@@ -65,10 +65,13 @@ bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Basic/ExceptionSpecificationType.h"
 #include "clang/Basic/SourceManager.h"
@@ -78,8 +81,10 @@ bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 
+#include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace giga_drill {
@@ -98,6 +103,61 @@ static std::string formatLocationHelper(clang::SourceManager &sm,
          std::to_string(col);
 }
 
+// Set of qualified lock type names recognized out of the box. Matched by
+// the stripped leading "::" of the record's qualified name.
+static const std::unordered_set<std::string> &builtinLockTypes() {
+  static const std::unordered_set<std::string> k = {
+      "std::lock_guard",    "std::unique_lock",
+      "std::shared_lock",   "std::scoped_lock",
+      "absl::MutexLock",    "absl::ReaderMutexLock",
+      "absl::WriterMutexLock",
+  };
+  return k;
+}
+
+// Classify a type as an RAII local we want to track. Returns nullopt if
+// the type is trivially destructed or not a class. Returns Lock when the
+// type is a recognized lock; SmartPtr for std::unique_ptr/shared_ptr;
+// Other for any remaining non-trivial-destructor class.
+static std::optional<RaiiKind> classifyRaiiType(clang::QualType qt,
+                                                const LockTypeConfig &cfg) {
+  if (qt.isNull())
+    return std::nullopt;
+  auto canonical = qt.getCanonicalType();
+  auto *rd = canonical->getAsCXXRecordDecl();
+  if (!rd || !rd->hasDefinition())
+    return std::nullopt;
+
+  std::string qname = rd->getQualifiedNameAsString();
+
+  // (a) Built-in lock allowlist.
+  if (cfg.useBuiltins) {
+    const auto &builtins = builtinLockTypes();
+    if (builtins.count(qname))
+      return RaiiKind::Lock;
+  }
+  // (b) User-supplied allowlist.
+  for (const auto &allowed : cfg.userAllowlist) {
+    if (qname == allowed)
+      return RaiiKind::Lock;
+  }
+  // (c) Clang thread-safety attributes on the record.
+  if (rd->hasAttr<clang::CapabilityAttr>() ||
+      rd->hasAttr<clang::ScopedLockableAttr>())
+    return RaiiKind::Lock;
+
+  // (d) Smart pointers.
+  if (qname == "std::unique_ptr" || qname == "std::shared_ptr")
+    return RaiiKind::SmartPtr;
+
+  // (e) Any other non-trivial destructor → Other.
+  auto *dtor = rd->getDestructor();
+  if (dtor && !dtor->isTrivial())
+    return RaiiKind::Other;
+
+  return std::nullopt;
+}
+
 // ============================================================================
 // ControlFlowContextVisitor (Phase 3)
 // ============================================================================
@@ -111,6 +171,7 @@ public:
 
   void setASTContext(clang::ASTContext *ctx) { ctx_ = ctx; }
   void setCollapseFilter(const CollapseFilter *filter) { collapse_ = filter; }
+  void setLockConfig(const LockTypeConfig *cfg) { lockCfg_ = cfg; }
 
   // -- Function traversal (push/pop funcStack_) ----------------------------
 
@@ -169,6 +230,37 @@ public:
 
     tryScopeStack_.pop_back();
     return true; // Skip base traversal — we manually traversed children.
+  }
+
+  // -- Compound-statement scopes (push/pop scopeStack_) --------------------
+
+  bool TraverseCompoundStmt(clang::CompoundStmt *stmt) {
+    scopeStack_.push_back({});
+    bool result = RecursiveASTVisitor::TraverseCompoundStmt(stmt);
+    scopeStack_.pop_back();
+    return result;
+  }
+
+  // Track local RAII VarDecls as they appear in lexical scope. Calls that
+  // follow in the same CompoundStmt see the local as live.
+  bool VisitVarDecl(clang::VarDecl *decl) {
+    if (scopeStack_.empty())
+      return true;
+    if (!decl->isLocalVarDecl())
+      return true;
+    LockTypeConfig emptyCfg;
+    const auto &cfg = lockCfg_ ? *lockCfg_ : emptyCfg;
+    auto kind = classifyRaiiType(decl->getType(), cfg);
+    if (!kind)
+      return true;
+
+    RaiiLocal local;
+    local.typeName = decl->getType().getCanonicalType().getAsString();
+    local.varName = decl->getNameAsString();
+    local.declLocation = formatLocation(decl->getLocation());
+    local.kind = *kind;
+    scopeStack_.back().push_back(std::move(local));
+    return true;
   }
 
   // -- If-statement traversal (push/pop guardStack_) -----------------------
@@ -276,8 +368,12 @@ private:
   clang::SourceManager &sm_;
   clang::ASTContext *ctx_ = nullptr;
   const CollapseFilter *collapse_ = nullptr;
+  const LockTypeConfig *lockCfg_ = nullptr;
 
   std::vector<clang::FunctionDecl *> funcStack_;
+  // Per-scope stack of RAII locals declared inside the current lexical
+  // CompoundStmt. Outer scope at the front, innermost scope at the back.
+  std::vector<std::vector<RaiiLocal>> scopeStack_;
 
   struct TryScopeEntry {
     std::string tryLocation;
@@ -333,7 +429,43 @@ private:
       info.caughtType = caughtType.getAsString();
     }
     info.location = formatLocation(catchStmt->getCatchLoc());
+    info.bodySummary = extractHandlerBodySummary(catchStmt);
     return info;
+  }
+
+  // Best-effort source-text summary of a catch handler body. Returns an
+  // empty string for macro-expanded or otherwise unprintable bodies.
+  std::string
+  extractHandlerBodySummary(clang::CXXCatchStmt *catchStmt) const {
+    if (!ctx_)
+      return "";
+    auto *body = catchStmt->getHandlerBlock();
+    if (!body)
+      return "";
+    auto range = clang::CharSourceRange::getTokenRange(body->getSourceRange());
+    auto text = clang::Lexer::getSourceText(range, sm_, ctx_->getLangOpts());
+    std::string s(text);
+    // Truncate to min(160 chars, 3 newlines).
+    constexpr size_t kMaxChars = 160;
+    constexpr unsigned kMaxNewlines = 3;
+    unsigned nl = 0;
+    size_t cut = s.size();
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (s[i] == '\n') {
+        ++nl;
+        if (nl >= kMaxNewlines) {
+          cut = i;
+          break;
+        }
+      }
+      if (i + 1 >= kMaxChars) {
+        cut = i + 1;
+        break;
+      }
+    }
+    if (cut < s.size())
+      s.resize(cut);
+    return s;
   }
 
   NoexceptSpec extractNoexceptSpec(const clang::FunctionDecl *decl) const {
@@ -421,6 +553,12 @@ private:
       ctx.callerNoexcept = extractNoexceptSpec(funcStack_.back());
     }
 
+    // Snapshot live RAII locals, outer scope first, innermost last.
+    for (const auto &frame : scopeStack_) {
+      for (const auto &local : frame)
+        ctx.liveRaiiLocals.push_back(local);
+    }
+
     return ctx;
   }
 };
@@ -435,9 +573,11 @@ class ControlFlowContextConsumer : public clang::ASTConsumer {
 public:
   ControlFlowContextConsumer(ControlFlowIndex &index, const CallGraph &graph,
                              clang::SourceManager &sm,
-                             const CollapseFilter *collapse)
+                             const CollapseFilter *collapse,
+                             const LockTypeConfig *lockCfg)
       : visitor_(index, graph, sm) {
     visitor_.setCollapseFilter(collapse);
+    visitor_.setLockConfig(lockCfg);
   }
 
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
@@ -452,37 +592,43 @@ private:
 class ControlFlowContextAction : public clang::ASTFrontendAction {
 public:
   ControlFlowContextAction(ControlFlowIndex &index, const CallGraph &graph,
-                            const CollapseFilter *collapse)
-      : index_(index), graph_(graph), collapse_(collapse) {}
+                            const CollapseFilter *collapse,
+                            const LockTypeConfig *lockCfg)
+      : index_(index), graph_(graph), collapse_(collapse),
+        lockCfg_(lockCfg) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
     return std::make_unique<ControlFlowContextConsumer>(
-        index_, graph_, ci.getSourceManager(), collapse_);
+        index_, graph_, ci.getSourceManager(), collapse_, lockCfg_);
   }
 
 private:
   ControlFlowIndex &index_;
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
+  const LockTypeConfig *lockCfg_;
 };
 
 class ControlFlowContextFactory
     : public clang::tooling::FrontendActionFactory {
 public:
   ControlFlowContextFactory(ControlFlowIndex &index, const CallGraph &graph,
-                             const CollapseFilter *collapse)
-      : index_(index), graph_(graph), collapse_(collapse) {}
+                             const CollapseFilter *collapse,
+                             const LockTypeConfig *lockCfg)
+      : index_(index), graph_(graph), collapse_(collapse),
+        lockCfg_(lockCfg) {}
 
   std::unique_ptr<clang::FrontendAction> create() override {
     return std::make_unique<ControlFlowContextAction>(index_, graph_,
-                                                       collapse_);
+                                                       collapse_, lockCfg_);
   }
 
 private:
   ControlFlowIndex &index_;
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
+  const LockTypeConfig *lockCfg_;
 };
 
 } // anonymous namespace
@@ -498,11 +644,13 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
                       const std::vector<std::string> &collapsePaths,
                       unsigned threadCount,
                       const PchCache *pchCache,
-                      const std::string &sysroot) {
+                      const std::string &sysroot,
+                      const LockTypeConfig &lockCfg) {
   ControlFlowIndex index;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
+  const LockTypeConfig *lockCfgPtr = &lockCfg;
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
@@ -519,16 +667,17 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
         llvm::hardware_concurrency(threadCount));
 #endif
     for (const auto &file : files) {
-      pool.async([&compDb, &index, &graph, collapsePtr, pchCache, &sysroot,
-                  file]() {
-        ControlFlowContextFactory factory(index, graph, collapsePtr);
+      pool.async([&compDb, &index, &graph, collapsePtr, lockCfgPtr, pchCache,
+                  &sysroot, file]() {
+        ControlFlowContextFactory factory(index, graph, collapsePtr,
+                                          lockCfgPtr);
         runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
       });
     }
     pool.wait();
   } else {
     for (const auto &file : files) {
-      ControlFlowContextFactory factory(index, graph, collapsePtr);
+      ControlFlowContextFactory factory(index, graph, collapsePtr, lockCfgPtr);
       runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
     }
   }
@@ -549,7 +698,8 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const CallGraph &graph,
                         const std::vector<std::string> &collapsePaths,
                         const PchCache *pchCache,
-                        const std::string &sysroot) {
+                        const std::string &sysroot,
+                        const LockTypeConfig &lockCfg) {
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
@@ -558,7 +708,7 @@ void indexTUControlFlow(ControlFlowIndex &index,
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
   g_cfCrashCount.store(0, std::memory_order_relaxed);
 
-  ControlFlowContextFactory factory(index, graph, collapsePtr);
+  ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg);
   runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
 
   std::signal(SIGSEGV, prevSegv);

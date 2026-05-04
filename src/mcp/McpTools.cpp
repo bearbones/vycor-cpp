@@ -546,7 +546,8 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   }
 
   // Distinguish "not indexed" from "indexed with no enclosing try".
-  if (!ctx.cfIndex.contextAtSite(raw)) {
+  const auto *rawCtx = ctx.cfIndex.contextAtSite(raw);
+  if (!rawCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + raw +
         "'. Ensure the path matches the compilation database "
@@ -565,6 +566,8 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
       static_cast<int64_t>(info.enclosingScopes.size());
   obj["enclosingGuardCount"] =
       static_cast<int64_t>(info.enclosingGuards.size());
+  obj["liveRaiiLocalsCount"] =
+      static_cast<int64_t>(rawCtx->liveRaiiLocals.size());
 
   // Include scope details.
   llvm::json::Array scopes;
@@ -578,6 +581,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
       llvm::json::Object ho;
       ho["caughtType"] = h.caughtType;
       ho["isCatchAll"] = h.isCatchAll;
+      ho["body"] = h.bodySummary;
       handlers.push_back(llvm::json::Value(std::move(ho)));
     }
     s["handlers"] = std::move(handlers);

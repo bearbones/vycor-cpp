@@ -42,7 +42,8 @@ McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
             buildParams_.sysroot);
     indexTUControlFlow(cfIndex_, *buildParams_.compDb, filePath,
                        graph_, buildParams_.collapsePaths,
-                       buildParams_.pchCache, buildParams_.sysroot);
+                       buildParams_.pchCache, buildParams_.sysroot,
+                       buildParams_.lockCfg);
   }
 
   r.edgesAfter = graph_.edgeCount();

@@ -35,6 +35,7 @@ struct McpBuildParams {
   std::vector<std::string> collapsePaths;
   const PchCache *pchCache = nullptr;
   std::string sysroot;
+  LockTypeConfig lockCfg;
 };
 
 class McpServer {

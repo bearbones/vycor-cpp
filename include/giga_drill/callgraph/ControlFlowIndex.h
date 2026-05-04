@@ -17,6 +17,7 @@
 
 #include "giga_drill/callgraph/StringInterner.h"
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -33,6 +34,34 @@ namespace giga_drill {
 class CallGraph;
 
 // ============================================================================
+// RAII scope context
+// ============================================================================
+
+enum class RaiiKind : uint8_t {
+  Lock,     // std::lock_guard, absl::MutexLock, or user-declared lock type
+  SmartPtr, // std::unique_ptr, std::shared_ptr
+  Other,    // Any other non-trivial-destructor local (file handles, guards)
+};
+
+// One RAII-capable local variable live at a call site. These are stored
+// per CallSiteContext; innermost scopes come last in liveRaiiLocals.
+struct RaiiLocal {
+  std::string typeName;    // Canonical qualified type name
+  std::string varName;     // Source variable name (may be "")
+  std::string declLocation; // file:line:col of the VarDecl
+  RaiiKind kind = RaiiKind::Other;
+};
+
+// User/CLI-configurable lock type recognition. useBuiltins enables the
+// standard allowlist (std::lock_guard/unique_lock/shared_lock/scoped_lock,
+// absl::MutexLock/ReaderMutexLock/WriterMutexLock). userAllowlist adds
+// extra qualified type names matched exactly (e.g. "RBX::Arbiter").
+struct LockTypeConfig {
+  std::vector<std::string> userAllowlist;
+  bool useBuiltins = true;
+};
+
+// ============================================================================
 // Exception handling context
 // ============================================================================
 
@@ -40,6 +69,9 @@ struct CatchHandlerInfo {
   std::string caughtType; // Qualified type name, or "" for catch(...)
   bool isCatchAll = false;
   std::string location; // file:line:col of the catch keyword
+  // First min(160 chars, 3 lines) of the handler body source text. Empty
+  // when the body is macro-expanded or the source range is invalid.
+  std::string bodySummary;
 };
 
 struct TryCatchScope {
@@ -88,6 +120,12 @@ struct CallSiteContext {
 
   // Whether inside a catch block body (re-throw context).
   bool insideCatchBlock = false;
+
+  // RAII-capable locals live at this call site. Outer scopes come first;
+  // innermost-declared locals come last. A local is considered "live" when
+  // its declaration is lexically before the call site inside a still-open
+  // CompoundStmt scope.
+  std::vector<RaiiLocal> liveRaiiLocals;
 };
 
 // ============================================================================
@@ -165,7 +203,8 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
                       const std::vector<std::string> &collapsePaths = {},
                       unsigned threadCount = 0,
                       const PchCache *pchCache = nullptr,
-                      const std::string &sysroot = "");
+                      const std::string &sysroot = "",
+                      const LockTypeConfig &lockCfg = {});
 
 // Index a single TU into an existing ControlFlowIndex (Phase 3).
 // Call cfIndex.removeTU(file) first when re-indexing a changed file.
@@ -175,6 +214,7 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const CallGraph &graph,
                         const std::vector<std::string> &collapsePaths = {},
                         const PchCache *pchCache = nullptr,
-                        const std::string &sysroot = "");
+                        const std::string &sysroot = "",
+                        const LockTypeConfig &lockCfg = {});
 
 } // namespace giga_drill

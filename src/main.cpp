@@ -247,6 +247,12 @@ static llvm::cl::opt<std::string>
         llvm::cl::init(GIGA_DRILL_DEFAULT_CLANG),
         llvm::cl::sub(CfqueryCmd));
 
+static llvm::cl::list<std::string>
+    CfqueryLockTypes("lock-types",
+        llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
+        llvm::cl::value_desc("qualified-name"),
+        llvm::cl::sub(CfqueryCmd));
+
 static llvm::cl::opt<std::string>
     CfquerySysroot("sysroot",
         llvm::cl::desc("macOS SDK sysroot path (default: auto-detect via xcrun)"),
@@ -311,6 +317,12 @@ static llvm::cl::opt<std::string>
     McpSysroot("sysroot",
         llvm::cl::desc("macOS SDK sysroot path (default: auto-detect via xcrun)"),
         llvm::cl::value_desc("dir"),
+        llvm::cl::sub(McpServeCmd));
+
+static llvm::cl::list<std::string>
+    McpLockTypes("lock-types",
+        llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
+        llvm::cl::value_desc("qualified-name"),
         llvm::cl::sub(McpServeCmd));
 
 // ---------------------------------------------------------------------------
@@ -476,10 +488,13 @@ int main(int argc, const char **argv) {
                                               CfqueryThreads, pchPtr, sysroot);
 
     // Phase 3: Build control flow index.
+    giga_drill::LockTypeConfig lockCfg;
+    lockCfg.userAllowlist.assign(CfqueryLockTypes.begin(),
+                                 CfqueryLockTypes.end());
     auto cfIndex = giga_drill::buildControlFlowIndex(*compDb, files, graph,
                                                       collapsePaths,
                                                       CfqueryThreads, pchPtr,
-                                                      sysroot);
+                                                      sysroot, lockCfg);
 
     // Dump mode: serialize the full index as JSON.
     if (CfqueryModeOpt == CfqueryDump) {
@@ -663,11 +678,14 @@ int main(int argc, const char **argv) {
                  << graph.nodeCount() << " nodes, "
                  << graph.edgeCount() << " edges)\n";
 
+    giga_drill::LockTypeConfig lockCfg;
+    lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
+
     llvm::errs() << "mcp-serve: building control flow index...\n";
     auto cfIndex = giga_drill::buildControlFlowIndex(*compDb, files, graph,
                                                       collapsePaths,
                                                       McpThreads, pchPtr,
-                                                      sysroot);
+                                                      sysroot, lockCfg);
     llvm::errs() << "mcp-serve: control flow index built ("
                  << cfIndex.size() << " call sites)\n";
 
@@ -682,6 +700,7 @@ int main(int argc, const char **argv) {
     buildParams.collapsePaths = collapsePaths;
     buildParams.pchCache = pchPtr;
     buildParams.sysroot = sysroot;
+    buildParams.lockCfg = std::move(lockCfg);
 
     giga_drill::McpServer server(std::move(graph), std::move(cfIndex),
                                  std::move(entryPoints),
