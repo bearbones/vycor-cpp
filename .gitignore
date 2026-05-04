@@ -9,6 +9,9 @@ cmake/org-overrides.cmake
 .cache/
 .DS_Store
 
+# Claude Code per-clone scratch (session-only helper scripts, logs, etc.)
+.claude/tmp/
+
 # CTest output directory (created when ctest runs outside the build dir)
 Testing/
 
