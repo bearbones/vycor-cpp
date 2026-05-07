@@ -546,7 +546,8 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   }
 
   // Distinguish "not indexed" from "indexed with no enclosing try".
-  if (!ctx.cfIndex.contextAtSite(raw)) {
+  const auto *rawCtx = ctx.cfIndex.contextAtSite(raw);
+  if (!rawCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + raw +
         "'. Ensure the path matches the compilation database "
@@ -565,6 +566,8 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
       static_cast<int64_t>(info.enclosingScopes.size());
   obj["enclosingGuardCount"] =
       static_cast<int64_t>(info.enclosingGuards.size());
+  obj["liveRaiiLocalsCount"] =
+      static_cast<int64_t>(rawCtx->liveRaiiLocals.size());
 
   // Include scope details.
   llvm::json::Array scopes;
@@ -578,6 +581,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
       llvm::json::Object ho;
       ho["caughtType"] = h.caughtType;
       ho["isCatchAll"] = h.isCatchAll;
+      ho["body"] = h.bodySummary;
       handlers.push_back(llvm::json::Value(std::move(ho)));
     }
     s["handlers"] = std::move(handlers);
@@ -586,6 +590,348 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   obj["enclosingScopes"] = std::move(scopes);
 
   return makeTextResult(llvm::json::Value(std::move(obj)));
+}
+
+// ============================================================================
+// Tool 6a: query_raii_scopes_at_callsite
+// ============================================================================
+
+static const char *raiiKindToString(RaiiKind k) {
+  switch (k) {
+  case RaiiKind::Lock: return "lock";
+  case RaiiKind::SmartPtr: return "smart_ptr";
+  case RaiiKind::Other: return "other";
+  }
+  return "other";
+}
+
+static std::optional<RaiiKind> parseRaiiKind(llvm::StringRef s) {
+  if (s == "lock") return RaiiKind::Lock;
+  if (s == "smart_ptr") return RaiiKind::SmartPtr;
+  if (s == "other") return RaiiKind::Other;
+  return std::nullopt;
+}
+
+static llvm::json::Value
+handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
+                                const McpToolContext &ctx) {
+  auto callSite = args.getString("call_site");
+  if (!callSite)
+    return makeErrorResult("Missing required parameter 'call_site'");
+
+  // Optional kinds filter. If absent or empty, all kinds are included.
+  std::set<RaiiKind> allowed;
+  if (auto *kindsArr = args.getArray("kinds")) {
+    for (auto &v : *kindsArr) {
+      if (auto s = v.getAsString()) {
+        auto k = parseRaiiKind(*s);
+        if (!k) {
+          return makeErrorResult(
+              "Invalid value in kinds: '" + s->str() +
+              "' (expected lock, smart_ptr, or other)");
+        }
+        allowed.insert(*k);
+      }
+    }
+  }
+  bool filterByKind = !allowed.empty();
+
+  const auto *csCtx = ctx.cfIndex.contextAtSite(callSite->str());
+  if (!csCtx) {
+    return makeErrorResult(
+        "Call site not indexed: '" + callSite->str() +
+        "'. Ensure the path matches the compilation database "
+        "canonicalization (typically an absolute path).");
+  }
+
+  llvm::json::Array locals;
+  for (const auto &l : csCtx->liveRaiiLocals) {
+    if (filterByKind && !allowed.count(l.kind))
+      continue;
+    llvm::json::Object obj;
+    obj["typeName"] = l.typeName;
+    obj["varName"] = l.varName;
+    obj["declLocation"] = l.declLocation;
+    obj["kind"] = raiiKindToString(l.kind);
+    locals.push_back(llvm::json::Value(std::move(obj)));
+  }
+
+  llvm::json::Object out;
+  out["callSite"] = callSite->str();
+  out["caller"] = csCtx->callerName;
+  out["callee"] = csCtx->calleeName;
+  out["locals"] = std::move(locals);
+  return makeTextResult(llvm::json::Value(std::move(out)));
+}
+
+// ============================================================================
+// Tool 6b: query_locks_held  —  reverse DFS from target to entry points,
+// accumulating Lock-kind RAII locals along each discovered path.
+// ============================================================================
+
+namespace {
+
+// Hashable key identifying a lock across call sites.
+struct LockKey {
+  std::string typeName;
+  std::string varName;
+  bool operator==(const LockKey &o) const {
+    return typeName == o.typeName && varName == o.varName;
+  }
+};
+
+struct LockKeyHash {
+  size_t operator()(const LockKey &k) const {
+    return std::hash<std::string>{}(k.typeName) ^
+           (std::hash<std::string>{}(k.varName) << 1);
+  }
+};
+
+struct LockOccurrence {
+  std::string typeName;
+  std::string varName;
+  std::string heldAt; // file:line:col of the call site where it was in scope
+};
+
+struct PathResult {
+  std::string entryPoint;
+  std::vector<std::string> path; // entry → ... → target
+  std::vector<LockOccurrence> locksHeld;
+};
+
+// Safety caps to bound DFS cost on hub functions and cyclic graphs.
+constexpr unsigned kDefaultMaxDepth = 20;
+constexpr size_t kMaxPaths = 512;
+
+// Collect Lock-kind RAII locals live at the edge (caller → callee @ callSite),
+// reading from the ControlFlowIndex. Appends deduped-by-key occurrences.
+static void collectLocksOnEdge(const ControlFlowIndex &cfIndex,
+                               const std::string &callSite,
+                               std::vector<LockOccurrence> &out,
+                               std::unordered_set<LockKey, LockKeyHash> &seen) {
+  const auto *cs = cfIndex.contextAtSite(callSite);
+  if (!cs)
+    return;
+  for (const auto &l : cs->liveRaiiLocals) {
+    if (l.kind != RaiiKind::Lock)
+      continue;
+    LockKey key{l.typeName, l.varName};
+    if (seen.insert(key).second) {
+      out.push_back({l.typeName, l.varName, callSite});
+    }
+  }
+}
+
+// Reverse-DFS from `target` walking callersOf. When `path.back()` matches
+// any entry point, emit a PathResult for that entry point. path[0] is the
+// current frontier (closest to target); we reverse at emit time.
+static void reverseDfs(const CallGraph &graph,
+                       const ControlFlowIndex &cfIndex,
+                       const std::unordered_set<std::string> &entrySet,
+                       const std::string &target,
+                       std::vector<std::string> &path,
+                       std::vector<std::string> &edgeCallSites,
+                       std::unordered_set<std::string> &visitedEdges,
+                       unsigned maxDepth, std::vector<PathResult> &out,
+                       bool &truncated) {
+  if (out.size() >= kMaxPaths) {
+    truncated = true;
+    return;
+  }
+
+  const std::string &cur = path.back();
+  if (entrySet.count(cur)) {
+    // Emit path from entry → target.
+    PathResult pr;
+    pr.entryPoint = cur;
+    pr.path.assign(path.rbegin(), path.rend());
+
+    std::unordered_set<LockKey, LockKeyHash> seen;
+    for (const auto &cs : edgeCallSites)
+      collectLocksOnEdge(cfIndex, cs, pr.locksHeld, seen);
+    out.push_back(std::move(pr));
+    return;
+  }
+
+  if (path.size() >= maxDepth)
+    return;
+
+  auto callers = graph.callersOf(cur);
+  for (const auto *edge : callers) {
+    // Skip indirect edges — they have no stable callee identity for
+    // transitive lock inheritance.
+    if (edge->callerName == "<indirect>")
+      continue;
+    std::string key = edge->callerName + "->" + edge->calleeName + "@" +
+                      edge->callSite;
+    if (!visitedEdges.insert(key).second)
+      continue;
+
+    path.push_back(edge->callerName);
+    edgeCallSites.push_back(edge->callSite);
+    reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
+               visitedEdges, maxDepth, out, truncated);
+    edgeCallSites.pop_back();
+    path.pop_back();
+    visitedEdges.erase(key);
+
+    if (out.size() >= kMaxPaths) {
+      truncated = true;
+      return;
+    }
+  }
+}
+
+static std::vector<PathResult>
+collectLocksHeld(const CallGraph &graph, const ControlFlowIndex &cfIndex,
+                 const std::string &target,
+                 const std::vector<std::string> &entryPoints,
+                 unsigned maxDepth, bool &truncated) {
+  std::vector<PathResult> out;
+  truncated = false;
+  if (entryPoints.empty())
+    return out;
+
+  std::unordered_set<std::string> entrySet(entryPoints.begin(),
+                                            entryPoints.end());
+  std::vector<std::string> path{target};
+  std::vector<std::string> edgeCallSites; // per edge caller→callee
+  std::unordered_set<std::string> visitedEdges;
+  reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
+             visitedEdges, maxDepth, out, truncated);
+  return out;
+}
+
+static llvm::json::Value pathResultToJson(const PathResult &pr) {
+  llvm::json::Object obj;
+  obj["entryPoint"] = pr.entryPoint;
+  llvm::json::Array p;
+  for (const auto &f : pr.path)
+    p.push_back(f);
+  obj["path"] = std::move(p);
+  llvm::json::Array locks;
+  for (const auto &l : pr.locksHeld) {
+    llvm::json::Object lo;
+    lo["typeName"] = l.typeName;
+    lo["varName"] = l.varName;
+    lo["heldAt"] = l.heldAt;
+    locks.push_back(llvm::json::Value(std::move(lo)));
+  }
+  obj["locksHeld"] = std::move(locks);
+  return llvm::json::Value(std::move(obj));
+}
+
+} // namespace
+
+static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
+                                              const McpToolContext &ctx) {
+  auto fn = args.getString("function");
+  if (!fn)
+    return makeErrorResult("Missing required parameter 'function'");
+
+  unsigned maxDepth = kDefaultMaxDepth;
+  if (auto md = args.getInteger("max_depth"))
+    maxDepth = static_cast<unsigned>(std::max<int64_t>(1, *md));
+
+  std::vector<std::string> entryPoints;
+  if (auto *epsArr = args.getArray("entry_points")) {
+    for (auto &v : *epsArr) {
+      if (auto s = v.getAsString())
+        entryPoints.push_back(s->str());
+    }
+  }
+  if (entryPoints.empty())
+    entryPoints = ctx.entryPoints;
+
+  bool truncated = false;
+  auto paths = collectLocksHeld(ctx.graph, ctx.cfIndex, fn->str(),
+                                 entryPoints, maxDepth, truncated);
+
+  llvm::json::Object out;
+  out["function"] = fn->str();
+  llvm::json::Array arr;
+  for (const auto &pr : paths)
+    arr.push_back(pathResultToJson(pr));
+  out["paths"] = std::move(arr);
+  out["truncated"] = truncated;
+  out["pathCount"] = static_cast<int64_t>(paths.size());
+  return makeTextResult(llvm::json::Value(std::move(out)));
+}
+
+// ============================================================================
+// Tool 6c: query_same_lock  —  intersection of locks_held(a) and
+// locks_held(b). Lock identity = (typeName, varName).
+// ============================================================================
+
+static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
+                                             const McpToolContext &ctx) {
+  auto a = args.getString("fn_a");
+  auto b = args.getString("fn_b");
+  if (!a || !b)
+    return makeErrorResult("Missing required parameters 'fn_a' and 'fn_b'");
+
+  unsigned maxDepth = kDefaultMaxDepth;
+  if (auto md = args.getInteger("max_depth"))
+    maxDepth = static_cast<unsigned>(std::max<int64_t>(1, *md));
+
+  std::vector<std::string> entryPoints;
+  if (auto *epsArr = args.getArray("entry_points")) {
+    for (auto &v : *epsArr) {
+      if (auto s = v.getAsString())
+        entryPoints.push_back(s->str());
+    }
+  }
+  if (entryPoints.empty())
+    entryPoints = ctx.entryPoints;
+
+  bool truncA = false, truncB = false;
+  auto pathsA = collectLocksHeld(ctx.graph, ctx.cfIndex, a->str(),
+                                  entryPoints, maxDepth, truncA);
+  auto pathsB = collectLocksHeld(ctx.graph, ctx.cfIndex, b->str(),
+                                  entryPoints, maxDepth, truncB);
+
+  // Collect lock identity sets per side, remembering which paths use each.
+  std::unordered_map<LockKey, std::vector<size_t>, LockKeyHash> byKeyA,
+      byKeyB;
+  for (size_t i = 0; i < pathsA.size(); ++i)
+    for (const auto &l : pathsA[i].locksHeld)
+      byKeyA[{l.typeName, l.varName}].push_back(i);
+  for (size_t i = 0; i < pathsB.size(); ++i)
+    for (const auto &l : pathsB[i].locksHeld)
+      byKeyB[{l.typeName, l.varName}].push_back(i);
+
+  // Intersect.
+  llvm::json::Array sharedArr;
+  int sharedCount = 0;
+  for (const auto &[key, idxsA] : byKeyA) {
+    auto it = byKeyB.find(key);
+    if (it == byKeyB.end())
+      continue;
+    ++sharedCount;
+    llvm::json::Object obj;
+    obj["typeName"] = key.typeName;
+    obj["varName"] = key.varName;
+    llvm::json::Array pa, pb;
+    for (auto idx : idxsA)
+      pa.push_back(pathResultToJson(pathsA[idx]));
+    for (auto idx : it->second)
+      pb.push_back(pathResultToJson(pathsB[idx]));
+    obj["pathsA"] = std::move(pa);
+    obj["pathsB"] = std::move(pb);
+    sharedArr.push_back(llvm::json::Value(std::move(obj)));
+  }
+
+  llvm::json::Object out;
+  out["fn_a"] = a->str();
+  out["fn_b"] = b->str();
+  out["sharedLocks"] = std::move(sharedArr);
+  out["shared"] = sharedCount;
+  out["aOnly"] =
+      static_cast<int64_t>(byKeyA.size()) - static_cast<int64_t>(sharedCount);
+  out["bOnly"] =
+      static_cast<int64_t>(byKeyB.size()) - static_cast<int64_t>(sharedCount);
+  out["truncated"] = truncA || truncB;
+  return makeTextResult(llvm::json::Value(std::move(out)));
 }
 
 // ============================================================================
@@ -1169,6 +1515,90 @@ std::vector<McpToolEntry> getRegisteredTools() {
                      "try/catch scopes and conditional guards.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryCallSiteContext});
+  }
+
+  // 6a. query_raii_scopes_at_callsite
+  {
+    llvm::json::Object props;
+    props["call_site"] = stringProp(
+        "Call site location formatted as 'file:line:col'. Must match the "
+        "compilation database canonicalization.");
+    props["kinds"] = stringArrayProp(
+        "Filter by kind: lock, smart_ptr, other. Default: all kinds.");
+    llvm::json::Array req;
+    req.push_back("call_site");
+    llvm::json::Object schema;
+    schema["type"] = "object";
+    schema["properties"] = std::move(props);
+    schema["required"] = std::move(req);
+
+    tools.push_back({"query_raii_scopes_at_callsite",
+                     "List RAII-capable locals (non-trivial-destructor) live "
+                     "at a call site. Each entry is {typeName, varName, "
+                     "kind, declLocation}, kind in {lock, smart_ptr, other}. "
+                     "Use `kinds` to narrow the response (e.g. [\"lock\"] "
+                     "for concurrency audits).",
+                     llvm::json::Value(std::move(schema)),
+                     handleQueryRaiiScopesAtCallsite});
+  }
+
+  // 6b. query_locks_held
+  {
+    llvm::json::Object props;
+    props["function"] =
+        stringProp("Qualified name of the target function");
+    props["max_depth"] = intProp(
+        "Maximum number of frames above the target to walk (default: 20)");
+    props["entry_points"] = stringArrayProp(
+        "Entry points to root the reverse walk (default: configured "
+        "entry points)");
+    llvm::json::Array req;
+    req.push_back("function");
+    llvm::json::Object schema;
+    schema["type"] = "object";
+    schema["properties"] = std::move(props);
+    schema["required"] = std::move(req);
+
+    tools.push_back({"query_locks_held",
+                     "For each entry point, enumerate call paths reaching "
+                     "`function` via reverse-walking the call graph, and "
+                     "report Lock-kind RAII locals live on any edge of each "
+                     "path. Result: {paths:[{entryPoint, path:[fn...], "
+                     "locksHeld:[{typeName, varName, heldAt}]}], truncated, "
+                     "pathCount}. Truncated at 512 paths total. Walks only "
+                     "through edges with stable callee identity "
+                     "(indirect/function-pointer targets are skipped).",
+                     llvm::json::Value(std::move(schema)),
+                     handleQueryLocksHeld});
+  }
+
+  // 6c. query_same_lock
+  {
+    llvm::json::Object props;
+    props["fn_a"] = stringProp("First function qualified name");
+    props["fn_b"] = stringProp("Second function qualified name");
+    props["max_depth"] = intProp(
+        "Maximum number of frames above each target to walk (default: 20)");
+    props["entry_points"] = stringArrayProp(
+        "Entry points to root the reverse walk (default: configured "
+        "entry points)");
+    llvm::json::Array req;
+    req.push_back("fn_a");
+    req.push_back("fn_b");
+    llvm::json::Object schema;
+    schema["type"] = "object";
+    schema["properties"] = std::move(props);
+    schema["required"] = std::move(req);
+
+    tools.push_back({"query_same_lock",
+                     "Compute the intersection of locks held across paths "
+                     "reaching fn_a and fn_b. Lock identity is the tuple "
+                     "(typeName, varName); the same physical mutex under "
+                     "different variable names will not match. Result: "
+                     "{sharedLocks:[{typeName, varName, pathsA, pathsB}], "
+                     "shared, aOnly, bOnly, truncated}.",
+                     llvm::json::Value(std::move(schema)),
+                     handleQuerySameLock});
   }
 
   // 7. analyze_dead_code

@@ -277,9 +277,9 @@ TEST_CASE("readRequest parses Content-Length framed messages",
 // Tool registration tests
 // ============================================================================
 
-TEST_CASE("getRegisteredTools returns all 13 tools", "[mcp][tools]") {
+TEST_CASE("getRegisteredTools returns all 16 tools", "[mcp][tools]") {
   auto tools = getRegisteredTools();
-  CHECK(tools.size() == 13);
+  CHECK(tools.size() == 16);
 
   // Verify tool names.
   std::set<std::string> names;
@@ -292,6 +292,9 @@ TEST_CASE("getRegisteredTools returns all 13 tools", "[mcp][tools]") {
   CHECK(names.count("find_call_chain") == 1);
   CHECK(names.count("query_exception_safety") == 1);
   CHECK(names.count("query_call_site_context") == 1);
+  CHECK(names.count("query_raii_scopes_at_callsite") == 1);
+  CHECK(names.count("query_locks_held") == 1);
+  CHECK(names.count("query_same_lock") == 1);
   CHECK(names.count("analyze_dead_code") == 1);
   CHECK(names.count("get_class_hierarchy") == 1);
   CHECK(names.count("list_entry_points") == 1);
@@ -1190,4 +1193,326 @@ TEST_CASE("find_call_chain propagates executionContext per hop",
   CHECK(hop1->getString("kind") == "ThreadEntry");
   CHECK(hop1->getString("confidence") == "Proven");
   CHECK(hop1->getString("executionContext") == "AsyncTask");
+}
+
+// ============================================================================
+// Concurrency tools: query_raii_scopes_at_callsite, query_locks_held,
+// query_same_lock
+// ============================================================================
+
+// Helper: pluck a named tool's handler from getRegisteredTools().
+static McpToolHandler findHandler(const std::string &name) {
+  auto tools = getRegisteredTools();
+  for (auto &t : tools) {
+    if (t.name == name)
+      return t.handler;
+  }
+  return {};
+}
+
+// Helper: build a three-frame chain
+//   entry() -> mid() -> leaf()
+// where entry() holds `std::lock_guard<std::mutex> g(m)` live at the call
+// to mid(), and mid() has no locks live when it calls leaf().
+//
+// The query_locks_held(leaf) expectation: one path [entry, mid, leaf] with
+// lock `g` of type `std::lock_guard<std::mutex>` reported at the entry->mid
+// call site.
+static void buildThreeFrameChain(CallGraph &g, ControlFlowIndex &cf,
+                                  const std::string &entryCallSite,
+                                  const std::string &midCallSite) {
+  g.addNode({"entry", "entry.cpp", 1, true, false, ""});
+  g.addNode({"mid", "mid.cpp", 1, false, false, ""});
+  g.addNode({"leaf", "leaf.cpp", 1, false, false, ""});
+  g.addEdge({"entry", "mid", EdgeKind::DirectCall, Confidence::Proven,
+             entryCallSite, 0});
+  g.addEdge({"mid", "leaf", EdgeKind::DirectCall, Confidence::Proven,
+             midCallSite, 0});
+
+  // entry holds a lock when it calls mid.
+  {
+    CallSiteContext ctx;
+    ctx.callerName = "entry";
+    ctx.calleeName = "mid";
+    ctx.callSite = entryCallSite;
+    RaiiLocal g1;
+    g1.typeName = "std::lock_guard<std::mutex>";
+    g1.varName = "g";
+    g1.declLocation = "entry.cpp:2:29";
+    g1.kind = RaiiKind::Lock;
+    ctx.liveRaiiLocals.push_back(std::move(g1));
+    cf.addCallSiteContext(std::move(ctx));
+  }
+  // mid holds no locks when it calls leaf.
+  {
+    CallSiteContext ctx;
+    ctx.callerName = "mid";
+    ctx.calleeName = "leaf";
+    ctx.callSite = midCallSite;
+    cf.addCallSiteContext(std::move(ctx));
+  }
+}
+
+TEST_CASE("query_raii_scopes_at_callsite returns locals and respects kinds",
+          "[mcp][tools][concurrency]") {
+  CallGraph graph;
+  graph.addNode({"caller", "a.cpp", 1, true, false, ""});
+  graph.addNode({"callee", "b.cpp", 1, false, false, ""});
+  graph.addEdge({"caller", "callee", EdgeKind::DirectCall,
+                 Confidence::Proven, "a.cpp:5:3", 0});
+
+  ControlFlowIndex cf;
+  {
+    CallSiteContext ctx;
+    ctx.callerName = "caller";
+    ctx.calleeName = "callee";
+    ctx.callSite = "a.cpp:5:3";
+    RaiiLocal lock;
+    lock.typeName = "std::lock_guard<std::mutex>";
+    lock.varName = "g";
+    lock.declLocation = "a.cpp:4:29";
+    lock.kind = RaiiKind::Lock;
+    RaiiLocal ptr;
+    ptr.typeName = "std::unique_ptr<int>";
+    ptr.varName = "p";
+    ptr.declLocation = "a.cpp:3:10";
+    ptr.kind = RaiiKind::SmartPtr;
+    ctx.liveRaiiLocals.push_back(std::move(lock));
+    ctx.liveRaiiLocals.push_back(std::move(ptr));
+    cf.addCallSiteContext(std::move(ctx));
+  }
+
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"caller"};
+  McpToolContext ctx{graph, oracle, cf, eps};
+  auto handler = findHandler("query_raii_scopes_at_callsite");
+  REQUIRE(handler);
+
+  SECTION("returns all kinds by default") {
+    llvm::json::Object args;
+    args["call_site"] = "a.cpp:5:3";
+    auto result = handler(args, ctx);
+    REQUIRE_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    auto *locals = obj.getArray("locals");
+    REQUIRE(locals != nullptr);
+    CHECK(locals->size() == 2);
+  }
+
+  SECTION("kinds=[lock] filters to lock only") {
+    llvm::json::Object args;
+    args["call_site"] = "a.cpp:5:3";
+    llvm::json::Array kinds;
+    kinds.push_back("lock");
+    args["kinds"] = std::move(kinds);
+    auto result = handler(args, ctx);
+    REQUIRE_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    auto *locals = obj.getArray("locals");
+    REQUIRE(locals != nullptr);
+    REQUIRE(locals->size() == 1);
+    auto *only = (*locals)[0].getAsObject();
+    REQUIRE(only);
+    CHECK(only->getString("kind") == "lock");
+    CHECK(only->getString("varName") == "g");
+  }
+
+  SECTION("unknown kind returns error") {
+    llvm::json::Object args;
+    args["call_site"] = "a.cpp:5:3";
+    llvm::json::Array kinds;
+    kinds.push_back("bogus");
+    args["kinds"] = std::move(kinds);
+    auto result = handler(args, ctx);
+    CHECK(isErrorResult(result));
+  }
+
+  SECTION("unindexed call site returns error") {
+    llvm::json::Object args;
+    args["call_site"] = "nowhere.cpp:1:1";
+    auto result = handler(args, ctx);
+    CHECK(isErrorResult(result));
+  }
+}
+
+TEST_CASE("query_locks_held finds lock two frames up",
+          "[mcp][tools][concurrency]") {
+  CallGraph graph;
+  ControlFlowIndex cf;
+  buildThreeFrameChain(graph, cf, "entry.cpp:3:3", "mid.cpp:2:3");
+
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"entry"};
+  McpToolContext ctx{graph, oracle, cf, eps};
+  auto handler = findHandler("query_locks_held");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["function"] = "leaf";
+  auto result = handler(args, ctx);
+  REQUIRE_FALSE(isErrorResult(result));
+
+  auto obj = parseToolResult(result);
+  CHECK(obj.getString("function") == "leaf");
+  CHECK(obj.getBoolean("truncated") == false);
+
+  auto *paths = obj.getArray("paths");
+  REQUIRE(paths != nullptr);
+  REQUIRE(paths->size() == 1);
+
+  auto *first = (*paths)[0].getAsObject();
+  REQUIRE(first != nullptr);
+  CHECK(first->getString("entryPoint") == "entry");
+
+  auto *path = first->getArray("path");
+  REQUIRE(path != nullptr);
+  REQUIRE(path->size() == 3);
+  CHECK((*path)[0].getAsString() == "entry");
+  CHECK((*path)[1].getAsString() == "mid");
+  CHECK((*path)[2].getAsString() == "leaf");
+
+  auto *locks = first->getArray("locksHeld");
+  REQUIRE(locks != nullptr);
+  REQUIRE(locks->size() == 1);
+  auto *lockObj = (*locks)[0].getAsObject();
+  REQUIRE(lockObj != nullptr);
+  CHECK(lockObj->getString("typeName") == "std::lock_guard<std::mutex>");
+  CHECK(lockObj->getString("varName") == "g");
+  CHECK(lockObj->getString("heldAt") == "entry.cpp:3:3");
+}
+
+TEST_CASE("query_locks_held respects max_depth",
+          "[mcp][tools][concurrency]") {
+  CallGraph graph;
+  ControlFlowIndex cf;
+  buildThreeFrameChain(graph, cf, "entry.cpp:3:3", "mid.cpp:2:3");
+
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"entry"};
+  McpToolContext ctx{graph, oracle, cf, eps};
+  auto handler = findHandler("query_locks_held");
+  REQUIRE(handler);
+
+  // max_depth=1 means we walk at most 1 frame above the target; entry is
+  // 2 frames above leaf, so no paths should reach entry.
+  llvm::json::Object args;
+  args["function"] = "leaf";
+  args["max_depth"] = 1;
+  auto result = handler(args, ctx);
+  REQUIRE_FALSE(isErrorResult(result));
+
+  auto obj = parseToolResult(result);
+  auto *paths = obj.getArray("paths");
+  REQUIRE(paths != nullptr);
+  CHECK(paths->size() == 0);
+}
+
+TEST_CASE("query_same_lock intersects locks across two targets",
+          "[mcp][tools][concurrency]") {
+  // Graph:
+  //   entry() { lock_guard g(m); leafA(); leafB(); }
+  // Both leaves see the same (type, varName) lock live in the caller.
+  CallGraph graph;
+  graph.addNode({"entry", "e.cpp", 1, true, false, ""});
+  graph.addNode({"leafA", "a.cpp", 1, false, false, ""});
+  graph.addNode({"leafB", "b.cpp", 1, false, false, ""});
+  graph.addEdge({"entry", "leafA", EdgeKind::DirectCall,
+                 Confidence::Proven, "e.cpp:5:3", 0});
+  graph.addEdge({"entry", "leafB", EdgeKind::DirectCall,
+                 Confidence::Proven, "e.cpp:6:3", 0});
+
+  ControlFlowIndex cf;
+  for (auto [site, callee] : std::vector<std::pair<std::string, std::string>>{
+           {"e.cpp:5:3", "leafA"}, {"e.cpp:6:3", "leafB"}}) {
+    CallSiteContext ctx;
+    ctx.callerName = "entry";
+    ctx.calleeName = callee;
+    ctx.callSite = site;
+    RaiiLocal l;
+    l.typeName = "std::lock_guard<std::mutex>";
+    l.varName = "g";
+    l.declLocation = "e.cpp:2:29";
+    l.kind = RaiiKind::Lock;
+    ctx.liveRaiiLocals.push_back(std::move(l));
+    cf.addCallSiteContext(std::move(ctx));
+  }
+
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"entry"};
+  McpToolContext mctx{graph, oracle, cf, eps};
+  auto handler = findHandler("query_same_lock");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["fn_a"] = "leafA";
+  args["fn_b"] = "leafB";
+  auto result = handler(args, mctx);
+  REQUIRE_FALSE(isErrorResult(result));
+
+  auto obj = parseToolResult(result);
+  auto shared = obj.getInteger("shared");
+  REQUIRE(shared.has_value());
+  CHECK(*shared == 1);
+
+  auto *sharedLocks = obj.getArray("sharedLocks");
+  REQUIRE(sharedLocks != nullptr);
+  REQUIRE(sharedLocks->size() == 1);
+  auto *first = (*sharedLocks)[0].getAsObject();
+  REQUIRE(first != nullptr);
+  CHECK(first->getString("typeName") == "std::lock_guard<std::mutex>");
+  CHECK(first->getString("varName") == "g");
+  auto *pA = first->getArray("pathsA");
+  auto *pB = first->getArray("pathsB");
+  REQUIRE(pA != nullptr);
+  REQUIRE(pB != nullptr);
+  CHECK(pA->size() >= 1);
+  CHECK(pB->size() >= 1);
+}
+
+TEST_CASE("query_same_lock returns empty intersection when locks differ",
+          "[mcp][tools][concurrency]") {
+  // leafA is under lock `ga`; leafB under lock `gb` (same type, diff name).
+  CallGraph graph;
+  graph.addNode({"entry", "e.cpp", 1, true, false, ""});
+  graph.addNode({"leafA", "a.cpp", 1, false, false, ""});
+  graph.addNode({"leafB", "b.cpp", 1, false, false, ""});
+  graph.addEdge({"entry", "leafA", EdgeKind::DirectCall,
+                 Confidence::Proven, "e.cpp:5:3", 0});
+  graph.addEdge({"entry", "leafB", EdgeKind::DirectCall,
+                 Confidence::Proven, "e.cpp:10:3", 0});
+
+  ControlFlowIndex cf;
+  auto addLocked = [&](const std::string &site, const std::string &callee,
+                       const std::string &varName) {
+    CallSiteContext ctx;
+    ctx.callerName = "entry";
+    ctx.calleeName = callee;
+    ctx.callSite = site;
+    RaiiLocal l;
+    l.typeName = "std::lock_guard<std::mutex>";
+    l.varName = varName;
+    l.declLocation = "e.cpp:2:29";
+    l.kind = RaiiKind::Lock;
+    ctx.liveRaiiLocals.push_back(std::move(l));
+    cf.addCallSiteContext(std::move(ctx));
+  };
+  addLocked("e.cpp:5:3", "leafA", "ga");
+  addLocked("e.cpp:10:3", "leafB", "gb");
+
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"entry"};
+  McpToolContext mctx{graph, oracle, cf, eps};
+  auto handler = findHandler("query_same_lock");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["fn_a"] = "leafA";
+  args["fn_b"] = "leafB";
+  auto result = handler(args, mctx);
+  REQUIRE_FALSE(isErrorResult(result));
+
+  auto obj = parseToolResult(result);
+  auto shared = obj.getInteger("shared");
+  REQUIRE(shared.has_value());
+  CHECK(*shared == 0);
 }

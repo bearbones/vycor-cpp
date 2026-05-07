@@ -62,6 +62,7 @@ add_executable(giga_drill_tests
   test_coverage_diag.cpp
   test_dead_code.cpp
   test_control_flow.cpp
+  test_concurrency_index.cpp
   test_mcp.cpp
   test_deep_chains.cpp
 )
