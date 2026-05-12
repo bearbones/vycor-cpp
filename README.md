@@ -406,7 +406,7 @@ in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
 
 Glass and optics. **vycor** is the Corning glass family the C++ tool draws
 its name from (sibling to Pyrex, more demanding spec); the `-cpp` suffix
-just hints at what it's about. **anneal** surfaceslatent stress — ADL/CTAD
+just hints at what it's about. **anneal** surfaces latent stress — ADL/CTAD
 fragility — in order to relieve it. **morph** reshapes amorphous structure —
 AST transforms. **prism** decomposes one point into its components — call-site
 control flow. **megascope** is the persistent far-seeing instrument — the
