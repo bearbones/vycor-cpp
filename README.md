@@ -1,12 +1,12 @@
-# giga-drill-breaker
+# vycor-cpp
 
 A Clang LibTooling backend for safe, AST-aware C++ refactoring and static
 analysis. It exposes four features as subcommands:
 
-- **mugann** — detect problems such as fragile ADL/CTAD resolutions across translation units. `clang-tidy` wishes.
-- **lagann** — apply rule-driven, multi-pass AST matcher transformations
-- **cfquery** — query control flow, exception handling, and call site guard context from the command line
-- **mcp-serve** — start an MCP (Model Context Protocol) server for interactive call graph queries, designed for LLM-assisted code analysis
+- **anneal** — detect problems such as fragile ADL/CTAD resolutions across translation units. `clang-tidy` wishes.
+- **morph** — apply rule-driven, multi-pass AST matcher transformations
+- **prism** — query control flow, exception handling, and call site guard context from the command line
+- **megascope** — start an MCP (Model Context Protocol) server for interactive call graph queries, designed for LLM-assisted code analysis
 
 Designed as a backend for external systems (e.g. a Python script translating
 a custom DSL, or an LLM agent performing security audits via the MCP server).
@@ -15,14 +15,14 @@ a custom DSL, or an LLM agent performing security audits via the MCP server).
 
 ## Features
 
-### mugann — ADL/CTAD Fragility Analysis
+### anneal — ADL/CTAD Fragility Analysis
 
 ADL (Argument-Dependent Lookup) and CTAD (Class Template Argument Deduction)
 can silently resolve to different declarations depending on which headers are
 included in a given translation unit. This is a portability and correctness
 hazard that standard compilers do not diagnose.
 
-`mugann` runs a two-phase analysis:
+`anneal` runs a two-phase analysis:
 
 1. **Index phase** — walks every translation unit and records all function
    overloads and deduction guides found in any header, building a
@@ -35,9 +35,9 @@ hazard that standard compilers do not diagnose.
 Output is a list of diagnostics with source locations and human-readable
 messages indicating which header to include or how to qualify the call.
 
-### lagann — AST-Based Source Transformations
+### morph — AST-Based Source Transformations
 
-`lagann` parses matcher expressions from a JSON rules file and runs them
+`morph` parses matcher expressions from a JSON rules file and runs them
 against source files using Clang's dynamic AST matcher API. It supports
 multi-pass pipelines where each pass can build on the results of the
 previous one.
@@ -69,8 +69,8 @@ system — see "Hermetic and internal-package-manager builds" below.
 
 ```bash
 # Clone with submodules (LLVM and Catch2)
-git clone --recurse-submodules https://github.com/bearbones/giga-drill-breaker.git
-cd giga-drill-breaker
+git clone --recurse-submodules https://github.com/bearbones/vycor-cpp.git
+cd vycor-cpp
 
 # If you only need Catch2 (recommended — system LLVM is much faster):
 # git submodule update --init extern/Catch2
@@ -84,10 +84,10 @@ cd ../..
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
 # Build the tool
-cmake --build build --target giga-drill-breaker
+cmake --build build --target vycor-cpp
 
 # Build and run tests
-cmake --build build --target giga_drill_tests
+cmake --build build --target vycor_tests
 cd build && ctest --output-on-failure
 ```
 
@@ -117,7 +117,7 @@ The test build tries Catch2 in this order:
    Override the search with `CMAKE_PREFIX_PATH` or `Catch2_DIR`.
 3. **Submodule at `extern/Catch2`** — pinned to v3.10.0 upstream by default.
 
-Tests can be disabled entirely with `-DGIGA_DRILL_BUILD_TESTS=OFF`.
+Tests can be disabled entirely with `-DVYCOR_BUILD_TESTS=OFF`.
 
 ### Hermetic and internal-package-manager builds
 
@@ -141,10 +141,10 @@ project's build files:
 
 ## Usage
 
-### mugann — Analyze for Fragile ADL/CTAD
+### anneal — Analyze for Fragile ADL/CTAD
 
 ```bash
-./build/giga-drill-breaker mugann \
+./build/vycor-cpp anneal \
   --build-path /path/to/compile_commands_dir \
   --source file1.cpp file2.cpp
 ```
@@ -157,10 +157,10 @@ src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exist
     MathLib::scale(Vector, int). Include Extension.hpp or explicitly qualify the call.
 ```
 
-### lagann — Apply Transformations
+### morph — Apply Transformations
 
 ```bash
-./build/giga-drill-breaker lagann \
+./build/vycor-cpp morph \
   --rules-json rules.json \
   --build-path /path/to/compile_commands_dir \
   --source file1.cpp file2.cpp \
@@ -170,27 +170,27 @@ src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exist
 The `--dry-run` flag collects replacements without writing them to disk,
 which is useful for previewing changes.
 
-### cfquery — Query Control Flow and Exception Context
+### prism — Query Control Flow and Exception Context
 
 One-shot CLI queries against a compilation database. Useful for quick
 investigations of individual files.
 
 ```bash
 # Dump all call sites with guards and try/catch context
-./build/giga-drill-breaker cfquery \
+./build/vycor-cpp prism \
   --build-path /path/to/compile_commands_dir \
   --source SecurityModule.cpp \
   --mode dump
 
 # Query exception protection for a specific function
-./build/giga-drill-breaker cfquery \
+./build/vycor-cpp prism \
   --build-path /path/to/compile_commands_dir \
   --source SecurityModule.cpp \
   --mode query --query-type exception-protection \
   --function "RBX::Security::ServerSecurityInstance::onClientChallengeResponse"
 
 # Query call site context (try/catch, guards) at a specific location
-./build/giga-drill-breaker cfquery \
+./build/vycor-cpp prism \
   --build-path /path/to/compile_commands_dir \
   --source ServerReplicator.cpp \
   --mode query --query-type call-site-context \
@@ -202,7 +202,7 @@ investigations of individual files.
 
 **Edge collapse** — reduce noise from header-inlined utility code:
 ```bash
-./build/giga-drill-breaker cfquery \
+./build/vycor-cpp prism \
   --build-path /path/to/compile_commands_dir \
   --source SecurityModule.cpp \
   --collapse-paths Client/Math \
@@ -214,14 +214,14 @@ This skips internal edges where both caller and callee are in collapsed
 paths, while preserving boundary edges (calls from non-collapsed code into
 the collapsed region).
 
-### mcp-serve — Interactive Call Graph MCP Server
+### megascope — Interactive Call Graph MCP Server
 
 Starts a persistent MCP server that pre-bakes a call graph and control flow
 index from multiple source files, then serves interactive queries via
 JSON-RPC over stdio.
 
 ```bash
-./build/giga-drill-breaker mcp-serve \
+./build/vycor-cpp megascope \
   --build-path /path/to/compile_commands_dir \
   --source file1.cpp --source file2.cpp --source file3.cpp \
   --entry-point "main" \
@@ -233,10 +233,10 @@ JSON-RPC over stdio.
 `find_call_chain`, `query_exception_safety`, `query_call_site_context`,
 `analyze_dead_code`, `get_class_hierarchy`
 
-**Key difference from cfquery**: `mcp-serve` indexes all specified sources
-into a unified cross-TU call graph held in memory. `cfquery` parses per
+**Key difference from prism**: `megascope` indexes all specified sources
+into a unified cross-TU call graph held in memory. `prism` parses per
 invocation and is limited to single-TU context. For security audits or
-multi-file analysis, always use `mcp-serve`.
+multi-file analysis, always use `megascope`.
 
 ---
 
@@ -246,12 +246,12 @@ multi-file analysis, always use `mcp-serve`.
 CMakeLists.txt                  Top-level build configuration
 extern/llvm-project/            LLVM/Clang submodule (sparse checkout)
 
-include/giga_drill/
-  mugann/                       Public headers — ADL/CTAD analysis feature
+include/vycor/
+  anneal/                       Public headers — ADL/CTAD analysis feature
     GlobalIndex.h               Project-wide declaration database
     Indexer.h                   Phase-1 AST visitor (index all declarations)
     Analyzer.h                  Phase-2 AST visitor (detect fragile resolutions)
-  lagann/                       Public headers — transform pipeline feature
+  morph/                       Public headers — transform pipeline feature
     MatcherEngine.h             Dynamic matcher parsing and execution
     TransformPipeline.h         Multi-pass transform orchestration
   callgraph/                    Public headers — call graph and control flow
@@ -266,12 +266,12 @@ include/giga_drill/
     McpProtocol.h               JSON-RPC protocol framing
 
 src/
-  main.cpp                      CLI entry point (mugann / lagann / cfquery / mcp-serve)
-  mugann/                       mugann implementation
+  main.cpp                      CLI entry point (anneal / morph / prism / megascope)
+  anneal/                       anneal implementation
     GlobalIndex.cpp
     Indexer.cpp
     Analyzer.cpp
-  lagann/                       lagann implementation
+  morph/                       morph implementation
     MatcherEngine.cpp
     TransformPipeline.cpp
   callgraph/                    callgraph implementation
@@ -281,7 +281,7 @@ src/
     ControlFlowIndex.cpp
     ControlFlowContextVisitor.cpp  Phase 3: try/catch and guard context
     ControlFlowOracle.cpp
-  mcp/                          mcp-serve implementation
+  mcp/                          megascope implementation
     McpServer.cpp               JSON-RPC dispatch loop
     McpProtocol.cpp             Content-Length framing
     McpTools.cpp                Tool handlers (lookup, callers, callees, etc.)
@@ -289,8 +289,8 @@ src/
 
 tests/                          Catch2 test suite
   test_matcher_engine.cpp       Unit tests for MatcherEngine::parse and addRule
-  test_transforms.cpp           Integration test stubs for lagann transforms
-  test_adl_ctad.cpp             Unit and integration tests for mugann analysis
+  test_transforms.cpp           Integration test stubs for morph transforms
+  test_adl_ctad.cpp             Unit and integration tests for anneal analysis
 
 examples/
   adl_fallback/                 ADL fragility example (include-order sensitivity)
@@ -309,7 +309,7 @@ examples/
 
 ## Architecture
 
-### Two-Phase Analysis (mugann)
+### Two-Phase Analysis (anneal)
 
 ```
 Phase 1 — Index:
@@ -326,7 +326,7 @@ Phase 2 — Analyze:
       → emit Diagnostic entries
 ```
 
-### Transform Pipeline (lagann)
+### Transform Pipeline (morph)
 
 ```
 For each pass:
@@ -357,19 +357,19 @@ Apply replacements to disk (when not dry-run)
 `order_a.cpp` and `order_b.cpp` contain identical code but include headers in
 different orders. Due to ADL, the same unqualified call resolves to different
 overloads depending on which `scale()` overload is visible at the call site.
-`mugann` detects this without requiring compilation of both orderings.
+`anneal` detects this without requiring compilation of both orderings.
 
 ### CTAD Fragility (`examples/ctad_fallback/`)
 
 `Container c("hello")` deduces differently depending on whether `Guide.hpp`
 (which contains an explicit `Container(const char*) -> Container<std::string>`
-deduction guide) is included. `mugann` flags the case where the explicit guide
+deduction guide) is included. `anneal` flags the case where the explicit guide
 is absent.
 
 ### Boolean Macro Split (`examples/macro_split/`)
 
 `input.cpp` uses a boolean macro for a compound flag. `expected.cpp` shows the
-target form after splitting into separate named parameters. The `lagann`
+target form after splitting into separate named parameters. The `morph`
 transform for this pattern is a planned TDD target.
 
 ### Builder to Struct (`examples/builder_to_struct/`)
@@ -389,13 +389,13 @@ in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
 | GlobalIndex | Complete |
 | Indexer (two-phase phase 1) | Complete |
 | Analyzer (two-phase phase 2) | Complete |
-| mugann CLI subcommand | Complete |
-| lagann CLI subcommand | Complete (JSON parsing TODO) |
+| anneal CLI subcommand | Complete |
+| morph CLI subcommand | Complete (JSON parsing TODO) |
 | Call graph builder (two-phase) | Complete |
 | Control flow index (phase 3) | Complete |
 | Edge collapse filtering | Complete |
-| cfquery CLI subcommand | Complete |
-| MCP server (mcp-serve) | Complete |
+| prism CLI subcommand | Complete |
+| MCP server (megascope) | Complete |
 | MCP tools (8 tools) | Complete |
 | Test suite (unit) | Complete |
 | Test suite (integration stubs) | Stubs present, impl pending |
@@ -404,19 +404,10 @@ in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
 
 ## Naming
 
-The project and its subcommands are named after elements from the 2007 mecha
-anime *Tengen Toppa Gurren Lagann* (TTGL). The central motif is the spiral
-drill — an unstoppable force that breaks through any limit.
-
-- **giga-drill-breaker** — the Giga Drill Breaker finishing move: a colossal
-  spiral drill that pierces through whatever stands in its way. Fits a tool
-  that breaks through structural limitations in large C++ codebases.
-
-- **lagann** — Simon's core mech, whose nature is *transformation and
-  combination*: it bores into other machines and reshapes them. The `lagann`
-  subcommand drills into the AST and rewrites source code turn by turn.
-
-- **mugann** — the Anti-Spiral's hunter-killers. They appear inert and give
-  no warning; the danger is in *how they resolve*. Fragile ADL/CTAD
-  resolutions have the same character: they compile silently and only
-  detonate when include order shifts.
+Glass and optics. **vycor** is the Corning glass family the C++ tool draws
+its name from (sibling to Pyrex, more demanding spec); the `-cpp` suffix
+leaves the bare `vycor` for a future Python sibling. **anneal** relieves
+latent stress — ADL/CTAD fragility. **morph** reshapes amorphous structure —
+AST transforms. **prism** decomposes one point into its components — call-site
+control flow. **megascope** is the persistent far-seeing instrument — the
+MCP server.

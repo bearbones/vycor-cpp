@@ -20,7 +20,7 @@
       "name": "no-tests",
       "inherits": "default",
       "cacheVariables": {
-        "GIGA_DRILL_BUILD_TESTS": "OFF"
+        "VYCOR_BUILD_TESTS": "OFF"
       }
     }
   ]

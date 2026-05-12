@@ -49,12 +49,12 @@ if(NOT TARGET Catch2::Catch2WithMain)
     "  - imported target: a parent project or toolchain may pre-define\n"
     "    Catch2::Catch2WithMain before this directory is configured\n"
     "  - vendored submodule: git submodule update --init extern/Catch2\n"
-    "Or disable tests entirely with -DGIGA_DRILL_BUILD_TESTS=OFF.")
+    "Or disable tests entirely with -DVYCOR_BUILD_TESTS=OFF.")
 endif()
 
 message(STATUS "Using Catch2 from ${_catch2_origin}")
 
-add_executable(giga_drill_tests
+add_executable(vycor_tests
   test_matcher_engine.cpp
   test_rules_parser.cpp
   test_transforms.cpp
@@ -67,14 +67,14 @@ add_executable(giga_drill_tests
   test_deep_chains.cpp
 )
 
-target_link_libraries(giga_drill_tests PRIVATE
-  giga_drill_lib
+target_link_libraries(vycor_tests PRIVATE
+  vycor_lib
   Catch2::Catch2WithMain
 )
 
-target_compile_definitions(giga_drill_tests PRIVATE
+target_compile_definitions(vycor_tests PRIVATE
   PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 include(Catch)
-catch_discover_tests(giga_drill_tests)
+catch_discover_tests(vycor_tests)

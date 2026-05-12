@@ -51,10 +51,10 @@ main
 ## How to analyze
 
 ```bash
-# From repo root, after building giga-drill-breaker:
+# From repo root, after building vycor-cpp:
 ( cd examples/deep_chains && ./gen_compile_commands.sh )
 
-./build/giga-drill-breaker mcp-serve \
+./build/vycor-cpp megascope \
   --build-path examples/deep_chains \
   --source examples/deep_chains/main.cpp \
   --source examples/deep_chains/pipeline.cpp \

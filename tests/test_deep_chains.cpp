@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 // Uses containment semantics: the real graph may emit extra incidental
 // edges; the test only checks that expected edges are present.
 
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>
@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-using namespace giga_drill;
+using namespace vycor;
 
 namespace {
 

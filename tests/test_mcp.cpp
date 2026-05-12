@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +15,11 @@
 
 // test_mcp.cpp — Tests for the MCP call graph server.
 
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
-#include "giga_drill/callgraph/ControlFlowOracle.h"
-#include "giga_drill/mcp/McpProtocol.h"
-#include "giga_drill/mcp/McpTools.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/mcp/McpProtocol.h"
+#include "vycor/mcp/McpTools.h"
 
 #include "llvm/Support/JSON.h"
 
@@ -28,7 +28,7 @@
 #include <cstring>
 #include <string>
 
-using namespace giga_drill;
+using namespace vycor;
 
 // ============================================================================
 // Helper: build a Chain-C-shaped graph for callback/concurrency tool tests

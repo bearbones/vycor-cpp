@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(giga-drill-breaker LANGUAGES C CXX)
+project(vycor-cpp LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,21 +12,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(cmake/org-overrides.cmake OPTIONAL)
 
 # --- Options ---
-option(GIGA_DRILL_USE_SUBMODULE "Fall back to extern/llvm-project submodule if no system LLVM" ON)
-set(GIGA_DRILL_DEFAULT_CLANG "clang++" CACHE STRING
+option(VYCOR_USE_SUBMODULE "Fall back to extern/llvm-project submodule if no system LLVM" ON)
+set(VYCOR_DEFAULT_CLANG "clang++" CACHE STRING
     "Default clang++ binary for PCH compilation (--clang default)")
 
 # --- LLVM/Clang: prefer system packages, fall back to submodule ---
 # Supported LLVM versions, checked in order (newest first).
 # To add a new version, append it to this list.
-set(GIGA_DRILL_SUPPORTED_LLVM_VERSIONS 21 20 18)
+set(VYCOR_SUPPORTED_LLVM_VERSIONS 21 20 18)
 
 set(LLVM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/extern/llvm-project/llvm")
 
 # Try each supported version by probing well-known install paths.
 # LLVM's version-compat file requires major.minor to match exactly, so we
 # search without a version constraint and verify the major version ourselves.
-foreach(_ver IN LISTS GIGA_DRILL_SUPPORTED_LLVM_VERSIONS)
+foreach(_ver IN LISTS VYCOR_SUPPORTED_LLVM_VERSIONS)
   find_package(LLVM CONFIG QUIET
     PATHS "/usr/lib/llvm-${_ver}/lib/cmake/llvm"
     NO_DEFAULT_PATH)
@@ -50,14 +50,14 @@ endforeach()
 if(NOT LLVM_FOUND)
   find_package(LLVM CONFIG QUIET)
   if(LLVM_FOUND)
-    list(FIND GIGA_DRILL_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
+    list(FIND VYCOR_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
     if(_idx GREATER_EQUAL 0)
       find_package(Clang CONFIG QUIET
         HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
               "${LLVM_DIR}/../clang")
     else()
       message(WARNING "Found LLVM ${LLVM_PACKAGE_VERSION}, but only versions "
-              "${GIGA_DRILL_SUPPORTED_LLVM_VERSIONS} are supported.")
+              "${VYCOR_SUPPORTED_LLVM_VERSIONS} are supported.")
       unset(LLVM_FOUND)
     endif()
   endif()
@@ -68,7 +68,7 @@ if(LLVM_FOUND AND Clang_FOUND)
   message(STATUS "Using system Clang from ${Clang_DIR}")
   include_directories(SYSTEM ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
   add_definitions(${LLVM_DEFINITIONS})
-elseif(GIGA_DRILL_USE_SUBMODULE AND EXISTS "${LLVM_SUBMODULE_DIR}/CMakeLists.txt")
+elseif(VYCOR_USE_SUBMODULE AND EXISTS "${LLVM_SUBMODULE_DIR}/CMakeLists.txt")
   message(STATUS "Using LLVM/Clang from submodule")
   set(LLVM_ENABLE_PROJECTS "clang" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "X86;AArch64" CACHE STRING "" FORCE)
@@ -85,7 +85,7 @@ elseif(GIGA_DRILL_USE_SUBMODULE AND EXISTS "${LLVM_SUBMODULE_DIR}/CMakeLists.txt
     ${CMAKE_BINARY_DIR}/extern/llvm-project/llvm/tools/clang/include
   )
 else()
-  string(REPLACE ";" ", " _ver_list "${GIGA_DRILL_SUPPORTED_LLVM_VERSIONS}")
+  string(REPLACE ";" ", " _ver_list "${VYCOR_SUPPORTED_LLVM_VERSIONS}")
   message(FATAL_ERROR
     "LLVM/Clang not found. Install one of the supported versions "
     "(${_ver_list}), e.g. llvm-18-dev and libclang-18-dev, "
@@ -103,8 +103,8 @@ endif()
 
 add_subdirectory(src)
 
-option(GIGA_DRILL_BUILD_TESTS "Build tests (requires network for Catch2)" ON)
-if(GIGA_DRILL_BUILD_TESTS)
+option(VYCOR_BUILD_TESTS "Build tests (requires network for Catch2)" ON)
+if(VYCOR_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,9 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
 
-namespace giga_drill {
+#include <algorithm>
+
+namespace vycor {
 
 ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
     : interner_(std::move(other.interner_)),
@@ -199,4 +201,4 @@ void ControlFlowIndex::compact() {
   bySite_ = std::move(newBySite);
 }
 
-} // namespace giga_drill
+} // namespace vycor

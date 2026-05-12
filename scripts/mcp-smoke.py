@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 The giga-drill-breaker Authors
+# Copyright (c) 2026 The vycor-cpp Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 #
-# MCP smoke harness. Spawns `giga-drill-breaker mcp-serve` pointed at
+# MCP smoke harness. Spawns `vycor-cpp megascope` pointed at
 # examples/deep_chains/, drives every tool through a realistic sequence,
 # captures request/response pairs in scripts/mcp-smoke-out/, and produces
 # a summary.md used by docs/mcp-review.md.
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
-BIN = REPO / "build" / "src" / "giga-drill-breaker"
+BIN = REPO / "build" / "src" / "vycor-cpp"
 FIXTURE = REPO / "examples" / "deep_chains"
 OUT = REPO / "scripts" / "mcp-smoke-out"
 
@@ -65,7 +65,7 @@ def read_framed(stream) -> dict | None:
 class Server:
     def __init__(self, sources: list[Path], build_path: Path,
                  entry_point: str):
-        args = [str(BIN), "mcp-serve",
+        args = [str(BIN), "megascope",
                 "--build-path", str(build_path),
                 "--entry-point", entry_point]
         for s in sources:

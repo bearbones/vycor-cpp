@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/mcp/McpTools.h"
-#include "giga_drill/mugann/DeadCodeAnalyzer.h"
+#include "vycor/mcp/McpTools.h"
+#include "vycor/anneal/DeadCodeAnalyzer.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -28,7 +28,7 @@
 #include <utility>
 #include <vector>
 
-namespace giga_drill {
+namespace vycor {
 
 // ============================================================================
 // JSON helper: build an MCP tool result with text content
@@ -1758,4 +1758,4 @@ std::vector<McpToolEntry> getRegisteredTools() {
   return tools;
 }
 
-} // namespace giga_drill
+} // namespace vycor

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,13 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/lagann/RulesParser.h"
-#include "giga_drill/lagann/TemplateEngine.h"
+#include "vycor/morph/RulesParser.h"
+#include "vycor/morph/TemplateEngine.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <string>
 
-using namespace giga_drill;
+using namespace vycor;
 
 // ---------------------------------------------------------------------------
 // Template Parsing

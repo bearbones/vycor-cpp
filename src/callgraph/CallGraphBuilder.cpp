@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/compat/ClangVersion.h"
-#include "giga_drill/compat/ToolAdjusters.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/compat/ClangVersion.h"
+#include "vycor/compat/ToolAdjusters.h"
 
 #include "llvm/Support/ThreadPool.h"
 #include "llvm/Support/raw_ostream.h"
@@ -68,7 +68,7 @@ void restoreCrashGuard(const SavedHandlers &saved) {
 bool runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                     const std::string &file,
                     clang::tooling::FrontendActionFactory &factory,
-                    const giga_drill::PchCache *pchCache,
+                    const vycor::PchCache *pchCache,
                     const std::string &sysroot = "") {
   tl_guardActive = 1;
   int sig = sigsetjmp(tl_jumpBuf, 1);
@@ -78,7 +78,7 @@ bool runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
     return false;
   }
 
-  auto tool = giga_drill::makeClangTool(compDb, {file}, pchCache, sysroot);
+  auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
   tool.run(&factory);
   tl_guardActive = 0;
   return true;
@@ -95,7 +95,7 @@ bool runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Tooling/CompilationDatabase.h"
 
-namespace giga_drill {
+namespace vycor {
 
 // ============================================================================
 // Helpers shared by both visitors
@@ -1055,7 +1055,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
   bool parallel = threadCount != 1 && files.size() > 1;
 
   if (parallel) {
-#if GIGA_DRILL_LLVM_AT_LEAST(19)
+#if VYCOR_LLVM_AT_LEAST(19)
     llvm::DefaultThreadPool pool(
         llvm::hardware_concurrency(threadCount));
 #else
@@ -1124,4 +1124,4 @@ void indexTU(CallGraph &graph,
   restoreCrashGuard(saved);
 }
 
-} // namespace giga_drill
+} // namespace vycor

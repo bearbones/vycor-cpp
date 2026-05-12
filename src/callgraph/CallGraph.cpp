@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/callgraph/CallGraph.h"
+#include "vycor/callgraph/CallGraph.h"
 
 #include <algorithm>
 
-namespace giga_drill {
+namespace vycor {
 
 CallGraph::CallGraph(CallGraph &&other) noexcept
     : interner_(std::move(other.interner_)),
@@ -364,4 +364,4 @@ void CallGraph::compact() {
   inEdges_ = std::move(newIn);
 }
 
-} // namespace giga_drill
+} // namespace vycor

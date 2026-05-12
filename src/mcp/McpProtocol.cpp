@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/mcp/McpProtocol.h"
+#include "vycor/mcp/McpProtocol.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -21,7 +21,7 @@
 #include <cstring>
 #include <string>
 
-namespace giga_drill {
+namespace vycor {
 
 bool McpRequest::isNotification() const {
   return id.getAsNull().has_value();
@@ -91,7 +91,7 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
   }
 
   if (contentLength < 0) {
-    errLog << "mcp-serve: missing Content-Length header\n";
+    errLog << "megascope: missing Content-Length header\n";
     return std::nullopt;
   }
 
@@ -99,7 +99,7 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
   std::string body(contentLength, '\0');
   size_t bytesRead = std::fread(&body[0], 1, contentLength, in);
   if (bytesRead != static_cast<size_t>(contentLength)) {
-    errLog << "mcp-serve: truncated message body (expected " << contentLength
+    errLog << "megascope: truncated message body (expected " << contentLength
            << ", got " << bytesRead << ")\n";
     return std::nullopt;
   }
@@ -107,7 +107,7 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
   // Parse JSON.
   auto parsed = llvm::json::parse(body);
   if (!parsed) {
-    errLog << "mcp-serve: JSON parse error: "
+    errLog << "megascope: JSON parse error: "
            << llvm::toString(parsed.takeError()) << "\n";
     writeError(nullptr, kParseError, "JSON parse error");
     // Return nullopt to signal the caller should try reading the next message,
@@ -117,7 +117,7 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
 
   auto *obj = parsed->getAsObject();
   if (!obj) {
-    errLog << "mcp-serve: request is not a JSON object\n";
+    errLog << "megascope: request is not a JSON object\n";
     writeError(nullptr, kInvalidRequest, "Request must be a JSON object");
     return std::nullopt;
   }
@@ -187,4 +187,4 @@ void writeError(const llvm::json::Value &id, int code,
 
 void writeMessage(llvm::json::Value message) { writeRaw(message); }
 
-} // namespace giga_drill
+} // namespace vycor

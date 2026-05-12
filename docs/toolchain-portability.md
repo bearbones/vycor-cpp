@@ -1,6 +1,6 @@
 # Toolchain Portability Plan
 
-How to make giga-drill-breaker easy to fork and integrate with an organization's
+How to make vycor-cpp easy to fork and integrate with an organization's
 internal toolchains, package management, and CI — while keeping a "just works"
 default for standalone use.
 
@@ -51,9 +51,9 @@ modifying `CMakeLists.txt`.
         // Use our vendored Catch2 instead of FetchContent
         "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/../Catch2",
         // Disable submodule fallback since we have a package
-        "GIGA_DRILL_USE_SUBMODULE": "OFF",
+        "VYCOR_USE_SUBMODULE": "OFF",
         // Set the clang binary for PCH compilation
-        "GIGA_DRILL_DEFAULT_CLANG": "${sourceDir}/../game-engine/Client/dependencies/clang/bin/clang++"
+        "VYCOR_DEFAULT_CLANG": "${sourceDir}/../game-engine/Client/dependencies/clang/bin/clang++"
       }
     }
   ]
@@ -99,7 +99,7 @@ set(FETCHCONTENT_SOURCE_DIR_CATCH2
     "${CMAKE_SOURCE_DIR}/../Catch2" CACHE PATH "" FORCE)
 
 # Default --clang for PCH compilation
-set(GIGA_DRILL_DEFAULT_CLANG
+set(VYCOR_DEFAULT_CLANG
     "${CMAKE_SOURCE_DIR}/../game-engine/Client/dependencies/clang/bin/clang++"
     CACHE PATH "")
 ```
@@ -113,11 +113,11 @@ Minimal changes to the existing CMakeLists.txt to support the above:
    include(cmake/org-overrides.cmake OPTIONAL)
    ```
 
-2. **Guard the submodule fallback** behind `GIGA_DRILL_USE_SUBMODULE`:
+2. **Guard the submodule fallback** behind `VYCOR_USE_SUBMODULE`:
    ```cmake
-   option(GIGA_DRILL_USE_SUBMODULE "Fall back to extern/llvm-project submodule" ON)
+   option(VYCOR_USE_SUBMODULE "Fall back to extern/llvm-project submodule" ON)
    
-   if(NOT LLVM_FOUND AND GIGA_DRILL_USE_SUBMODULE AND EXISTS "${LLVM_SUBMODULE_DIR}/CMakeLists.txt")
+   if(NOT LLVM_FOUND AND VYCOR_USE_SUBMODULE AND EXISTS "${LLVM_SUBMODULE_DIR}/CMakeLists.txt")
      # ... existing submodule logic
    endif()
    ```
@@ -126,13 +126,13 @@ Minimal changes to the existing CMakeLists.txt to support the above:
    `FetchContent` automatically uses this variable when set, skipping the
    network fetch)
 
-4. **Add `GIGA_DRILL_DEFAULT_CLANG` cache variable** that sets the default
+4. **Add `VYCOR_DEFAULT_CLANG` cache variable** that sets the default
    for `--clang` when not specified on the command line:
    ```cmake
-   set(GIGA_DRILL_DEFAULT_CLANG "clang++" CACHE PATH
+   set(VYCOR_DEFAULT_CLANG "clang++" CACHE PATH
        "Default clang++ binary for PCH compilation")
-   target_compile_definitions(giga_drill_lib PRIVATE
-     "GIGA_DRILL_DEFAULT_CLANG=\"${GIGA_DRILL_DEFAULT_CLANG}\"")
+   target_compile_definitions(vycor_lib PRIVATE
+     "VYCOR_DEFAULT_CLANG=\"${VYCOR_DEFAULT_CLANG}\"")
    ```
 
 5. **Add a `default` preset** to `CMakePresets.json` (committed upstream):
@@ -154,7 +154,7 @@ Minimal changes to the existing CMakeLists.txt to support the above:
 
 ### What a fork looks like
 
-An organization forks giga-drill-breaker and:
+An organization forks vycor-cpp and:
 
 1. Adds `CMakeUserPresets.json` (or `CMakePresets.json` with org presets)
 2. Optionally adds `cmake/org-overrides.cmake` for advanced customization
@@ -199,8 +199,8 @@ Hermetic dependency resolution via Nix flakes or Bazel's `http_archive`.
 
 1. Add `CMakePresets.json` with a `default` preset (upstream)
 2. Add `include(cmake/org-overrides.cmake OPTIONAL)` to `CMakeLists.txt`
-3. Guard submodule fallback behind `GIGA_DRILL_USE_SUBMODULE`
-4. Add `GIGA_DRILL_DEFAULT_CLANG` cache variable
+3. Guard submodule fallback behind `VYCOR_USE_SUBMODULE`
+4. Add `VYCOR_DEFAULT_CLANG` cache variable
 5. Gitignore `CMakeUserPresets.json` and `cmake/org-overrides.cmake`
 6. Document in CLAUDE.md: "Forking for your organization" section
 

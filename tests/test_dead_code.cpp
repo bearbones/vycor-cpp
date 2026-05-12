@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +15,9 @@
 
 // test_dead_code.cpp — Tests for the call graph library and dead code analyzer.
 
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/mugann/DeadCodeAnalyzer.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/anneal/DeadCodeAnalyzer.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>
@@ -26,7 +26,7 @@
 #include <sstream>
 #include <string>
 
-using namespace giga_drill;
+using namespace vycor;
 
 static std::string readFile(const std::string &path) {
   std::ifstream in(path);

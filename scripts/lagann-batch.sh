@@ -5,7 +5,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] --build-path <dir> --rules-json <file> --pattern <regex> [search-dir]
 
-Search for source files matching a regex pattern and run lagann on each.
+Search for source files matching a regex pattern and run morph on each.
 
 Required:
   --build-path <dir>    Directory containing compile_commands.json
@@ -31,7 +31,7 @@ EOF
   exit 1
 }
 
-DRILL="$(cd "$(dirname "$0")/.." && pwd)/build/src/giga-drill-breaker"
+DRILL="$(cd "$(dirname "$0")/.." && pwd)/build/src/vycor-cpp"
 BUILD_PATHS=()
 RULES_JSON=""
 PATTERN=""
@@ -82,7 +82,7 @@ for f in "${FILES[@]}"; do
   for bp in "${BUILD_PATHS[@]}"; do
     BP_ARGS+=("--build-path=$bp")
   done
-  if ! "$DRILL" lagann \
+  if ! "$DRILL" morph \
     "${BP_ARGS[@]}" \
     --rules-json="$RULES_JSON" \
     --source="$ABS" \
