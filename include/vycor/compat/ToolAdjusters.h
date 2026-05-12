@@ -1,0 +1,246 @@
+// Copyright (c) 2026 The vycor-cpp Authors
+// Original author: Alex Mason
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef VYCOR_COMPAT_TOOL_ADJUSTERS_H
+#define VYCOR_COMPAT_TOOL_ADJUSTERS_H
+
+#include "vycor/compat/PchCache.h"
+
+#include "clang/Tooling/Tooling.h"
+#include "clang/Tooling/ArgumentsAdjusters.h"
+#include <algorithm>
+#include <string>
+#include <vector>
+
+namespace vycor {
+
+/// Strip compiler flags that are incompatible with our LibTooling build.
+/// This lets us consume compilation databases produced by toolchains whose
+/// Clang version or configuration differs from ours (e.g. hermetic Xcode
+/// builds that use -gmodules).
+/// When stripPch is false, PCH-related flags are preserved (use when a
+/// PchCache adjuster will handle them instead).
+inline clang::tooling::ArgumentsAdjuster
+getStripIncompatibleFlagsAdjuster(bool stripPch = true) {
+  return [stripPch](const clang::tooling::CommandLineArguments &args,
+                    llvm::StringRef /*filename*/) {
+    // Flags to remove outright.
+    static const char *const StripFlags[] = {
+        "-gmodules",
+        "-fmodules",
+        "-fcxx-modules",
+        "-Werror",
+    };
+    // Flags whose *next* argument should also be removed.
+    // -include-pch is only stripped when stripPch is true.
+    static const char *const StripWithNext[] = {
+        "-fmodule-file",
+        "-fmodules-cache-path",
+    };
+
+    clang::tooling::CommandLineArguments filtered;
+    filtered.reserve(args.size());
+    bool skipNext = false;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      bool skip = false;
+      for (const auto *f : StripFlags) {
+        if (args[i] == f) {
+          skip = true;
+          break;
+        }
+      }
+      if (!skip) {
+        for (const auto *f : StripWithNext) {
+          if (args[i] == f) {
+            skip = true;
+            ++i; // skip next arg too
+            break;
+          }
+        }
+      }
+      // Strip -include-pch (compiled PCH from build system).
+      if (!skip && stripPch && args[i] == "-include-pch") {
+        skip = true;
+        ++i; // skip next arg too
+      }
+      // Strip -include args that reference PCH files (CMake-style PCH).
+      // These use "-include/path/to/pch" (joined) or "-include /path/to/pch".
+      if (stripPch) {
+        if (!skip && (args[i] == "-Xarch_arm64" || args[i] == "-Xarch_x86_64")) {
+          // Check if next arg is a PCH include.
+          if (i + 1 < args.size() &&
+              args[i + 1].find("-include") == 0 &&
+              args[i + 1].find("pch") != std::string::npos) {
+            skip = true;
+            ++i; // skip the -include arg too
+          }
+        }
+        if (!skip && args[i].find("-include") == 0 &&
+            args[i].find("pch") != std::string::npos) {
+          skip = true;
+          // If it's just "-include" (separate), skip next arg too.
+          if (args[i] == "-include")
+            ++i;
+        }
+      }
+      if (!skip)
+        filtered.push_back(args[i]);
+    }
+    return filtered;
+  };
+}
+
+/// Inject -isysroot and libc++ include paths on macOS when the compilation
+/// database doesn't already provide them. If sysrootOverride is non-empty it
+/// takes precedence; otherwise falls back to the build-time default detected
+/// by CMake via xcrun.
+inline clang::tooling::ArgumentsAdjuster
+getSysrootAdjuster(const std::string &sysrootOverride = "") {
+  return [sysrootOverride](const clang::tooling::CommandLineArguments &args,
+                           llvm::StringRef /*filename*/) {
+    for (const auto &a : args)
+      if (a == "-isysroot")
+        return args;
+
+    const std::string sysroot = !sysrootOverride.empty() ? sysrootOverride
+#ifdef VYCOR_DEFAULT_SYSROOT
+        : std::string(VYCOR_DEFAULT_SYSROOT);
+#else
+        : std::string();
+#endif
+    if (sysroot.empty())
+      return args;
+
+    auto result = args;
+    result.push_back("-isysroot");
+    result.push_back(sysroot);
+    return result;
+  };
+}
+
+/// Inject -resource-dir pointing to this tool's Clang resource directory.
+/// This ensures the tool's built-in headers (stdarg.h, etc.) are found even
+/// when consuming compilation databases from a different toolchain.
+inline clang::tooling::ArgumentsAdjuster getResourceDirAdjuster() {
+  return [](const clang::tooling::CommandLineArguments &args,
+            llvm::StringRef /*filename*/) {
+    // Check if -resource-dir is already set.
+    for (const auto &a : args)
+      if (a.find("-resource-dir") == 0)
+        return args;
+#ifdef VYCOR_CLANG_RESOURCE_DIR
+    auto result = args;
+    // Use space-separated form: -resource-dir= (Joined) lacks CC1Option
+    // visibility in LLVM 21, so ClangTool's internal cc1 pipeline rejects it.
+    // The Separate form has CC1Option and works in both driver and cc1 modes.
+    result.push_back("-resource-dir");
+    result.push_back(VYCOR_CLANG_RESOURCE_DIR);
+    return result;
+#else
+    return args;
+#endif
+  };
+}
+
+/// Argument adjuster that replaces PCH source includes with compiled PCH
+/// binaries from a PchCache. The PCH source `-include <pch_src>` is replaced
+/// with `-include-pch <compiled.pch>`.
+inline clang::tooling::ArgumentsAdjuster
+getPchCacheAdjuster(const PchCache &cache) {
+  return [&cache](const clang::tooling::CommandLineArguments &args,
+                  llvm::StringRef /*filename*/) {
+    clang::tooling::CommandLineArguments result;
+    result.reserve(args.size());
+    for (size_t i = 0; i < args.size(); ++i) {
+      llvm::StringRef arg(args[i]);
+
+      // Handle -Xarch_* -include<pch> pairs.
+      if (arg.starts_with("-Xarch_") && i + 1 < args.size()) {
+        llvm::StringRef next(args[i + 1]);
+        if (next.starts_with("-include") && !next.starts_with("-include-pch") &&
+            next.contains("pch")) {
+          std::string pchSrc;
+          if (next.size() > 8) {
+            pchSrc = next.substr(8).str();
+          } else if (i + 2 < args.size()) {
+            pchSrc = args[i + 2];
+          }
+          auto compiled = cache.getCompiledPch(pchSrc);
+          if (!compiled.empty()) {
+            // Replace the whole -Xarch -include<pch> with -include-pch
+            result.push_back("-include-pch");
+            result.push_back(compiled);
+            i += (next == "-include") ? 2 : 1;
+            continue;
+          }
+        }
+      }
+
+      // Handle standalone -include<pch> (joined or separate).
+      if (arg.starts_with("-include") && !arg.starts_with("-include-pch") &&
+          arg.contains("pch")) {
+        std::string pchSrc;
+        if (arg.size() > 8) {
+          pchSrc = arg.substr(8).str();
+        } else if (i + 1 < args.size()) {
+          pchSrc = args[i + 1];
+        }
+        auto compiled = cache.getCompiledPch(pchSrc);
+        if (!compiled.empty()) {
+          result.push_back("-include-pch");
+          result.push_back(compiled);
+          if (arg == "-include")
+            ++i; // skip separate path arg
+          continue;
+        }
+      }
+
+      result.push_back(args[i]);
+    }
+    return result;
+  };
+}
+
+/// Create a ClangTool with standard argument adjusters applied.
+/// When pchCache is provided, PCH source includes are replaced with compiled
+/// .pch binaries instead of being stripped.
+/// When sysroot is non-empty, it overrides the default macOS SDK path; an
+/// empty string falls back to the build-time default from xcrun.
+inline clang::tooling::ClangTool
+makeClangTool(const clang::tooling::CompilationDatabase &compDb,
+              const std::vector<std::string> &files,
+              const PchCache *pchCache = nullptr,
+              const std::string &sysroot = "") {
+  clang::tooling::ClangTool tool(compDb, files);
+  if (pchCache && !pchCache->empty()) {
+    tool.appendArgumentsAdjuster(getPchCacheAdjuster(*pchCache));
+    tool.appendArgumentsAdjuster(getStripIncompatibleFlagsAdjuster(/*stripPch=*/false));
+  } else {
+    tool.appendArgumentsAdjuster(getStripIncompatibleFlagsAdjuster());
+  }
+  tool.appendArgumentsAdjuster(
+      clang::tooling::getClangStripDependencyFileAdjuster());
+  tool.appendArgumentsAdjuster(getSysrootAdjuster(sysroot));
+  tool.appendArgumentsAdjuster(getResourceDirAdjuster());
+  return tool;
+}
+
+} // namespace vycor
+
+#endif // VYCOR_COMPAT_TOOL_ADJUSTERS_H

@@ -7,18 +7,18 @@ others) working in this repository. Read it before making changes.
 
 ## What This Repository Does
 
-`giga-drill-breaker` is a **Clang LibTooling backend** for C++ static analysis
+`vycor-cpp` is a **Clang LibTooling backend** for C++ static analysis
 and source-to-source transformation. It uses Clang's AST (Abstract Syntax
 Tree) infrastructure to:
 
-1. **Detect fragile ADL/CTAD resolutions** (`mugann`) — header-order-sensitive
+1. **Detect fragile ADL/CTAD resolutions** (`anneal`) — header-order-sensitive
    name lookups that silently resolve to different declarations depending on
    what is included.
-2. **Apply AST matcher transformations** (`lagann`) — rule-driven rewrites of
+2. **Apply AST matcher transformations** (`morph`) — rule-driven rewrites of
    C++ source code using Clang's dynamic matcher DSL.
-3. **Query control flow and exception context** (`cfquery`) — one-shot CLI
+3. **Query control flow and exception context** (`prism`) — one-shot CLI
    queries for call site guards, try/catch scopes, and exception safety.
-4. **Interactive call graph MCP server** (`mcp-serve`) — pre-bakes a multi-TU
+4. **Interactive call graph MCP server** (`megascope`) — pre-bakes a multi-TU
    call graph and control flow index, then serves interactive queries via
    JSON-RPC for LLM-assisted code analysis (security audits, dead code, etc.).
 
@@ -27,24 +27,15 @@ or an LLM agent using the MCP server for security vulnerability analysis).
 
 ---
 
-## Naming Reference (TTGL)
+## Naming
 
-The project and its features are named after *Tengen Toppa Gurren Lagann*, a
-mecha anime whose central motif is the spiral drill — a force that evolves,
-combines, and breaks through any limit.
-
-- **giga-drill-breaker** — the Giga Drill Breaker finishing move: an
-  impossibly large spiral drill that pierces through whatever stands in the way.
-
-- **lagann** — Simon's core mech. Its nature is *transformation and
-  combination*: it bores into other machines and reshapes them into new forms.
-  Fitting for the subcommand that drills into ASTs and rewrites source code.
-
-- **mugann** — the Anti-Spiral's hunter-killers. Their defining trait: they
-  appear inert, give no warning, and the danger is entirely in *how they
-  resolve* — a Mugann killed in the wrong context detonates catastrophically.
-  Fragile ADL/CTAD resolutions have the same character: they compile silently
-  and only detonate when include order shifts.
+Glass and optics. **vycor** is the Corning glass family the C++ tool draws
+its name from (sibling to Pyrex, more demanding spec); the `-cpp` suffix
+leaves the bare `vycor` for a future Python sibling. **anneal** relieves
+latent stress — ADL/CTAD fragility. **morph** reshapes amorphous structure —
+AST transforms. **prism** decomposes one point into its components — call-site
+control flow. **megascope** is the persistent far-seeing instrument — the
+MCP server.
 
 ---
 
@@ -52,10 +43,10 @@ combines, and breaks through any limit.
 
 The codebase is split into four feature areas:
 
-### `mugann` — ADL/CTAD Analysis
+### `anneal` — ADL/CTAD Analysis
 
-**Headers:** `include/giga_drill/mugann/`
-**Sources:** `src/mugann/`
+**Headers:** `include/vycor/anneal/`
+**Sources:** `src/anneal/`
 
 | File | Purpose |
 |---|---|
@@ -63,24 +54,24 @@ The codebase is split into four feature areas:
 | `Indexer.h/.cpp` | Phase-1 AST visitor: walks every translation unit and populates `GlobalIndex` |
 | `Analyzer.h/.cpp` | Phase-2 AST visitor: compares each TU's resolved names against `GlobalIndex`; emits `Diagnostic` entries for fragile resolutions |
 
-The main entry point is `giga_drill::runAnalysis(compDb, files)` defined in
+The main entry point is `vycor::runAnalysis(compDb, files)` defined in
 `Analyzer.h`. It orchestrates both phases and returns a `vector<Diagnostic>`.
 
-### `lagann` — AST-Based Transformations
+### `morph` — AST-Based Transformations
 
-**Headers:** `include/giga_drill/lagann/`
-**Sources:** `src/lagann/`
+**Headers:** `include/vycor/morph/`
+**Sources:** `src/morph/`
 
 | File | Purpose |
 |---|---|
 | `MatcherEngine.h/.cpp` | Parses Clang dynamic matcher expression strings; registers callbacks with `MatchFinder`; runs `ClangTool` and accumulates `Replacement` objects |
 | `TransformPipeline.h/.cpp` | Orchestrates multiple passes of `MatcherEngine`; merges replacements across passes; optionally writes to disk |
 
-The main entry point is `giga_drill::TransformPipeline::execute(buildPath, files, dryRun)`.
+The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dryRun)`.
 
 ### `callgraph` — Call Graph and Control Flow Analysis
 
-**Headers:** `include/giga_drill/callgraph/`
+**Headers:** `include/vycor/callgraph/`
 **Sources:** `src/callgraph/`
 
 | File | Purpose |
@@ -92,7 +83,7 @@ The main entry point is `giga_drill::TransformPipeline::execute(buildPath, files
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `ControlFlowOracle.h/.cpp` | Query engine: exception safety, path analysis, call site context |
 
-**Three-phase build** (used by both `cfquery` and `mcp-serve`):
+**Three-phase build** (used by both `prism` and `megascope`):
 1. `buildCallGraph(compDb, files, collapsePaths)` — Phase 1 (index) + Phase 2 (edges)
 2. `buildControlFlowIndex(compDb, files, graph, collapsePaths)` — Phase 3 (CF context)
 
@@ -102,7 +93,7 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 
 ### `mcp` — MCP Server
 
-**Headers:** `include/giga_drill/mcp/`
+**Headers:** `include/vycor/mcp/`
 **Sources:** `src/mcp/`
 
 | File | Purpose |
@@ -122,10 +113,10 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 objects:
 
 ```
-giga-drill-breaker mugann     --build-path <dir> --source <files...>
-giga-drill-breaker lagann     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-giga-drill-breaker cfquery    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...]
-giga-drill-breaker mcp-serve  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...]
+vycor-cpp anneal     --build-path <dir> --source <files...>
+vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
+vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...]
+vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...]
 ```
 
 Each subcommand has its own scoped options (declared with `llvm::cl::sub(...)`).
@@ -134,14 +125,14 @@ To add a new subcommand, follow the pattern in `main.cpp`:
 2. Declare option variables with `llvm::cl::sub(MyCmd)`.
 3. Add an `if (MyCmd) { ... }` branch in `main()`.
 
-### cfquery vs mcp-serve
+### prism vs megascope
 
-- **cfquery**: One-shot CLI tool. Parses AST per invocation, outputs JSON to stdout. Best for quick single-file investigations.
-- **mcp-serve**: Persistent server. Pre-bakes a unified cross-TU call graph at startup, then serves interactive queries via JSON-RPC over stdio. **Always use mcp-serve for security audits or multi-file analysis** — cfquery is single-TU and cannot see cross-file callers.
+- **prism**: One-shot CLI tool. Parses AST per invocation, outputs JSON to stdout. Best for quick single-file investigations.
+- **megascope**: Persistent server. Pre-bakes a unified cross-TU call graph at startup, then serves interactive queries via JSON-RPC over stdio. **Always use megascope for security audits or multi-file analysis** — prism is single-TU and cannot see cross-file callers.
 
 ### Edge Collapse (--collapse-paths)
 
-Both `cfquery` and `mcp-serve` accept `--collapse-paths` to reduce noise from
+Both `prism` and `megascope` accept `--collapse-paths` to reduce noise from
 header-inlined utility code. Patterns are path component substrings:
 
 ```bash
@@ -158,20 +149,20 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
 
 `CMakeLists.txt` (top-level):
 - Requires CMake 3.20+, C++17.
-- Iterates `GIGA_DRILL_SUPPORTED_LLVM_VERSIONS` (currently `21 20 18`,
+- Iterates `VYCOR_SUPPORTED_LLVM_VERSIONS` (currently `21 20 18`,
   newest first) via `find_package()`. The CI matrix in
   `.github/workflows/ci.yml` mirrors this list.
 - Falls back to `extern/llvm-project` submodule if no system package matches.
 - Disables RTTI (`-fno-rtti`) to match LLVM's default.
-- A lightweight compatibility header (`include/giga_drill/compat/ClangVersion.h`)
-  provides `GIGA_DRILL_LLVM_AT_LEAST(major)` for version-conditional code.
+- A lightweight compatibility header (`include/vycor/compat/ClangVersion.h`)
+  provides `VYCOR_LLVM_AT_LEAST(major)` for version-conditional code.
 - See `COMPATIBILITY.md` for the support matrix, known API differences
   between supported LLVM majors, and the procedure for adding/removing a
   supported version.
 
 `src/CMakeLists.txt`:
-- Builds `giga_drill_lib` from `mugann/*.cpp`, `lagann/*.cpp`, `callgraph/*.cpp`, and `mcp/*.cpp`.
-- Builds `giga-drill-breaker` executable from `main.cpp`.
+- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, and `mcp/*.cpp`.
+- Builds `vycor-cpp` executable from `main.cpp`.
 - Links against: `clangTooling`, `clangDynamicASTMatchers`, `clangASTMatchers`,
   `clangAST`, `clangBasic`, `clangFrontend`, `clangSema`, `clangSerialization`,
   `clangRewrite`, `clangToolingCore`, `LLVMSupport`.
@@ -199,10 +190,10 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 
 # Build the CLI tool
-cmake --build build --target giga-drill-breaker
+cmake --build build --target vycor-cpp
 
 # Build tests
-cmake --build build --target giga_drill_tests
+cmake --build build --target vycor_tests
 
 # Run tests
 cd build && ctest --output-on-failure
@@ -216,7 +207,7 @@ correctly (the CMake build sets it automatically via a compile definition).
 
 ---
 
-## Adding a New Analysis to mugann
+## Adding a New Analysis to anneal
 
 1. **If new data is needed globally**, extend `GlobalIndex` (`GlobalIndex.h`
    and `GlobalIndex.cpp`) with a new entry struct and lookup method.
@@ -234,7 +225,7 @@ correctly (the CMake build sets it automatically via a compile definition).
 
 ---
 
-## Adding a New Transform to lagann
+## Adding a New Transform to morph
 
 1. Create a `TransformRule` struct with:
    - `matcherExpression`: a Clang dynamic matcher string
@@ -252,7 +243,7 @@ correctly (the CMake build sets it automatically via a compile definition).
 
 3. Test using the example files in `examples/` as TDD targets.
 
-The JSON rules format for the `lagann` CLI subcommand is not yet implemented
+The JSON rules format for the `morph` CLI subcommand is not yet implemented
 (see TODOs below). For now, rules are added programmatically.
 
 ---
@@ -317,12 +308,12 @@ applicable release branch via the `backport/llvm-NN` PR label. See
 
 | Area | TODO |
 |---|---|
-| `lagann` CLI | Parse `--rules-json` and populate `TransformPipeline` passes |
+| `morph` CLI | Parse `--rules-json` and populate `TransformPipeline` passes |
 | `TransformPipeline` | Apply replacements to disk between passes (not just collect) |
 | `TransformPipeline` | Write final replacements to disk when `!dryRun` |
 | Tests | Implement full integration tests in `test_transforms.cpp` (currently stubs) |
 | Matcher DSL | Define and document the JSON schema for rules files |
-| `mcp-serve` | Add `--source-glob` flag for directory-based source selection |
+| `megascope` | Add `--source-glob` flag for directory-based source selection |
 | `find_call_chain` | Annotate path edges with try/catch depth and caught types |
 | `call-site-context` | Include catch handler type and body summary in response |
 | Concurrency | `query_raii_scopes_at_callsite` — list RAII objects live at a call site |
@@ -335,7 +326,7 @@ applicable release branch via the `backport/llvm-NN` PR label. See
 
 ## Namespace
 
-All types and functions live in `namespace giga_drill`. There are no nested
+All types and functions live in `namespace vycor`. There are no nested
 namespaces per feature — the feature folders are a filesystem organization
 only, not a namespace boundary.
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/mugann/Analyzer.h"
-#include "giga_drill/mugann/DeadCodeAnalyzer.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
-#include "giga_drill/callgraph/ControlFlowOracle.h"
-#include "giga_drill/lagann/RulesParser.h"
-#include "giga_drill/lagann/TransformPipeline.h"
-#include "giga_drill/callgraph/CollapseFilter.h"
-#include "giga_drill/compat/PchCache.h"
-#include "giga_drill/mcp/McpServer.h"
+#include "vycor/anneal/Analyzer.h"
+#include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/morph/RulesParser.h"
+#include "vycor/morph/TransformPipeline.h"
+#include "vycor/callgraph/CollapseFilter.h"
+#include "vycor/compat/PchCache.h"
+#include "vycor/mcp/McpServer.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 
@@ -35,143 +35,143 @@
 // ---------------------------------------------------------------------------
 
 static llvm::cl::SubCommand
-    MugannCmd("mugann",
+    AnnealCmd("anneal",
               "Analyze sources for fragile ADL/CTAD resolutions");
 
 static llvm::cl::SubCommand
-    LagannCmd("lagann",
+    MorphCmd("morph",
               "Apply AST-based source transformations");
 
 static llvm::cl::SubCommand
-    CfqueryCmd("cfquery",
+    PrismCmd("prism",
                "Query control flow and exception handling context");
 
 static llvm::cl::SubCommand
-    McpServeCmd("mcp-serve",
+    MegascopeCmd("megascope",
                 "Start MCP server for interactive call graph queries");
 
 // ---------------------------------------------------------------------------
-// mugann options
+// anneal options
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
-    MugannBuildPath("build-path",
+    AnnealBuildPath("build-path",
                     llvm::cl::desc("Directory containing compile_commands.json"),
                     llvm::cl::value_desc("dir"),
-                    llvm::cl::sub(MugannCmd));
+                    llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::list<std::string>
-    MugannSourceFiles("source",
+    AnnealSourceFiles("source",
                       llvm::cl::desc("Source files to analyze"),
                       llvm::cl::value_desc("file"),
                       llvm::cl::OneOrMore,
-                      llvm::cl::sub(MugannCmd));
+                      llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
-    MugannCoverageDiag("coverage-diag",
+    AnnealCoverageDiag("coverage-diag",
                        llvm::cl::desc("Enable coverage instrumentation diagnostics"),
-                       llvm::cl::sub(MugannCmd));
+                       llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
-    MugannDeadCode("dead-code",
+    AnnealDeadCode("dead-code",
                    llvm::cl::desc("Enable dead code analysis via call graph"),
-                   llvm::cl::sub(MugannCmd));
+                   llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::list<std::string>
-    MugannEntryPoints("entry-point",
+    AnnealEntryPoints("entry-point",
                       llvm::cl::desc("Entry point function names (default: main)"),
                       llvm::cl::value_desc("name"),
-                      llvm::cl::sub(MugannCmd));
+                      llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
-    MugannWarnSameScore("warn-same-score",
+    AnnealWarnSameScore("warn-same-score",
                         llvm::cl::desc("Warn on ADL candidates that tie the "
                                        "resolved overload on every argument "
                                        "position"),
-                        llvm::cl::sub(MugannCmd));
+                        llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
-    MugannModelConvertibility("model-convertibility",
+    AnnealModelConvertibility("model-convertibility",
                               llvm::cl::desc("Use indexed type relations "
                                              "(inheritance, converting ctors, "
                                              "conversion operators) to decide "
                                              "candidate viability"),
-                              llvm::cl::sub(MugannCmd));
+                              llvm::cl::sub(AnnealCmd));
 
 // ---------------------------------------------------------------------------
-// lagann options
+// morph options
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
-    LagannRulesJson("rules-json",
+    MorphRulesJson("rules-json",
                     llvm::cl::desc("JSON file with transform rules"),
                     llvm::cl::value_desc("file"),
-                    llvm::cl::sub(LagannCmd));
+                    llvm::cl::sub(MorphCmd));
 
 static llvm::cl::list<std::string>
-    LagannBuildPaths("build-path",
+    MorphBuildPaths("build-path",
                      llvm::cl::desc("Directory containing compile_commands.json"
                                     " (may be repeated; first match wins)"),
                      llvm::cl::value_desc("dir"),
                      llvm::cl::OneOrMore,
-                     llvm::cl::sub(LagannCmd));
+                     llvm::cl::sub(MorphCmd));
 
 static llvm::cl::list<std::string>
-    LagannSourceFiles("source",
+    MorphSourceFiles("source",
                       llvm::cl::desc("Source files to transform"),
                       llvm::cl::value_desc("file"),
                       llvm::cl::OneOrMore,
-                      llvm::cl::sub(LagannCmd));
+                      llvm::cl::sub(MorphCmd));
 
 static llvm::cl::opt<bool>
-    LagannDryRun("dry-run",
+    MorphDryRun("dry-run",
                  llvm::cl::desc("Print replacements without applying them"),
-                 llvm::cl::sub(LagannCmd));
+                 llvm::cl::sub(MorphCmd));
 
 // ---------------------------------------------------------------------------
-// cfquery options
+// prism options
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
-    CfqueryBuildPath("build-path",
+    PrismBuildPath("build-path",
                      llvm::cl::desc("Directory containing compile_commands.json"),
                      llvm::cl::value_desc("dir"),
-                     llvm::cl::sub(CfqueryCmd));
+                     llvm::cl::sub(PrismCmd));
 
 static llvm::cl::list<std::string>
-    CfquerySourceFiles("source",
+    PrismSourceFiles("source",
                        llvm::cl::desc("Source files to analyze"),
                        llvm::cl::value_desc("file"),
                        llvm::cl::OneOrMore,
-                       llvm::cl::sub(CfqueryCmd));
+                       llvm::cl::sub(PrismCmd));
 
 static llvm::cl::list<std::string>
-    CfqueryEntryPoints("entry-point",
+    PrismEntryPoints("entry-point",
                        llvm::cl::desc("Entry point function names (default: main)"),
                        llvm::cl::value_desc("name"),
-                       llvm::cl::sub(CfqueryCmd));
+                       llvm::cl::sub(PrismCmd));
 
-enum CfqueryMode { CfqueryDump, CfqueryQuery };
-static llvm::cl::opt<CfqueryMode>
-    CfqueryModeOpt("mode",
+enum PrismMode { PrismDump, PrismQuery };
+static llvm::cl::opt<PrismMode>
+    PrismModeOpt("mode",
                    llvm::cl::desc("Output mode"),
                    llvm::cl::values(
-                       clEnumValN(CfqueryDump, "dump",
+                       clEnumValN(PrismDump, "dump",
                                   "Dump full control flow index as JSON"),
-                       clEnumValN(CfqueryQuery, "query",
+                       clEnumValN(PrismQuery, "query",
                                   "Run a targeted query")),
-                   llvm::cl::init(CfqueryDump),
-                   llvm::cl::sub(CfqueryCmd));
+                   llvm::cl::init(PrismDump),
+                   llvm::cl::sub(PrismCmd));
 
-enum CfqueryType {
+enum PrismType {
   CfqExceptionProtection,
   CfqCallSiteContext,
   CfqAllPathContexts,
   CfqThrowPropagation,
   CfqNearestCatches
 };
-static llvm::cl::opt<CfqueryType>
-    CfqueryQueryType("query-type",
+static llvm::cl::opt<PrismType>
+    PrismQueryType("query-type",
                      llvm::cl::desc("Type of query to run (requires --mode query)"),
                      llvm::cl::values(
                          clEnumValN(CfqExceptionProtection,
@@ -190,140 +190,140 @@ static llvm::cl::opt<CfqueryType>
                                     "nearest-catches",
                                     "Nearest try/catch on each path to function")),
                      llvm::cl::init(CfqExceptionProtection),
-                     llvm::cl::sub(CfqueryCmd));
+                     llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfqueryFunction("function",
+    PrismFunction("function",
                     llvm::cl::desc("Target function (qualified name)"),
                     llvm::cl::value_desc("name"),
-                    llvm::cl::sub(CfqueryCmd));
+                    llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfqueryCallSite("call-site",
+    PrismCallSite("call-site",
                     llvm::cl::desc("Call site location (file:line:col)"),
                     llvm::cl::value_desc("location"),
-                    llvm::cl::sub(CfqueryCmd));
+                    llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfqueryExceptionType("exception-type",
+    PrismExceptionType("exception-type",
                          llvm::cl::desc("Exception type for protection queries"),
                          llvm::cl::value_desc("type"),
-                         llvm::cl::sub(CfqueryCmd));
+                         llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<unsigned>
-    CfqueryMaxPaths("max-paths",
+    PrismMaxPaths("max-paths",
                     llvm::cl::desc("Maximum number of paths to enumerate (default: 100)"),
                     llvm::cl::init(100),
-                    llvm::cl::sub(CfqueryCmd));
+                    llvm::cl::sub(PrismCmd));
 
 static llvm::cl::list<std::string>
-    CfqueryCollapsePaths("collapse-paths",
+    PrismCollapsePaths("collapse-paths",
         llvm::cl::desc("Path patterns to collapse (internal edges skipped)"),
         llvm::cl::value_desc("pattern"),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::list<std::string>
-    CfquerySkipPaths("skip-paths",
+    PrismSkipPaths("skip-paths",
         llvm::cl::desc("Path patterns to skip entirely (TUs matching are not processed)"),
         llvm::cl::value_desc("pattern"),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<unsigned>
-    CfqueryThreads("threads",
+    PrismThreads("threads",
         llvm::cl::desc("Number of threads (0 = hardware_concurrency, 1 = serial)"),
         llvm::cl::init(0),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfqueryPchDir("pch-dir",
+    PrismPchDir("pch-dir",
         llvm::cl::desc("Directory for compiled PCH cache (enables PCH reuse)"),
         llvm::cl::value_desc("dir"),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfqueryClang("clang",
+    PrismClang("clang",
         llvm::cl::desc("Path to clang++ binary for PCH compilation"),
         llvm::cl::value_desc("path"),
-        llvm::cl::init(GIGA_DRILL_DEFAULT_CLANG),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::init(VYCOR_DEFAULT_CLANG),
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::list<std::string>
-    CfqueryLockTypes("lock-types",
+    PrismLockTypes("lock-types",
         llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
         llvm::cl::value_desc("qualified-name"),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 static llvm::cl::opt<std::string>
-    CfquerySysroot("sysroot",
+    PrismSysroot("sysroot",
         llvm::cl::desc("macOS SDK sysroot path (default: auto-detect via xcrun)"),
         llvm::cl::value_desc("dir"),
-        llvm::cl::sub(CfqueryCmd));
+        llvm::cl::sub(PrismCmd));
 
 // ---------------------------------------------------------------------------
-// mcp-serve options
+// megascope options
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
     McpBuildPath("build-path",
                  llvm::cl::desc("Directory containing compile_commands.json"),
                  llvm::cl::value_desc("dir"),
-                 llvm::cl::sub(McpServeCmd));
+                 llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
     McpSourceFiles("source",
                    llvm::cl::desc("Source files to analyze"),
                    llvm::cl::value_desc("file"),
                    llvm::cl::OneOrMore,
-                   llvm::cl::sub(McpServeCmd));
+                   llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
     McpEntryPoints("entry-point",
                    llvm::cl::desc("Entry point function names (default: main)"),
                    llvm::cl::value_desc("name"),
-                   llvm::cl::sub(McpServeCmd));
+                   llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
     McpCollapsePaths("collapse-paths",
         llvm::cl::desc("Path patterns to collapse (internal edges skipped)"),
         llvm::cl::value_desc("pattern"),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
     McpSkipPaths("skip-paths",
         llvm::cl::desc("Path patterns to skip entirely (TUs matching are not processed)"),
         llvm::cl::value_desc("pattern"),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
     McpThreads("threads",
         llvm::cl::desc("Number of threads (0 = hardware_concurrency, 1 = serial)"),
         llvm::cl::init(0),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
     McpPchDir("pch-dir",
         llvm::cl::desc("Directory for compiled PCH cache (enables PCH reuse)"),
         llvm::cl::value_desc("dir"),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
     McpClang("clang",
         llvm::cl::desc("Path to clang++ binary for PCH compilation"),
         llvm::cl::value_desc("path"),
-        llvm::cl::init(GIGA_DRILL_DEFAULT_CLANG),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::init(VYCOR_DEFAULT_CLANG),
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
     McpSysroot("sysroot",
         llvm::cl::desc("macOS SDK sysroot path (default: auto-detect via xcrun)"),
         llvm::cl::value_desc("dir"),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
     McpLockTypes("lock-types",
         llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
         llvm::cl::value_desc("qualified-name"),
-        llvm::cl::sub(McpServeCmd));
+        llvm::cl::sub(MegascopeCmd));
 
 // ---------------------------------------------------------------------------
 // main
@@ -332,51 +332,51 @@ static llvm::cl::list<std::string>
 int main(int argc, const char **argv) {
   llvm::cl::ParseCommandLineOptions(
       argc, argv,
-      "giga-drill-breaker: AST-based C++ analysis and transformation tool\n"
+      "vycor-cpp: AST-based C++ analysis and transformation tool\n"
       "\nSubcommands:\n"
-      "  mugann     Detect fragile ADL/CTAD resolution across translation units\n"
-      "  lagann     Apply rule-driven AST matcher transformations\n"
-      "  cfquery    Query control flow and exception handling context\n"
-      "  mcp-serve  Start MCP server for interactive call graph queries\n");
+      "  anneal     Detect fragile ADL/CTAD resolution across translation units\n"
+      "  morph     Apply rule-driven AST matcher transformations\n"
+      "  prism    Query control flow and exception handling context\n"
+      "  megascope  Start MCP server for interactive call graph queries\n");
 
-  // ---- mugann ---------------------------------------------------------------
-  if (MugannCmd) {
-    if (MugannBuildPath.empty()) {
-      llvm::errs() << "mugann: --build-path is required\n";
+  // ---- anneal ---------------------------------------------------------------
+  if (AnnealCmd) {
+    if (AnnealBuildPath.empty()) {
+      llvm::errs() << "anneal: --build-path is required\n";
       return 1;
     }
-    if (MugannSourceFiles.empty()) {
-      llvm::errs() << "mugann: at least one --source file is required\n";
+    if (AnnealSourceFiles.empty()) {
+      llvm::errs() << "anneal: at least one --source file is required\n";
       return 1;
     }
 
     std::string dbError;
     auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-        MugannBuildPath, dbError);
+        AnnealBuildPath, dbError);
     if (!compDb) {
-      llvm::errs() << "mugann: error loading compilation database from "
-                   << MugannBuildPath << ": " << dbError << "\n";
+      llvm::errs() << "anneal: error loading compilation database from "
+                   << AnnealBuildPath << ": " << dbError << "\n";
       return 1;
     }
 
-    std::vector<std::string> files(MugannSourceFiles.begin(),
-                                   MugannSourceFiles.end());
-    giga_drill::AnalysisOptions opts;
-    opts.enableCoverageDiag = MugannCoverageDiag;
-    opts.warnSameScore = MugannWarnSameScore;
-    opts.modelConvertibility = MugannModelConvertibility;
-    auto diagnostics = giga_drill::runAnalysis(*compDb, files, opts);
+    std::vector<std::string> files(AnnealSourceFiles.begin(),
+                                   AnnealSourceFiles.end());
+    vycor::AnalysisOptions opts;
+    opts.enableCoverageDiag = AnnealCoverageDiag;
+    opts.warnSameScore = AnnealWarnSameScore;
+    opts.modelConvertibility = AnnealModelConvertibility;
+    auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
 
     // Dead code analysis.
-    if (MugannDeadCode) {
-      auto graph = giga_drill::buildCallGraph(*compDb, files);
+    if (AnnealDeadCode) {
+      auto graph = vycor::buildCallGraph(*compDb, files);
 
-      std::vector<std::string> entryPoints(MugannEntryPoints.begin(),
-                                           MugannEntryPoints.end());
+      std::vector<std::string> entryPoints(AnnealEntryPoints.begin(),
+                                           AnnealEntryPoints.end());
       if (entryPoints.empty())
         entryPoints.push_back("main");
 
-      giga_drill::DeadCodeAnalyzer analyzer(graph, entryPoints);
+      vycor::DeadCodeAnalyzer analyzer(graph, entryPoints);
       analyzer.analyzePessimistic();
       analyzer.analyzeOptimistic();
 
@@ -387,7 +387,7 @@ int main(int argc, const char **argv) {
     }
 
     if (diagnostics.empty()) {
-      llvm::outs() << "mugann: no issues found.\n";
+      llvm::outs() << "anneal: no issues found.\n";
       return 0;
     }
 
@@ -397,71 +397,71 @@ int main(int argc, const char **argv) {
     return 0;
   }
 
-  // ---- lagann ---------------------------------------------------------------
-  if (LagannCmd) {
-    if (LagannRulesJson.empty()) {
-      llvm::errs() << "lagann: --rules-json is required\n";
+  // ---- morph ---------------------------------------------------------------
+  if (MorphCmd) {
+    if (MorphRulesJson.empty()) {
+      llvm::errs() << "morph: --rules-json is required\n";
       return 1;
     }
-    if (LagannSourceFiles.empty()) {
-      llvm::errs() << "lagann: at least one --source file is required\n";
+    if (MorphSourceFiles.empty()) {
+      llvm::errs() << "morph: at least one --source file is required\n";
       return 1;
     }
 
-    auto rulesOrErr = giga_drill::parseRulesFile(LagannRulesJson);
+    auto rulesOrErr = vycor::parseRulesFile(MorphRulesJson);
     if (!rulesOrErr) {
-      llvm::errs() << "lagann: " << llvm::toString(rulesOrErr.takeError())
+      llvm::errs() << "morph: " << llvm::toString(rulesOrErr.takeError())
                    << "\n";
       return 1;
     }
 
-    auto passRulesOrErr = giga_drill::buildPipeline(*rulesOrErr);
+    auto passRulesOrErr = vycor::buildPipeline(*rulesOrErr);
     if (!passRulesOrErr) {
-      llvm::errs() << "lagann: " << llvm::toString(passRulesOrErr.takeError())
+      llvm::errs() << "morph: " << llvm::toString(passRulesOrErr.takeError())
                    << "\n";
       return 1;
     }
 
-    giga_drill::TransformPipeline pipeline;
+    vycor::TransformPipeline pipeline;
     for (auto &pass : *passRulesOrErr)
       pipeline.addPass(std::move(pass));
 
-    std::vector<std::string> buildPaths(LagannBuildPaths.begin(),
-                                        LagannBuildPaths.end());
-    std::vector<std::string> files(LagannSourceFiles.begin(),
-                                   LagannSourceFiles.end());
-    return pipeline.execute(buildPaths, files, LagannDryRun);
+    std::vector<std::string> buildPaths(MorphBuildPaths.begin(),
+                                        MorphBuildPaths.end());
+    std::vector<std::string> files(MorphSourceFiles.begin(),
+                                   MorphSourceFiles.end());
+    return pipeline.execute(buildPaths, files, MorphDryRun);
   }
 
-  // ---- cfquery --------------------------------------------------------------
-  if (CfqueryCmd) {
-    if (CfqueryBuildPath.empty()) {
-      llvm::errs() << "cfquery: --build-path is required\n";
+  // ---- prism --------------------------------------------------------------
+  if (PrismCmd) {
+    if (PrismBuildPath.empty()) {
+      llvm::errs() << "prism: --build-path is required\n";
       return 1;
     }
-    if (CfquerySourceFiles.empty()) {
-      llvm::errs() << "cfquery: at least one --source file is required\n";
+    if (PrismSourceFiles.empty()) {
+      llvm::errs() << "prism: at least one --source file is required\n";
       return 1;
     }
 
     std::string dbError;
     auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-        CfqueryBuildPath, dbError);
+        PrismBuildPath, dbError);
     if (!compDb) {
-      llvm::errs() << "cfquery: error loading compilation database from "
-                   << CfqueryBuildPath << ": " << dbError << "\n";
+      llvm::errs() << "prism: error loading compilation database from "
+                   << PrismBuildPath << ": " << dbError << "\n";
       return 1;
     }
 
-    std::vector<std::string> files(CfquerySourceFiles.begin(),
-                                   CfquerySourceFiles.end());
-    std::vector<std::string> collapsePaths(CfqueryCollapsePaths.begin(),
-                                           CfqueryCollapsePaths.end());
+    std::vector<std::string> files(PrismSourceFiles.begin(),
+                                   PrismSourceFiles.end());
+    std::vector<std::string> collapsePaths(PrismCollapsePaths.begin(),
+                                           PrismCollapsePaths.end());
 
     // Filter out TUs matching --skip-paths.
-    if (!CfquerySkipPaths.empty()) {
-      giga_drill::CollapseFilter skipFilter(
-          {CfquerySkipPaths.begin(), CfquerySkipPaths.end()});
+    if (!PrismSkipPaths.empty()) {
+      vycor::CollapseFilter skipFilter(
+          {PrismSkipPaths.begin(), PrismSkipPaths.end()});
       size_t before = files.size();
       files.erase(std::remove_if(files.begin(), files.end(),
                                   [&](const std::string &f) {
@@ -473,51 +473,51 @@ int main(int argc, const char **argv) {
     }
 
     // Pre-compile PCH headers if --pch-dir is set.
-    std::unique_ptr<giga_drill::PchCache> pchCache;
-    if (!CfqueryPchDir.empty()) {
-      pchCache = std::make_unique<giga_drill::PchCache>(
-          CfqueryPchDir.getValue(), CfqueryClang.getValue());
+    std::unique_ptr<vycor::PchCache> pchCache;
+    if (!PrismPchDir.empty()) {
+      pchCache = std::make_unique<vycor::PchCache>(
+          PrismPchDir.getValue(), PrismClang.getValue());
       pchCache->buildFromCompileCommands(*compDb, files);
     }
-    const giga_drill::PchCache *pchPtr = pchCache.get();
+    const vycor::PchCache *pchPtr = pchCache.get();
 
-    std::string sysroot = CfquerySysroot.getValue();
+    std::string sysroot = PrismSysroot.getValue();
 
     // Phase 1+2: Build call graph.
-    auto graph = giga_drill::buildCallGraph(*compDb, files, collapsePaths,
-                                              CfqueryThreads, pchPtr, sysroot);
+    auto graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
+                                              PrismThreads, pchPtr, sysroot);
 
     // Phase 3: Build control flow index.
-    giga_drill::LockTypeConfig lockCfg;
-    lockCfg.userAllowlist.assign(CfqueryLockTypes.begin(),
-                                 CfqueryLockTypes.end());
-    auto cfIndex = giga_drill::buildControlFlowIndex(*compDb, files, graph,
+    vycor::LockTypeConfig lockCfg;
+    lockCfg.userAllowlist.assign(PrismLockTypes.begin(),
+                                 PrismLockTypes.end());
+    auto cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
                                                       collapsePaths,
-                                                      CfqueryThreads, pchPtr,
+                                                      PrismThreads, pchPtr,
                                                       sysroot, lockCfg);
 
     // Dump mode: serialize the full index as JSON.
-    if (CfqueryModeOpt == CfqueryDump) {
-      llvm::outs() << giga_drill::ControlFlowOracle::dumpIndexToJson(cfIndex);
+    if (PrismModeOpt == PrismDump) {
+      llvm::outs() << vycor::ControlFlowOracle::dumpIndexToJson(cfIndex);
       return 0;
     }
 
     // Query mode: run a specific query.
-    giga_drill::ControlFlowOracle oracle(graph, cfIndex);
+    vycor::ControlFlowOracle oracle(graph, cfIndex);
 
-    std::vector<std::string> entryPoints(CfqueryEntryPoints.begin(),
-                                         CfqueryEntryPoints.end());
+    std::vector<std::string> entryPoints(PrismEntryPoints.begin(),
+                                         PrismEntryPoints.end());
     if (entryPoints.empty())
       entryPoints.push_back("main");
 
-    switch (CfqueryQueryType) {
+    switch (PrismQueryType) {
     case CfqCallSiteContext: {
-      if (CfqueryCallSite.empty()) {
-        llvm::errs() << "cfquery: --call-site is required for "
+      if (PrismCallSite.empty()) {
+        llvm::errs() << "prism: --call-site is required for "
                         "call-site-context query\n";
         return 1;
       }
-      auto info = oracle.queryCallSite(CfqueryCallSite);
+      auto info = oracle.queryCallSite(PrismCallSite);
       // Simple JSON output for call site info.
       llvm::outs() << "{\n"
                    << "  \"callSite\": \"" << info.callSite << "\",\n"
@@ -536,57 +536,57 @@ int main(int argc, const char **argv) {
     }
 
     case CfqExceptionProtection: {
-      if (CfqueryFunction.empty()) {
-        llvm::errs() << "cfquery: --function is required for "
+      if (PrismFunction.empty()) {
+        llvm::errs() << "prism: --function is required for "
                         "exception-protection query\n";
         return 1;
       }
       auto result = oracle.queryExceptionProtection(
-          CfqueryFunction, CfqueryExceptionType, entryPoints);
-      llvm::outs() << giga_drill::ControlFlowOracle::toJson(
-          result, "exception-protection", CfqueryFunction,
-          CfqueryExceptionType);
+          PrismFunction, PrismExceptionType, entryPoints);
+      llvm::outs() << vycor::ControlFlowOracle::toJson(
+          result, "exception-protection", PrismFunction,
+          PrismExceptionType);
       return 0;
     }
 
     case CfqAllPathContexts: {
-      if (CfqueryFunction.empty()) {
-        llvm::errs() << "cfquery: --function is required for "
+      if (PrismFunction.empty()) {
+        llvm::errs() << "prism: --function is required for "
                         "all-path-contexts query\n";
         return 1;
       }
       auto result = oracle.queryExceptionProtection(
-          CfqueryFunction, CfqueryExceptionType, entryPoints);
-      llvm::outs() << giga_drill::ControlFlowOracle::toJson(
-          result, "all-path-contexts", CfqueryFunction,
-          CfqueryExceptionType);
+          PrismFunction, PrismExceptionType, entryPoints);
+      llvm::outs() << vycor::ControlFlowOracle::toJson(
+          result, "all-path-contexts", PrismFunction,
+          PrismExceptionType);
       return 0;
     }
 
     case CfqThrowPropagation: {
-      if (CfqueryFunction.empty()) {
-        llvm::errs() << "cfquery: --function is required for "
+      if (PrismFunction.empty()) {
+        llvm::errs() << "prism: --function is required for "
                         "throw-propagation query\n";
         return 1;
       }
       auto result = oracle.queryThrowPropagation(
-          CfqueryFunction, CfqueryExceptionType, entryPoints);
-      llvm::outs() << giga_drill::ControlFlowOracle::toJson(
-          result, "throw-propagation", CfqueryFunction,
-          CfqueryExceptionType);
+          PrismFunction, PrismExceptionType, entryPoints);
+      llvm::outs() << vycor::ControlFlowOracle::toJson(
+          result, "throw-propagation", PrismFunction,
+          PrismExceptionType);
       return 0;
     }
 
     case CfqNearestCatches: {
-      if (CfqueryFunction.empty()) {
-        llvm::errs() << "cfquery: --function is required for "
+      if (PrismFunction.empty()) {
+        llvm::errs() << "prism: --function is required for "
                         "nearest-catches query\n";
         return 1;
       }
-      auto catches = oracle.queryNearestCatches(CfqueryFunction);
+      auto catches = oracle.queryNearestCatches(PrismFunction);
       llvm::outs() << "{\n"
                    << "  \"query\": \"nearest-catches\",\n"
-                   << "  \"function\": \"" << CfqueryFunction.getValue()
+                   << "  \"function\": \"" << PrismFunction.getValue()
                    << "\",\n"
                    << "  \"results\": [\n";
       for (size_t i = 0; i < catches.size(); ++i) {
@@ -618,14 +618,14 @@ int main(int argc, const char **argv) {
     return 0;
   }
 
-  // ---- mcp-serve -------------------------------------------------------------
-  if (McpServeCmd) {
+  // ---- megascope -------------------------------------------------------------
+  if (MegascopeCmd) {
     if (McpBuildPath.empty()) {
-      llvm::errs() << "mcp-serve: --build-path is required\n";
+      llvm::errs() << "megascope: --build-path is required\n";
       return 1;
     }
     if (McpSourceFiles.empty()) {
-      llvm::errs() << "mcp-serve: at least one --source file is required\n";
+      llvm::errs() << "megascope: at least one --source file is required\n";
       return 1;
     }
 
@@ -633,7 +633,7 @@ int main(int argc, const char **argv) {
     auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
         McpBuildPath, dbError);
     if (!compDb) {
-      llvm::errs() << "mcp-serve: error loading compilation database from "
+      llvm::errs() << "megascope: error loading compilation database from "
                    << McpBuildPath << ": " << dbError << "\n";
       return 1;
     }
@@ -645,7 +645,7 @@ int main(int argc, const char **argv) {
 
     // Filter out TUs matching --skip-paths.
     if (!McpSkipPaths.empty()) {
-      giga_drill::CollapseFilter skipFilter(
+      vycor::CollapseFilter skipFilter(
           {McpSkipPaths.begin(), McpSkipPaths.end()});
       size_t before = files.size();
       files.erase(std::remove_if(files.begin(), files.end(),
@@ -653,40 +653,40 @@ int main(int argc, const char **argv) {
                                     return skipFilter.isCollapsed(f);
                                   }),
                   files.end());
-      llvm::errs() << "mcp-serve: skip-paths: " << (before - files.size())
+      llvm::errs() << "megascope: skip-paths: " << (before - files.size())
                    << " of " << before << " TUs skipped\n";
     }
 
     // Pre-compile PCH headers if --pch-dir is set.
-    std::unique_ptr<giga_drill::PchCache> pchCache;
+    std::unique_ptr<vycor::PchCache> pchCache;
     if (!McpPchDir.empty()) {
-      llvm::errs() << "mcp-serve: building PCH cache...\n";
-      pchCache = std::make_unique<giga_drill::PchCache>(
+      llvm::errs() << "megascope: building PCH cache...\n";
+      pchCache = std::make_unique<vycor::PchCache>(
           McpPchDir.getValue(), McpClang.getValue());
       pchCache->buildFromCompileCommands(*compDb, files);
     }
-    const giga_drill::PchCache *pchPtr = pchCache.get();
+    const vycor::PchCache *pchPtr = pchCache.get();
 
     std::string sysroot = McpSysroot.getValue();
 
-    llvm::errs() << "mcp-serve: building call graph ("
+    llvm::errs() << "megascope: building call graph ("
                  << files.size() << " files, "
                  << McpThreads << " threads)...\n";
-    auto graph = giga_drill::buildCallGraph(*compDb, files, collapsePaths,
+    auto graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
                                              McpThreads, pchPtr, sysroot);
-    llvm::errs() << "mcp-serve: call graph built ("
+    llvm::errs() << "megascope: call graph built ("
                  << graph.nodeCount() << " nodes, "
                  << graph.edgeCount() << " edges)\n";
 
-    giga_drill::LockTypeConfig lockCfg;
+    vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
 
-    llvm::errs() << "mcp-serve: building control flow index...\n";
-    auto cfIndex = giga_drill::buildControlFlowIndex(*compDb, files, graph,
+    llvm::errs() << "megascope: building control flow index...\n";
+    auto cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
                                                       collapsePaths,
                                                       McpThreads, pchPtr,
                                                       sysroot, lockCfg);
-    llvm::errs() << "mcp-serve: control flow index built ("
+    llvm::errs() << "megascope: control flow index built ("
                  << cfIndex.size() << " call sites)\n";
 
     std::vector<std::string> entryPoints(McpEntryPoints.begin(),
@@ -694,7 +694,7 @@ int main(int argc, const char **argv) {
     if (entryPoints.empty())
       entryPoints.push_back("main");
 
-    giga_drill::McpBuildParams buildParams;
+    vycor::McpBuildParams buildParams;
     buildParams.compDb = std::shared_ptr<clang::tooling::CompilationDatabase>(
         std::move(compDb));
     buildParams.collapsePaths = collapsePaths;
@@ -702,14 +702,14 @@ int main(int argc, const char **argv) {
     buildParams.sysroot = sysroot;
     buildParams.lockCfg = std::move(lockCfg);
 
-    giga_drill::McpServer server(std::move(graph), std::move(cfIndex),
+    vycor::McpServer server(std::move(graph), std::move(cfIndex),
                                  std::move(entryPoints),
                                  std::move(buildParams));
     return server.run();
   }
 
-  llvm::errs() << "No subcommand specified. Use 'mugann', 'lagann', "
-                  "'cfquery', or 'mcp-serve'.\n"
+  llvm::errs() << "No subcommand specified. Use 'anneal', 'morph', "
+                  "'prism', or 'megascope'.\n"
                << "Run with --help for usage information.\n";
   return 1;
 }

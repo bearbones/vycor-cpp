@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/compat/PchCache.h"
+#include "vycor/compat/PchCache.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/ADT/StringRef.h"
@@ -25,7 +25,7 @@
 #include <functional>
 #include <set>
 
-namespace giga_drill {
+namespace vycor {
 
 namespace {
 
@@ -89,10 +89,10 @@ applyToolAdjusters(const std::vector<std::string> &args) {
       break;
     }
   }
-#ifdef GIGA_DRILL_CLANG_RESOURCE_DIR
+#ifdef VYCOR_CLANG_RESOURCE_DIR
   if (!hasResourceDir) {
     result.push_back("-resource-dir");
-    result.push_back(GIGA_DRILL_CLANG_RESOURCE_DIR);
+    result.push_back(VYCOR_CLANG_RESOURCE_DIR);
   }
 #endif
 
@@ -315,4 +315,4 @@ PchCache::computeCacheKey(const std::string &pchPath,
   return stem.str() + "_" + std::to_string(h);
 }
 
-} // namespace giga_drill
+} // namespace vycor

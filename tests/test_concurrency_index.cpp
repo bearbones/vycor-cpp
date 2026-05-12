@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,9 +16,9 @@
 // test_concurrency_index.cpp — Tests for RAII scope capture + catch handler
 // body summaries produced by ControlFlowContextVisitor (Phase 3).
 
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>
@@ -31,7 +31,7 @@
 #include <unistd.h>
 #include <vector>
 
-using namespace giga_drill;
+using namespace vycor;
 
 // ============================================================================
 // Helpers
@@ -45,7 +45,7 @@ std::string writeTempSource(const std::string &code) {
   llvm::SmallString<128> tmp;
   int fd = -1;
   auto ec =
-      llvm::sys::fs::createTemporaryFile("giga_drill_cf", "cpp", fd, tmp);
+      llvm::sys::fs::createTemporaryFile("vycor_cf", "cpp", fd, tmp);
   if (ec)
     return {};
   // close() the fd immediately — we reopen as an ofstream to write.
@@ -99,7 +99,7 @@ const CallSiteContext *findContext(const ControlFlowIndex &cf,
 // ============================================================================
 
 TEST_CASE("Built-in std::lock_guard is captured as Lock kind",
-          "[cfquery][raii]") {
+          "[prism][raii]") {
   std::string code = R"(
     namespace std {
       class mutex {};
@@ -139,7 +139,7 @@ TEST_CASE("Built-in std::lock_guard is captured as Lock kind",
 }
 
 TEST_CASE("User allowlist promotes a custom type to Lock kind",
-          "[cfquery][raii]") {
+          "[prism][raii]") {
   std::string code = R"(
     class Arbiter {
     public:
@@ -173,7 +173,7 @@ TEST_CASE("User allowlist promotes a custom type to Lock kind",
 }
 
 TEST_CASE("CapabilityAttr marks a type as Lock automatically",
-          "[cfquery][raii]") {
+          "[prism][raii]") {
   std::string code = R"(
     class __attribute__((capability("mutex"))) MyLock {
     public:
@@ -206,7 +206,7 @@ TEST_CASE("CapabilityAttr marks a type as Lock automatically",
 }
 
 TEST_CASE("std::unique_ptr classifies as SmartPtr kind",
-          "[cfquery][raii]") {
+          "[prism][raii]") {
   std::string code = R"(
     namespace std {
       template <class T, class D = void> class unique_ptr {
@@ -241,7 +241,7 @@ TEST_CASE("std::unique_ptr classifies as SmartPtr kind",
 }
 
 TEST_CASE("RAII scope tracking respects nested CompoundStmt blocks",
-          "[cfquery][raii]") {
+          "[prism][raii]") {
   // The call to inner() sees both outer and inner locks live.
   // The call to outerOnly() sees only the outer lock live.
   std::string code = R"(
@@ -296,7 +296,7 @@ TEST_CASE("RAII scope tracking respects nested CompoundStmt blocks",
 // ============================================================================
 
 TEST_CASE("Catch handler body summary is captured",
-          "[cfquery][catch-body]") {
+          "[prism][catch-body]") {
   std::string code = R"(
     namespace std {
       class exception { public: virtual ~exception() {} };
@@ -333,7 +333,7 @@ TEST_CASE("Catch handler body summary is captured",
 }
 
 TEST_CASE("Catch(...) body is captured and isCatchAll is set",
-          "[cfquery][catch-body]") {
+          "[prism][catch-body]") {
   std::string code = R"(
     void dangerous();
     void run() {

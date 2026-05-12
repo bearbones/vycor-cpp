@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/mugann/Analyzer.h"
-#include "giga_drill/mugann/GlobalIndex.h"
-#include "giga_drill/mugann/Indexer.h"
+#include "vycor/anneal/Analyzer.h"
+#include "vycor/anneal/GlobalIndex.h"
+#include "vycor/anneal/Indexer.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-using namespace giga_drill;
+using namespace vycor;
 
 namespace {
 std::string readFileContents(const std::string &path) {

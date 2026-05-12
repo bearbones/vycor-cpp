@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/callgraph/CollapseFilter.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/compat/ClangVersion.h"
-#include "giga_drill/compat/PchCache.h"
-#include "giga_drill/compat/ToolAdjusters.h"
+#include "vycor/callgraph/CollapseFilter.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/compat/ClangVersion.h"
+#include "vycor/compat/PchCache.h"
+#include "vycor/compat/ToolAdjusters.h"
 
 #include "llvm/Support/ThreadPool.h"
 #include "llvm/Support/raw_ostream.h"
@@ -47,7 +47,7 @@ void cfCrashHandler(int sig) {
 bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                       const std::string &file,
                       clang::tooling::FrontendActionFactory &factory,
-                      const giga_drill::PchCache *pchCache,
+                      const vycor::PchCache *pchCache,
                       const std::string &sysroot = "") {
   tl_cfGuardActive = 1;
   int sig = sigsetjmp(tl_cfJumpBuf, 1);
@@ -56,7 +56,7 @@ bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                  << " — skipping\n";
     return false;
   }
-  auto tool = giga_drill::makeClangTool(compDb, {file}, pchCache, sysroot);
+  auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
   tool.run(&factory);
   tl_cfGuardActive = 0;
   return true;
@@ -87,7 +87,7 @@ bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 #include <unordered_set>
 #include <vector>
 
-namespace giga_drill {
+namespace vycor {
 
 // ============================================================================
 // Helpers (same pattern as CallGraphBuilder.cpp)
@@ -659,7 +659,7 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
   bool parallel = threadCount != 1 && files.size() > 1;
 
   if (parallel) {
-#if GIGA_DRILL_LLVM_AT_LEAST(19)
+#if VYCOR_LLVM_AT_LEAST(19)
     llvm::DefaultThreadPool pool(
         llvm::hardware_concurrency(threadCount));
 #else
@@ -715,4 +715,4 @@ void indexTUControlFlow(ControlFlowIndex &index,
   std::signal(SIGBUS, prevBus);
 }
 
-} // namespace giga_drill
+} // namespace vycor

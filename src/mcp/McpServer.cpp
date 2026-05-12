@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "giga_drill/mcp/McpServer.h"
-#include "giga_drill/mcp/McpTools.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
+#include "vycor/mcp/McpServer.h"
+#include "vycor/mcp/McpTools.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
 
 #include "llvm/Support/raw_ostream.h"
 
 #include <unordered_map>
 
-namespace giga_drill {
+namespace vycor {
 
 McpServer::McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
                      std::vector<std::string> entryPoints,
@@ -52,20 +52,20 @@ McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
 }
 
 int McpServer::run() {
-  llvm::errs() << "mcp-serve: server started, waiting for requests...\n";
+  llvm::errs() << "megascope: server started, waiting for requests...\n";
 
   while (true) {
     auto req = readRequest(stdin, llvm::errs());
     if (!req)
       break; // EOF or unrecoverable error.
 
-    llvm::errs() << "mcp-serve: received method: " << req->method << "\n";
+    llvm::errs() << "megascope: received method: " << req->method << "\n";
 
     // Notifications have no id and get no response.
     if (req->isNotification()) {
       if (req->method == "notifications/initialized") {
         initialized_ = true;
-        llvm::errs() << "mcp-serve: client initialized\n";
+        llvm::errs() << "megascope: client initialized\n";
       }
       // Silently ignore unknown notifications.
       continue;
@@ -74,7 +74,7 @@ int McpServer::run() {
     dispatch(*req);
   }
 
-  llvm::errs() << "mcp-serve: shutting down\n";
+  llvm::errs() << "megascope: shutting down\n";
   return 0;
 }
 
@@ -101,7 +101,7 @@ llvm::json::Value McpServer::handleInitialize(
   capabilities["tools"] = llvm::json::Object{};
 
   llvm::json::Object serverInfo;
-  serverInfo["name"] = "giga-drill-breaker";
+  serverInfo["name"] = "vycor-cpp";
   serverInfo["version"] = "0.1.0";
 
   llvm::json::Object result;
@@ -215,4 +215,4 @@ llvm::json::Value McpServer::handleToolsCall(
   return it->second(args, ctx);
 }
 
-} // namespace giga_drill
+} // namespace vycor

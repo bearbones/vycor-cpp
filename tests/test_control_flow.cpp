@@ -1,4 +1,4 @@
-// Copyright (c) 2026 The giga-drill-breaker Authors
+// Copyright (c) 2026 The vycor-cpp Authors
 // Original author: Alex Mason
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,23 +15,23 @@
 
 // test_control_flow.cpp — Tests for the control flow query system.
 
-#include "giga_drill/callgraph/CallGraph.h"
-#include "giga_drill/callgraph/CallGraphBuilder.h"
-#include "giga_drill/callgraph/ControlFlowIndex.h"
-#include "giga_drill/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ControlFlowOracle.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/Tooling.h>
 #include <string>
 
-using namespace giga_drill;
+using namespace vycor;
 
 // ============================================================================
 // ControlFlowIndex unit tests
 // ============================================================================
 
 TEST_CASE("ControlFlowIndex stores and queries contexts",
-          "[cfquery][index]") {
+          "[prism][index]") {
   ControlFlowIndex index;
 
   SECTION("empty index returns no results") {
@@ -134,7 +134,7 @@ TEST_CASE("ControlFlowIndex stores and queries contexts",
 // ============================================================================
 
 TEST_CASE("Oracle determines exception protection across paths",
-          "[cfquery][oracle]") {
+          "[prism][oracle]") {
   // Graph: main -> processFile -> readChunk -> allocateBuffer
   //        main -> directAlloc -> allocateBuffer
   // processFile calls readChunk inside a try/catch(std::exception).
@@ -273,7 +273,7 @@ TEST_CASE("Oracle determines exception protection across paths",
 }
 
 TEST_CASE("Oracle handles always-caught and never-caught cases",
-          "[cfquery][oracle]") {
+          "[prism][oracle]") {
   SECTION("always caught") {
     CallGraph graph;
     graph.addNode({"main", "m.cpp", 1, true, false, ""});
@@ -365,7 +365,7 @@ buildFromCode(const std::string &code) {
 }
 
 TEST_CASE("CallGraph integration for exception context scenarios",
-          "[cfquery][integration]") {
+          "[prism][integration]") {
   // This test verifies the call graph structure for code with try/catch,
   // which the oracle will then reason about.
   std::string code = R"(
@@ -424,7 +424,7 @@ TEST_CASE("CallGraph integration for exception context scenarios",
 // JSON dump tests
 // ============================================================================
 
-TEST_CASE("JSON dump serialization", "[cfquery][json]") {
+TEST_CASE("JSON dump serialization", "[prism][json]") {
   ControlFlowIndex index;
 
   CallSiteContext ctx;
@@ -463,7 +463,7 @@ TEST_CASE("JSON dump serialization", "[cfquery][json]") {
 // ============================================================================
 
 TEST_CASE("Exception type matching through hierarchy",
-          "[cfquery][oracle][matching]") {
+          "[prism][oracle][matching]") {
   // catch(std::exception) should catch std::bad_alloc.
   CallGraph graph;
   graph.addNode({"main", "m.cpp", 1, true, false, ""});

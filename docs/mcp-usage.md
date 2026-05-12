@@ -1,6 +1,6 @@
-# giga-drill-breaker MCP Server — Usage Guide
+# vycor-cpp MCP Server — Usage Guide
 
-This guide covers practical usage of `mcp-serve` based on real analysis runs
+This guide covers practical usage of `megascope` based on real analysis runs
 against game-engine codebases. It focuses on workflow, gotchas, and effective
 query patterns rather than repeating what's in CLAUDE.md.
 
@@ -16,7 +16,7 @@ For API critique and improvement proposals see `docs/mcp-review.md`.
 export PATH="/path/to/llvm/bin:$PATH"
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=$(which clang++)
-cmake --build build --target giga-drill-breaker
+cmake --build build --target vycor-cpp
 ```
 
 ### 2. Generate a compilation database
@@ -30,7 +30,7 @@ crash while parsing TUs that include them.
 ### 3. Launch the server
 
 ```bash
-./build/src/giga-drill-breaker mcp-serve \
+./build/src/vycor-cpp megascope \
   --build-path /path/to/build \
   --source /path/to/file1.cpp \
   --source /path/to/file2.cpp \
@@ -44,11 +44,11 @@ The server prints progress to stderr and then blocks on stdin waiting for
 JSON-RPC requests:
 
 ```
-mcp-serve: building call graph (68 files, 8 threads)...
-mcp-serve: call graph built (59893 nodes, 842463 edges)
-mcp-serve: building control flow index...
-mcp-serve: control flow index built (1098163 call sites)
-mcp-serve: server started, waiting for requests...
+megascope: building call graph (68 files, 8 threads)...
+megascope: call graph built (59893 nodes, 842463 edges)
+megascope: building control flow index...
+megascope: control flow index built (1098163 call sites)
+megascope: server started, waiting for requests...
 ```
 
 Do not send requests until "server started" appears — the index is not
@@ -149,12 +149,12 @@ def call(proc, req_id, tool, params):
 ### Step 1 — Mine function names before querying
 
 `lookup_function` requires an **exact qualified name**. Do not guess.
-Before launching the server, extract real function names from a `cfquery`
+Before launching the server, extract real function names from a `prism`
 dump or from the `compile_commands.json` source files:
 
 ```bash
-# Get a cfquery dump (faster than mcp-serve for discovery)
-giga-drill-breaker cfquery \
+# Get a prism dump (faster than megascope for discovery)
+vycor-cpp prism \
   --build-path /path/to/build \
   --source file1.cpp --source file2.cpp \
   --mode dump --threads 8 > dump.json
@@ -284,7 +284,7 @@ is hidden.
 
 **`lookup_function` is exact-match only.** Partial names, namespaces
 without the full path, and operator spellings will all fail silently
-with `isError: true`. Mine real names from a cfquery dump first.
+with `isError: true`. Mine real names from a prism dump first.
 
 **Duplicate edges in `get_callers`/`get_callees`.** The same function can
 appear multiple times with different `callSite` values. Deduplicate on
@@ -304,8 +304,8 @@ paths for older protocol versions. Exception safety audits must include them.
 **Build completeness matters.** TUs that include missing generated headers
 (OpenAPI stubs, Protobuf outputs, reflection registration) will crash
 ClangTool during parsing. The crash guard skips them and reports
-`N TU(s) crashed and were skipped` to stderr. Run a `cfquery --mode dump`
-pass first to confirm your crash count before a long `mcp-serve` session.
+`N TU(s) crashed and were skipped` to stderr. Run a `prism --mode dump`
+pass first to confirm your crash count before a long `megascope` session.
 
 **Index build takes time proportional to file count.** Expect roughly
 4–6 seconds per 10 source files at 8 threads on ARM64. For 68 Replicator
