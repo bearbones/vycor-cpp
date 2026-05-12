@@ -15,6 +15,8 @@
 
 #include "vycor/callgraph/ControlFlowIndex.h"
 
+#include <algorithm>
+
 namespace vycor {
 
 ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept

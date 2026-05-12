@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
