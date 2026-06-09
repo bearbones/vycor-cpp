@@ -96,7 +96,7 @@ void McpServer::dispatch(const McpRequest &req) {
 }
 
 llvm::json::Value McpServer::handleInitialize(
-    const llvm::json::Object & /*params*/) {
+    const llvm::json::Object &params) {
   llvm::json::Object capabilities;
   capabilities["tools"] = llvm::json::Object{};
 
@@ -104,8 +104,16 @@ llvm::json::Value McpServer::handleInitialize(
   serverInfo["name"] = "vycor-cpp";
   serverInfo["version"] = "0.1.0";
 
+  // Echo the client's requested protocol version: the stdio transport and
+  // tools capability are unchanged across spec revisions we care about, so
+  // agreeing with the client maximizes interop. Fall back to a known-good
+  // revision when the client omits the field.
+  std::string protocolVersion = "2024-11-05";
+  if (auto pv = params.getString("protocolVersion"))
+    protocolVersion = pv->str();
+
   llvm::json::Object result;
-  result["protocolVersion"] = "2024-11-05";
+  result["protocolVersion"] = protocolVersion;
   result["capabilities"] = std::move(capabilities);
   result["serverInfo"] = std::move(serverInfo);
   return llvm::json::Value(std::move(result));
@@ -144,14 +152,13 @@ llvm::json::Value McpServer::handleToolsCall(
   }
 
   // Look up tool by name.
-  static std::unordered_map<std::string, McpToolHandler> handlerMap;
-  if (handlerMap.empty()) {
+  if (handlers_.empty()) {
     for (auto &entry : getRegisteredTools())
-      handlerMap[entry.name] = std::move(entry.handler);
+      handlers_[entry.name] = std::move(entry.handler);
   }
 
-  auto it = handlerMap.find(toolName->str());
-  if (it == handlerMap.end()) {
+  auto it = handlers_.find(toolName->str());
+  if (it == handlers_.end()) {
     llvm::json::Object content;
     content["type"] = "text";
     content["text"] = "Unknown tool: " + toolName->str();

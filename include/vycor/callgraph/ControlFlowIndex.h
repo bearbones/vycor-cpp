@@ -18,6 +18,7 @@
 #include "vycor/callgraph/StringInterner.h"
 
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -181,7 +182,9 @@ private:
 
   mutable std::mutex mutex_;
   StringInterner interner_;
-  std::vector<CallSiteContext> contexts_;
+  // deque, not vector: queries hand out pointers into this container, and
+  // growth must not invalidate them. compact() is the only invalidator.
+  std::deque<CallSiteContext> contexts_;
   std::unordered_map<SId, std::vector<size_t>> byCallee_;
   std::unordered_map<SId, std::vector<size_t>> byCaller_;
   std::unordered_map<SId, size_t> bySite_;

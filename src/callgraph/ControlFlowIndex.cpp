@@ -175,8 +175,7 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
 
 void ControlFlowIndex::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<CallSiteContext> newCtx;
-  newCtx.reserve(liveCount_);
+  std::deque<CallSiteContext> newCtx;
 
   std::unordered_map<SId, std::vector<size_t>> newByCallee;
   std::unordered_map<SId, std::vector<size_t>> newByCaller;

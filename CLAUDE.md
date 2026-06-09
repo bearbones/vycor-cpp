@@ -99,7 +99,7 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 | File | Purpose |
 |---|---|
 | `McpServer.h/.cpp` | JSON-RPC dispatch loop, holds call graph + CF index in memory |
-| `McpProtocol.h/.cpp` | Content-Length framing for MCP stdio transport |
+| `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 | `McpTools.h/.cpp` | Tool implementations: lookup, callers, callees, call chains, exception safety, dead code, class hierarchy |
 
 **8 MCP tools**: `lookup_function`, `get_callees`, `get_callers`, `find_call_chain`,

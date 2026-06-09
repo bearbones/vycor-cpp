@@ -328,8 +328,7 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
 
 void CallGraph::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<CallGraphEdge> newEdges;
-  newEdges.reserve(liveEdgeCount_);
+  std::deque<CallGraphEdge> newEdges;
 
   std::unordered_map<SId, std::vector<size_t>> newOut;
   std::unordered_map<SId, std::vector<size_t>> newIn;

@@ -39,9 +39,29 @@ struct McpRequest {
   bool isNotification() const;
 };
 
-/// Read one Content-Length framed JSON-RPC request from an input stream.
+/// Wire framing for the stdio transport.
+///
+/// The MCP specification frames stdio messages as newline-delimited JSON:
+/// one compact JSON-RPC message per line, no headers. Earlier vycor builds
+/// (and LSP-derived clients) used Content-Length headers instead. readRequest
+/// autodetects the framing per message from its first byte ('{' = newline
+/// framing, anything else = header framing) and records it; all writes use
+/// the most recently detected framing so responses match the client.
+enum class McpFraming {
+  Newline,       // MCP-standard: one JSON message per line
+  ContentLength, // Legacy: LSP-style Content-Length headers
+};
+
+/// Framing used for outgoing messages. Defaults to Newline until a request
+/// is read; thereafter follows the framing of the last request read.
+McpFraming activeFraming();
+
+/// Override the outgoing framing (used by tests and embedders).
+void setActiveFraming(McpFraming framing);
+
+/// Read one JSON-RPC request from an input stream, autodetecting newline
+/// vs. Content-Length framing (see McpFraming).
 /// Returns std::nullopt on EOF or unrecoverable framing error.
-/// On JSON parse error, writes a JSON-RPC error response and continues.
 std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog);
 
 /// Write a JSON-RPC 2.0 success response to stdout.

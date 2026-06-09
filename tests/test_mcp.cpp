@@ -271,6 +271,146 @@ TEST_CASE("readRequest parses Content-Length framed messages",
     CHECK(req->method == "notifications/initialized");
     CHECK(req->isNotification());
   }
+
+  SECTION("Content-Length framing sets ContentLength write mode") {
+    setActiveFraming(McpFraming::Newline);
+    std::string input =
+        "Content-Length: 58\r\n"
+        "\r\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(activeFraming() == McpFraming::ContentLength);
+    setActiveFraming(McpFraming::Newline);
+  }
+}
+
+TEST_CASE("readRequest parses newline-delimited messages (MCP stdio framing)",
+          "[mcp][protocol]") {
+  SECTION("single request") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{}}\n";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(req->method == "tools/list");
+    auto id = req->id.getAsInteger();
+    REQUIRE(id.has_value());
+    CHECK(*id == 7);
+    CHECK(activeFraming() == McpFraming::Newline);
+  }
+
+  SECTION("two requests back to back") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto first = readRequest(f, llvm::errs());
+    auto second = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(first.has_value());
+    CHECK(first->method == "initialize");
+    REQUIRE(second.has_value());
+    CHECK(second->method == "tools/list");
+  }
+
+  SECTION("blank lines between messages are tolerated") {
+    std::string input =
+        "\n\r\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n"
+        "\n";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(req->method == "tools/list");
+  }
+
+  SECTION("CRLF line ending is stripped") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\"}\r\n";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(req->method == "tools/list");
+  }
+
+  SECTION("trailing newline missing (EOF terminates the line)") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(req->method == "tools/list");
+  }
+
+  SECTION("malformed line is skipped, next message still read") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",,,garbage\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\"}\n";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto req = readRequest(f, llvm::errs());
+    std::fclose(f);
+
+    REQUIRE(req.has_value());
+    CHECK(req->method == "tools/list");
+    auto id = req->id.getAsInteger();
+    REQUIRE(id.has_value());
+    CHECK(*id == 6);
+  }
+
+  SECTION("framing can alternate between messages") {
+    std::string input =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"
+        "Content-Length: 46\r\n"
+        "\r\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
+
+    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
+    REQUIRE(f != nullptr);
+
+    auto first = readRequest(f, llvm::errs());
+    REQUIRE(first.has_value());
+    CHECK(activeFraming() == McpFraming::Newline);
+
+    auto second = readRequest(f, llvm::errs());
+    std::fclose(f);
+    REQUIRE(second.has_value());
+    CHECK(second->method == "tools/list");
+    CHECK(activeFraming() == McpFraming::ContentLength);
+    setActiveFraming(McpFraming::Newline);
+  }
 }
 
 // ============================================================================

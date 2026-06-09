@@ -28,7 +28,17 @@ bool McpRequest::isNotification() const {
 }
 
 // ---------------------------------------------------------------------------
-// Reading: Content-Length framed JSON-RPC from FILE*
+// Framing state
+// ---------------------------------------------------------------------------
+
+static McpFraming g_framing = McpFraming::Newline;
+
+McpFraming activeFraming() { return g_framing; }
+
+void setActiveFraming(McpFraming framing) { g_framing = framing; }
+
+// ---------------------------------------------------------------------------
+// Reading: newline-delimited or Content-Length framed JSON-RPC from FILE*
 // ---------------------------------------------------------------------------
 
 /// Read a single header line (up to \r\n). Returns false on EOF.
@@ -75,13 +85,42 @@ static int parseContentLength(const std::string &line) {
   return std::atoi(line.c_str() + pos);
 }
 
-std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
+/// Read one framed message body. Returns false on EOF or unrecoverable
+/// framing error. Detects the framing per message and updates g_framing.
+static bool readMessageBody(FILE *in, llvm::raw_ostream &errLog,
+                            std::string &body) {
+  // Skip blank lines and stray whitespace between messages, then sniff the
+  // first byte: '{' means newline-delimited JSON (MCP-standard stdio
+  // framing); anything else is treated as the start of a Content-Length
+  // header block (legacy LSP-style clients).
+  int first;
+  do {
+    first = std::fgetc(in);
+  } while (first == '\n' || first == '\r' || first == ' ' || first == '\t');
+  if (first == EOF)
+    return false;
+
+  body.clear();
+  if (first == '{') {
+    g_framing = McpFraming::Newline;
+    body += '{';
+    int ch;
+    while ((ch = std::fgetc(in)) != EOF && ch != '\n')
+      body += static_cast<char>(ch);
+    while (!body.empty() && body.back() == '\r')
+      body.pop_back();
+    return true;
+  }
+
+  g_framing = McpFraming::ContentLength;
+  std::ungetc(first, in);
+
   // Read headers until empty line.
   int contentLength = -1;
   std::string headerLine;
   while (true) {
     if (!readHeaderLine(in, headerLine))
-      return std::nullopt; // EOF.
+      return false; // EOF.
     if (headerLine.empty())
       break; // End of headers.
     int len = parseContentLength(headerLine);
@@ -92,44 +131,58 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
 
   if (contentLength < 0) {
     errLog << "megascope: missing Content-Length header\n";
-    return std::nullopt;
+    return false;
   }
 
   // Read exactly contentLength bytes.
-  std::string body(contentLength, '\0');
+  body.assign(contentLength, '\0');
   size_t bytesRead = std::fread(&body[0], 1, contentLength, in);
   if (bytesRead != static_cast<size_t>(contentLength)) {
     errLog << "megascope: truncated message body (expected " << contentLength
            << ", got " << bytesRead << ")\n";
-    return std::nullopt;
+    return false;
+  }
+  return true;
+}
+
+std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
+  std::string body;
+  llvm::json::Value parsedValue = nullptr;
+  llvm::json::Object *obj = nullptr;
+
+  // Malformed messages get a JSON-RPC error response, then we keep reading —
+  // both framings stay synchronized after a bad message, so a single garbled
+  // request must not take the server down.
+  while (true) {
+    if (!readMessageBody(in, errLog, body))
+      return std::nullopt; // EOF or unrecoverable framing error.
+
+    auto parsed = llvm::json::parse(body);
+    if (!parsed) {
+      errLog << "megascope: JSON parse error: "
+             << llvm::toString(parsed.takeError()) << "\n";
+      writeError(nullptr, kParseError, "JSON parse error");
+      continue;
+    }
+
+    parsedValue = std::move(*parsed);
+    obj = parsedValue.getAsObject();
+    if (!obj) {
+      errLog << "megascope: request is not a JSON object\n";
+      writeError(nullptr, kInvalidRequest, "Request must be a JSON object");
+      continue;
+    }
+    // Extract method (required).
+    if (!obj->getString("method")) {
+      auto *idVal = obj->get("id");
+      writeError(idVal ? *idVal : llvm::json::Value(nullptr),
+                 kInvalidRequest, "Missing 'method' field");
+      continue;
+    }
+    break;
   }
 
-  // Parse JSON.
-  auto parsed = llvm::json::parse(body);
-  if (!parsed) {
-    errLog << "megascope: JSON parse error: "
-           << llvm::toString(parsed.takeError()) << "\n";
-    writeError(nullptr, kParseError, "JSON parse error");
-    // Return nullopt to signal the caller should try reading the next message,
-    // but for simplicity we treat parse errors as fatal in the protocol sense.
-    return std::nullopt;
-  }
-
-  auto *obj = parsed->getAsObject();
-  if (!obj) {
-    errLog << "megascope: request is not a JSON object\n";
-    writeError(nullptr, kInvalidRequest, "Request must be a JSON object");
-    return std::nullopt;
-  }
-
-  // Extract method (required).
   auto method = obj->getString("method");
-  if (!method) {
-    auto idVal = obj->get("id");
-    writeError(idVal ? std::move(*idVal) : llvm::json::Value(nullptr),
-               kInvalidRequest, "Missing 'method' field");
-    return std::nullopt;
-  }
 
   McpRequest req;
   req.method = method->str();
@@ -150,17 +203,24 @@ std::optional<McpRequest> readRequest(FILE *in, llvm::raw_ostream &errLog) {
 }
 
 // ---------------------------------------------------------------------------
-// Writing: Content-Length framed JSON-RPC to stdout
+// Writing: JSON-RPC to stdout, framed to match the client (see McpFraming)
 // ---------------------------------------------------------------------------
 
 static void writeRaw(const llvm::json::Value &msg) {
+  // llvm::json prints compact (single-line) JSON by default, which is what
+  // newline framing requires — no embedded newlines in the body.
   std::string body;
   llvm::raw_string_ostream os(body);
   os << msg;
   os.flush();
 
-  std::fprintf(stdout, "Content-Length: %zu\r\n\r\n", body.size());
-  std::fwrite(body.data(), 1, body.size(), stdout);
+  if (g_framing == McpFraming::ContentLength) {
+    std::fprintf(stdout, "Content-Length: %zu\r\n\r\n", body.size());
+    std::fwrite(body.data(), 1, body.size(), stdout);
+  } else {
+    std::fwrite(body.data(), 1, body.size(), stdout);
+    std::fputc('\n', stdout);
+  }
   std::fflush(stdout);
 }
 
