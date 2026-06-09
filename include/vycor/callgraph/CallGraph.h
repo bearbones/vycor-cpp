@@ -159,6 +159,11 @@ public:
 private:
   using SId = StringInterner::Id;
 
+  // Snapshot serialization reads provenance maps (tuEdges_,
+  // nodeContributors_) that have no public accessors; deserialization goes
+  // through the public API.
+  friend class SnapshotIO;
+
   mutable std::mutex mutex_;
   StringInterner interner_;
   std::unordered_map<SId, CallGraphNode> nodes_;

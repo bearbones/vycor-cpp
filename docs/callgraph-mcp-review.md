@@ -151,6 +151,18 @@ the crash occurs while a thread holds the `CallGraph` mutex, the next
 merge) give true isolation and a path to distributed indexing; at minimum the
 mutex-poisoning case needs a guard.
 
+### F13a. ControlFlowIndex::removeTU matched on the wrong path (found during F9 work)
+
+`removeTU` matched contexts whose `callSite` string starts with
+`tuPath + ":"`, but call sites are recorded with the *compile-command
+spelling* of the file (often relative, e.g. `foo.cpp:11:3`) while callers
+pass the TU path they know (often absolute). The prefix never matched, so
+stale contexts survived re-indexing — this silently broke both the
+`reindex_tu` MCP tool and snapshot warm starts. Fixed by recording an
+explicit `tuPath` on every `CallSiteContext` (threaded through the Phase 3
+factory chain, like the CallGraph builders already do) and matching on it
+exactly; contexts without provenance fall back to the old prefix match.
+
 ### F13. Minor serve-loop items
 
 - `handleToolsCall` keeps a function-local `static` handler map — harmless
@@ -168,7 +180,7 @@ mutex-poisoning case needs a guard.
 |---|------|----------|--------|
 | 1 | Newline-delimited stdio framing with Content-Length autodetect | F1 | ✅ done |
 | 2 | Quick wins: `deque` for `edges_`, handler map as member, locking contract docs | F6, F7, F13 | ✅ done |
-| 3 | Snapshot persistence + warm start | F9 | |
+| 3 | Snapshot persistence + warm start | F9, F13a | ✅ done |
 | 4 | Merge Phase 2+3 into one parse | F2 | |
 | 5 | Query-time virtual dispatch expansion (then 1-parse pipeline) | F3, F2 | |
 | 6 | Edge dedup + interned IDs in edges | F4, F5 | |

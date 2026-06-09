@@ -54,6 +54,31 @@ megascope: server started, waiting for requests...
 Do not send requests until "server started" appears — the index is not
 ready before that point.
 
+### 4. Warm starts with `--snapshot`
+
+Pass `--snapshot <file>` to persist the baked graph and control-flow index
+across launches:
+
+```bash
+./build/src/vycor-cpp megascope --build-path ... --source ... \
+  --snapshot /tmp/myproject.vycs
+```
+
+On the first run the server builds normally and saves the snapshot. On later
+runs it loads the snapshot, compares per-file mtime+size stamps, and
+re-parses **only the TUs that changed** (plus drops TUs removed from the
+`--source` set). For a large file set this turns minutes of startup into
+seconds:
+
+```
+megascope: warm start from /tmp/myproject.vycs (2 TU(s) re-indexed, 0 dropped, ...)
+```
+
+The snapshot is invalidated wholesale (full rebuild) when `--collapse-paths`
+or `--lock-types` differ from the run that produced it, when the format
+version changes, or when the file fails to decode. It is a cache, never a
+source of truth — deleting it is always safe.
+
 ---
 
 ## File selection
