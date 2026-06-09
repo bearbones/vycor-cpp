@@ -166,8 +166,9 @@ class ControlFlowContextVisitor
     : public clang::RecursiveASTVisitor<ControlFlowContextVisitor> {
 public:
   ControlFlowContextVisitor(ControlFlowIndex &index, const CallGraph &graph,
-                            clang::SourceManager &sm)
-      : index_(index), graph_(graph), sm_(sm) {}
+                            clang::SourceManager &sm,
+                            const std::string &tuPath = "")
+      : index_(index), graph_(graph), sm_(sm), tuPath_(tuPath) {}
 
   void setASTContext(clang::ASTContext *ctx) { ctx_ = ctx; }
   void setCollapseFilter(const CollapseFilter *filter) { collapse_ = filter; }
@@ -366,6 +367,7 @@ private:
   ControlFlowIndex &index_;
   const CallGraph &graph_;
   clang::SourceManager &sm_;
+  std::string tuPath_;
   clang::ASTContext *ctx_ = nullptr;
   const CollapseFilter *collapse_ = nullptr;
   const LockTypeConfig *lockCfg_ = nullptr;
@@ -516,6 +518,7 @@ private:
     ctx.callerName = caller;
     ctx.calleeName = calleeName;
     ctx.callSite = formatLocation(callLoc);
+    ctx.tuPath = tuPath_;
     ctx.insideCatchBlock = insideCatchBlock_;
 
     // Snapshot try/catch scopes (innermost first = reverse of stack).
@@ -574,8 +577,9 @@ public:
   ControlFlowContextConsumer(ControlFlowIndex &index, const CallGraph &graph,
                              clang::SourceManager &sm,
                              const CollapseFilter *collapse,
-                             const LockTypeConfig *lockCfg)
-      : visitor_(index, graph, sm) {
+                             const LockTypeConfig *lockCfg,
+                             const std::string &tuPath)
+      : visitor_(index, graph, sm, tuPath) {
     visitor_.setCollapseFilter(collapse);
     visitor_.setLockConfig(lockCfg);
   }
@@ -593,14 +597,15 @@ class ControlFlowContextAction : public clang::ASTFrontendAction {
 public:
   ControlFlowContextAction(ControlFlowIndex &index, const CallGraph &graph,
                             const CollapseFilter *collapse,
-                            const LockTypeConfig *lockCfg)
+                            const LockTypeConfig *lockCfg,
+                            const std::string &tuPath)
       : index_(index), graph_(graph), collapse_(collapse),
-        lockCfg_(lockCfg) {}
+        lockCfg_(lockCfg), tuPath_(tuPath) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
     return std::make_unique<ControlFlowContextConsumer>(
-        index_, graph_, ci.getSourceManager(), collapse_, lockCfg_);
+        index_, graph_, ci.getSourceManager(), collapse_, lockCfg_, tuPath_);
   }
 
 private:
@@ -608,6 +613,7 @@ private:
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  std::string tuPath_;
 };
 
 class ControlFlowContextFactory
@@ -615,13 +621,15 @@ class ControlFlowContextFactory
 public:
   ControlFlowContextFactory(ControlFlowIndex &index, const CallGraph &graph,
                              const CollapseFilter *collapse,
-                             const LockTypeConfig *lockCfg)
+                             const LockTypeConfig *lockCfg,
+                             const std::string &tuPath = "")
       : index_(index), graph_(graph), collapse_(collapse),
-        lockCfg_(lockCfg) {}
+        lockCfg_(lockCfg), tuPath_(tuPath) {}
 
   std::unique_ptr<clang::FrontendAction> create() override {
     return std::make_unique<ControlFlowContextAction>(index_, graph_,
-                                                       collapse_, lockCfg_);
+                                                       collapse_, lockCfg_,
+                                                       tuPath_);
   }
 
 private:
@@ -629,6 +637,7 @@ private:
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  std::string tuPath_;
 };
 
 } // anonymous namespace
@@ -670,14 +679,15 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
       pool.async([&compDb, &index, &graph, collapsePtr, lockCfgPtr, pchCache,
                   &sysroot, file]() {
         ControlFlowContextFactory factory(index, graph, collapsePtr,
-                                          lockCfgPtr);
+                                          lockCfgPtr, file);
         runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
       });
     }
     pool.wait();
   } else {
     for (const auto &file : files) {
-      ControlFlowContextFactory factory(index, graph, collapsePtr, lockCfgPtr);
+      ControlFlowContextFactory factory(index, graph, collapsePtr, lockCfgPtr,
+                                        file);
       runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
     }
   }
@@ -708,7 +718,8 @@ void indexTUControlFlow(ControlFlowIndex &index,
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
   g_cfCrashCount.store(0, std::memory_order_relaxed);
 
-  ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg);
+  ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg,
+                                    file);
   runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
 
   std::signal(SIGSEGV, prevSegv);

@@ -14,6 +14,7 @@ add_library(vycor_lib
   callgraph/ControlFlowIndex.cpp
   callgraph/ControlFlowContextVisitor.cpp
   callgraph/ControlFlowOracle.cpp
+  callgraph/Snapshot.cpp
   mcp/McpProtocol.cpp
   mcp/McpServer.cpp
   mcp/McpTools.cpp

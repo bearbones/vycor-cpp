@@ -54,6 +54,31 @@ megascope: server started, waiting for requests...
 Do not send requests until "server started" appears — the index is not
 ready before that point.
 
+### 4. Warm starts with `--snapshot`
+
+Pass `--snapshot <file>` to persist the baked graph and control-flow index
+across launches:
+
+```bash
+./build/src/vycor-cpp megascope --build-path ... --source ... \
+  --snapshot /tmp/myproject.vycs
+```
+
+On the first run the server builds normally and saves the snapshot. On later
+runs it loads the snapshot, compares per-file mtime+size stamps, and
+re-parses **only the TUs that changed** (plus drops TUs removed from the
+`--source` set). For a large file set this turns minutes of startup into
+seconds:
+
+```
+megascope: warm start from /tmp/myproject.vycs (2 TU(s) re-indexed, 0 dropped, ...)
+```
+
+The snapshot is invalidated wholesale (full rebuild) when `--collapse-paths`
+or `--lock-types` differ from the run that produced it, when the format
+version changes, or when the file fails to decode. It is a cache, never a
+source of truth — deleting it is always safe.
+
 ---
 
 ## File selection
@@ -94,9 +119,19 @@ noise to the function list but ensures `get_class_hierarchy` is accurate.
 
 ## Protocol
 
-The server speaks JSON-RPC 2.0 over stdio with MCP Content-Length framing.
+The server speaks JSON-RPC 2.0 over stdio with MCP-standard
+**newline-delimited framing**: one compact JSON message per line. Framing is
+autodetected per message, so legacy clients that send LSP-style
+`Content-Length` headers continue to work; responses always use the framing
+of the most recent request.
 
-**Request format:**
+**Request format** (standard MCP clients — Claude Desktop, MCP SDKs — do
+this automatically):
+```
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"<tool>","arguments":{...}}}\n
+```
+
+**Legacy request format** (still accepted):
 ```
 Content-Length: <byte count>\r\n
 \r\n
@@ -122,17 +157,11 @@ value to get the actual result object.
 import subprocess, json
 
 def send(proc, msg):
-    body = json.dumps(msg).encode()
-    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    proc.stdin.write(json.dumps(msg).encode() + b"\n")
     proc.stdin.flush()
 
 def recv(proc):
-    hdr = b""
-    while not hdr.endswith(b"\r\n\r\n"):
-        hdr += proc.stdout.read(1)
-    length = int([l for l in hdr.decode().splitlines()
-                  if l.startswith("Content-Length:")][0].split(":")[1])
-    return json.loads(proc.stdout.read(length))
+    return json.loads(proc.stdout.readline())
 
 def call(proc, req_id, tool, params):
     send(proc, {"jsonrpc":"2.0","id":req_id,"method":"tools/call",

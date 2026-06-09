@@ -148,8 +148,12 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
     auto &ctx = contexts_[i];
     if (ctx.callerName.empty())
       continue;
-    if (ctx.callSite.compare(0, prefix.size(), prefix) != 0)
+    if (!ctx.tuPath.empty()) {
+      if (ctx.tuPath != tuPath)
+        continue;
+    } else if (ctx.callSite.compare(0, prefix.size(), prefix) != 0) {
       continue;
+    }
 
     auto calleeId = interner_.find(ctx.calleeName);
     if (calleeId) {
@@ -175,8 +179,7 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
 
 void ControlFlowIndex::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<CallSiteContext> newCtx;
-  newCtx.reserve(liveCount_);
+  std::deque<CallSiteContext> newCtx;
 
   std::unordered_map<SId, std::vector<size_t>> newByCallee;
   std::unordered_map<SId, std::vector<size_t>> newByCaller;

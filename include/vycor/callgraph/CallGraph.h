@@ -17,6 +17,7 @@
 
 #include "vycor/callgraph/StringInterner.h"
 
+#include <deque>
 #include <mutex>
 #include <set>
 #include <string>
@@ -80,6 +81,19 @@ struct CallGraphEdge {
   ExecutionContext execContext = ExecutionContext::Synchronous;
 };
 
+// Thread-safety contract: mutating methods (addNode, addEdge, add*, removeTU,
+// compact) lock the internal mutex and may be called concurrently. Read
+// methods (calleesOf, callersOf, findNode, getOverrides, ...) do NOT lock;
+// they are safe only when no mutation can run concurrently. The multi-TU
+// builder relies on phase barriers for this: Phase 2 workers read only maps
+// that Phase 1 finished writing (hierarchy, overrides, function returns)
+// before the pool barrier, while Phase 2's own writes touch disjoint state
+// (nodes_/edges_/outEdges_/inEdges_). The MCP serve loop is single-threaded,
+// so queries never overlap reindexTU. Revisit before adding concurrent reads.
+//
+// Pointer stability: const CallGraphEdge* returned by calleesOf/callersOf
+// remains valid across addEdge/removeTU (edges_ is a deque and removal only
+// tombstones). compact() is the ONLY operation that invalidates them.
 class CallGraph {
 public:
   CallGraph() = default;
@@ -145,10 +159,17 @@ public:
 private:
   using SId = StringInterner::Id;
 
+  // Snapshot serialization reads provenance maps (tuEdges_,
+  // nodeContributors_) that have no public accessors; deserialization goes
+  // through the public API.
+  friend class SnapshotIO;
+
   mutable std::mutex mutex_;
   StringInterner interner_;
   std::unordered_map<SId, CallGraphNode> nodes_;
-  std::vector<CallGraphEdge> edges_;
+  // deque, not vector: queries hand out pointers into this container, and
+  // growth must not invalidate them (see class comment).
+  std::deque<CallGraphEdge> edges_;
   std::unordered_map<SId, std::vector<size_t>> outEdges_;
   std::unordered_map<SId, std::vector<size_t>> inEdges_;
 

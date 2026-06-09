@@ -99,7 +99,7 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 | File | Purpose |
 |---|---|
 | `McpServer.h/.cpp` | JSON-RPC dispatch loop, holds call graph + CF index in memory |
-| `McpProtocol.h/.cpp` | Content-Length framing for MCP stdio transport |
+| `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 | `McpTools.h/.cpp` | Tool implementations: lookup, callers, callees, call chains, exception safety, dead code, class hierarchy |
 
 **8 MCP tools**: `lookup_function`, `get_callees`, `get_callers`, `find_call_chain`,
@@ -116,7 +116,7 @@ objects:
 vycor-cpp anneal     --build-path <dir> --source <files...>
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...]
-vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...]
+vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>]
 ```
 
 Each subcommand has its own scoped options (declared with `llvm::cl::sub(...)`).
@@ -320,7 +320,6 @@ applicable release branch via the `backport/llvm-NN` PR label. See
 | Concurrency | `query_locks_held(function)` — trace callers to find implicit locks |
 | Concurrency | `query_same_lock(fn_a, fn_b)` — confirm two functions share a lock |
 | Scaling | Parallel multi-TU graph construction (currently serial) |
-| Scaling | Incremental indexing with binary serialization |
 
 ---
 

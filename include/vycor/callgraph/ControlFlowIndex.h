@@ -18,6 +18,7 @@
 #include "vycor/callgraph/StringInterner.h"
 
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -109,6 +110,12 @@ struct CallSiteContext {
   std::string calleeName; // What's being called
   std::string callSite;   // file:line:col (join key with CallGraphEdge)
 
+  // TU that produced this context (the path passed to indexTUControlFlow /
+  // buildControlFlowIndex). Used by removeTU: callSite alone is unreliable
+  // because its file component is the compile-command spelling (often
+  // relative), not the TU path the caller knows.
+  std::string tuPath;
+
   // Try/catch scopes enclosing this call, innermost first.
   std::vector<TryCatchScope> enclosingTryCatches;
 
@@ -166,7 +173,9 @@ public:
   // All stored contexts (for dump mode).
   std::vector<const CallSiteContext *> allContexts() const;
 
-  // Remove all contexts whose callSite belongs to the given TU file path.
+  // Remove all contexts contributed by the given TU. Matches on the
+  // recorded tuPath; contexts without one (hand-built in tests, or from
+  // pre-provenance snapshots) fall back to a callSite prefix match.
   // Returns the number of contexts removed.
   size_t removeTU(const std::string &tuPath);
 
@@ -181,7 +190,9 @@ private:
 
   mutable std::mutex mutex_;
   StringInterner interner_;
-  std::vector<CallSiteContext> contexts_;
+  // deque, not vector: queries hand out pointers into this container, and
+  // growth must not invalidate them. compact() is the only invalidator.
+  std::deque<CallSiteContext> contexts_;
   std::unordered_map<SId, std::vector<size_t>> byCallee_;
   std::unordered_map<SId, std::vector<size_t>> byCaller_;
   std::unordered_map<SId, size_t> bySite_;

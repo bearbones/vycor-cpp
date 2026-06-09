@@ -19,11 +19,13 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
 #include "vycor/mcp/McpProtocol.h"
+#include "vycor/mcp/McpTools.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace vycor {
@@ -64,6 +66,8 @@ private:
   std::vector<std::string> entryPoints_;
   McpBuildParams buildParams_;
   bool initialized_ = false;
+  // Tool name -> handler, populated lazily on the first tools/call.
+  std::unordered_map<std::string, McpToolHandler> handlers_;
 
   void dispatch(const McpRequest &req);
 

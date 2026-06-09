@@ -21,12 +21,15 @@
 #include "vycor/morph/RulesParser.h"
 #include "vycor/morph/TransformPipeline.h"
 #include "vycor/callgraph/CollapseFilter.h"
+#include "vycor/callgraph/Snapshot.h"
 #include "vycor/compat/PchCache.h"
 #include "vycor/mcp/McpServer.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 
 #include <algorithm>
+#include <set>
+#include <unordered_map>
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -323,6 +326,14 @@ static llvm::cl::list<std::string>
     McpLockTypes("lock-types",
         llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
         llvm::cl::value_desc("qualified-name"),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<std::string>
+    McpSnapshot("snapshot",
+        llvm::cl::desc("Snapshot file for warm starts: load the baked graph "
+                       "if present (reindexing only changed TUs), and save "
+                       "after building"),
+        llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
 // ---------------------------------------------------------------------------
@@ -669,25 +680,103 @@ int main(int argc, const char **argv) {
 
     std::string sysroot = McpSysroot.getValue();
 
-    llvm::errs() << "megascope: building call graph ("
-                 << files.size() << " files, "
-                 << McpThreads << " threads)...\n";
-    auto graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
-                                             McpThreads, pchPtr, sysroot);
-    llvm::errs() << "megascope: call graph built ("
-                 << graph.nodeCount() << " nodes, "
-                 << graph.edgeCount() << " edges)\n";
-
     vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
 
-    llvm::errs() << "megascope: building control flow index...\n";
-    auto cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
-                                                      collapsePaths,
-                                                      McpThreads, pchPtr,
-                                                      sysroot, lockCfg);
-    llvm::errs() << "megascope: control flow index built ("
-                 << cfIndex.size() << " call sites)\n";
+    vycor::CallGraph graph;
+    vycor::ControlFlowIndex cfIndex;
+    bool needFullBuild = true;
+
+    // Stamps are taken before any parsing: a file modified mid-build gets a
+    // stale stamp and is conservatively re-indexed on the next warm start.
+    auto currentStamps = vycor::SnapshotIO::stampFiles(files);
+
+    if (!McpSnapshot.empty()) {
+      if (auto snap = vycor::SnapshotIO::load(McpSnapshot)) {
+        bool configMatch =
+            snap->meta.collapsePaths == collapsePaths &&
+            snap->meta.lockAllowlist == lockCfg.userAllowlist &&
+            snap->meta.lockBuiltins == lockCfg.useBuiltins;
+        if (!configMatch) {
+          llvm::errs() << "megascope: snapshot build configuration differs "
+                          "— full rebuild\n";
+        } else {
+          graph = std::move(snap->graph);
+          cfIndex = std::move(snap->cfIndex);
+          needFullBuild = false;
+
+          std::unordered_map<std::string, const vycor::FileStamp *> baked;
+          for (const auto &fs : snap->meta.files)
+            baked[fs.path] = &fs;
+          std::set<std::string> current(files.begin(), files.end());
+
+          size_t dropped = 0, refreshed = 0;
+          for (const auto &fs : snap->meta.files) {
+            if (!current.count(fs.path)) {
+              graph.removeTU(fs.path);
+              cfIndex.removeTU(fs.path);
+              ++dropped;
+            }
+          }
+          for (const auto &stamp : currentStamps) {
+            auto it = baked.find(stamp.path);
+            if (it != baked.end() && *it->second == stamp)
+              continue; // Unchanged since the snapshot was taken.
+            if (it != baked.end()) {
+              graph.removeTU(stamp.path);
+              cfIndex.removeTU(stamp.path);
+            }
+            vycor::indexTU(graph, *compDb, stamp.path, collapsePaths,
+                           pchPtr, sysroot);
+            vycor::indexTUControlFlow(cfIndex, *compDb, stamp.path, graph,
+                                      collapsePaths, pchPtr, sysroot,
+                                      lockCfg);
+            ++refreshed;
+          }
+          llvm::errs() << "megascope: warm start from " << McpSnapshot
+                       << " (" << refreshed << " TU(s) re-indexed, "
+                       << dropped << " dropped, "
+                       << graph.nodeCount() << " nodes, "
+                       << graph.edgeCount() << " edges, "
+                       << cfIndex.size() << " call sites)\n";
+        }
+      } else {
+        llvm::errs() << "megascope: no usable snapshot at " << McpSnapshot
+                     << " — full build\n";
+      }
+    }
+
+    if (needFullBuild) {
+      llvm::errs() << "megascope: building call graph ("
+                   << files.size() << " files, "
+                   << McpThreads << " threads)...\n";
+      graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
+                                    McpThreads, pchPtr, sysroot);
+      llvm::errs() << "megascope: call graph built ("
+                   << graph.nodeCount() << " nodes, "
+                   << graph.edgeCount() << " edges)\n";
+
+      llvm::errs() << "megascope: building control flow index...\n";
+      cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
+                                             collapsePaths,
+                                             McpThreads, pchPtr,
+                                             sysroot, lockCfg);
+      llvm::errs() << "megascope: control flow index built ("
+                   << cfIndex.size() << " call sites)\n";
+    }
+
+    if (!McpSnapshot.empty()) {
+      vycor::SnapshotMeta meta;
+      meta.collapsePaths = collapsePaths;
+      meta.lockAllowlist = lockCfg.userAllowlist;
+      meta.lockBuiltins = lockCfg.useBuiltins;
+      meta.files = std::move(currentStamps);
+      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta))
+        llvm::errs() << "megascope: snapshot saved to " << McpSnapshot << "\n";
+      else
+        llvm::errs() << "megascope: WARNING: could not save snapshot to "
+                     << McpSnapshot << "\n";
+    }
 
     std::vector<std::string> entryPoints(McpEntryPoints.begin(),
                                          McpEntryPoints.end());

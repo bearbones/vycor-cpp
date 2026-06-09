@@ -283,7 +283,7 @@ src/
     ControlFlowOracle.cpp
   mcp/                          megascope implementation
     McpServer.cpp               JSON-RPC dispatch loop
-    McpProtocol.cpp             Content-Length framing
+    McpProtocol.cpp             stdio framing (newline-delimited + legacy Content-Length)
     McpTools.cpp                Tool handlers (lookup, callers, callees, etc.)
   CMakeLists.txt
 
