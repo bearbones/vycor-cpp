@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/StringInterner.h"
 
 #include <cstdint>
@@ -31,8 +32,6 @@ class CompilationDatabase;
 } // namespace clang
 
 namespace vycor {
-
-class CallGraph;
 
 // ============================================================================
 // RAII scope context
@@ -227,5 +226,39 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const PchCache *pchCache = nullptr,
                         const std::string &sysroot = "",
                         const LockTypeConfig &lockCfg = {});
+
+// ============================================================================
+// Combined bake — two frontend parses per TU instead of three
+// ============================================================================
+
+struct BakedIndexes {
+  CallGraph graph;
+  ControlFlowIndex cfIndex;
+};
+
+// Build both indexes with one parse per phase barrier: Phase 1 (declarations,
+// hierarchy, function returns) parses every TU, then Phase 2 (edges) and
+// Phase 3 (control-flow contexts) run together on a single second parse of
+// each TU. Equivalent output to buildCallGraph + buildControlFlowIndex at
+// two-thirds the frontend cost. Phase 1 stays a separate parse because edge
+// building consults cross-TU hierarchy and function-return data.
+BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
+                         const std::vector<std::string> &files,
+                         const std::vector<std::string> &collapsePaths = {},
+                         unsigned threadCount = 0,
+                         const PchCache *pchCache = nullptr,
+                         const std::string &sysroot = "",
+                         const LockTypeConfig &lockCfg = {});
+
+// Single-TU variant for incremental reindex: Phase 1 parse + combined
+// Phase 2+3 parse. Call graph.removeTU(file) and cfIndex.removeTU(file)
+// first when re-indexing a changed file.
+void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
+            const clang::tooling::CompilationDatabase &compDb,
+            const std::string &file,
+            const std::vector<std::string> &collapsePaths = {},
+            const PchCache *pchCache = nullptr,
+            const std::string &sysroot = "",
+            const LockTypeConfig &lockCfg = {});
 
 } // namespace vycor

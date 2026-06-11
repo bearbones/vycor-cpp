@@ -60,9 +60,9 @@ Confidence parseConf(const std::string &s) {
 
 bool graphHasEdge(const CallGraph &g, const RequiredEdge &e) {
   auto outs = g.calleesOf(e.from);
-  for (auto *edge : outs) {
-    if (edge->calleeName == e.to && edge->kind == e.kind &&
-        edge->confidence == e.confidence)
+  for (const auto &edge : outs) {
+    if (edge.calleeName == e.to && edge.kind == e.kind &&
+        edge.confidence == e.confidence)
       return true;
   }
   return false;
@@ -71,8 +71,8 @@ bool graphHasEdge(const CallGraph &g, const RequiredEdge &e) {
 bool hasOutEdgeWithConfidence(const CallGraph &g, const std::string &from,
                               Confidence c) {
   auto outs = g.calleesOf(from);
-  for (auto *edge : outs) {
-    if (edge->confidence == c)
+  for (const auto &edge : outs) {
+    if (edge.confidence == c)
       return true;
   }
   return false;
@@ -143,10 +143,10 @@ TEST_CASE("Chain A: pipeline chain is >=6 layers with expected edges",
     // 7 nodes -> 6 edges between them.
     for (size_t i = 0; i + 1 < path.size(); ++i) {
       bool found = false;
-      for (auto *e : g.calleesOf(path[i])) {
-        if (e->calleeName == path[i + 1] &&
-            e->kind == EdgeKind::DirectCall &&
-            e->confidence == Confidence::Proven) {
+      for (const auto &e : g.calleesOf(path[i])) {
+        if (e.calleeName == path[i + 1] &&
+            e.kind == EdgeKind::DirectCall &&
+            e.confidence == Confidence::Proven) {
           found = true;
           break;
         }
@@ -292,8 +292,8 @@ std::string findLambdaNodeByEnclosing(const CallGraph &g,
 bool hasEdgeWithCtx(const CallGraph &g, const std::string &from,
                     const std::string &to, EdgeKind kind,
                     ExecutionContext ctx) {
-  for (auto *e : g.calleesOf(from)) {
-    if (e->calleeName == to && e->kind == kind && e->execContext == ctx)
+  for (const auto &e : g.calleesOf(from)) {
+    if (e.calleeName == to && e.kind == kind && e.execContext == ctx)
       return true;
   }
   return false;
@@ -332,10 +332,10 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
   SECTION("lambda passed to std::thread becomes a ThreadEntry edge to a "
           "synthetic lambda node") {
     bool found = false;
-    for (auto *e : g.calleesOf("runChainC")) {
-      if (e->kind == EdgeKind::ThreadEntry &&
-          e->execContext == ExecutionContext::ThreadSpawn &&
-          e->calleeName.rfind("lambda#", 0) == 0) {
+    for (const auto &e : g.calleesOf("runChainC")) {
+      if (e.kind == EdgeKind::ThreadEntry &&
+          e.execContext == ExecutionContext::ThreadSpawn &&
+          e.calleeName.rfind("lambda#", 0) == 0) {
         found = true;
         break;
       }
@@ -349,9 +349,9 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
     // so we expect a LambdaCall edge and that the synthetic node has a
     // DirectCall edge into scaled().
     bool lambdaEdge = false;
-    for (auto *e : g.calleesOf("runChainC")) {
-      if (e->kind == EdgeKind::LambdaCall &&
-          e->calleeName.rfind("lambda#", 0) == 0) {
+    for (const auto &e : g.calleesOf("runChainC")) {
+      if (e.kind == EdgeKind::LambdaCall &&
+          e.calleeName.rfind("lambda#", 0) == 0) {
         lambdaEdge = true;
         break;
       }
@@ -366,8 +366,8 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
         continue;
       if (node->qualifiedName.find("#runChainC") == std::string::npos)
         continue;
-      for (auto *e : g.calleesOf(node->qualifiedName)) {
-        if (e->calleeName == "scaled" && e->kind == EdgeKind::DirectCall) {
+      for (const auto &e : g.calleesOf(node->qualifiedName)) {
+        if (e.calleeName == "scaled" && e.kind == EdgeKind::DirectCall) {
           bodyCall = true;
           break;
         }
@@ -384,9 +384,9 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
     // that edge should come from the synthetic lambda node whose enclosing
     // is Emitter::emit.
     bool directFromEmit = false;
-    for (auto *e : g.calleesOf("Emitter::emit")) {
-      if (e->calleeName == "Emitter::handle" &&
-          e->kind == EdgeKind::DirectCall)
+    for (const auto &e : g.calleesOf("Emitter::emit")) {
+      if (e.calleeName == "Emitter::handle" &&
+          e.kind == EdgeKind::DirectCall)
         directFromEmit = true;
     }
     CHECK_FALSE(directFromEmit);
@@ -397,9 +397,9 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
     INFO("no synthetic lambda node found with enclosing Emitter::emit");
     REQUIRE(!lambdaName.empty());
     bool handled = false;
-    for (auto *e : g.calleesOf(lambdaName)) {
-      if (e->calleeName == "Emitter::handle" &&
-          e->kind == EdgeKind::DirectCall) {
+    for (const auto &e : g.calleesOf(lambdaName)) {
+      if (e.calleeName == "Emitter::handle" &&
+          e.kind == EdgeKind::DirectCall) {
         handled = true;
         break;
       }
@@ -411,10 +411,10 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
           "LambdaCall edge to the synthetic node") {
     // `auto refCb = [](State&){...}; registerRefCallback(refCb);`
     bool found = false;
-    for (auto *e : g.calleesOf("runChainC")) {
-      if (e->kind == EdgeKind::LambdaCall &&
-          e->calleeName.rfind("lambda#", 0) == 0 &&
-          e->callerName == "runChainC") {
+    for (const auto &e : g.calleesOf("runChainC")) {
+      if (e.kind == EdgeKind::LambdaCall &&
+          e.calleeName.rfind("lambda#", 0) == 0 &&
+          e.callerName == "runChainC") {
         // Could be either of the two lambdas — that's OK; just check >=1.
         found = true;
         break;
@@ -426,9 +426,9 @@ TEST_CASE("Chain C: runChainC spawns threads and registers callbacks",
   SECTION("ExecutionContext is Synchronous by default on DirectCall edges") {
     auto edges = g.calleesOf("main");
     bool sawMainRunChainC = false;
-    for (auto *e : edges) {
-      if (e->calleeName == "runChainC") {
-        CHECK(e->execContext == ExecutionContext::Synchronous);
+    for (const auto &e : edges) {
+      if (e.calleeName == "runChainC") {
+        CHECK(e.execContext == ExecutionContext::Synchronous);
         sawMainRunChainC = true;
       }
     }

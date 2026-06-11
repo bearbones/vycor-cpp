@@ -173,18 +173,21 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
   }
 
   SECTION("edges with kind, confidence, and execution context") {
+    // 2 stored callees of main, plus the synthesized virtual-dispatch
+    // expansion Base::run -> Derived::run (the override relation also
+    // round-tripped through the snapshot).
     auto callees = loaded->graph.calleesOf("main");
-    REQUIRE(callees.size() == 2);
+    REQUIRE(callees.size() == 3);
 
     auto callers = loaded->graph.callersOf("helper");
     REQUIRE(callers.size() == 2);
 
     auto spawns = loaded->graph.calleesOf("helper");
     REQUIRE(spawns.size() == 1);
-    CHECK(spawns[0]->kind == EdgeKind::ThreadEntry);
-    CHECK(spawns[0]->execContext == ExecutionContext::ThreadSpawn);
-    CHECK(spawns[0]->indirectionDepth == 1);
-    CHECK(spawns[0]->callSite == "/src/a.cpp:4:5");
+    CHECK(spawns[0].kind == EdgeKind::ThreadEntry);
+    CHECK(spawns[0].execContext == ExecutionContext::ThreadSpawn);
+    CHECK(spawns[0].indirectionDepth == 1);
+    CHECK(spawns[0].callSite == "/src/a.cpp:4:5");
   }
 
   SECTION("hierarchy, overrides, impls, returns") {

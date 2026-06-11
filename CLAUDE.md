@@ -84,8 +84,17 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowOracle.h/.cpp` | Query engine: exception safety, path analysis, call site context |
 
 **Three-phase build** (used by both `prism` and `megascope`):
-1. `buildCallGraph(compDb, files, collapsePaths)` — Phase 1 (index) + Phase 2 (edges)
-2. `buildControlFlowIndex(compDb, files, graph, collapsePaths)` — Phase 3 (CF context)
+`bakeIndexes(compDb, files, ...)` runs Phase 1 (declaration/hierarchy index)
+as one parse per TU, then Phase 2 (edges) and Phase 3 (CF context) together
+on a single second parse per TU — two frontend parses instead of three.
+`buildCallGraph` / `buildControlFlowIndex` remain for callers that need only
+one of the two indexes.
+
+**Virtual dispatch** is stored as ONE Plausible `VirtualDispatch` edge to the
+static target per call site. `CallGraph::calleesOf`/`callersOf` expand it
+through the transitive override map at query time, so overrides indexed
+later (other TUs, incremental reindex) are visible to existing call sites.
+Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)

@@ -27,6 +27,7 @@ CallGraph::CallGraph(CallGraph &&other) noexcept
       inEdges_(std::move(other.inEdges_)),
       derivedClasses_(std::move(other.derivedClasses_)),
       methodOverrides_(std::move(other.methodOverrides_)),
+      overrideBases_(std::move(other.overrideBases_)),
       effectiveImplClasses_(std::move(other.effectiveImplClasses_)),
       functionReturns_(std::move(other.functionReturns_)),
       tuEdges_(std::move(other.tuEdges_)),
@@ -41,6 +42,7 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   inEdges_ = std::move(other.inEdges_);
   derivedClasses_ = std::move(other.derivedClasses_);
   methodOverrides_ = std::move(other.methodOverrides_);
+  overrideBases_ = std::move(other.overrideBases_);
   effectiveImplClasses_ = std::move(other.effectiveImplClasses_);
   functionReturns_ = std::move(other.functionReturns_);
   tuEdges_ = std::move(other.tuEdges_);
@@ -88,33 +90,108 @@ void CallGraph::addEdge(CallGraphEdge edge, const std::string &tuPath) {
   }
 }
 
-std::vector<const CallGraphEdge *>
-CallGraph::calleesOf(const std::string &name) const {
-  std::vector<const CallGraphEdge *> result;
-  auto id = interner_.find(name);
-  if (!id)
-    return result;
-  auto it = outEdges_.find(*id);
-  if (it != outEdges_.end()) {
-    for (size_t idx : it->second) {
-      if (!edges_[idx].callerName.empty())
-        result.push_back(&edges_[idx]);
+std::vector<CallGraph::SId> CallGraph::transitiveClosure(
+    SId start,
+    const std::unordered_map<SId, std::vector<SId>> &relation) const {
+  std::vector<SId> result;
+  std::vector<SId> stack{start};
+  std::set<SId> visited{start};
+  while (!stack.empty()) {
+    SId cur = stack.back();
+    stack.pop_back();
+    auto it = relation.find(cur);
+    if (it == relation.end())
+      continue;
+    for (SId next : it->second) {
+      if (visited.insert(next).second) {
+        result.push_back(next);
+        stack.push_back(next);
+      }
     }
   }
   return result;
 }
 
-std::vector<const CallGraphEdge *>
-CallGraph::callersOf(const std::string &name) const {
-  std::vector<const CallGraphEdge *> result;
+std::vector<CallGraphEdge>
+CallGraph::calleesOf(const std::string &name) const {
+  std::vector<CallGraphEdge> result;
   auto id = interner_.find(name);
   if (!id)
     return result;
+  auto it = outEdges_.find(*id);
+  if (it == outEdges_.end())
+    return result;
+
+  // Keys of stored VirtualDispatch edges, so synthesized expansions never
+  // duplicate an edge already on disk (e.g. a snapshot baked with the old
+  // build-time fan-out).
+  std::set<std::pair<std::string, std::string>> seen; // (callee, callSite)
+  for (size_t idx : it->second) {
+    const CallGraphEdge &e = edges_[idx];
+    if (e.callerName.empty())
+      continue;
+    if (e.kind == EdgeKind::VirtualDispatch)
+      seen.insert({e.calleeName, e.callSite});
+    result.push_back(e);
+  }
+
+  // Expand Plausible virtual dispatch through transitive overrides.
+  for (size_t idx : it->second) {
+    const CallGraphEdge &e = edges_[idx];
+    if (e.callerName.empty() || e.kind != EdgeKind::VirtualDispatch ||
+        e.confidence != Confidence::Plausible)
+      continue;
+    auto targetId = interner_.find(e.calleeName);
+    if (!targetId)
+      continue;
+    for (SId ovId : transitiveClosure(*targetId, methodOverrides_)) {
+      const std::string &ov = interner_.resolve(ovId);
+      if (!seen.insert({ov, e.callSite}).second)
+        continue;
+      CallGraphEdge synth = e;
+      synth.calleeName = ov;
+      result.push_back(std::move(synth));
+    }
+  }
+  return result;
+}
+
+std::vector<CallGraphEdge>
+CallGraph::callersOf(const std::string &name) const {
+  std::vector<CallGraphEdge> result;
+  auto id = interner_.find(name);
+  if (!id)
+    return result;
+
+  std::set<std::pair<std::string, std::string>> seen; // (caller, callSite)
   auto it = inEdges_.find(*id);
   if (it != inEdges_.end()) {
     for (size_t idx : it->second) {
-      if (!edges_[idx].callerName.empty())
-        result.push_back(&edges_[idx]);
+      const CallGraphEdge &e = edges_[idx];
+      if (e.callerName.empty())
+        continue;
+      if (e.kind == EdgeKind::VirtualDispatch)
+        seen.insert({e.callerName, e.callSite});
+      result.push_back(e);
+    }
+  }
+
+  // A dispatch recorded against any base declaration of this method can
+  // reach it at runtime: synthesize caller -> name for those call sites.
+  for (SId baseId : transitiveClosure(*id, overrideBases_)) {
+    auto bit = inEdges_.find(baseId);
+    if (bit == inEdges_.end())
+      continue;
+    for (size_t idx : bit->second) {
+      const CallGraphEdge &e = edges_[idx];
+      if (e.callerName.empty() || e.kind != EdgeKind::VirtualDispatch ||
+          e.confidence != Confidence::Plausible)
+        continue;
+      if (!seen.insert({e.callerName, e.callSite}).second)
+        continue;
+      CallGraphEdge synth = e;
+      synth.calleeName = name;
+      result.push_back(std::move(synth));
     }
   }
   return result;
@@ -207,6 +284,9 @@ void CallGraph::addMethodOverride(const std::string &baseMethod,
   auto &vec = methodOverrides_[baseId];
   if (std::find(vec.begin(), vec.end(), overrideId) == vec.end())
     vec.push_back(overrideId);
+  auto &rev = overrideBases_[overrideId];
+  if (std::find(rev.begin(), rev.end(), baseId) == rev.end())
+    rev.push_back(baseId);
 }
 
 std::vector<std::string>
@@ -223,6 +303,28 @@ CallGraph::getOverrides(const std::string &baseMethod) const {
     return result;
   }
   return {};
+}
+
+std::vector<std::string>
+CallGraph::getTransitiveOverrides(const std::string &baseMethod) const {
+  auto id = interner_.find(baseMethod);
+  if (!id)
+    return {};
+  std::vector<std::string> result;
+  for (SId sid : transitiveClosure(*id, methodOverrides_))
+    result.push_back(interner_.resolve(sid));
+  return result;
+}
+
+std::vector<std::string>
+CallGraph::getOverriddenBases(const std::string &method) const {
+  auto id = interner_.find(method);
+  if (!id)
+    return {};
+  std::vector<std::string> result;
+  for (SId sid : transitiveClosure(*id, overrideBases_))
+    result.push_back(interner_.resolve(sid));
+  return result;
 }
 
 // --- Effective implementation mapping ---

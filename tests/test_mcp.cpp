@@ -508,12 +508,14 @@ TEST_CASE("get_callees tool", "[mcp][tools]") {
   }
   REQUIRE(handler);
 
-  SECTION("main has 3 callees") {
+  SECTION("main has 4 callees (virtual dispatch expanded to override)") {
     llvm::json::Object args;
     args["name"] = "main";
     auto result = handler(args, ctx);
     auto obj = parseToolResult(result);
-    CHECK(obj.getInteger("calleeCount") == 3);
+    // processFile, cleanup, Base::doWork (stored), plus Derived::doWork
+    // synthesized from the Plausible VirtualDispatch at query time.
+    CHECK(obj.getInteger("calleeCount") == 4);
   }
 
   SECTION("filter by edge kind") {
@@ -1012,19 +1014,21 @@ TEST_CASE("graph_summary produces histograms and top-N fanout",
   auto obj = parseToolResult(result);
 
   CHECK(obj.getInteger("nodeCount") == 8);
-  CHECK(obj.getInteger("edgeCount") == 5);
+  // 5 stored edges + 1 synthesized: the Plausible VirtualDispatch to
+  // Base::doWork expands to Derived::doWork at query time.
+  CHECK(obj.getInteger("edgeCount") == 6);
   CHECK(obj.getInteger("entryPointCount") == 1);
 
   auto *confHist = obj.getObject("confidenceHistogram");
   REQUIRE(confHist != nullptr);
   CHECK(confHist->getInteger("Proven") == 3);
-  CHECK(confHist->getInteger("Plausible") == 2);
+  CHECK(confHist->getInteger("Plausible") == 3);
   CHECK(confHist->getInteger("Unknown") == 0);
 
   auto *kindHist = obj.getObject("edgeKindHistogram");
   REQUIRE(kindHist != nullptr);
   CHECK(kindHist->getInteger("DirectCall") == 4);
-  CHECK(kindHist->getInteger("VirtualDispatch") == 1);
+  CHECK(kindHist->getInteger("VirtualDispatch") == 2);
 
   auto *topCallers = obj.getArray("topFanoutCallers");
   REQUIRE(topCallers != nullptr);
@@ -1032,7 +1036,7 @@ TEST_CASE("graph_summary produces histograms and top-N fanout",
   auto *topCaller = (*topCallers)[0].getAsObject();
   REQUIRE(topCaller != nullptr);
   CHECK(topCaller->getString("qualifiedName") == "main");
-  CHECK(topCaller->getInteger("count") == 3);
+  CHECK(topCaller->getInteger("count") == 4);
 }
 
 // ============================================================================

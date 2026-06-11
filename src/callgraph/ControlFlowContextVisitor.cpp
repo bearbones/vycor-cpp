@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
@@ -721,6 +722,225 @@ void indexTUControlFlow(ControlFlowIndex &index,
   ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg,
                                     file);
   runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+
+  std::signal(SIGSEGV, prevSegv);
+  std::signal(SIGBUS, prevBus);
+}
+
+// ============================================================================
+// Combined bake: Phase 1 parse, then Phase 2+3 on one shared parse per TU
+// ============================================================================
+
+namespace {
+
+// Phase 1 (declarations/hierarchy) — same visitor as buildCallGraph's first
+// pass, driven from this TU so the bake pipeline owns its crash guard.
+class BakeIndexerConsumer : public clang::ASTConsumer {
+public:
+  BakeIndexerConsumer(CallGraph &graph, clang::SourceManager &sm,
+                      const std::string &tuPath)
+      : visitor_(graph, sm, tuPath) {}
+  void HandleTranslationUnit(clang::ASTContext &ctx) override {
+    visitor_.setASTContext(&ctx);
+    visitor_.TraverseDecl(ctx.getTranslationUnitDecl());
+  }
+
+private:
+  CallGraphIndexerVisitor visitor_;
+};
+
+class BakeIndexerAction : public clang::ASTFrontendAction {
+public:
+  BakeIndexerAction(CallGraph &graph, const std::string &tuPath)
+      : graph_(graph), tuPath_(tuPath) {}
+  std::unique_ptr<clang::ASTConsumer>
+  CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
+    return std::make_unique<BakeIndexerConsumer>(graph_,
+                                                 ci.getSourceManager(),
+                                                 tuPath_);
+  }
+
+private:
+  CallGraph &graph_;
+  std::string tuPath_;
+};
+
+class BakeIndexerFactory : public clang::tooling::FrontendActionFactory {
+public:
+  BakeIndexerFactory(CallGraph &graph, const std::string &tuPath)
+      : graph_(graph), tuPath_(tuPath) {}
+  std::unique_ptr<clang::FrontendAction> create() override {
+    return std::make_unique<BakeIndexerAction>(graph_, tuPath_);
+  }
+
+private:
+  CallGraph &graph_;
+  std::string tuPath_;
+};
+
+// Phase 2+3: edge building and control-flow context extraction over the
+// same ASTContext — one frontend parse instead of two.
+class BakeEdgeAndContextConsumer : public clang::ASTConsumer {
+public:
+  BakeEdgeAndContextConsumer(CallGraph &graph, ControlFlowIndex &index,
+                             clang::SourceManager &sm,
+                             const CollapseFilter *collapse,
+                             const LockTypeConfig *lockCfg,
+                             const std::string &tuPath)
+      : edgeVisitor_(graph, sm, tuPath),
+        cfVisitor_(index, graph, sm, tuPath) {
+    edgeVisitor_.setCollapseFilter(collapse);
+    cfVisitor_.setCollapseFilter(collapse);
+    cfVisitor_.setLockConfig(lockCfg);
+  }
+
+  void HandleTranslationUnit(clang::ASTContext &ctx) override {
+    edgeVisitor_.setASTContext(&ctx);
+    edgeVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
+    cfVisitor_.setASTContext(&ctx);
+    cfVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
+  }
+
+private:
+  CallGraphEdgeVisitor edgeVisitor_;
+  ControlFlowContextVisitor cfVisitor_;
+};
+
+class BakeEdgeAndContextAction : public clang::ASTFrontendAction {
+public:
+  BakeEdgeAndContextAction(CallGraph &graph, ControlFlowIndex &index,
+                           const CollapseFilter *collapse,
+                           const LockTypeConfig *lockCfg,
+                           const std::string &tuPath)
+      : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
+        tuPath_(tuPath) {}
+
+  std::unique_ptr<clang::ASTConsumer>
+  CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
+    return std::make_unique<BakeEdgeAndContextConsumer>(
+        graph_, index_, ci.getSourceManager(), collapse_, lockCfg_, tuPath_);
+  }
+
+private:
+  CallGraph &graph_;
+  ControlFlowIndex &index_;
+  const CollapseFilter *collapse_;
+  const LockTypeConfig *lockCfg_;
+  std::string tuPath_;
+};
+
+class BakeEdgeAndContextFactory : public clang::tooling::FrontendActionFactory {
+public:
+  BakeEdgeAndContextFactory(CallGraph &graph, ControlFlowIndex &index,
+                            const CollapseFilter *collapse,
+                            const LockTypeConfig *lockCfg,
+                            const std::string &tuPath)
+      : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
+        tuPath_(tuPath) {}
+
+  std::unique_ptr<clang::FrontendAction> create() override {
+    return std::make_unique<BakeEdgeAndContextAction>(graph_, index_,
+                                                      collapse_, lockCfg_,
+                                                      tuPath_);
+  }
+
+private:
+  CallGraph &graph_;
+  ControlFlowIndex &index_;
+  const CollapseFilter *collapse_;
+  const LockTypeConfig *lockCfg_;
+  std::string tuPath_;
+};
+
+} // anonymous namespace
+
+BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
+                         const std::vector<std::string> &files,
+                         const std::vector<std::string> &collapsePaths,
+                         unsigned threadCount,
+                         const PchCache *pchCache,
+                         const std::string &sysroot,
+                         const LockTypeConfig &lockCfg) {
+  BakedIndexes out;
+  CollapseFilter collapseFilter(collapsePaths);
+  const CollapseFilter *collapsePtr =
+      collapseFilter.empty() ? nullptr : &collapseFilter;
+
+  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
+  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
+  g_cfCrashCount.store(0, std::memory_order_relaxed);
+
+  bool parallel = threadCount != 1 && files.size() > 1;
+
+  if (parallel) {
+#if VYCOR_LLVM_AT_LEAST(19)
+    llvm::DefaultThreadPool pool(llvm::hardware_concurrency(threadCount));
+#else
+    llvm::ThreadPool pool(llvm::hardware_concurrency(threadCount));
+#endif
+
+    // Phase 1: declarations, hierarchy, function returns.
+    for (const auto &file : files) {
+      pool.async([&compDb, &out, pchCache, &sysroot, file]() {
+        BakeIndexerFactory factory(out.graph, file);
+        runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+      });
+    }
+    pool.wait();
+
+    // Phase 2+3 on one parse per TU, with full Phase 1 knowledge.
+    for (const auto &file : files) {
+      pool.async([&compDb, &out, collapsePtr, &lockCfg, pchCache, &sysroot,
+                  file]() {
+        BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
+                                          &lockCfg, file);
+        runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+      });
+    }
+    pool.wait();
+  } else {
+    for (const auto &file : files) {
+      BakeIndexerFactory factory(out.graph, file);
+      runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+    }
+    for (const auto &file : files) {
+      BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
+                                        &lockCfg, file);
+      runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+    }
+  }
+
+  unsigned crashes = g_cfCrashCount.load(std::memory_order_relaxed);
+  if (crashes > 0) {
+    llvm::errs() << "bake: " << crashes << " TU parse(s) crashed and were "
+                 << "skipped (" << files.size() << " TUs total)\n";
+  }
+
+  std::signal(SIGSEGV, prevSegv);
+  std::signal(SIGBUS, prevBus);
+  return out;
+}
+
+void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
+            const clang::tooling::CompilationDatabase &compDb,
+            const std::string &file,
+            const std::vector<std::string> &collapsePaths,
+            const PchCache *pchCache,
+            const std::string &sysroot,
+            const LockTypeConfig &lockCfg) {
+  CollapseFilter collapseFilter(collapsePaths);
+  const CollapseFilter *collapsePtr =
+      collapseFilter.empty() ? nullptr : &collapseFilter;
+
+  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
+  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
+
+  BakeIndexerFactory indexerFactory(graph, file);
+  runCfToolGuarded(compDb, file, indexerFactory, pchCache, sysroot);
+
+  BakeEdgeAndContextFactory combinedFactory(graph, cfIndex, collapsePtr,
+                                            &lockCfg, file);
+  runCfToolGuarded(compDb, file, combinedFactory, pchCache, sysroot);
 
   std::signal(SIGSEGV, prevSegv);
   std::signal(SIGBUS, prevBus);

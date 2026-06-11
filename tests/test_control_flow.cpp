@@ -405,16 +405,16 @@ TEST_CASE("CallGraph integration for exception context scenarios",
   // Both safe_caller and unsafe_caller should call dangerous.
   auto safeCallees = graph.calleesOf("safe_caller");
   bool safeCallsDangerous = false;
-  for (const auto *e : safeCallees) {
-    if (e->calleeName == "dangerous")
+  for (const auto &e : safeCallees) {
+    if (e.calleeName == "dangerous")
       safeCallsDangerous = true;
   }
   CHECK(safeCallsDangerous);
 
   auto unsafeCallees = graph.calleesOf("unsafe_caller");
   bool unsafeCallsDangerous = false;
-  for (const auto *e : unsafeCallees) {
-    if (e->calleeName == "dangerous")
+  for (const auto &e : unsafeCallees) {
+    if (e.calleeName == "dangerous")
       unsafeCallsDangerous = true;
   }
   CHECK(unsafeCallsDangerous);

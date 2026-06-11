@@ -100,11 +100,11 @@ TEST_CASE("CallGraph stores nodes and edges", "[dead_code][callgraph]") {
                    "main.cpp:12:5", 0});
     auto callees = graph.calleesOf("main");
     REQUIRE(callees.size() == 1);
-    CHECK(callees[0]->calleeName == "foo");
+    CHECK(callees[0].calleeName == "foo");
 
     auto callers = graph.callersOf("foo");
     REQUIRE(callers.size() == 1);
-    CHECK(callers[0]->callerName == "main");
+    CHECK(callers[0].callerName == "main");
   }
 
   SECTION("virtual dispatch edges have Plausible confidence") {
@@ -125,10 +125,10 @@ TEST_CASE("CallGraph stores nodes and edges", "[dead_code][callgraph]") {
     REQUIRE(callees.size() == 2);
 
     bool hasProven = false, hasPlausible = false;
-    for (const auto *e : callees) {
-      if (e->confidence == Confidence::Proven)
+    for (const auto &e : callees) {
+      if (e.confidence == Confidence::Proven)
         hasProven = true;
-      if (e->confidence == Confidence::Plausible)
+      if (e.confidence == Confidence::Plausible)
         hasPlausible = true;
     }
     CHECK(hasProven);
@@ -246,17 +246,17 @@ TEST_CASE("CallGraphBuilder indexes direct calls",
 
   auto callees = graph.calleesOf("main");
   bool callsFoo = false;
-  for (const auto *e : callees) {
-    if (e->calleeName == "foo" && e->kind == EdgeKind::DirectCall &&
-        e->confidence == Confidence::Proven)
+  for (const auto &e : callees) {
+    if (e.calleeName == "foo" && e.kind == EdgeKind::DirectCall &&
+        e.confidence == Confidence::Proven)
       callsFoo = true;
   }
   CHECK(callsFoo);
 
   auto fooCallees = graph.calleesOf("foo");
   bool callsBar = false;
-  for (const auto *e : fooCallees) {
-    if (e->calleeName == "bar" && e->kind == EdgeKind::DirectCall)
+  for (const auto &e : fooCallees) {
+    if (e.calleeName == "bar" && e.kind == EdgeKind::DirectCall)
       callsBar = true;
   }
   CHECK(callsBar);
@@ -284,9 +284,9 @@ TEST_CASE("CallGraphBuilder tracks virtual dispatch",
   // use() should have a VirtualDispatch edge to Derived::value.
   auto useCallees = graph.calleesOf("use");
   bool hasDerivedEdge = false;
-  for (const auto *e : useCallees) {
-    if (e->calleeName == "Derived::value" &&
-        e->kind == EdgeKind::VirtualDispatch)
+  for (const auto &e : useCallees) {
+    if (e.calleeName == "Derived::value" &&
+        e.kind == EdgeKind::VirtualDispatch)
       hasDerivedEdge = true;
   }
   CHECK(hasDerivedEdge);
@@ -294,9 +294,9 @@ TEST_CASE("CallGraphBuilder tracks virtual dispatch",
   // main should have "concrete type knowledge" edges for Derived.
   auto mainCallees = graph.calleesOf("main");
   bool mainHasDerivedValue = false;
-  for (const auto *e : mainCallees) {
-    if (e->calleeName == "Derived::value" &&
-        e->confidence == Confidence::Proven)
+  for (const auto &e : mainCallees) {
+    if (e.calleeName == "Derived::value" &&
+        e.confidence == Confidence::Proven)
       mainHasDerivedValue = true;
   }
   CHECK(mainHasDerivedValue);
@@ -327,12 +327,12 @@ TEST_CASE("CallGraphBuilder tracks function pointer indirection",
   auto mainCallees = graph.calleesOf("main");
   bool hasTransformProven = false;
   bool hasNoopPlausible = false;
-  for (const auto *e : mainCallees) {
-    if (e->calleeName == "transform" && e->kind == EdgeKind::FunctionPointer &&
-        e->confidence == Confidence::Proven)
+  for (const auto &e : mainCallees) {
+    if (e.calleeName == "transform" && e.kind == EdgeKind::FunctionPointer &&
+        e.confidence == Confidence::Proven)
       hasTransformProven = true;
-    if (e->calleeName == "noop" && e->kind == EdgeKind::FunctionPointer &&
-        e->confidence == Confidence::Plausible)
+    if (e.calleeName == "noop" && e.kind == EdgeKind::FunctionPointer &&
+        e.confidence == Confidence::Plausible)
       hasNoopPlausible = true;
   }
   CHECK(hasTransformProven);
@@ -512,4 +512,101 @@ TEST_CASE("Dead code analysis on example project",
       }
     }
   }
+}
+
+// ============================================================================
+// Query-time virtual dispatch expansion
+// ============================================================================
+
+TEST_CASE("virtual dispatch expands through transitive overrides at query time",
+          "[callgraph][virtual]") {
+  CallGraph g;
+  g.addNode({"caller", "a.cpp", 1, false, false, ""});
+  g.addNode({"Base::run", "b.cpp", 5, false, true, "Base"});
+  g.addNode({"Mid::run", "b.cpp", 15, false, true, "Mid"});
+  g.addNode({"Leaf::run", "b.cpp", 25, false, true, "Leaf"});
+
+  // One stored edge to the static target; overrides registered separately.
+  g.addEdge({"caller", "Base::run", EdgeKind::VirtualDispatch,
+             Confidence::Plausible, "a.cpp:2:3", 0});
+  g.addMethodOverride("Base::run", "Mid::run");
+  g.addMethodOverride("Mid::run", "Leaf::run");
+
+  SECTION("calleesOf synthesizes the full override chain") {
+    auto callees = g.calleesOf("caller");
+    REQUIRE(callees.size() == 3); // Base::run + Mid::run + Leaf::run
+    std::set<std::string> names;
+    for (const auto &e : callees) {
+      names.insert(e.calleeName);
+      CHECK(e.kind == EdgeKind::VirtualDispatch);
+      CHECK(e.confidence == Confidence::Plausible);
+      CHECK(e.callSite == "a.cpp:2:3");
+    }
+    CHECK(names == std::set<std::string>{"Base::run", "Mid::run",
+                                         "Leaf::run"});
+    // Stored edge count is unchanged by expansion.
+    CHECK(g.edgeCount() == 1);
+  }
+
+  SECTION("callersOf reaches the dispatch site from a transitive override") {
+    auto callers = g.callersOf("Leaf::run");
+    REQUIRE(callers.size() == 1);
+    CHECK(callers[0].callerName == "caller");
+    CHECK(callers[0].calleeName == "Leaf::run");
+    CHECK(callers[0].callSite == "a.cpp:2:3");
+  }
+
+  SECTION("overrides registered after the edge are visible immediately") {
+    g.addNode({"Late::run", "c.cpp", 5, false, true, "Late"});
+    g.addMethodOverride("Base::run", "Late::run");
+    auto callees = g.calleesOf("caller");
+    CHECK(callees.size() == 4);
+    CHECK(g.callersOf("Late::run").size() == 1);
+  }
+
+  SECTION("transitive closure helpers") {
+    CHECK(g.getTransitiveOverrides("Base::run") ==
+          std::vector<std::string>{"Mid::run", "Leaf::run"});
+    CHECK(g.getOverriddenBases("Leaf::run") ==
+          std::vector<std::string>{"Mid::run", "Base::run"});
+  }
+}
+
+TEST_CASE("Proven virtual dispatch edges are not expanded",
+          "[callgraph][virtual]") {
+  CallGraph g;
+  g.addNode({"caller", "a.cpp", 1, false, false, ""});
+  g.addNode({"Derived::run", "b.cpp", 15, false, true, "Derived"});
+  g.addNode({"MoreDerived::run", "b.cpp", 25, false, true, "MoreDerived"});
+
+  // Concrete-type-known edge (e.g. from addConcreteTypeEdges): exact target.
+  g.addEdge({"caller", "Derived::run", EdgeKind::VirtualDispatch,
+             Confidence::Proven, "a.cpp:2:3", 0});
+  g.addMethodOverride("Derived::run", "MoreDerived::run");
+
+  auto callees = g.calleesOf("caller");
+  REQUIRE(callees.size() == 1);
+  CHECK(callees[0].calleeName == "Derived::run");
+  CHECK(g.callersOf("MoreDerived::run").empty());
+}
+
+TEST_CASE("expansion does not duplicate stored fan-out edges",
+          "[callgraph][virtual]") {
+  // Old snapshots carry build-time fan-out edges; expansion must dedup
+  // against them instead of doubling the result.
+  CallGraph g;
+  g.addNode({"caller", "a.cpp", 1, false, false, ""});
+  g.addNode({"Base::run", "b.cpp", 5, false, true, "Base"});
+  g.addNode({"Derived::run", "b.cpp", 15, false, true, "Derived"});
+
+  g.addEdge({"caller", "Base::run", EdgeKind::VirtualDispatch,
+             Confidence::Plausible, "a.cpp:2:3", 0});
+  g.addEdge({"caller", "Derived::run", EdgeKind::VirtualDispatch,
+             Confidence::Plausible, "a.cpp:2:3", 0}); // baked fan-out
+  g.addMethodOverride("Base::run", "Derived::run");
+
+  auto callees = g.calleesOf("caller");
+  CHECK(callees.size() == 2);
+  auto callers = g.callersOf("Derived::run");
+  CHECK(callers.size() == 1);
 }

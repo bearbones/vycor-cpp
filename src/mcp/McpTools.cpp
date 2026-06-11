@@ -306,10 +306,10 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
 
   auto edges = ctx.graph.calleesOf(name->str());
   llvm::json::Array results;
-  for (auto *e : edges) {
-    if (!filter.allows(*e))
+  for (const auto &e : edges) {
+    if (!filter.allows(e))
       continue;
-    results.push_back(edgeToJson(*e));
+    results.push_back(edgeToJson(e));
   }
 
   llvm::json::Object obj;
@@ -335,10 +335,10 @@ static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
 
   auto edges = ctx.graph.callersOf(name->str());
   llvm::json::Array results;
-  for (auto *e : edges) {
-    if (!filter.allows(*e))
+  for (const auto &e : edges) {
+    if (!filter.allows(e))
       continue;
-    results.push_back(edgeToJson(*e));
+    results.push_back(edgeToJson(e));
   }
 
   llvm::json::Object obj;
@@ -378,15 +378,17 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   }
 
   // Reverse DFS from target to start nodes. We track the edge used for every
-  // hop so the response can carry kind/confidence/callSite per hop.
+  // hop so the response can carry kind/confidence/callSite per hop. Edges are
+  // copied: callersOf returns by value (it can synthesize virtual-dispatch
+  // expansions), so pointers into its result would not survive the frame.
   std::set<std::string> startSet(starts.begin(), starts.end());
   struct FoundPath {
-    std::vector<std::string> nodes;              // start -> ... -> target
-    std::vector<const CallGraphEdge *> edges;    // edges[i]: nodes[i] -> nodes[i+1]
+    std::vector<std::string> nodes;        // start -> ... -> target
+    std::vector<CallGraphEdge> edges;      // edges[i]: nodes[i] -> nodes[i+1]
   };
   std::vector<FoundPath> foundPaths;
-  std::vector<std::string> currentPath;          // target -> ... -> start
-  std::vector<const CallGraphEdge *> currentEdges; // parallel to edges along currentPath
+  std::vector<std::string> currentPath;    // target -> ... -> start
+  std::vector<CallGraphEdge> currentEdges; // parallel to edges along currentPath
   std::set<std::string> onPath;
 
   std::function<void(const std::string &, unsigned)> dfs =
@@ -406,13 +408,13 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
           foundPaths.push_back(std::move(fp));
         } else {
           auto callers = ctx.graph.callersOf(node);
-          for (auto *edge : callers) {
-            if (onPath.count(edge->callerName))
+          for (const auto &edge : callers) {
+            if (onPath.count(edge.callerName))
               continue;
-            if (!filter.allows(*edge))
+            if (!filter.allows(edge))
               continue;
             currentEdges.push_back(edge);
-            dfs(edge->callerName, depth + 1);
+            dfs(edge.callerName, depth + 1);
             currentEdges.pop_back();
             if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
               break;
@@ -428,15 +430,15 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   llvm::json::Array pathsJson;
   for (auto &fp : foundPaths) {
     llvm::json::Array chain;
-    for (auto *edge : fp.edges) {
+    for (const auto &edge : fp.edges) {
       llvm::json::Object hop;
-      hop["from"] = edge->callerName;
-      hop["to"] = edge->calleeName;
-      hop["kind"] = edgeKindToString(edge->kind);
-      hop["confidence"] = confidenceToString(edge->confidence);
-      hop["callSite"] = edge->callSite;
-      if (edge->execContext != ExecutionContext::Synchronous)
-        hop["executionContext"] = executionContextToString(edge->execContext);
+      hop["from"] = edge.callerName;
+      hop["to"] = edge.calleeName;
+      hop["kind"] = edgeKindToString(edge.kind);
+      hop["confidence"] = confidenceToString(edge.confidence);
+      hop["callSite"] = edge.callSite;
+      if (edge.execContext != ExecutionContext::Synchronous)
+        hop["executionContext"] = executionContextToString(edge.execContext);
       chain.push_back(llvm::json::Value(std::move(hop)));
     }
     pathsJson.push_back(llvm::json::Value(std::move(chain)));
@@ -757,18 +759,18 @@ static void reverseDfs(const CallGraph &graph,
     return;
 
   auto callers = graph.callersOf(cur);
-  for (const auto *edge : callers) {
+  for (const auto &edge : callers) {
     // Skip indirect edges — they have no stable callee identity for
     // transitive lock inheritance.
-    if (edge->callerName == "<indirect>")
+    if (edge.callerName == "<indirect>")
       continue;
-    std::string key = edge->callerName + "->" + edge->calleeName + "@" +
-                      edge->callSite;
+    std::string key = edge.callerName + "->" + edge.calleeName + "@" +
+                      edge.callSite;
     if (!visitedEdges.insert(key).second)
       continue;
 
-    path.push_back(edge->callerName);
-    edgeCallSites.push_back(edge->callSite);
+    path.push_back(edge.callerName);
+    edgeCallSites.push_back(edge.callSite);
     reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
                visitedEdges, maxDepth, out, truncated);
     edgeCallSites.pop_back();
@@ -1158,11 +1160,11 @@ handleGraphSummary(const llvm::json::Object & /*args*/,
     auto edges = ctx.graph.calleesOf(node->qualifiedName);
     if (!edges.empty())
       callerFanout.emplace_back(node->qualifiedName, edges.size());
-    for (auto *e : edges) {
+    for (const auto &e : edges) {
       ++totalEdges;
-      ++confHist[e->confidence];
-      ++kindHist[e->kind];
-      ++calleeInDegree[e->calleeName];
+      ++confHist[e.confidence];
+      ++kindHist[e.kind];
+      ++calleeInDegree[e.calleeName];
     }
   }
 
@@ -1221,33 +1223,34 @@ handleListCallbackSites(const llvm::json::Object &args,
                         const McpToolContext &ctx) {
   auto targetFilter = args.getString("target_prefix");
 
-  // Group callback-like edges by calleeName.
-  std::map<std::string, std::vector<const CallGraphEdge *>> byTarget;
+  // Group callback-like edges by calleeName (copies — calleesOf returns a
+  // temporary vector per node).
+  std::map<std::string, std::vector<CallGraphEdge>> byTarget;
   for (auto *node : ctx.graph.allNodes()) {
-    for (auto *e : ctx.graph.calleesOf(node->qualifiedName)) {
-      if (e->kind != EdgeKind::FunctionPointer &&
-          e->kind != EdgeKind::LambdaCall)
+    for (const auto &e : ctx.graph.calleesOf(node->qualifiedName)) {
+      if (e.kind != EdgeKind::FunctionPointer &&
+          e.kind != EdgeKind::LambdaCall)
         continue;
-      if (targetFilter && !llvm::StringRef(e->calleeName)
+      if (targetFilter && !llvm::StringRef(e.calleeName)
                                .starts_with(*targetFilter))
         continue;
-      byTarget[e->calleeName].push_back(e);
+      byTarget[e.calleeName].push_back(e);
     }
   }
 
   llvm::json::Array targets;
   for (auto &kv : byTarget) {
     llvm::json::Array sites;
-    for (auto *e : kv.second) {
+    for (const auto &e : kv.second) {
       llvm::json::Object site;
-      site["caller"] = e->callerName;
-      site["callSite"] = e->callSite;
-      site["kind"] = edgeKindToString(e->kind);
-      site["confidence"] = confidenceToString(e->confidence);
-      if (e->indirectionDepth > 0)
-        site["indirectionDepth"] = static_cast<int64_t>(e->indirectionDepth);
-      if (e->execContext != ExecutionContext::Synchronous)
-        site["executionContext"] = executionContextToString(e->execContext);
+      site["caller"] = e.callerName;
+      site["callSite"] = e.callSite;
+      site["kind"] = edgeKindToString(e.kind);
+      site["confidence"] = confidenceToString(e.confidence);
+      if (e.indirectionDepth > 0)
+        site["indirectionDepth"] = static_cast<int64_t>(e.indirectionDepth);
+      if (e.execContext != ExecutionContext::Synchronous)
+        site["executionContext"] = executionContextToString(e.execContext);
       sites.push_back(llvm::json::Value(std::move(site)));
     }
     llvm::json::Object entry;
@@ -1290,19 +1293,19 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
   llvm::json::Array entries;
   size_t total = 0;
   for (auto *node : ctx.graph.allNodes()) {
-    for (auto *e : ctx.graph.calleesOf(node->qualifiedName)) {
-      if (e->kind != EdgeKind::ThreadEntry)
+    for (const auto &e : ctx.graph.calleesOf(node->qualifiedName)) {
+      if (e.kind != EdgeKind::ThreadEntry)
         continue;
-      if (!ctxFilter.empty() && !ctxFilter.count(e->execContext))
+      if (!ctxFilter.empty() && !ctxFilter.count(e.execContext))
         continue;
       ++total;
       llvm::json::Object entry;
-      entry["spawner"] = e->callerName;
-      entry["target"] = e->calleeName;
+      entry["spawner"] = e.callerName;
+      entry["target"] = e.calleeName;
       entry["executionContext"] =
-          executionContextToString(e->execContext);
-      entry["callSite"] = e->callSite;
-      entry["confidence"] = confidenceToString(e->confidence);
+          executionContextToString(e.execContext);
+      entry["callSite"] = e.callSite;
+      entry["confidence"] = confidenceToString(e.confidence);
       entries.push_back(llvm::json::Value(std::move(entry)));
     }
   }
