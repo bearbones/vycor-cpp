@@ -17,7 +17,9 @@
 
 #include "vycor/callgraph/StringInterner.h"
 
+#include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -91,9 +93,10 @@ struct CallGraphEdge {
 // (nodes_/edges_/outEdges_/inEdges_). The MCP serve loop is single-threaded,
 // so queries never overlap reindexTU. Revisit before adding concurrent reads.
 //
-// Pointer stability: const CallGraphEdge* returned by calleesOf/callersOf
-// remains valid across addEdge/removeTU (edges_ is a deque and removal only
-// tombstones). compact() is the ONLY operation that invalidates them.
+// calleesOf/callersOf return edges by value (the result can contain
+// synthesized virtual-dispatch expansions that have no stored counterpart),
+// so query results never dangle. edges_ remains a deque so that internal
+// indices stay stable across growth; compact() rewrites them.
 class CallGraph {
 public:
   CallGraph() = default;
@@ -105,8 +108,19 @@ public:
   void addNode(CallGraphNode node, const std::string &tuPath = "");
   void addEdge(CallGraphEdge edge, const std::string &tuPath = "");
 
-  std::vector<const CallGraphEdge *> calleesOf(const std::string &name) const;
-  std::vector<const CallGraphEdge *> callersOf(const std::string &name) const;
+  // Query the graph. Virtual dispatch is expanded at query time: for every
+  // stored Plausible VirtualDispatch edge (caller -> static target), edges
+  // to all transitive overrides of the static target are synthesized into
+  // the result. The builder records only the static-target edge, so
+  // overrides indexed after the call site (incremental reindex) are visible
+  // to existing call sites without re-baking. Proven VirtualDispatch edges
+  // (exact concrete type known at the call site) are never expanded.
+  std::vector<CallGraphEdge> calleesOf(const std::string &name) const;
+  std::vector<CallGraphEdge> callersOf(const std::string &name) const;
+
+  // Count of live stored in-edges (cheap: no materialization or virtual
+  // expansion). Used as a hub heuristic by path-walking tools.
+  size_t storedInDegree(const std::string &name) const;
 
   size_t nodeCount() const;
   size_t edgeCount() const;
@@ -130,6 +144,16 @@ public:
   std::vector<std::string>
   getOverrides(const std::string &baseMethod) const;
 
+  // Transitive closure over the override relation: all methods that
+  // (directly or through intermediate classes) override baseMethod.
+  std::vector<std::string>
+  getTransitiveOverrides(const std::string &baseMethod) const;
+
+  // Inverse closure: all methods that the given method transitively
+  // overrides (its base-class declarations, walking up the hierarchy).
+  std::vector<std::string>
+  getOverriddenBases(const std::string &method) const;
+
   // Effective implementation mapping: which concrete classes use a given
   // method implementation for virtual dispatch.
   void addEffectiveImpl(const std::string &concreteClass,
@@ -145,13 +169,14 @@ public:
   std::set<std::string>
   getFunctionReturns(const std::string &funcName) const;
 
-  // Per-TU incremental re-indexing. removeTU tombstones all edges from the
-  // given TU and removes nodes that were only contributed by that TU.
-  // Returns the number of edges removed.
+  // Per-TU incremental re-indexing. removeTU drops the given TU's
+  // contribution: each of its edge registrations is released, and an edge
+  // is tombstoned only when its last contributor is removed (header-inlined
+  // code registers the same edge from many TUs). Nodes contributed only by
+  // this TU are removed. Returns the number of edges fully removed.
   size_t removeTU(const std::string &tuPath);
 
-  // Compact the edge vector, eliminating tombstones. Invalidates all
-  // previously returned const CallGraphEdge * pointers.
+  // Compact the edge storage, eliminating tombstones.
   void compact();
 
   const StringInterner &interner() const { return interner_; }
@@ -159,22 +184,80 @@ public:
 private:
   using SId = StringInterner::Id;
 
+  // Compact interned edge record. Public queries materialize CallGraphEdge
+  // (with resolved strings) on demand; nothing outside CallGraph sees this.
+  struct StoredEdge {
+    SId caller;
+    SId callee;
+    SId callSite;
+    EdgeKind kind;
+    Confidence confidence;
+    ExecutionContext execContext;
+    uint32_t indirectionDepth;
+    // Number of registrations (one per addEdge call, TU-tagged or not).
+    // 0 = tombstone.
+    uint32_t refs;
+  };
+
+  // Content identity for dedup: every semantic field participates, so
+  // edges that differ only in confidence or execution context stay
+  // distinct.
+  struct EdgeKey {
+    SId caller, callee, callSite;
+    uint8_t kind, confidence, execContext;
+    uint32_t indirectionDepth;
+    bool operator==(const EdgeKey &o) const {
+      return caller == o.caller && callee == o.callee &&
+             callSite == o.callSite && kind == o.kind &&
+             confidence == o.confidence && execContext == o.execContext &&
+             indirectionDepth == o.indirectionDepth;
+    }
+  };
+  struct EdgeKeyHash {
+    size_t operator()(const EdgeKey &k) const {
+      size_t h = std::hash<uint64_t>{}(
+          (static_cast<uint64_t>(k.caller) << 32) | k.callee);
+      h ^= std::hash<uint64_t>{}(
+               (static_cast<uint64_t>(k.callSite) << 32) |
+               (static_cast<uint64_t>(k.kind) << 16) |
+               (static_cast<uint64_t>(k.confidence) << 8) | k.execContext) +
+           0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      return h ^ k.indirectionDepth;
+    }
+  };
+
+  static EdgeKey keyOf(const StoredEdge &se) {
+    return {se.caller,
+            se.callee,
+            se.callSite,
+            static_cast<uint8_t>(se.kind),
+            static_cast<uint8_t>(se.confidence),
+            static_cast<uint8_t>(se.execContext),
+            se.indirectionDepth};
+  }
+
+  CallGraphEdge materialize(const StoredEdge &se) const;
+
   // Snapshot serialization reads provenance maps (tuEdges_,
-  // nodeContributors_) that have no public accessors; deserialization goes
-  // through the public API.
+  // nodeContributors_) and edge storage that have no public accessors;
+  // deserialization goes through the public API.
   friend class SnapshotIO;
 
   mutable std::mutex mutex_;
   StringInterner interner_;
   std::unordered_map<SId, CallGraphNode> nodes_;
-  // deque, not vector: queries hand out pointers into this container, and
-  // growth must not invalidate them (see class comment).
-  std::deque<CallGraphEdge> edges_;
+  // deque, not vector: indices into this container are held by the maps
+  // below and must stay stable across growth (see class comment).
+  std::deque<StoredEdge> edges_;
+  std::unordered_map<EdgeKey, size_t, EdgeKeyHash> edgeIndex_;
   std::unordered_map<SId, std::vector<size_t>> outEdges_;
   std::unordered_map<SId, std::vector<size_t>> inEdges_;
 
   std::unordered_map<SId, std::vector<SId>> derivedClasses_;
   std::unordered_map<SId, std::vector<SId>> methodOverrides_;
+  // Reverse of methodOverrides_: override -> base methods it overrides.
+  // Maintained by addMethodOverride; used by callersOf expansion.
+  std::unordered_map<SId, std::vector<SId>> overrideBases_;
   std::unordered_map<SId, std::set<SId>> effectiveImplClasses_;
   std::unordered_map<SId, std::set<SId>> functionReturns_;
 
@@ -182,6 +265,12 @@ private:
   std::unordered_map<SId, std::vector<size_t>> tuEdges_;
   std::unordered_map<SId, std::set<SId>> nodeContributors_;
   size_t liveEdgeCount_ = 0;
+
+  // Transitive closure helpers over the override relation (callers must
+  // not hold mutex_; these only read maps written during Phase 1).
+  std::vector<SId> transitiveClosure(
+      SId start,
+      const std::unordered_map<SId, std::vector<SId>> &relation) const;
 };
 
 } // namespace vycor

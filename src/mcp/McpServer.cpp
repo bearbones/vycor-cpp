@@ -37,13 +37,9 @@ McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
   r.contextsRemoved = cfIndex_.removeTU(filePath);
 
   if (buildParams_.compDb) {
-    indexTU(graph_, *buildParams_.compDb, filePath,
-            buildParams_.collapsePaths, buildParams_.pchCache,
-            buildParams_.sysroot);
-    indexTUControlFlow(cfIndex_, *buildParams_.compDb, filePath,
-                       graph_, buildParams_.collapsePaths,
-                       buildParams_.pchCache, buildParams_.sysroot,
-                       buildParams_.lockCfg);
+    bakeTU(graph_, cfIndex_, *buildParams_.compDb, filePath,
+           buildParams_.collapsePaths, buildParams_.pchCache,
+           buildParams_.sysroot, buildParams_.lockCfg);
   }
 
   r.edgesAfter = graph_.edgeCount();

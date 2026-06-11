@@ -84,8 +84,17 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowOracle.h/.cpp` | Query engine: exception safety, path analysis, call site context |
 
 **Three-phase build** (used by both `prism` and `megascope`):
-1. `buildCallGraph(compDb, files, collapsePaths)` — Phase 1 (index) + Phase 2 (edges)
-2. `buildControlFlowIndex(compDb, files, graph, collapsePaths)` — Phase 3 (CF context)
+`bakeIndexes(compDb, files, ...)` runs Phase 1 (declaration/hierarchy index)
+as one parse per TU, then Phase 2 (edges) and Phase 3 (CF context) together
+on a single second parse per TU — two frontend parses instead of three.
+`buildCallGraph` / `buildControlFlowIndex` remain for callers that need only
+one of the two indexes.
+
+**Virtual dispatch** is stored as ONE Plausible `VirtualDispatch` edge to the
+static target per call site. `CallGraph::calleesOf`/`callersOf` expand it
+through the transitive override map at query time, so overrides indexed
+later (other TUs, incremental reindex) are visible to existing call sites.
+Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
@@ -102,8 +111,20 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 | `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 | `McpTools.h/.cpp` | Tool implementations: lookup, callers, callees, call chains, exception safety, dead code, class hierarchy |
 
-**8 MCP tools**: `lookup_function`, `get_callees`, `get_callers`, `find_call_chain`,
-`query_exception_safety`, `query_call_site_context`, `analyze_dead_code`, `get_class_hierarchy`
+**17 MCP tools**: `search_functions`, `lookup_function`, `get_callees`,
+`get_callers`, `find_call_chain`, `query_exception_safety`,
+`query_call_site_context`, `query_raii_scopes_at_callsite`,
+`query_locks_held`, `query_same_lock`, `analyze_dead_code`,
+`get_class_hierarchy`, `list_entry_points`, `graph_summary`,
+`list_callback_sites`, `list_concurrency_entry_points`, `reindex_tu`.
+
+Identical edges registered by multiple TUs (header-inlined code) are
+**deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
+an edge when its last contributing TU is removed. Edge records store
+interned string IDs internally; public queries materialize `CallGraphEdge`
+with resolved strings. Path-walking tools (`find_call_chain`,
+`query_locks_held`, `query_same_lock`) accept `max_fan_in` to skip
+high-fan-in hubs and report them in the response.
 
 ---
 

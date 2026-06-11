@@ -700,34 +700,16 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
 void CallGraphEdgeVisitor::handleVirtualDispatch(
     const std::string &caller, clang::CXXMethodDecl *method,
     clang::SourceLocation loc) {
-  std::string baseMethodName = method->getQualifiedNameAsString();
-  std::string site = formatLocation(loc);
-
-  // Add Plausible edge to the base method itself (if not pure virtual).
-  if (!method->isPureVirtual()) {
-    graph_.addEdge({caller, baseMethodName, EdgeKind::VirtualDispatch,
-                    Confidence::Plausible, site, 0}, tuPath_);
-  }
-
-  // Add Plausible edges to all known overrides.
-  auto overrides = graph_.getOverrides(baseMethodName);
-  for (const auto &overrideName : overrides) {
-    graph_.addEdge({caller, overrideName, EdgeKind::VirtualDispatch,
-                    Confidence::Plausible, site, 0}, tuPath_);
-  }
-
-  // Also check overrides of methods that this method itself overrides
-  // (to catch the full override chain).
-  for (auto *overridden : method->overridden_methods()) {
-    auto moreOverrides =
-        graph_.getOverrides(overridden->getQualifiedNameAsString());
-    for (const auto &overrideName : moreOverrides) {
-      if (overrideName != baseMethodName) {
-        graph_.addEdge({caller, overrideName, EdgeKind::VirtualDispatch,
-                        Confidence::Plausible, site, 0}, tuPath_);
-      }
-    }
-  }
+  // Record a single Plausible edge to the static target — even when it is
+  // pure virtual, since it identifies the dispatch point. The feasible
+  // runtime targets (transitive overrides of the static target) are
+  // synthesized at query time by CallGraph::calleesOf/callersOf, so
+  // overrides indexed later (other TUs, incremental reindex) are visible
+  // to this call site without re-baking, and edge storage stays one row
+  // per call site instead of one per override.
+  graph_.addEdge({caller, method->getQualifiedNameAsString(),
+                  EdgeKind::VirtualDispatch, Confidence::Plausible,
+                  formatLocation(loc), 0}, tuPath_);
 }
 
 bool CallGraphEdgeVisitor::VisitCXXConstructExpr(

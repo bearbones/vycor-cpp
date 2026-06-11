@@ -44,10 +44,8 @@ The server prints progress to stderr and then blocks on stdin waiting for
 JSON-RPC requests:
 
 ```
-megascope: building call graph (68 files, 8 threads)...
-megascope: call graph built (59893 nodes, 842463 edges)
-megascope: building control flow index...
-megascope: control flow index built (1098163 call sites)
+megascope: baking call graph + control flow index (68 files, 8 threads)...
+megascope: indexes built (59893 nodes, 412051 edges, 1098163 call sites)
 megascope: server started, waiting for requests...
 ```
 
@@ -177,9 +175,15 @@ def call(proc, req_id, tool, params):
 
 ### Step 1 — Mine function names before querying
 
-`lookup_function` requires an **exact qualified name**. Do not guess.
-Before launching the server, extract real function names from a `prism`
-dump or from the `compile_commands.json` source files:
+`lookup_function` requires an **exact qualified name**. Do not guess —
+use `search_functions` first:
+
+```python
+r = call(proc, 1, "search_functions", {"query": "handleServerSecurity"})
+# -> ranked candidates with qualifiedName, file, line
+```
+
+For bulk name mining outside the server, a `prism` dump also works:
 
 ```bash
 # Get a prism dump (faster than megascope for discovery)
@@ -213,9 +217,9 @@ r = call(proc, 1, "get_callers",
 # Each unique callerName with zero callers of its own is a real entry point
 ```
 
-Deduplicate the caller list in your client — the graph can produce
-duplicate edges (same caller name, different call site) for template
-instantiations or inlined functions.
+Identical edges from multiple TUs are deduplicated server-side; distinct
+call sites for the same caller still appear as separate entries (that is
+real information, not duplication).
 
 ### Step 3 — Check exception safety with real entry points
 

@@ -72,7 +72,8 @@ struct SnapshotData {
 class SnapshotIO {
 public:
   /// Current on-disk format version. Bump on any layout change.
-  static constexpr uint32_t kFormatVersion = 1;
+  /// v2: edges carry a contributor-TU list (deduped multi-TU edges).
+  static constexpr uint32_t kFormatVersion = 2;
 
   /// Serialize graph + cfIndex + meta to `path` (atomically, via a temp file
   /// and rename). Returns false on I/O failure.

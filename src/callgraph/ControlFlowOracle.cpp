@@ -173,10 +173,10 @@ void ControlFlowOracle::findPathsToTarget(
         } else {
           // Walk callers.
           auto callers = graph_.callersOf(node);
-          for (const auto *edge : callers) {
-            if (onPath.count(edge->callerName))
+          for (const auto &edge : callers) {
+            if (onPath.count(edge.callerName))
               continue; // Skip cycles.
-            dfs(edge->callerName);
+            dfs(edge.callerName);
             if (outPaths.size() >= maxPaths)
               break;
           }
@@ -367,12 +367,12 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName) const {
       continue;
 
     auto callers = graph_.callersOf(state.func);
-    for (const auto *edge : callers) {
-      if (visited.count(edge->callerName))
+    for (const auto &edge : callers) {
+      if (visited.count(edge.callerName))
         continue;
 
       // Check if the call site has a try/catch.
-      auto contexts = cfIndex_.contextsForCaller(edge->callerName);
+      auto contexts = cfIndex_.contextsForCaller(edge.callerName);
       bool foundCatch = false;
       for (const auto *ctx : contexts) {
         if (ctx->calleeName != state.func)
@@ -380,7 +380,7 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName) const {
         if (!ctx->enclosingTryCatches.empty()) {
           NearestCatchInfo nci;
           nci.pathSegment = state.pathSoFar;
-          nci.pathSegment.insert(nci.pathSegment.begin(), edge->callerName);
+          nci.pathSegment.insert(nci.pathSegment.begin(), edge.callerName);
           nci.scope = ctx->enclosingTryCatches.front(); // Innermost.
           nci.framesFromTarget = state.depth + 1;
           result.push_back(std::move(nci));
@@ -390,10 +390,10 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName) const {
       }
 
       if (!foundCatch) {
-        visited.insert(edge->callerName);
+        visited.insert(edge.callerName);
         auto newPath = state.pathSoFar;
-        newPath.insert(newPath.begin(), edge->callerName);
-        queue.push_back({edge->callerName, std::move(newPath),
+        newPath.insert(newPath.begin(), edge.callerName);
+        queue.push_back({edge.callerName, std::move(newPath),
                          state.depth + 1});
       }
     }
