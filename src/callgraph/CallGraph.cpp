@@ -23,6 +23,7 @@ CallGraph::CallGraph(CallGraph &&other) noexcept
     : interner_(std::move(other.interner_)),
       nodes_(std::move(other.nodes_)),
       edges_(std::move(other.edges_)),
+      edgeIndex_(std::move(other.edgeIndex_)),
       outEdges_(std::move(other.outEdges_)),
       inEdges_(std::move(other.inEdges_)),
       derivedClasses_(std::move(other.derivedClasses_)),
@@ -38,6 +39,7 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   interner_ = std::move(other.interner_);
   nodes_ = std::move(other.nodes_);
   edges_ = std::move(other.edges_);
+  edgeIndex_ = std::move(other.edgeIndex_);
   outEdges_ = std::move(other.outEdges_);
   inEdges_ = std::move(other.inEdges_);
   derivedClasses_ = std::move(other.derivedClasses_);
@@ -75,15 +77,46 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   }
 }
 
+CallGraphEdge CallGraph::materialize(const StoredEdge &se) const {
+  CallGraphEdge e;
+  e.callerName = interner_.resolve(se.caller);
+  e.calleeName = interner_.resolve(se.callee);
+  e.kind = se.kind;
+  e.confidence = se.confidence;
+  e.callSite = interner_.resolve(se.callSite);
+  e.indirectionDepth = se.indirectionDepth;
+  e.execContext = se.execContext;
+  return e;
+}
+
 void CallGraph::addEdge(CallGraphEdge edge, const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
-  SId callerId = interner_.intern(edge.callerName);
-  SId calleeId = interner_.intern(edge.calleeName);
-  size_t idx = edges_.size();
-  outEdges_[callerId].push_back(idx);
-  inEdges_[calleeId].push_back(idx);
-  edges_.push_back(std::move(edge));
-  ++liveEdgeCount_;
+  StoredEdge se;
+  se.caller = interner_.intern(edge.callerName);
+  se.callee = interner_.intern(edge.calleeName);
+  se.callSite = interner_.intern(edge.callSite);
+  se.kind = edge.kind;
+  se.confidence = edge.confidence;
+  se.execContext = edge.execContext;
+  se.indirectionDepth = edge.indirectionDepth;
+  se.refs = 1;
+
+  EdgeKey key = keyOf(se);
+  size_t idx;
+  auto it = edgeIndex_.find(key);
+  if (it != edgeIndex_.end()) {
+    // Identical edge already stored (e.g. header-inlined function indexed
+    // by several TUs): register another contributor instead of duplicating.
+    idx = it->second;
+    ++edges_[idx].refs;
+  } else {
+    idx = edges_.size();
+    outEdges_[se.caller].push_back(idx);
+    inEdges_[se.callee].push_back(idx);
+    edges_.push_back(se);
+    edgeIndex_.emplace(key, idx);
+    ++liveEdgeCount_;
+  }
   if (!tuPath.empty()) {
     SId tuId = interner_.intern(tuPath);
     tuEdges_[tuId].push_back(idx);
@@ -125,31 +158,27 @@ CallGraph::calleesOf(const std::string &name) const {
   // Keys of stored VirtualDispatch edges, so synthesized expansions never
   // duplicate an edge already on disk (e.g. a snapshot baked with the old
   // build-time fan-out).
-  std::set<std::pair<std::string, std::string>> seen; // (callee, callSite)
+  std::set<std::pair<SId, SId>> seen; // (callee, callSite)
   for (size_t idx : it->second) {
-    const CallGraphEdge &e = edges_[idx];
-    if (e.callerName.empty())
+    const StoredEdge &se = edges_[idx];
+    if (se.refs == 0)
       continue;
-    if (e.kind == EdgeKind::VirtualDispatch)
-      seen.insert({e.calleeName, e.callSite});
-    result.push_back(e);
+    if (se.kind == EdgeKind::VirtualDispatch)
+      seen.insert({se.callee, se.callSite});
+    result.push_back(materialize(se));
   }
 
   // Expand Plausible virtual dispatch through transitive overrides.
   for (size_t idx : it->second) {
-    const CallGraphEdge &e = edges_[idx];
-    if (e.callerName.empty() || e.kind != EdgeKind::VirtualDispatch ||
-        e.confidence != Confidence::Plausible)
+    const StoredEdge &se = edges_[idx];
+    if (se.refs == 0 || se.kind != EdgeKind::VirtualDispatch ||
+        se.confidence != Confidence::Plausible)
       continue;
-    auto targetId = interner_.find(e.calleeName);
-    if (!targetId)
-      continue;
-    for (SId ovId : transitiveClosure(*targetId, methodOverrides_)) {
-      const std::string &ov = interner_.resolve(ovId);
-      if (!seen.insert({ov, e.callSite}).second)
+    for (SId ovId : transitiveClosure(se.callee, methodOverrides_)) {
+      if (!seen.insert({ovId, se.callSite}).second)
         continue;
-      CallGraphEdge synth = e;
-      synth.calleeName = ov;
+      CallGraphEdge synth = materialize(se);
+      synth.calleeName = interner_.resolve(ovId);
       result.push_back(std::move(synth));
     }
   }
@@ -163,16 +192,16 @@ CallGraph::callersOf(const std::string &name) const {
   if (!id)
     return result;
 
-  std::set<std::pair<std::string, std::string>> seen; // (caller, callSite)
+  std::set<std::pair<SId, SId>> seen; // (caller, callSite)
   auto it = inEdges_.find(*id);
   if (it != inEdges_.end()) {
     for (size_t idx : it->second) {
-      const CallGraphEdge &e = edges_[idx];
-      if (e.callerName.empty())
+      const StoredEdge &se = edges_[idx];
+      if (se.refs == 0)
         continue;
-      if (e.kind == EdgeKind::VirtualDispatch)
-        seen.insert({e.callerName, e.callSite});
-      result.push_back(e);
+      if (se.kind == EdgeKind::VirtualDispatch)
+        seen.insert({se.caller, se.callSite});
+      result.push_back(materialize(se));
     }
   }
 
@@ -183,18 +212,33 @@ CallGraph::callersOf(const std::string &name) const {
     if (bit == inEdges_.end())
       continue;
     for (size_t idx : bit->second) {
-      const CallGraphEdge &e = edges_[idx];
-      if (e.callerName.empty() || e.kind != EdgeKind::VirtualDispatch ||
-          e.confidence != Confidence::Plausible)
+      const StoredEdge &se = edges_[idx];
+      if (se.refs == 0 || se.kind != EdgeKind::VirtualDispatch ||
+          se.confidence != Confidence::Plausible)
         continue;
-      if (!seen.insert({e.callerName, e.callSite}).second)
+      if (!seen.insert({se.caller, se.callSite}).second)
         continue;
-      CallGraphEdge synth = e;
+      CallGraphEdge synth = materialize(se);
       synth.calleeName = name;
       result.push_back(std::move(synth));
     }
   }
   return result;
+}
+
+size_t CallGraph::storedInDegree(const std::string &name) const {
+  auto id = interner_.find(name);
+  if (!id)
+    return 0;
+  auto it = inEdges_.find(*id);
+  if (it == inEdges_.end())
+    return 0;
+  size_t count = 0;
+  for (size_t idx : it->second) {
+    if (edges_[idx].refs > 0)
+      ++count;
+  }
+  return count;
 }
 
 size_t CallGraph::nodeCount() const { return nodes_.size(); }
@@ -394,20 +438,17 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
   if (eit != tuEdges_.end()) {
     for (size_t idx : eit->second) {
       auto &edge = edges_[idx];
-      if (edge.callerName.empty())
+      if (edge.refs == 0)
         continue;
-      auto callerOpt = interner_.find(edge.callerName);
-      auto calleeOpt = interner_.find(edge.calleeName);
-      if (callerOpt) {
-        auto &ov = outEdges_[*callerOpt];
-        ov.erase(std::remove(ov.begin(), ov.end(), idx), ov.end());
-      }
-      if (calleeOpt) {
-        auto &iv = inEdges_[*calleeOpt];
-        iv.erase(std::remove(iv.begin(), iv.end(), idx), iv.end());
-      }
-      edge.callerName.clear();
-      edge.calleeName.clear();
+      // Release this TU's registration; the edge survives while other
+      // contributors (TUs or untagged additions) still reference it.
+      if (--edge.refs > 0)
+        continue;
+      auto &ov = outEdges_[edge.caller];
+      ov.erase(std::remove(ov.begin(), ov.end(), idx), ov.end());
+      auto &iv = inEdges_[edge.callee];
+      iv.erase(std::remove(iv.begin(), iv.end(), idx), iv.end());
+      edgeIndex_.erase(keyOf(edge));
       --liveEdgeCount_;
       ++removed;
     }
@@ -430,39 +471,43 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
 
 void CallGraph::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::deque<CallGraphEdge> newEdges;
-
+  std::deque<StoredEdge> newEdges;
+  std::unordered_map<EdgeKey, size_t, EdgeKeyHash> newIndex;
   std::unordered_map<SId, std::vector<size_t>> newOut;
   std::unordered_map<SId, std::vector<size_t>> newIn;
-  std::unordered_map<SId, std::vector<size_t>> newTuEdges;
+
+  // Old index -> new index, for remapping TU provenance.
+  std::unordered_map<size_t, size_t> remap;
 
   for (size_t old = 0; old < edges_.size(); ++old) {
     auto &edge = edges_[old];
-    if (edge.callerName.empty())
+    if (edge.refs == 0)
       continue;
     size_t neu = newEdges.size();
-    SId callerId = *interner_.find(edge.callerName);
-    SId calleeId = *interner_.find(edge.calleeName);
-    newOut[callerId].push_back(neu);
-    newIn[calleeId].push_back(neu);
-    newEdges.push_back(std::move(edge));
+    remap.emplace(old, neu);
+    newOut[edge.caller].push_back(neu);
+    newIn[edge.callee].push_back(neu);
+    newIndex.emplace(keyOf(edge), neu);
+    newEdges.push_back(edge);
   }
 
-  // Rebuild tuEdges_ with new indices.
+  std::unordered_map<SId, std::vector<size_t>> newTuEdges;
   for (auto &[tuId, indices] : tuEdges_) {
-    // We need a mapping from old index to new index. Build it by scanning
-    // the new edges and matching. Instead, just clear and let the next
-    // indexTU re-populate. This is correct because compact() is only called
-    // between operations, not mid-build.
+    auto &vec = newTuEdges[tuId];
+    for (size_t old : indices) {
+      auto it = remap.find(old);
+      if (it != remap.end())
+        vec.push_back(it->second);
+    }
+    if (vec.empty())
+      newTuEdges.erase(tuId);
   }
-  // Since compact invalidates old indices, clear tuEdges_ entirely.
-  // Re-indexing will repopulate. Alternatively, build a remap:
-  // For now, clear it — callers should only compact when done with removals.
-  tuEdges_.clear();
 
   edges_ = std::move(newEdges);
+  edgeIndex_ = std::move(newIndex);
   outEdges_ = std::move(newOut);
   inEdges_ = std::move(newIn);
+  tuEdges_ = std::move(newTuEdges);
 }
 
 } // namespace vycor

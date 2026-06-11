@@ -27,7 +27,6 @@ namespace vycor {
 namespace {
 
 constexpr char kMagic[4] = {'V', 'Y', 'C', 'S'};
-constexpr uint32_t kNoTu = 0xFFFFFFFFu;
 
 // ----------------------------------------------------------------------------
 // String pool: every string in the data section is a u32 index into a table
@@ -206,12 +205,13 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     // insurance against future callers).
     std::lock_guard<std::mutex> lock(graph.mutex_);
 
-    // Invert tuEdges_: edge index -> TU path pool id.
-    std::unordered_map<size_t, uint32_t> edgeTu;
+    // Invert tuEdges_: edge index -> contributor TU pool ids (an edge can
+    // be registered by several TUs once dedup merges identical edges).
+    std::unordered_map<size_t, std::vector<uint32_t>> edgeTus;
     for (const auto &[tuId, idxs] : graph.tuEdges_) {
       uint32_t tuPoolId = pool.id(graph.interner_.resolve(tuId));
       for (size_t idx : idxs)
-        edgeTu[idx] = tuPoolId;
+        edgeTus[idx].push_back(tuPoolId);
     }
 
     // Nodes with their contributor TU sets.
@@ -233,22 +233,29 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       }
     }
 
-    // Live edges (tombstones — empty callerName — are dropped; the loaded
-    // graph comes back pre-compacted).
+    // Live edges (tombstones are dropped; the loaded graph comes back
+    // pre-compacted). Each edge carries its contributor TU list so the
+    // loaded graph's removeTU behaves identically.
     putU32(data, static_cast<uint32_t>(graph.liveEdgeCount_));
     for (size_t i = 0; i < graph.edges_.size(); ++i) {
-      const CallGraphEdge &e = graph.edges_[i];
-      if (e.callerName.empty())
+      const auto &se = graph.edges_[i];
+      if (se.refs == 0)
         continue;
-      putStr(data, pool, e.callerName);
-      putStr(data, pool, e.calleeName);
-      putU8(data, static_cast<uint8_t>(e.kind));
-      putU8(data, static_cast<uint8_t>(e.confidence));
-      putStr(data, pool, e.callSite);
-      putU32(data, e.indirectionDepth);
-      putU8(data, static_cast<uint8_t>(e.execContext));
-      auto tit = edgeTu.find(i);
-      putU32(data, tit == edgeTu.end() ? kNoTu : tit->second);
+      putStr(data, pool, graph.interner_.resolve(se.caller));
+      putStr(data, pool, graph.interner_.resolve(se.callee));
+      putU8(data, static_cast<uint8_t>(se.kind));
+      putU8(data, static_cast<uint8_t>(se.confidence));
+      putStr(data, pool, graph.interner_.resolve(se.callSite));
+      putU32(data, se.indirectionDepth);
+      putU8(data, static_cast<uint8_t>(se.execContext));
+      auto tit = edgeTus.find(i);
+      if (tit == edgeTus.end()) {
+        putU32(data, 0);
+      } else {
+        putU32(data, static_cast<uint32_t>(tit->second.size()));
+        for (uint32_t tuPoolId : tit->second)
+          putU32(data, tuPoolId);
+      }
     }
 
     // Relationship maps, as flat (a, b) pairs re-added through the public
@@ -414,7 +421,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
     }
   }
 
-  // Edges.
+  // Edges. Re-adding once per contributor reconstructs the dedup refcount
+  // and TU provenance through the public API.
   uint32_t edgeCount = r.count();
   for (uint32_t i = 0; r.ok && i < edgeCount; ++i) {
     CallGraphEdge e;
@@ -425,15 +433,12 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
     e.callSite = r.str();
     e.indirectionDepth = r.u32();
     e.execContext = static_cast<ExecutionContext>(r.u8());
-    uint32_t tuId = r.u32();
-    if (tuId == kNoTu) {
+    uint32_t contribCount = r.count();
+    if (contribCount == 0) {
       out.graph.addEdge(std::move(e));
     } else {
-      if (tuId >= pool.size()) {
-        r.ok = false;
-        break;
-      }
-      out.graph.addEdge(std::move(e), pool[tuId]);
+      for (uint32_t c = 0; r.ok && c < contribCount; ++c)
+        out.graph.addEdge(e, r.str());
     }
   }
 

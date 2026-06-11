@@ -183,8 +183,8 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 3 | Snapshot persistence + warm start | F9, F13a | ✅ done |
 | 4 | Merge Phase 2+3 into one parse | F2 | ✅ done |
 | 5 | Query-time virtual dispatch expansion | F3 | ✅ done (single-parse pipeline still open: Phase 1 stays separate because edge building consults cross-TU function-return data) |
-| 6 | Edge dedup + interned IDs in edges | F4, F5 | |
-| 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | |
+| 6 | Edge dedup + interned IDs in edges | F4, F5 | ✅ done (edges; CallSiteContext scope-sharing from F5 still open) |
+| 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | ✅ done |
 | 8 | USR-based node identity | F8 | |
 | 9 | Subprocess worker isolation | F12 | |
 

@@ -17,7 +17,9 @@
 
 #include "vycor/callgraph/StringInterner.h"
 
+#include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -116,6 +118,10 @@ public:
   std::vector<CallGraphEdge> calleesOf(const std::string &name) const;
   std::vector<CallGraphEdge> callersOf(const std::string &name) const;
 
+  // Count of live stored in-edges (cheap: no materialization or virtual
+  // expansion). Used as a hub heuristic by path-walking tools.
+  size_t storedInDegree(const std::string &name) const;
+
   size_t nodeCount() const;
   size_t edgeCount() const;
 
@@ -163,13 +169,14 @@ public:
   std::set<std::string>
   getFunctionReturns(const std::string &funcName) const;
 
-  // Per-TU incremental re-indexing. removeTU tombstones all edges from the
-  // given TU and removes nodes that were only contributed by that TU.
-  // Returns the number of edges removed.
+  // Per-TU incremental re-indexing. removeTU drops the given TU's
+  // contribution: each of its edge registrations is released, and an edge
+  // is tombstoned only when its last contributor is removed (header-inlined
+  // code registers the same edge from many TUs). Nodes contributed only by
+  // this TU are removed. Returns the number of edges fully removed.
   size_t removeTU(const std::string &tuPath);
 
-  // Compact the edge vector, eliminating tombstones. Invalidates all
-  // previously returned const CallGraphEdge * pointers.
+  // Compact the edge storage, eliminating tombstones.
   void compact();
 
   const StringInterner &interner() const { return interner_; }
@@ -177,17 +184,72 @@ public:
 private:
   using SId = StringInterner::Id;
 
+  // Compact interned edge record. Public queries materialize CallGraphEdge
+  // (with resolved strings) on demand; nothing outside CallGraph sees this.
+  struct StoredEdge {
+    SId caller;
+    SId callee;
+    SId callSite;
+    EdgeKind kind;
+    Confidence confidence;
+    ExecutionContext execContext;
+    uint32_t indirectionDepth;
+    // Number of registrations (one per addEdge call, TU-tagged or not).
+    // 0 = tombstone.
+    uint32_t refs;
+  };
+
+  // Content identity for dedup: every semantic field participates, so
+  // edges that differ only in confidence or execution context stay
+  // distinct.
+  struct EdgeKey {
+    SId caller, callee, callSite;
+    uint8_t kind, confidence, execContext;
+    uint32_t indirectionDepth;
+    bool operator==(const EdgeKey &o) const {
+      return caller == o.caller && callee == o.callee &&
+             callSite == o.callSite && kind == o.kind &&
+             confidence == o.confidence && execContext == o.execContext &&
+             indirectionDepth == o.indirectionDepth;
+    }
+  };
+  struct EdgeKeyHash {
+    size_t operator()(const EdgeKey &k) const {
+      size_t h = std::hash<uint64_t>{}(
+          (static_cast<uint64_t>(k.caller) << 32) | k.callee);
+      h ^= std::hash<uint64_t>{}(
+               (static_cast<uint64_t>(k.callSite) << 32) |
+               (static_cast<uint64_t>(k.kind) << 16) |
+               (static_cast<uint64_t>(k.confidence) << 8) | k.execContext) +
+           0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      return h ^ k.indirectionDepth;
+    }
+  };
+
+  static EdgeKey keyOf(const StoredEdge &se) {
+    return {se.caller,
+            se.callee,
+            se.callSite,
+            static_cast<uint8_t>(se.kind),
+            static_cast<uint8_t>(se.confidence),
+            static_cast<uint8_t>(se.execContext),
+            se.indirectionDepth};
+  }
+
+  CallGraphEdge materialize(const StoredEdge &se) const;
+
   // Snapshot serialization reads provenance maps (tuEdges_,
-  // nodeContributors_) that have no public accessors; deserialization goes
-  // through the public API.
+  // nodeContributors_) and edge storage that have no public accessors;
+  // deserialization goes through the public API.
   friend class SnapshotIO;
 
   mutable std::mutex mutex_;
   StringInterner interner_;
   std::unordered_map<SId, CallGraphNode> nodes_;
-  // deque, not vector: queries hand out pointers into this container, and
-  // growth must not invalidate them (see class comment).
-  std::deque<CallGraphEdge> edges_;
+  // deque, not vector: indices into this container are held by the maps
+  // below and must stay stable across growth (see class comment).
+  std::deque<StoredEdge> edges_;
+  std::unordered_map<EdgeKey, size_t, EdgeKeyHash> edgeIndex_;
   std::unordered_map<SId, std::vector<size_t>> outEdges_;
   std::unordered_map<SId, std::vector<size_t>> inEdges_;
 

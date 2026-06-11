@@ -111,8 +111,20 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 | `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 | `McpTools.h/.cpp` | Tool implementations: lookup, callers, callees, call chains, exception safety, dead code, class hierarchy |
 
-**8 MCP tools**: `lookup_function`, `get_callees`, `get_callers`, `find_call_chain`,
-`query_exception_safety`, `query_call_site_context`, `analyze_dead_code`, `get_class_hierarchy`
+**17 MCP tools**: `search_functions`, `lookup_function`, `get_callees`,
+`get_callers`, `find_call_chain`, `query_exception_safety`,
+`query_call_site_context`, `query_raii_scopes_at_callsite`,
+`query_locks_held`, `query_same_lock`, `analyze_dead_code`,
+`get_class_hierarchy`, `list_entry_points`, `graph_summary`,
+`list_callback_sites`, `list_concurrency_entry_points`, `reindex_tu`.
+
+Identical edges registered by multiple TUs (header-inlined code) are
+**deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
+an edge when its last contributing TU is removed. Edge records store
+interned string IDs internally; public queries materialize `CallGraphEdge`
+with resolved strings. Path-walking tools (`find_call_chain`,
+`query_locks_held`, `query_same_lock`) accept `max_fan_in` to skip
+high-fan-in hubs and report them in the response.
 
 ---
 

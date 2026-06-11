@@ -417,9 +417,9 @@ TEST_CASE("readRequest parses newline-delimited messages (MCP stdio framing)",
 // Tool registration tests
 // ============================================================================
 
-TEST_CASE("getRegisteredTools returns all 16 tools", "[mcp][tools]") {
+TEST_CASE("getRegisteredTools returns all 17 tools", "[mcp][tools]") {
   auto tools = getRegisteredTools();
-  CHECK(tools.size() == 16);
+  CHECK(tools.size() == 17);
 
   // Verify tool names.
   std::set<std::string> names;
@@ -442,11 +442,70 @@ TEST_CASE("getRegisteredTools returns all 16 tools", "[mcp][tools]") {
   CHECK(names.count("list_callback_sites") == 1);
   CHECK(names.count("list_concurrency_entry_points") == 1);
   CHECK(names.count("reindex_tu") == 1);
+  CHECK(names.count("search_functions") == 1);
 }
 
 // ============================================================================
 // Tool handler tests
 // ============================================================================
+
+TEST_CASE("search_functions tool", "[mcp][tools]") {
+  auto graph = buildTestGraph();
+  ControlFlowIndex cfIndex;
+  ControlFlowOracle oracle(graph, cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{graph, oracle, cfIndex, eps};
+
+  auto tools = getRegisteredTools();
+  McpToolHandler handler;
+  for (auto &t : tools) {
+    if (t.name == "search_functions") {
+      handler = t.handler;
+      break;
+    }
+  }
+  REQUIRE(handler);
+
+  SECTION("substring match is case-insensitive") {
+    llvm::json::Object args;
+    args["query"] = "dowork";
+    auto result = handler(args, ctx);
+    auto obj = parseToolResult(result);
+    CHECK(obj.getInteger("totalMatches") == 2); // Base::doWork, Derived::doWork
+    auto *matches = obj.getArray("matches");
+    REQUIRE(matches != nullptr);
+    REQUIRE(matches->size() == 2);
+    // Exact unqualified-name matches rank first; ties break by length.
+    auto *first = (*matches)[0].getAsObject();
+    REQUIRE(first != nullptr);
+    CHECK(first->getString("qualifiedName") == "Base::doWork");
+  }
+
+  SECTION("limit truncates and reports") {
+    llvm::json::Object args;
+    args["query"] = "o"; // matches many
+    args["limit"] = 2;
+    auto result = handler(args, ctx);
+    auto obj = parseToolResult(result);
+    CHECK(obj.getInteger("returned") == 2);
+    CHECK(obj.getBoolean("truncated") == true);
+  }
+
+  SECTION("no match returns empty result, not an error") {
+    llvm::json::Object args;
+    args["query"] = "zzz_no_such_function";
+    auto result = handler(args, ctx);
+    CHECK_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    CHECK(obj.getInteger("totalMatches") == 0);
+  }
+
+  SECTION("missing query is an error") {
+    llvm::json::Object args;
+    auto result = handler(args, ctx);
+    CHECK(isErrorResult(result));
+  }
+}
 
 TEST_CASE("lookup_function tool", "[mcp][tools]") {
   auto graph = buildTestGraph();

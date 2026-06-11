@@ -610,3 +610,70 @@ TEST_CASE("expansion does not duplicate stored fan-out edges",
   auto callers = g.callersOf("Derived::run");
   CHECK(callers.size() == 1);
 }
+
+// ============================================================================
+// Edge deduplication with multi-TU provenance
+// ============================================================================
+
+TEST_CASE("identical edges from multiple TUs are deduplicated",
+          "[callgraph][dedup]") {
+  CallGraph g;
+  g.addNode({"inlineCaller", "common.h", 2, false, false, ""}, "a.cpp");
+  g.addNode({"inlineCaller", "common.h", 2, false, false, ""}, "b.cpp");
+  g.addNode({"target", "t.cpp", 5, false, false, ""}, "t.cpp");
+
+  // Header-inlined function: both TUs register the identical edge.
+  g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+             Confidence::Proven, "common.h:3:5", 0}, "a.cpp");
+  g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+             Confidence::Proven, "common.h:3:5", 0}, "b.cpp");
+
+  CHECK(g.edgeCount() == 1);
+  CHECK(g.callersOf("target").size() == 1);
+
+  SECTION("edge survives removal of one contributing TU") {
+    CHECK(g.removeTU("a.cpp") == 0); // released, not removed
+    CHECK(g.edgeCount() == 1);
+    CHECK(g.callersOf("target").size() == 1);
+
+    CHECK(g.removeTU("b.cpp") == 1); // last contributor gone
+    CHECK(g.edgeCount() == 0);
+    CHECK(g.callersOf("target").empty());
+  }
+
+  SECTION("edges differing in any semantic field stay distinct") {
+    g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+               Confidence::Plausible, "common.h:3:5", 0}, "a.cpp");
+    g.addEdge({"inlineCaller", "target", EdgeKind::FunctionPointer,
+               Confidence::Proven, "common.h:3:5", 0}, "a.cpp");
+    g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+               Confidence::Proven, "common.h:9:1", 0}, "a.cpp");
+    CHECK(g.edgeCount() == 4);
+  }
+
+  SECTION("re-adding after full removal works") {
+    g.removeTU("a.cpp");
+    g.removeTU("b.cpp");
+    g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+               Confidence::Proven, "common.h:3:5", 0}, "a.cpp");
+    CHECK(g.edgeCount() == 1);
+    CHECK(g.callersOf("target").size() == 1);
+  }
+
+  SECTION("compact preserves TU provenance") {
+    // Create a tombstone, then compact, then verify removeTU still works
+    // on the surviving edge.
+    g.addNode({"other", "o.cpp", 1, false, false, ""}, "c.cpp");
+    g.addEdge({"other", "target", EdgeKind::DirectCall,
+               Confidence::Proven, "o.cpp:2:3", 0}, "c.cpp");
+    g.removeTU("c.cpp"); // tombstones other->target
+    g.compact();
+    CHECK(g.edgeCount() == 1);
+
+    // Provenance survived compact: removing both contributors still
+    // removes the deduped edge.
+    g.removeTU("a.cpp");
+    CHECK(g.removeTU("b.cpp") == 1);
+    CHECK(g.edgeCount() == 0);
+  }
+}

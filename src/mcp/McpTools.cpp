@@ -291,6 +291,81 @@ static llvm::json::Value handleLookupFunction(const llvm::json::Object &args,
 }
 
 // ============================================================================
+// Tool 1a: search_functions
+// ============================================================================
+
+static llvm::json::Value
+handleSearchFunctions(const llvm::json::Object &args,
+                      const McpToolContext &ctx) {
+  auto query = args.getString("query");
+  if (!query || query->empty())
+    return makeErrorResult("Missing required parameter 'query'");
+
+  int64_t limit = 25;
+  if (auto l = args.getInteger("limit"))
+    limit = std::max<int64_t>(1, *l);
+
+  std::string needle = query->lower();
+
+  // Rank: exact name match, then prefix of the unqualified name, then any
+  // substring. Within a tier, shorter qualified names first (closer match).
+  struct Hit {
+    const CallGraphNode *node;
+    int tier;
+  };
+  std::vector<Hit> hits;
+  for (auto *node : ctx.graph.allNodes()) {
+    llvm::StringRef qn(node->qualifiedName);
+    std::string lower = qn.lower();
+    auto pos = lower.find(needle);
+    if (pos == std::string::npos)
+      continue;
+    int tier = 2;
+    llvm::StringRef unqualified = qn;
+    auto sep = qn.rfind("::");
+    if (sep != llvm::StringRef::npos)
+      unqualified = qn.substr(sep + 2);
+    std::string unqLower = unqualified.lower();
+    if (unqLower == needle)
+      tier = 0;
+    else if (unqLower.compare(0, needle.size(), needle) == 0)
+      tier = 1;
+    hits.push_back({node, tier});
+  }
+
+  std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
+    if (a.tier != b.tier)
+      return a.tier < b.tier;
+    if (a.node->qualifiedName.size() != b.node->qualifiedName.size())
+      return a.node->qualifiedName.size() < b.node->qualifiedName.size();
+    return a.node->qualifiedName < b.node->qualifiedName;
+  });
+
+  llvm::json::Array results;
+  for (const auto &hit : hits) {
+    if (static_cast<int64_t>(results.size()) >= limit)
+      break;
+    llvm::json::Object entry;
+    entry["qualifiedName"] = hit.node->qualifiedName;
+    entry["file"] = hit.node->file;
+    entry["line"] = static_cast<int64_t>(hit.node->line);
+    if (!hit.node->enclosingClass.empty())
+      entry["enclosingClass"] = hit.node->enclosingClass;
+    if (hit.node->isVirtual)
+      entry["isVirtual"] = true;
+    results.push_back(llvm::json::Value(std::move(entry)));
+  }
+
+  llvm::json::Object obj;
+  obj["query"] = query->str();
+  obj["totalMatches"] = static_cast<int64_t>(hits.size());
+  obj["returned"] = static_cast<int64_t>(results.size());
+  obj["truncated"] = static_cast<int64_t>(hits.size()) > limit;
+  obj["matches"] = std::move(results);
+  return makeTextResult(llvm::json::Value(std::move(obj)));
+}
+
+// ============================================================================
 // Tool 2: get_callees
 // ============================================================================
 
@@ -366,6 +441,13 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   if (auto md = args.getInteger("max_depth"))
     maxDepth = *md;
 
+  // Hub cutoff: skip expanding nodes whose stored in-degree exceeds this,
+  // reporting them instead. Bounds DFS work on graphs with high-fan-in
+  // utility functions (loggers, allocators). 0 disables.
+  int64_t maxFanIn = 1000;
+  if (auto mf = args.getInteger("max_fan_in"))
+    maxFanIn = std::max<int64_t>(0, *mf);
+
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
     return makeErrorResult(*err);
@@ -390,6 +472,7 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   std::vector<std::string> currentPath;    // target -> ... -> start
   std::vector<CallGraphEdge> currentEdges; // parallel to edges along currentPath
   std::set<std::string> onPath;
+  std::map<std::string, size_t> skippedHubs; // name -> stored in-degree
 
   std::function<void(const std::string &, unsigned)> dfs =
       [&](const std::string &node, unsigned depth) {
@@ -406,6 +489,13 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
           fp.nodes.assign(currentPath.rbegin(), currentPath.rend());
           fp.edges.assign(currentEdges.rbegin(), currentEdges.rend());
           foundPaths.push_back(std::move(fp));
+        } else if (maxFanIn > 0 && depth > 0 &&
+                   ctx.graph.storedInDegree(node) >
+                       static_cast<size_t>(maxFanIn)) {
+          // Hub: expanding its ancestry would dominate the search. Record
+          // and prune; the caller can re-run with a higher max_fan_in or
+          // query the hub directly.
+          skippedHubs.emplace(node, ctx.graph.storedInDegree(node));
         } else {
           auto callers = ctx.graph.callersOf(node);
           for (const auto &edge : callers) {
@@ -448,6 +538,20 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   obj["target"] = to->str();
   obj["pathCount"] = static_cast<int64_t>(foundPaths.size());
   obj["paths"] = std::move(pathsJson);
+  if (!skippedHubs.empty()) {
+    llvm::json::Array hubs;
+    for (const auto &[name, inDegree] : skippedHubs) {
+      llvm::json::Object hub;
+      hub["name"] = name;
+      hub["inDegree"] = static_cast<int64_t>(inDegree);
+      hubs.push_back(llvm::json::Value(std::move(hub)));
+    }
+    obj["skippedHubs"] = std::move(hubs);
+    obj["skippedHubsNote"] =
+        "Ancestry of these high-fan-in functions was not expanded "
+        "(stored in-degree exceeds max_fan_in). Re-run with a higher "
+        "max_fan_in or query them directly with get_callers.";
+  }
   return makeTextResult(llvm::json::Value(std::move(obj)));
 }
 
@@ -704,6 +808,7 @@ struct PathResult {
 // Safety caps to bound DFS cost on hub functions and cyclic graphs.
 constexpr unsigned kDefaultMaxDepth = 20;
 constexpr size_t kMaxPaths = 512;
+constexpr size_t kDefaultMaxFanIn = 1000;
 
 // Collect Lock-kind RAII locals live at the edge (caller → callee @ callSite),
 // reading from the ControlFlowIndex. Appends deduped-by-key occurrences.
@@ -734,7 +839,9 @@ static void reverseDfs(const CallGraph &graph,
                        std::vector<std::string> &path,
                        std::vector<std::string> &edgeCallSites,
                        std::unordered_set<std::string> &visitedEdges,
-                       unsigned maxDepth, std::vector<PathResult> &out,
+                       unsigned maxDepth, size_t maxFanIn,
+                       std::map<std::string, size_t> &skippedHubs,
+                       std::vector<PathResult> &out,
                        bool &truncated) {
   if (out.size() >= kMaxPaths) {
     truncated = true;
@@ -758,6 +865,15 @@ static void reverseDfs(const CallGraph &graph,
   if (path.size() >= maxDepth)
     return;
 
+  // Hub cutoff: never refuse to expand the query target itself.
+  if (maxFanIn > 0 && path.size() > 1) {
+    size_t inDeg = graph.storedInDegree(cur);
+    if (inDeg > maxFanIn) {
+      skippedHubs.emplace(cur, inDeg);
+      return;
+    }
+  }
+
   auto callers = graph.callersOf(cur);
   for (const auto &edge : callers) {
     // Skip indirect edges — they have no stable callee identity for
@@ -772,7 +888,7 @@ static void reverseDfs(const CallGraph &graph,
     path.push_back(edge.callerName);
     edgeCallSites.push_back(edge.callSite);
     reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
-               visitedEdges, maxDepth, out, truncated);
+               visitedEdges, maxDepth, maxFanIn, skippedHubs, out, truncated);
     edgeCallSites.pop_back();
     path.pop_back();
     visitedEdges.erase(key);
@@ -788,7 +904,9 @@ static std::vector<PathResult>
 collectLocksHeld(const CallGraph &graph, const ControlFlowIndex &cfIndex,
                  const std::string &target,
                  const std::vector<std::string> &entryPoints,
-                 unsigned maxDepth, bool &truncated) {
+                 unsigned maxDepth, size_t maxFanIn,
+                 std::map<std::string, size_t> &skippedHubs,
+                 bool &truncated) {
   std::vector<PathResult> out;
   truncated = false;
   if (entryPoints.empty())
@@ -800,7 +918,7 @@ collectLocksHeld(const CallGraph &graph, const ControlFlowIndex &cfIndex,
   std::vector<std::string> edgeCallSites; // per edge caller→callee
   std::unordered_set<std::string> visitedEdges;
   reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
-             visitedEdges, maxDepth, out, truncated);
+             visitedEdges, maxDepth, maxFanIn, skippedHubs, out, truncated);
   return out;
 }
 
@@ -845,9 +963,15 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
   if (entryPoints.empty())
     entryPoints = ctx.entryPoints;
 
+  size_t maxFanIn = kDefaultMaxFanIn;
+  if (auto mf = args.getInteger("max_fan_in"))
+    maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
+
   bool truncated = false;
+  std::map<std::string, size_t> skippedHubs;
   auto paths = collectLocksHeld(ctx.graph, ctx.cfIndex, fn->str(),
-                                 entryPoints, maxDepth, truncated);
+                                 entryPoints, maxDepth, maxFanIn,
+                                 skippedHubs, truncated);
 
   llvm::json::Object out;
   out["function"] = fn->str();
@@ -857,6 +981,16 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
   out["paths"] = std::move(arr);
   out["truncated"] = truncated;
   out["pathCount"] = static_cast<int64_t>(paths.size());
+  if (!skippedHubs.empty()) {
+    llvm::json::Array hubs;
+    for (const auto &[name, inDegree] : skippedHubs) {
+      llvm::json::Object hub;
+      hub["name"] = name;
+      hub["inDegree"] = static_cast<int64_t>(inDegree);
+      hubs.push_back(llvm::json::Value(std::move(hub)));
+    }
+    out["skippedHubs"] = std::move(hubs);
+  }
   return makeTextResult(llvm::json::Value(std::move(out)));
 }
 
@@ -886,11 +1020,18 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
   if (entryPoints.empty())
     entryPoints = ctx.entryPoints;
 
+  size_t maxFanIn = kDefaultMaxFanIn;
+  if (auto mf = args.getInteger("max_fan_in"))
+    maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
+
   bool truncA = false, truncB = false;
+  std::map<std::string, size_t> skippedHubs;
   auto pathsA = collectLocksHeld(ctx.graph, ctx.cfIndex, a->str(),
-                                  entryPoints, maxDepth, truncA);
+                                  entryPoints, maxDepth, maxFanIn,
+                                  skippedHubs, truncA);
   auto pathsB = collectLocksHeld(ctx.graph, ctx.cfIndex, b->str(),
-                                  entryPoints, maxDepth, truncB);
+                                  entryPoints, maxDepth, maxFanIn,
+                                  skippedHubs, truncB);
 
   // Collect lock identity sets per side, remembering which paths use each.
   std::unordered_map<LockKey, std::vector<size_t>, LockKeyHash> byKeyA,
@@ -933,6 +1074,16 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
   out["bOnly"] =
       static_cast<int64_t>(byKeyB.size()) - static_cast<int64_t>(sharedCount);
   out["truncated"] = truncA || truncB;
+  if (!skippedHubs.empty()) {
+    llvm::json::Array hubs;
+    for (const auto &[name, inDegree] : skippedHubs) {
+      llvm::json::Object hub;
+      hub["name"] = name;
+      hub["inDegree"] = static_cast<int64_t>(inDegree);
+      hubs.push_back(llvm::json::Value(std::move(hub)));
+    }
+    out["skippedHubs"] = std::move(hubs);
+  }
   return makeTextResult(llvm::json::Value(std::move(out)));
 }
 
@@ -1458,6 +1609,10 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["include_confidences"] = stringArrayProp(
         "Explicit set of confidence tiers allowed at every hop. Overrides "
         "min_confidence.");
+    props["max_fan_in"] = intProp(
+        "Skip expanding the ancestry of functions with more stored callers "
+        "than this (high-fan-in hubs like loggers); skipped hubs are listed "
+        "in the response. 0 disables the cutoff (default: 1000).");
     llvm::json::Array req;
     req.push_back("to");
     llvm::json::Object schema;
@@ -1473,6 +1628,30 @@ std::vector<McpToolEntry> getRegisteredTools() {
                      "ThreadEntry hops and other non-Synchronous edges.",
                      llvm::json::Value(std::move(schema)),
                      handleFindCallChain});
+  }
+
+  // 4a. search_functions
+  {
+    llvm::json::Object props;
+    props["query"] = stringProp(
+        "Case-insensitive substring to match against qualified function "
+        "names (e.g. 'execute' or 'TransformPipeline').");
+    props["limit"] = intProp("Maximum matches to return (default: 25)");
+    llvm::json::Array req;
+    req.push_back("query");
+    llvm::json::Object schema;
+    schema["type"] = "object";
+    schema["properties"] = std::move(props);
+    schema["required"] = std::move(req);
+
+    tools.push_back({"search_functions",
+                     "Find functions by name substring when the exact "
+                     "qualified name is unknown. Returns candidates ranked "
+                     "by match quality (exact unqualified name, then prefix, "
+                     "then substring). Use this before lookup_function / "
+                     "get_callers when unsure of the precise name.",
+                     llvm::json::Value(std::move(schema)),
+                     handleSearchFunctions});
   }
 
   // 5. query_exception_safety
@@ -1552,6 +1731,10 @@ std::vector<McpToolEntry> getRegisteredTools() {
         stringProp("Qualified name of the target function");
     props["max_depth"] = intProp(
         "Maximum number of frames above the target to walk (default: 20)");
+    props["max_fan_in"] = intProp(
+        "Skip expanding functions with more stored callers than this; "
+        "skipped hubs are listed in the response. 0 disables "
+        "(default: 1000).");
     props["entry_points"] = stringArrayProp(
         "Entry points to root the reverse walk (default: configured "
         "entry points)");
@@ -1582,6 +1765,10 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["fn_b"] = stringProp("Second function qualified name");
     props["max_depth"] = intProp(
         "Maximum number of frames above each target to walk (default: 20)");
+    props["max_fan_in"] = intProp(
+        "Skip expanding functions with more stored callers than this; "
+        "skipped hubs are listed in the response. 0 disables "
+        "(default: 1000).");
     props["entry_points"] = stringArrayProp(
         "Entry points to root the reverse walk (default: configured "
         "entry points)");

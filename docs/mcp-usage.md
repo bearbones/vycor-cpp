@@ -175,9 +175,15 @@ def call(proc, req_id, tool, params):
 
 ### Step 1 — Mine function names before querying
 
-`lookup_function` requires an **exact qualified name**. Do not guess.
-Before launching the server, extract real function names from a `prism`
-dump or from the `compile_commands.json` source files:
+`lookup_function` requires an **exact qualified name**. Do not guess —
+use `search_functions` first:
+
+```python
+r = call(proc, 1, "search_functions", {"query": "handleServerSecurity"})
+# -> ranked candidates with qualifiedName, file, line
+```
+
+For bulk name mining outside the server, a `prism` dump also works:
 
 ```bash
 # Get a prism dump (faster than megascope for discovery)
@@ -211,9 +217,9 @@ r = call(proc, 1, "get_callers",
 # Each unique callerName with zero callers of its own is a real entry point
 ```
 
-Deduplicate the caller list in your client — the graph can produce
-duplicate edges (same caller name, different call site) for template
-instantiations or inlined functions.
+Identical edges from multiple TUs are deduplicated server-side; distinct
+call sites for the same caller still appear as separate entries (that is
+real information, not duplication).
 
 ### Step 3 — Check exception safety with real entry points
 
