@@ -181,10 +181,10 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 1 | Newline-delimited stdio framing with Content-Length autodetect | F1 | ✅ done |
 | 2 | Quick wins: `deque` for `edges_`, handler map as member, locking contract docs | F6, F7, F13 | ✅ done |
 | 3 | Snapshot persistence + warm start | F9, F13a | ✅ done |
-| 4 | Merge Phase 2+3 into one parse | F2 | |
-| 5 | Query-time virtual dispatch expansion (then 1-parse pipeline) | F3, F2 | |
-| 6 | Edge dedup + interned IDs in edges | F4, F5 | |
-| 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | |
+| 4 | Merge Phase 2+3 into one parse | F2 | ✅ done |
+| 5 | Query-time virtual dispatch expansion | F3 | ✅ done (single-parse pipeline still open: Phase 1 stays separate because edge building consults cross-TU function-return data) |
+| 6 | Edge dedup + interned IDs in edges | F4, F5 | ✅ done (edges; CallSiteContext scope-sharing from F5 still open) |
+| 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | ✅ done |
 | 8 | USR-based node identity | F8 | |
 | 9 | Subprocess worker isolation | F12 | |
 

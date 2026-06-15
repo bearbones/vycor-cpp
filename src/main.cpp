@@ -494,18 +494,15 @@ int main(int argc, const char **argv) {
 
     std::string sysroot = PrismSysroot.getValue();
 
-    // Phase 1+2: Build call graph.
-    auto graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
-                                              PrismThreads, pchPtr, sysroot);
-
-    // Phase 3: Build control flow index.
+    // Phases 1-3: bake call graph and control flow index (Phase 2+3 share
+    // one parse per TU).
     vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(PrismLockTypes.begin(),
                                  PrismLockTypes.end());
-    auto cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
-                                                      collapsePaths,
-                                                      PrismThreads, pchPtr,
-                                                      sysroot, lockCfg);
+    auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
+                                    PrismThreads, pchPtr, sysroot, lockCfg);
+    auto graph = std::move(baked.graph);
+    auto cfIndex = std::move(baked.cfIndex);
 
     // Dump mode: serialize the full index as JSON.
     if (PrismModeOpt == PrismDump) {
@@ -726,11 +723,8 @@ int main(int argc, const char **argv) {
               graph.removeTU(stamp.path);
               cfIndex.removeTU(stamp.path);
             }
-            vycor::indexTU(graph, *compDb, stamp.path, collapsePaths,
-                           pchPtr, sysroot);
-            vycor::indexTUControlFlow(cfIndex, *compDb, stamp.path, graph,
-                                      collapsePaths, pchPtr, sysroot,
-                                      lockCfg);
+            vycor::bakeTU(graph, cfIndex, *compDb, stamp.path,
+                          collapsePaths, pchPtr, sysroot, lockCfg);
             ++refreshed;
           }
           llvm::errs() << "megascope: warm start from " << McpSnapshot
@@ -747,21 +741,16 @@ int main(int argc, const char **argv) {
     }
 
     if (needFullBuild) {
-      llvm::errs() << "megascope: building call graph ("
+      llvm::errs() << "megascope: baking call graph + control flow index ("
                    << files.size() << " files, "
                    << McpThreads << " threads)...\n";
-      graph = vycor::buildCallGraph(*compDb, files, collapsePaths,
-                                    McpThreads, pchPtr, sysroot);
-      llvm::errs() << "megascope: call graph built ("
+      auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
+                                      McpThreads, pchPtr, sysroot, lockCfg);
+      graph = std::move(baked.graph);
+      cfIndex = std::move(baked.cfIndex);
+      llvm::errs() << "megascope: indexes built ("
                    << graph.nodeCount() << " nodes, "
-                   << graph.edgeCount() << " edges)\n";
-
-      llvm::errs() << "megascope: building control flow index...\n";
-      cfIndex = vycor::buildControlFlowIndex(*compDb, files, graph,
-                                             collapsePaths,
-                                             McpThreads, pchPtr,
-                                             sysroot, lockCfg);
-      llvm::errs() << "megascope: control flow index built ("
+                   << graph.edgeCount() << " edges, "
                    << cfIndex.size() << " call sites)\n";
     }
 

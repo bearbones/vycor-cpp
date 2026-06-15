@@ -173,18 +173,21 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
   }
 
   SECTION("edges with kind, confidence, and execution context") {
+    // 2 stored callees of main, plus the synthesized virtual-dispatch
+    // expansion Base::run -> Derived::run (the override relation also
+    // round-tripped through the snapshot).
     auto callees = loaded->graph.calleesOf("main");
-    REQUIRE(callees.size() == 2);
+    REQUIRE(callees.size() == 3);
 
     auto callers = loaded->graph.callersOf("helper");
     REQUIRE(callers.size() == 2);
 
     auto spawns = loaded->graph.calleesOf("helper");
     REQUIRE(spawns.size() == 1);
-    CHECK(spawns[0]->kind == EdgeKind::ThreadEntry);
-    CHECK(spawns[0]->execContext == ExecutionContext::ThreadSpawn);
-    CHECK(spawns[0]->indirectionDepth == 1);
-    CHECK(spawns[0]->callSite == "/src/a.cpp:4:5");
+    CHECK(spawns[0].kind == EdgeKind::ThreadEntry);
+    CHECK(spawns[0].execContext == ExecutionContext::ThreadSpawn);
+    CHECK(spawns[0].indirectionDepth == 1);
+    CHECK(spawns[0].callSite == "/src/a.cpp:4:5");
   }
 
   SECTION("hierarchy, overrides, impls, returns") {
@@ -318,4 +321,34 @@ TEST_CASE("stampFiles flags missing files with zero stamps", "[snapshot]") {
   REQUIRE(stamps.size() == 1);
   CHECK(stamps[0].mtimeNs == 0);
   CHECK(stamps[0].size == 0);
+}
+
+TEST_CASE("snapshot round-trips multi-contributor deduped edges",
+          "[snapshot]") {
+  auto path = tempSnapshotPath("multicontrib");
+  CallGraph g;
+  g.addNode({"inlineCaller", "common.h", 2, false, false, ""}, "/src/a.cpp");
+  g.addNode({"inlineCaller", "common.h", 2, false, false, ""}, "/src/b.cpp");
+  g.addNode({"target", "t.cpp", 5, false, false, ""}, "/src/t.cpp");
+  g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+             Confidence::Proven, "common.h:3:5", 0}, "/src/a.cpp");
+  g.addEdge({"inlineCaller", "target", EdgeKind::DirectCall,
+             Confidence::Proven, "common.h:3:5", 0}, "/src/b.cpp");
+  REQUIRE(g.edgeCount() == 1);
+
+  ControlFlowIndex cf;
+  REQUIRE(SnapshotIO::save(path, g, cf, makeMeta()));
+  auto loaded = SnapshotIO::load(path);
+  std::remove(path.c_str());
+  REQUIRE(loaded.has_value());
+
+  CHECK(loaded->graph.edgeCount() == 1);
+  CHECK(loaded->graph.callersOf("target").size() == 1);
+
+  // Both contributors must survive the round-trip: removing one TU keeps
+  // the edge, removing both drops it.
+  CHECK(loaded->graph.removeTU("/src/a.cpp") == 0);
+  CHECK(loaded->graph.edgeCount() == 1);
+  CHECK(loaded->graph.removeTU("/src/b.cpp") == 1);
+  CHECK(loaded->graph.edgeCount() == 0);
 }

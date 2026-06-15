@@ -102,10 +102,10 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
       queue.pop();
 
       auto edges = graph_.calleesOf(current);
-      for (const auto *edge : edges) {
+      for (const auto &edge : edges) {
         // Track constructed classes from ConstructorCall edges.
-        if (edge->kind == EdgeKind::ConstructorCall) {
-          auto *calleeNode = graph_.findNode(edge->calleeName);
+        if (edge.kind == EdgeKind::ConstructorCall) {
+          auto *calleeNode = graph_.findNode(edge.calleeName);
           if (calleeNode && !calleeNode->enclosingClass.empty()) {
             if (constructedClasses.insert(calleeNode->enclosingClass).second) {
               changed = true; // New class constructed, may unlock deferred edges.
@@ -113,13 +113,13 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
           }
         }
 
-        if (shouldFollowEdge(*edge)) {
-          if (alive.insert(edge->calleeName).second)
-            queue.push(edge->calleeName);
+        if (shouldFollowEdge(edge)) {
+          if (alive.insert(edge.calleeName).second)
+            queue.push(edge.calleeName);
         } else if (includeVirtualPlausible &&
-                   edge->kind == EdgeKind::VirtualDispatch &&
-                   edge->confidence == Confidence::Plausible) {
-          deferredVirtualEdges.push_back({edge->calleeName});
+                   edge.kind == EdgeKind::VirtualDispatch &&
+                   edge.confidence == Confidence::Plausible) {
+          deferredVirtualEdges.push_back({edge.calleeName});
         }
       }
     }
