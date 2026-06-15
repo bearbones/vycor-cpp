@@ -2,7 +2,7 @@
 
 This guide covers practical usage of `megascope` based on real analysis runs
 against game-engine codebases. It focuses on workflow, gotchas, and effective
-query patterns rather than repeating what's in CLAUDE.md.
+query patterns rather than repeating what's in AGENTS.md.
 
 For API critique and improvement proposals see `docs/mcp-review.md`.
 

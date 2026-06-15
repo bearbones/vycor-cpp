@@ -127,7 +127,7 @@ will tell you immediately.
    - If it's a behavioral change without an obvious workaround, decide
      whether to drop support or write an adapter; document the decision.
 4. Update the support matrix table at the top of this document.
-5. Update `CLAUDE.md`'s "External Dependencies" line to include the new
+5. Update `AGENTS.md`'s "External Dependencies" line to include the new
    version if it changes the supported range.
 
 ## Removing a supported LLVM major
@@ -202,4 +202,4 @@ defense against semantic conflicts that text-merge can't catch.
 - `include/vycor/compat/ClangVersion.h` — version-check macros.
 - `CMakeLists.txt` — `VYCOR_SUPPORTED_LLVM_VERSIONS`, LLVM detection.
 - `.github/workflows/ci.yml` — matrix CI per supported major.
-- `CLAUDE.md` — top-level developer guide; cross-references this document.
+- `AGENTS.md` — top-level developer guide; cross-references this document.

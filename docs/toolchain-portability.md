@@ -202,6 +202,6 @@ Hermetic dependency resolution via Nix flakes or Bazel's `http_archive`.
 3. Guard submodule fallback behind `VYCOR_USE_SUBMODULE`
 4. Add `VYCOR_DEFAULT_CLANG` cache variable
 5. Gitignore `CMakeUserPresets.json` and `cmake/org-overrides.cmake`
-6. Document in CLAUDE.md: "Forking for your organization" section
+6. Document in AGENTS.md: "Forking for your organization" section
 
 Total CMakeLists.txt changes: ~10 lines. No behavioral change for existing users.
