@@ -204,8 +204,8 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
   SECTION("control flow contexts") {
     CHECK(loaded->cfIndex.size() == 2);
 
-    const auto *ctx = loaded->cfIndex.contextAtSite("/src/a.cpp:11:3");
-    REQUIRE(ctx != nullptr);
+    const auto ctx = loaded->cfIndex.contextAtSite("/src/a.cpp:11:3");
+    REQUIRE(ctx.has_value());
     CHECK(ctx->callerName == "main");
     CHECK(ctx->tuPath == "/src/a.cpp");
     REQUIRE(ctx->enclosingTryCatches.size() == 1);
@@ -219,8 +219,8 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
     REQUIRE(ctx->liveRaiiLocals.size() == 1);
     CHECK(ctx->liveRaiiLocals[0].kind == RaiiKind::Lock);
 
-    const auto *bare = loaded->cfIndex.contextAtSite("/src/b.cpp:16:3");
-    REQUIRE(bare != nullptr);
+    const auto bare = loaded->cfIndex.contextAtSite("/src/b.cpp:16:3");
+    REQUIRE(bare.has_value());
     CHECK(bare->callerNoexcept == NoexceptSpec::Noexcept);
   }
 }

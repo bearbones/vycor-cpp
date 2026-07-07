@@ -36,7 +36,7 @@ TEST_CASE("ControlFlowIndex stores and queries contexts",
 
   SECTION("empty index returns no results") {
     CHECK(index.size() == 0);
-    CHECK(index.contextAtSite("test.cpp:10:5") == nullptr);
+    CHECK_FALSE(index.contextAtSite("test.cpp:10:5").has_value());
     CHECK(index.contextsForCallee("foo").empty());
     CHECK(index.protectedCallsTo("foo").empty());
     CHECK(index.unprotectedCallsTo("foo").empty());
@@ -50,8 +50,8 @@ TEST_CASE("ControlFlowIndex stores and queries contexts",
     index.addCallSiteContext(std::move(ctx));
 
     CHECK(index.size() == 1);
-    auto *result = index.contextAtSite("test.cpp:10:5");
-    REQUIRE(result != nullptr);
+    auto result = index.contextAtSite("test.cpp:10:5");
+    REQUIRE(result.has_value());
     CHECK(result->callerName == "main");
     CHECK(result->calleeName == "dangerous");
     CHECK(result->enclosingTryCatches.empty());
