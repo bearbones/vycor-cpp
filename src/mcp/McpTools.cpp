@@ -190,13 +190,24 @@ struct EdgeFilter {
   std::set<ExecutionContext> execContexts; // empty = allow all
 
   bool allows(const CallGraphEdge &e) const {
-    if (!kinds.empty() && !kinds.count(e.kind))
+    return allowsFields(e.kind, e.confidence, e.execContext);
+  }
+
+  // Id-space twin for traversal loops that never materialize strings.
+  bool allowsRef(const CallGraph::EdgeRef &e) const {
+    return allowsFields(e.kind, e.confidence, e.execContext);
+  }
+
+private:
+  bool allowsFields(EdgeKind kind, Confidence conf,
+                    ExecutionContext execCtx) const {
+    if (!kinds.empty() && !kinds.count(kind))
       return false;
-    if (!execContexts.empty() && !execContexts.count(e.execContext))
+    if (!execContexts.empty() && !execContexts.count(execCtx))
       return false;
     if (useIncludeSet)
-      return includeConfidences.count(e.confidence) > 0;
-    return confidenceRank(e.confidence) >= confidenceRank(minConf);
+      return includeConfidences.count(conf) > 0;
+    return confidenceRank(conf) >= confidenceRank(minConf);
   }
 };
 
@@ -307,6 +318,39 @@ handleSearchFunctions(const llvm::json::Object &args,
 
   std::string needle = query->lower();
 
+  // Lowercased name index, built once per graph state and cached — the
+  // per-query lowering of every node name was 14 ms on a 57k-node graph.
+  // Node pointers are stable (nodes live in a node-based map) and the
+  // cache is cleared whenever the graph mutates.
+  struct SearchEntry {
+    std::string lowerQualified;
+    size_t unqualifiedOffset; // offset of the unqualified name within it
+    const CallGraphNode *node;
+  };
+  using SearchIndex = std::vector<SearchEntry>;
+  std::shared_ptr<const SearchIndex> index;
+  if (ctx.cache) {
+    auto it = ctx.cache->objects.find("search_index");
+    if (it != ctx.cache->objects.end())
+      index = std::static_pointer_cast<const SearchIndex>(it->second);
+  }
+  if (!index) {
+    auto built = std::make_shared<SearchIndex>();
+    auto nodes = ctx.graph.allNodes();
+    built->reserve(nodes.size());
+    for (auto *node : nodes) {
+      llvm::StringRef qn(node->qualifiedName);
+      size_t off = 0;
+      auto sep = qn.rfind("::");
+      if (sep != llvm::StringRef::npos)
+        off = sep + 2;
+      built->push_back({qn.lower(), off, node});
+    }
+    if (ctx.cache)
+      ctx.cache->objects["search_index"] = built;
+    index = std::move(built);
+  }
+
   // Rank: exact name match, then prefix of the unqualified name, then any
   // substring. Within a tier, shorter qualified names first (closer match).
   struct Hit {
@@ -314,23 +358,17 @@ handleSearchFunctions(const llvm::json::Object &args,
     int tier;
   };
   std::vector<Hit> hits;
-  for (auto *node : ctx.graph.allNodes()) {
-    llvm::StringRef qn(node->qualifiedName);
-    std::string lower = qn.lower();
-    auto pos = lower.find(needle);
-    if (pos == std::string::npos)
+  for (const auto &entry : *index) {
+    llvm::StringRef lower(entry.lowerQualified);
+    if (lower.find(needle) == llvm::StringRef::npos)
       continue;
     int tier = 2;
-    llvm::StringRef unqualified = qn;
-    auto sep = qn.rfind("::");
-    if (sep != llvm::StringRef::npos)
-      unqualified = qn.substr(sep + 2);
-    std::string unqLower = unqualified.lower();
+    llvm::StringRef unqLower = lower.substr(entry.unqualifiedOffset);
     if (unqLower == needle)
       tier = 0;
-    else if (unqLower.compare(0, needle.size(), needle) == 0)
+    else if (unqLower.starts_with(needle))
       tier = 1;
-    hits.push_back({node, tier});
+    hits.push_back({entry.node, tier});
   }
 
   std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
@@ -459,20 +497,30 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
     starts = ctx.entryPoints;
   }
 
-  // Reverse DFS from target to start nodes. We track the edge used for every
-  // hop so the response can carry kind/confidence/callSite per hop. Edges are
-  // copied: callersOf returns by value (it can synthesize virtual-dispatch
-  // expansions), so pointers into its result would not survive the frame.
-  std::set<std::string> startSet(starts.begin(), starts.end());
+  // Reverse DFS from target to start nodes, entirely in interned-id space:
+  // no string materialization per hop and no string-keyed sets — measured
+  // 5.4s -> ms-scale on a 938-TU / 345k-edge graph, where the ancestor
+  // cone is large and names are long. Strings are resolved only for found
+  // paths and skipped hubs. We track the edge used for every hop so the
+  // response can carry kind/confidence/callSite per hop.
+  using SId = StringInterner::Id;
+  const auto &interner = ctx.graph.interner();
+
+  std::set<SId> startSet;
+  for (const auto &st : starts) {
+    if (auto sid = interner.find(st))
+      startSet.insert(*sid);
+  }
+  auto targetId = interner.find(to->str());
   struct FoundPath {
-    std::vector<std::string> nodes;        // start -> ... -> target
-    std::vector<CallGraphEdge> edges;      // edges[i]: nodes[i] -> nodes[i+1]
+    std::vector<SId> nodes;                     // start -> ... -> target
+    std::vector<CallGraph::EdgeRef> edges;      // edges[i]: nodes[i] -> nodes[i+1]
   };
   std::vector<FoundPath> foundPaths;
-  std::vector<std::string> currentPath;    // target -> ... -> start
-  std::vector<CallGraphEdge> currentEdges; // parallel to edges along currentPath
-  std::set<std::string> onPath;
-  std::map<std::string, size_t> skippedHubs; // name -> stored in-degree
+  std::vector<SId> currentPath;                 // target -> ... -> start
+  std::vector<CallGraph::EdgeRef> currentEdges; // parallel to currentPath
+  std::unordered_set<SId> onPath;
+  std::map<SId, size_t> skippedHubs; // id -> stored in-degree
 
   // Dead-end memo. Without it the simple-path enumeration re-explores the
   // whole ancestor cone once per permutation — exponential in the no-path
@@ -484,86 +532,125 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   // early-stop are path/search-state-dependent and are never memoized
   // (kBlocked poisons cleanness up the recursion). Budget-exhaustion
   // failures ARE memoizable: the depth comparison encodes the budget.
-  std::map<std::string, unsigned> deadAt;
-  // callersOf materializes strings for every edge (and synthesizes
-  // virtual-dispatch / deferred-return expansions); a node can be visited
-  // several times at different depths, so materialize once per call.
-  std::map<std::string, std::vector<CallGraphEdge>> callersMemo;
+  // Corridor prune: one forward BFS from the start set over callee edges
+  // (respecting the same edge filter) records the fewest edges from any
+  // start to each node, bounded by maxDepth. The reverse DFS then only
+  // expands nodes that can still complete a start->...->target path within
+  // budget: minFromStart[node] + depth(node from target) <= maxDepth.
+  // In the no-path case the DFS dies immediately after one O(E) BFS —
+  // previously it enumerated the target's whole ancestor cone.
+  std::unordered_map<SId, unsigned> minFromStart;
+  {
+    std::vector<SId> frontier(startSet.begin(), startSet.end());
+    for (SId st : frontier)
+      minFromStart.emplace(st, 0);
+    unsigned dist = 0;
+    while (!frontier.empty() && dist < static_cast<unsigned>(maxDepth)) {
+      ++dist;
+      std::vector<SId> next;
+      for (SId node : frontier) {
+        for (const auto &edge : ctx.graph.calleeRefsOf(node)) {
+          if (!filter.allowsRef(edge))
+            continue;
+          if (minFromStart.emplace(edge.callee, dist).second)
+            next.push_back(edge.callee);
+        }
+      }
+      frontier = std::move(next);
+    }
+  }
+
+  std::unordered_map<SId, unsigned> deadAt;
+  // callerRefsOf synthesizes virtual-dispatch / deferred-return
+  // expansions; a node can be visited several times at different depths,
+  // so compute once per call.
+  std::unordered_map<SId, std::vector<CallGraph::EdgeRef>> callersMemo;
   constexpr int kFound = 1, kBlocked = 2;
 
-  std::function<int(const std::string &, unsigned)> dfs =
-      [&](const std::string &node, unsigned depth) -> int {
-        if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
-          return kBlocked;
-        if (depth > static_cast<unsigned>(maxDepth))
-          return 0;
-        auto dit = deadAt.find(node);
-        if (dit != deadAt.end() && depth >= dit->second)
-          return 0;
+  std::function<int(SId, unsigned)> dfs = [&](SId node,
+                                              unsigned depth) -> int {
+    if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
+      return kBlocked;
+    if (depth > static_cast<unsigned>(maxDepth))
+      return 0;
+    auto dit = deadAt.find(node);
+    if (dit != deadAt.end() && depth >= dit->second)
+      return 0;
 
-        currentPath.push_back(node);
-        onPath.insert(node);
-        int flags = 0;
+    currentPath.push_back(node);
+    onPath.insert(node);
+    int flags = 0;
 
-        if (startSet.count(node)) {
-          FoundPath fp;
-          fp.nodes.assign(currentPath.rbegin(), currentPath.rend());
-          fp.edges.assign(currentEdges.rbegin(), currentEdges.rend());
-          foundPaths.push_back(std::move(fp));
-          flags |= kFound;
-        } else if (maxFanIn > 0 && depth > 0 &&
-                   ctx.graph.storedInDegree(node) >
-                       static_cast<size_t>(maxFanIn)) {
-          // Hub: expanding its ancestry would dominate the search. Record
-          // and prune; the caller can re-run with a higher max_fan_in or
-          // query the hub directly. Deterministic per node, so it does not
-          // poison the dead-end memo.
-          skippedHubs.emplace(node, ctx.graph.storedInDegree(node));
-        } else {
-          auto cit = callersMemo.find(node);
-          if (cit == callersMemo.end())
-            cit = callersMemo.emplace(node, ctx.graph.callersOf(node)).first;
-          const auto &callers = cit->second;
-          for (const auto &edge : callers) {
-            if (onPath.count(edge.callerName)) {
-              flags |= kBlocked; // path-dependent exclusion
-              continue;
-            }
-            if (!filter.allows(edge))
-              continue;
-            currentEdges.push_back(edge);
-            flags |= dfs(edge.callerName, depth + 1);
-            currentEdges.pop_back();
-            if (static_cast<int64_t>(foundPaths.size()) >= maxPaths) {
-              flags |= kBlocked; // exploration truncated, not exhausted
-              break;
-            }
-          }
+    if (startSet.count(node)) {
+      FoundPath fp;
+      fp.nodes.assign(currentPath.rbegin(), currentPath.rend());
+      fp.edges.assign(currentEdges.rbegin(), currentEdges.rend());
+      foundPaths.push_back(std::move(fp));
+      flags |= kFound;
+    } else if (maxFanIn > 0 && depth > 0 &&
+               ctx.graph.storedInDegree(node) >
+                   static_cast<size_t>(maxFanIn)) {
+      // Hub: expanding its ancestry would dominate the search. Record
+      // and prune; the caller can re-run with a higher max_fan_in or
+      // query the hub directly. Deterministic per node, so it does not
+      // poison the dead-end memo.
+      skippedHubs.emplace(node, ctx.graph.storedInDegree(node));
+    } else {
+      auto cit = callersMemo.find(node);
+      if (cit == callersMemo.end())
+        cit = callersMemo.emplace(node, ctx.graph.callerRefsOf(node)).first;
+      const auto &callers = cit->second;
+      for (const auto &edge : callers) {
+        if (onPath.count(edge.caller)) {
+          flags |= kBlocked; // path-dependent exclusion
+          continue;
         }
-
-        currentPath.pop_back();
-        onPath.erase(node);
-
-        if (!(flags & (kFound | kBlocked))) {
-          auto [it, inserted] = deadAt.emplace(node, depth);
-          if (!inserted && depth < it->second)
-            it->second = depth;
+        if (!filter.allowsRef(edge))
+          continue;
+        // Corridor prune: the caller must be reachable from a start with
+        // enough budget left to descend back to the target.
+        auto mit = minFromStart.find(edge.caller);
+        if (mit == minFromStart.end() ||
+            mit->second + depth + 1 > static_cast<unsigned>(maxDepth))
+          continue;
+        currentEdges.push_back(edge);
+        flags |= dfs(edge.caller, depth + 1);
+        currentEdges.pop_back();
+        if (static_cast<int64_t>(foundPaths.size()) >= maxPaths) {
+          flags |= kBlocked; // exploration truncated, not exhausted
+          break;
         }
-        return flags;
-      };
+      }
+    }
 
-  dfs(to->str(), 0);
+    currentPath.pop_back();
+    onPath.erase(node);
+
+    if (!(flags & (kFound | kBlocked))) {
+      auto [it, inserted] = deadAt.emplace(node, depth);
+      if (!inserted && depth < it->second)
+        it->second = depth;
+    }
+    return flags;
+  };
+
+  if (targetId) {
+    auto tmit = minFromStart.find(*targetId);
+    if (tmit != minFromStart.end() &&
+        tmit->second <= static_cast<unsigned>(maxDepth))
+      dfs(*targetId, 0);
+  }
 
   llvm::json::Array pathsJson;
   for (auto &fp : foundPaths) {
     llvm::json::Array chain;
     for (const auto &edge : fp.edges) {
       llvm::json::Object hop;
-      hop["from"] = edge.callerName;
-      hop["to"] = edge.calleeName;
+      hop["from"] = interner.resolve(edge.caller);
+      hop["to"] = interner.resolve(edge.callee);
       hop["kind"] = edgeKindToString(edge.kind);
       hop["confidence"] = confidenceToString(edge.confidence);
-      hop["callSite"] = edge.callSite;
+      hop["callSite"] = interner.resolve(edge.callSite);
       if (edge.execContext != ExecutionContext::Synchronous)
         hop["executionContext"] = executionContextToString(edge.execContext);
       chain.push_back(llvm::json::Value(std::move(hop)));
@@ -577,9 +664,9 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   obj["paths"] = std::move(pathsJson);
   if (!skippedHubs.empty()) {
     llvm::json::Array hubs;
-    for (const auto &[name, inDegree] : skippedHubs) {
+    for (const auto &[hubId, inDegree] : skippedHubs) {
       llvm::json::Object hub;
-      hub["name"] = name;
+      hub["name"] = interner.resolve(hubId);
       hub["inDegree"] = static_cast<int64_t>(inDegree);
       hubs.push_back(llvm::json::Value(std::move(hub)));
     }

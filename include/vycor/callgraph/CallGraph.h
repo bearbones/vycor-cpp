@@ -129,9 +129,38 @@ public:
   std::vector<CallGraphEdge> calleesOf(const std::string &name) const;
   std::vector<CallGraphEdge> callersOf(const std::string &name) const;
 
+  // ------------------------------------------------------------------
+  // Id-level query API for traversal-heavy tools (path search, lock DFS).
+  // Works entirely in interned ids: no string materialization per hop,
+  // no string-keyed visited sets. Same expansion semantics as
+  // callersOf/calleesOf (virtual dispatch + deferred function-return
+  // joins). Resolve ids through interner() only for the survivors.
+  // ------------------------------------------------------------------
+
+  // Lightweight edge view in interned-id space.
+  struct EdgeRef {
+    StringInterner::Id caller;
+    StringInterner::Id callee;
+    StringInterner::Id callSite;
+    EdgeKind kind;
+    Confidence confidence;
+    ExecutionContext execContext;
+    uint32_t indirectionDepth;
+  };
+
+  // All caller-side edges reaching `callee` (stored + synthesized), in id
+  // space. Exactly the edge set callersOf materializes.
+  std::vector<EdgeRef> callerRefsOf(StringInterner::Id callee) const;
+
+  // All callee-side edges leaving `caller` (stored + synthesized), in id
+  // space. Exactly the edge set calleesOf materializes.
+  std::vector<EdgeRef> calleeRefsOf(StringInterner::Id caller) const;
+
   // Count of live stored in-edges (cheap: no materialization or virtual
-  // expansion). Used as a hub heuristic by path-walking tools.
+  // expansion). Used as a hub heuristic by path-walking tools. The id
+  // overload avoids the name lookup in inner loops.
   size_t storedInDegree(const std::string &name) const;
+  size_t storedInDegree(StringInterner::Id id) const;
 
   size_t nodeCount() const;
   size_t edgeCount() const;

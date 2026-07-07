@@ -129,6 +129,8 @@ std::vector<CallGraph::SId> CallGraph::transitiveClosure(
     SId start,
     const std::unordered_map<SId, std::vector<SId>> &relation) const {
   std::vector<SId> result;
+  if (relation.find(start) == relation.end())
+    return result; // common case: no entry — skip all allocations
   std::vector<SId> stack{start};
   std::set<SId> visited{start};
   while (!stack.empty()) {
@@ -147,13 +149,10 @@ std::vector<CallGraph::SId> CallGraph::transitiveClosure(
   return result;
 }
 
-std::vector<CallGraphEdge>
-CallGraph::calleesOf(const std::string &name) const {
-  std::vector<CallGraphEdge> result;
-  auto id = interner_.find(name);
-  if (!id)
-    return result;
-  auto it = outEdges_.find(*id);
+std::vector<CallGraph::EdgeRef>
+CallGraph::calleeRefsOf(StringInterner::Id caller) const {
+  std::vector<EdgeRef> result;
+  auto it = outEdges_.find(caller);
   if (it == outEdges_.end())
     return result;
 
@@ -170,7 +169,8 @@ CallGraph::calleesOf(const std::string &name) const {
       continue;
     if (se.kind == EdgeKind::VirtualDispatch)
       seen.insert({se.callee, se.callSite});
-    result.push_back(materialize(se));
+    result.push_back({se.caller, se.callee, se.callSite, se.kind,
+                      se.confidence, se.execContext, se.indirectionDepth});
   }
 
   // Expand Plausible virtual dispatch through transitive overrides.
@@ -182,9 +182,8 @@ CallGraph::calleesOf(const std::string &name) const {
     for (SId ovId : transitiveClosure(se.callee, methodOverrides_)) {
       if (!seen.insert({ovId, se.callSite}).second)
         continue;
-      CallGraphEdge synth = materialize(se);
-      synth.calleeName = interner_.resolve(ovId);
-      result.push_back(std::move(synth));
+      result.push_back({se.caller, ovId, se.callSite, se.kind,
+                        se.confidence, se.execContext, se.indirectionDepth});
     }
   }
 
@@ -201,26 +200,44 @@ CallGraph::calleesOf(const std::string &name) const {
     for (SId retId : rit->second) {
       if (!seen.insert({retId, se.callSite}).second)
         continue;
-      CallGraphEdge synth = materialize(se);
-      synth.calleeName = interner_.resolve(retId);
-      synth.kind = se.execContext != ExecutionContext::Synchronous
-                       ? EdgeKind::ThreadEntry
-                       : EdgeKind::FunctionPointer;
-      result.push_back(std::move(synth));
+      EdgeKind kind = se.execContext != ExecutionContext::Synchronous
+                          ? EdgeKind::ThreadEntry
+                          : EdgeKind::FunctionPointer;
+      result.push_back({se.caller, retId, se.callSite, kind, se.confidence,
+                        se.execContext, se.indirectionDepth});
     }
   }
   return result;
 }
 
 std::vector<CallGraphEdge>
-CallGraph::callersOf(const std::string &name) const {
+CallGraph::calleesOf(const std::string &name) const {
   std::vector<CallGraphEdge> result;
   auto id = interner_.find(name);
   if (!id)
     return result;
+  auto refs = calleeRefsOf(*id);
+  result.reserve(refs.size());
+  for (const auto &r : refs) {
+    CallGraphEdge e;
+    e.callerName = interner_.resolve(r.caller);
+    e.calleeName = interner_.resolve(r.callee);
+    e.kind = r.kind;
+    e.confidence = r.confidence;
+    e.callSite = interner_.resolve(r.callSite);
+    e.indirectionDepth = r.indirectionDepth;
+    e.execContext = r.execContext;
+    result.push_back(std::move(e));
+  }
+  return result;
+}
+
+std::vector<CallGraph::EdgeRef>
+CallGraph::callerRefsOf(StringInterner::Id callee) const {
+  std::vector<EdgeRef> result;
 
   std::set<std::pair<SId, SId>> seen; // (caller, callSite)
-  auto it = inEdges_.find(*id);
+  auto it = inEdges_.find(callee);
   if (it != inEdges_.end()) {
     for (size_t idx : it->second) {
       const StoredEdge &se = edges_[idx];
@@ -231,13 +248,14 @@ CallGraph::callersOf(const std::string &name) const {
       if (se.kind == EdgeKind::FunctionPointerReturn)
         continue;
       seen.insert({se.caller, se.callSite});
-      result.push_back(materialize(se));
+      result.push_back({se.caller, se.callee, se.callSite, se.kind,
+                        se.confidence, se.execContext, se.indirectionDepth});
     }
   }
 
   // A dispatch recorded against any base declaration of this method can
-  // reach it at runtime: synthesize caller -> name for those call sites.
-  for (SId baseId : transitiveClosure(*id, overrideBases_)) {
+  // reach it at runtime: synthesize caller -> callee for those call sites.
+  for (SId baseId : transitiveClosure(callee, overrideBases_)) {
     auto bit = inEdges_.find(baseId);
     if (bit == inEdges_.end())
       continue;
@@ -248,15 +266,14 @@ CallGraph::callersOf(const std::string &name) const {
         continue;
       if (!seen.insert({se.caller, se.callSite}).second)
         continue;
-      CallGraphEdge synth = materialize(se);
-      synth.calleeName = name;
-      result.push_back(std::move(synth));
+      result.push_back({se.caller, callee, se.callSite, se.kind,
+                        se.confidence, se.execContext, se.indirectionDepth});
     }
   }
 
   // Deferred function-pointer-through-return expansion: any call site that
-  // consumed a pointer returned by F reaches `name` when F returns it.
-  auto rbIt = returnedBy_.find(*id);
+  // consumed a pointer returned by F reaches `callee` when F returns it.
+  auto rbIt = returnedBy_.find(callee);
   if (rbIt != returnedBy_.end()) {
     for (SId returner : rbIt->second) {
       auto rin = inEdges_.find(returner);
@@ -268,14 +285,36 @@ CallGraph::callersOf(const std::string &name) const {
           continue;
         if (!seen.insert({se.caller, se.callSite}).second)
           continue;
-        CallGraphEdge synth = materialize(se);
-        synth.calleeName = name;
-        synth.kind = se.execContext != ExecutionContext::Synchronous
-                         ? EdgeKind::ThreadEntry
-                         : EdgeKind::FunctionPointer;
-        result.push_back(std::move(synth));
+        EdgeKind kind = se.execContext != ExecutionContext::Synchronous
+                            ? EdgeKind::ThreadEntry
+                            : EdgeKind::FunctionPointer;
+        result.push_back({se.caller, callee, se.callSite, kind,
+                          se.confidence, se.execContext,
+                          se.indirectionDepth});
       }
     }
+  }
+  return result;
+}
+
+std::vector<CallGraphEdge>
+CallGraph::callersOf(const std::string &name) const {
+  std::vector<CallGraphEdge> result;
+  auto id = interner_.find(name);
+  if (!id)
+    return result;
+  auto refs = callerRefsOf(*id);
+  result.reserve(refs.size());
+  for (const auto &r : refs) {
+    CallGraphEdge e;
+    e.callerName = interner_.resolve(r.caller);
+    e.calleeName = interner_.resolve(r.callee);
+    e.kind = r.kind;
+    e.confidence = r.confidence;
+    e.callSite = interner_.resolve(r.callSite);
+    e.indirectionDepth = r.indirectionDepth;
+    e.execContext = r.execContext;
+    result.push_back(std::move(e));
   }
   return result;
 }
@@ -284,7 +323,11 @@ size_t CallGraph::storedInDegree(const std::string &name) const {
   auto id = interner_.find(name);
   if (!id)
     return 0;
-  auto it = inEdges_.find(*id);
+  return storedInDegree(*id);
+}
+
+size_t CallGraph::storedInDegree(StringInterner::Id id) const {
+  auto it = inEdges_.find(id);
   if (it == inEdges_.end())
     return 0;
   size_t count = 0;
