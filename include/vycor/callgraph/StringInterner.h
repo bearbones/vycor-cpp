@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace vycor {
 
@@ -84,6 +85,30 @@ public:
   size_t size() const {
     std::shared_lock lock(mutex_);
     return strings_.size();
+  }
+
+  /// Visit every interned string in id order: fn(const std::string&) is
+  /// called for id 0, 1, 2, ... Snapshot save serializes the table with
+  /// this so that a table installed via installStrings reproduces the ids
+  /// by position.
+  template <typename Fn> void forEachString(Fn fn) const {
+    std::shared_lock lock(mutex_);
+    for (const auto &s : strings_)
+      fn(s);
+  }
+
+  /// Bulk-install a string table whose positions become the ids (snapshot
+  /// load). Only valid on an empty interner: returns false without
+  /// modifying anything when strings have already been interned. Later
+  /// intern() calls extend the table normally.
+  bool installStrings(std::vector<std::string> strings) {
+    std::unique_lock lock(mutex_);
+    if (!strings_.empty())
+      return false;
+    for (auto &s : strings)
+      strings_.push_back(std::move(s));
+    rebuildIndex();
+    return true;
   }
 
   /// Total bytes of interned string payload (excludes container overhead).
