@@ -277,18 +277,96 @@ static bool isSystemPath(llvm::StringRef path) {
 }
 
 // ============================================================================
+// F8 identity resolution (docs/design-f8-usr-identity.md §4, PR C)
+// ============================================================================
+
+// Non-error disambiguation response for an ambiguous display name: the
+// client picks a candidate and re-queries with its `usr`. Candidates are
+// sorted by usr string so the response is deterministic.
+static llvm::json::Value makeAmbiguousNameResult(const McpToolContext &ctx,
+                                                 llvm::StringRef paramName,
+                                                 llvm::StringRef name,
+                                                 std::vector<std::string> usrs) {
+  std::sort(usrs.begin(), usrs.end());
+  llvm::json::Array candidates;
+  for (const auto &usr : usrs) {
+    llvm::json::Object cand;
+    cand["usr"] = usr;
+    // Nodes are usr-keyed; findNode(usr) is the exact node.
+    if (const auto *node = ctx.graph.findNode(usr)) {
+      cand["qualifiedName"] = node->qualifiedName;
+      cand["file"] = node->file;
+      cand["line"] = static_cast<int64_t>(node->line);
+    } else {
+      cand["qualifiedName"] = name.str();
+    }
+    candidates.push_back(llvm::json::Value(std::move(cand)));
+  }
+  llvm::json::Object obj;
+  obj["ambiguous"] = true;
+  obj["parameter"] = paramName.str();
+  obj["name"] = name.str();
+  obj["candidates"] = std::move(candidates);
+  obj["note"] = "Multiple functions share this name. Re-run with the 'usr' "
+                "parameter of the intended candidate.";
+  return makeTextResult(llvm::json::Value(std::move(obj)));
+}
+
+// Resolves an identity parameter per the F8 disambiguation contract:
+//   1. `usrParam` present -> that string verbatim (no name lookup).
+//   2. `nameParam` resolving to 0 or 1 USRs -> the unique USR (or the name
+//      itself when unknown: downstream queries treat it as an unregistered
+//      endpoint, exactly as the by-name path does today).
+//   3. N >= 2 USRs -> nullopt with `ambiguous` set to the NON-error
+//      disambiguation response the handler must return. Never a silent
+//      union; never a hard error.
+// Returns nullopt with `ambiguous` UNSET when neither parameter is present;
+// the handler emits its own missing-parameter error.
+static std::optional<std::string>
+resolveIdentity(const llvm::json::Object &args, const McpToolContext &ctx,
+                llvm::StringRef nameParam, llvm::StringRef usrParam,
+                std::optional<llvm::json::Value> &ambiguous) {
+  if (auto usr = args.getString(usrParam))
+    return usr->str();
+  auto name = args.getString(nameParam);
+  if (!name)
+    return std::nullopt;
+  auto usrs = ctx.graph.usrsForName(name->str());
+  if (usrs.size() >= 2) {
+    ambiguous =
+        makeAmbiguousNameResult(ctx, nameParam, *name, std::move(usrs));
+    return std::nullopt;
+  }
+  if (usrs.size() == 1)
+    return std::move(usrs.front());
+  return name->str();
+}
+
+// Adds the resolved node usr to a response object when the identity names a
+// registered node (unregistered endpoints have no node to cite).
+static void attachUsr(llvm::json::Object &obj, const McpToolContext &ctx,
+                      const std::string &ident,
+                      llvm::StringRef key = "usr") {
+  if (const auto *node = ctx.graph.findNode(ident))
+    obj[key] = node->usr;
+}
+
+// ============================================================================
 // Tool 1: lookup_function
 // ============================================================================
 
 static llvm::json::Value handleLookupFunction(const llvm::json::Object &args,
                                               const McpToolContext &ctx) {
-  auto name = args.getString("name");
-  if (!name)
-    return makeErrorResult("Missing required parameter 'name'");
+  std::optional<llvm::json::Value> ambiguous;
+  auto ident = resolveIdentity(args, ctx, "name", "usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (!ident)
+    return makeErrorResult("Missing required parameter 'name' (or 'usr')");
 
-  auto *node = ctx.graph.findNode(name->str());
+  auto *node = ctx.graph.findNode(*ident);
   if (!node)
-    return makeErrorResult("Function not found: " + name->str());
+    return makeErrorResult("Function not found: " + *ident);
 
   llvm::json::Object obj;
   obj["qualifiedName"] = node->qualifiedName;
@@ -411,15 +489,19 @@ handleSearchFunctions(const llvm::json::Object &args,
 
 static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
                                           const McpToolContext &ctx) {
-  auto name = args.getString("name");
-  if (!name)
-    return makeErrorResult("Missing required parameter 'name'");
+  std::optional<llvm::json::Value> ambiguous;
+  auto ident = resolveIdentity(args, ctx, "name", "usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (!ident)
+    return makeErrorResult("Missing required parameter 'name' (or 'usr')");
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
     return makeErrorResult(*err);
 
-  auto edges = ctx.graph.calleesOf(name->str());
+  // Query by the resolved USR: the by-name union path is never taken.
+  auto edges = ctx.graph.calleesOf(*ident);
   llvm::json::Array results;
   for (const auto &e : edges) {
     if (!filter.allows(e))
@@ -428,7 +510,11 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
   }
 
   llvm::json::Object obj;
-  obj["function"] = name->str();
+  // Display the name the caller asked for; the precise identity rides in
+  // "usr".
+  auto name = args.getString("name");
+  obj["function"] = name ? name->str() : *ident;
+  attachUsr(obj, ctx, *ident);
   obj["calleeCount"] = static_cast<int64_t>(results.size());
   obj["callees"] = std::move(results);
   return makeTextResult(llvm::json::Value(std::move(obj)));
@@ -440,15 +526,19 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
 
 static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
                                           const McpToolContext &ctx) {
-  auto name = args.getString("name");
-  if (!name)
-    return makeErrorResult("Missing required parameter 'name'");
+  std::optional<llvm::json::Value> ambiguous;
+  auto ident = resolveIdentity(args, ctx, "name", "usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (!ident)
+    return makeErrorResult("Missing required parameter 'name' (or 'usr')");
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
     return makeErrorResult(*err);
 
-  auto edges = ctx.graph.callersOf(name->str());
+  // Query by the resolved USR: the by-name union path is never taken.
+  auto edges = ctx.graph.callersOf(*ident);
   llvm::json::Array results;
   for (const auto &e : edges) {
     if (!filter.allows(e))
@@ -457,7 +547,9 @@ static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
   }
 
   llvm::json::Object obj;
-  obj["function"] = name->str();
+  auto name = args.getString("name");
+  obj["function"] = name ? name->str() : *ident;
+  attachUsr(obj, ctx, *ident);
   obj["callerCount"] = static_cast<int64_t>(results.size());
   obj["callers"] = std::move(results);
   return makeTextResult(llvm::json::Value(std::move(obj)));
@@ -469,9 +561,12 @@ static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
 
 static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
                                              const McpToolContext &ctx) {
-  auto to = args.getString("to");
+  std::optional<llvm::json::Value> ambiguous;
+  auto to = resolveIdentity(args, ctx, "to", "to_usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
   if (!to)
-    return makeErrorResult("Missing required parameter 'to'");
+    return makeErrorResult("Missing required parameter 'to' (or 'to_usr')");
 
   int64_t maxPaths = 10;
   if (auto mp = args.getInteger("max_paths"))
@@ -492,9 +587,14 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   if (auto err = parseEdgeFilter(args, filter))
     return makeErrorResult(*err);
 
+  // `from` is optional (absent -> entry points); the ambiguity check
+  // applies only when an identity IS provided.
   std::vector<std::string> starts;
-  if (auto from = args.getString("from")) {
-    starts.push_back(from->str());
+  auto from = resolveIdentity(args, ctx, "from", "from_usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (from) {
+    starts.push_back(*from);
   } else {
     starts = ctx.entryPoints;
   }
@@ -513,7 +613,7 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
     if (auto sid = interner.find(st))
       startSet.insert(*sid);
   }
-  auto targetId = interner.find(to->str());
+  auto targetId = interner.find(*to);
   struct FoundPath {
     std::vector<SId> nodes;                     // start -> ... -> target
     std::vector<CallGraph::EdgeRef> edges;      // edges[i]: nodes[i] -> nodes[i+1]
@@ -661,7 +761,9 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   }
 
   llvm::json::Object obj;
-  obj["target"] = to->str();
+  auto toName = args.getString("to");
+  obj["target"] = toName ? toName->str() : *to;
+  attachUsr(obj, ctx, *to, "targetUsr");
   obj["pathCount"] = static_cast<int64_t>(foundPaths.size());
   obj["paths"] = std::move(pathsJson);
   if (!skippedHubs.empty()) {
@@ -699,9 +801,12 @@ static const char *protectionToStr(Protection p) {
 static llvm::json::Value
 handleQueryExceptionSafety(const llvm::json::Object &args,
                            const McpToolContext &ctx) {
-  auto function = args.getString("function");
-  if (!function)
-    return makeErrorResult("Missing required parameter 'function'");
+  std::optional<llvm::json::Value> ambiguous;
+  auto ident = resolveIdentity(args, ctx, "function", "usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (!ident)
+    return makeErrorResult("Missing required parameter 'function' (or 'usr')");
 
   std::string exceptionType;
   if (auto et = args.getString("exception_type"))
@@ -717,11 +822,13 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
   if (entryPoints.empty())
     entryPoints = ctx.entryPoints;
 
-  auto result = ctx.oracle.queryExceptionProtection(function->str(),
-                                                    exceptionType, entryPoints);
+  auto result =
+      ctx.oracle.queryExceptionProtection(*ident, exceptionType, entryPoints);
 
   llvm::json::Object obj;
-  obj["function"] = function->str();
+  auto function = args.getString("function");
+  obj["function"] = function ? function->str() : *ident;
+  attachUsr(obj, ctx, *ident);
   obj["protection"] = protectionToStr(result.protection);
   obj["totalPaths"] = static_cast<int64_t>(result.paths.size());
   obj["summary"] = result.summary;
@@ -743,6 +850,58 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
 // ============================================================================
 // Tool 6: query_call_site_context
 // ============================================================================
+
+// Non-error disambiguation response for a call-site spelling shared by
+// several live contexts (macro expansion): the client picks a caller and
+// re-queries with the `caller` parameter. Candidates sorted by callerUsr
+// for determinism.
+static llvm::json::Value
+makeAmbiguousSiteResult(llvm::StringRef callSite,
+                        std::vector<CallSiteContext> contexts) {
+  std::sort(contexts.begin(), contexts.end(),
+            [](const CallSiteContext &a, const CallSiteContext &b) {
+              return a.callerUsr < b.callerUsr;
+            });
+  llvm::json::Array candidates;
+  for (const auto &c : contexts) {
+    llvm::json::Object cand;
+    cand["callSite"] = c.callSite;
+    cand["callerUsr"] = c.callerUsr;
+    cand["callerName"] = c.callerName;
+    candidates.push_back(llvm::json::Value(std::move(cand)));
+  }
+  llvm::json::Object obj;
+  obj["ambiguous"] = true;
+  obj["parameter"] = "caller";
+  obj["callSite"] = callSite.str();
+  obj["candidates"] = std::move(candidates);
+  obj["note"] = "Multiple call sites share this spelling (macro expansion). "
+                "Re-run with the 'caller' parameter (USR or qualified name) "
+                "of the intended enclosing function.";
+  return makeTextResult(llvm::json::Value(std::move(obj)));
+}
+
+// Resolves a call-site spelling to ONE live context per the disambiguation
+// contract: `caller` provided -> the precise (spelling, caller) compound
+// lookup; absent -> the unique live context, or `ambiguous` set to the
+// candidates response when several contexts share the spelling. Returns
+// nullopt with `ambiguous` unset when nothing is indexed (the handler emits
+// its not-indexed error).
+static std::optional<CallSiteContext>
+resolveCallSiteContext(const llvm::json::Object &args,
+                       const McpToolContext &ctx, const std::string &callSite,
+                       std::optional<llvm::json::Value> &ambiguous) {
+  if (auto caller = args.getString("caller"))
+    return ctx.cfIndex.contextAtSite(callSite, caller->str());
+  auto contexts = ctx.cfIndex.contextsAtSite(callSite);
+  if (contexts.empty())
+    return std::nullopt;
+  if (contexts.size() >= 2) {
+    ambiguous = makeAmbiguousSiteResult(callSite, std::move(contexts));
+    return std::nullopt;
+  }
+  return std::move(contexts.front());
+}
 
 static llvm::json::Value
 handleQueryCallSiteContext(const llvm::json::Object &args,
@@ -777,8 +936,13 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
         raw + "'");
   }
 
-  // Distinguish "not indexed" from "indexed with no enclosing try".
-  const auto rawCtx = ctx.cfIndex.contextAtSite(raw);
+  // Distinguish "not indexed" from "indexed with no enclosing try". When
+  // several contexts share the spelling (macro expansion) and no `caller`
+  // narrows them, a non-error candidates response is returned instead.
+  std::optional<llvm::json::Value> ambiguous;
+  const auto rawCtx = resolveCallSiteContext(args, ctx, raw, ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
   if (!rawCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + raw +
@@ -786,24 +950,27 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
         "canonicalization (typically an absolute path).");
   }
 
-  auto info = ctx.oracle.queryCallSite(raw);
-
+  // Built from the resolved context directly (the same fields
+  // ControlFlowOracle::queryCallSite derives, but honoring the specific
+  // caller-qualified context rather than the first spelling match).
   llvm::json::Object obj;
-  obj["callSite"] = info.callSite;
-  obj["caller"] = info.caller;
-  obj["callee"] = info.callee;
-  obj["isUnderTryCatch"] = info.isUnderTryCatch;
-  obj["wouldTerminateIfThrows"] = info.wouldTerminateIfThrows;
+  obj["callSite"] = rawCtx->callSite;
+  obj["caller"] = rawCtx->callerName;
+  obj["callerUsr"] = rawCtx->callerUsr;
+  obj["callee"] = rawCtx->calleeName;
+  obj["isUnderTryCatch"] = !rawCtx->enclosingTryCatches.empty();
+  obj["wouldTerminateIfThrows"] =
+      (rawCtx->callerNoexcept == NoexceptSpec::Noexcept);
   obj["enclosingScopeCount"] =
-      static_cast<int64_t>(info.enclosingScopes.size());
+      static_cast<int64_t>(rawCtx->enclosingTryCatches.size());
   obj["enclosingGuardCount"] =
-      static_cast<int64_t>(info.enclosingGuards.size());
+      static_cast<int64_t>(rawCtx->enclosingGuards.size());
   obj["liveRaiiLocalsCount"] =
       static_cast<int64_t>(rawCtx->liveRaiiLocals.size());
 
   // Include scope details.
   llvm::json::Array scopes;
-  for (auto &scope : info.enclosingScopes) {
+  for (auto &scope : rawCtx->enclosingTryCatches) {
     llvm::json::Object s;
     s["tryLocation"] = scope.tryLocation;
     s["enclosingFunction"] = scope.enclosingFunction;
@@ -868,7 +1035,14 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
   }
   bool filterByKind = !allowed.empty();
 
-  const auto csCtx = ctx.cfIndex.contextAtSite(callSite->str());
+  // Same disambiguation contract as query_call_site_context: an optional
+  // `caller` routes to the precise compound-key lookup; a bare spelling
+  // matching several live contexts returns a candidates response.
+  std::optional<llvm::json::Value> ambiguous;
+  const auto csCtx =
+      resolveCallSiteContext(args, ctx, callSite->str(), ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
   if (!csCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + callSite->str() +
@@ -891,6 +1065,7 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
   llvm::json::Object out;
   out["callSite"] = callSite->str();
   out["caller"] = csCtx->callerName;
+  out["callerUsr"] = csCtx->callerUsr;
   out["callee"] = csCtx->calleeName;
   out["locals"] = std::move(locals);
   return makeTextResult(llvm::json::Value(std::move(out)));
@@ -1196,9 +1371,12 @@ static llvm::json::Value pathResultToJson(const PathResult &pr) {
 
 static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
                                               const McpToolContext &ctx) {
-  auto fn = args.getString("function");
-  if (!fn)
-    return makeErrorResult("Missing required parameter 'function'");
+  std::optional<llvm::json::Value> ambiguous;
+  auto ident = resolveIdentity(args, ctx, "function", "usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  if (!ident)
+    return makeErrorResult("Missing required parameter 'function' (or 'usr')");
 
   unsigned maxDepth = kDefaultMaxDepth;
   if (auto md = args.getInteger("max_depth"))
@@ -1220,12 +1398,16 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
 
   bool truncated = false;
   std::map<std::string, size_t> skippedHubs;
-  auto paths = collectLocksHeld(ctx.graph, ctx.cfIndex, fn->str(),
+  // The lock walk resolves the target through interner.find: a USR string
+  // works verbatim (usrs ARE the interned identities).
+  auto paths = collectLocksHeld(ctx.graph, ctx.cfIndex, *ident,
                                  entryPoints, maxDepth, maxFanIn,
                                  skippedHubs, truncated);
 
   llvm::json::Object out;
-  out["function"] = fn->str();
+  auto fn = args.getString("function");
+  out["function"] = fn ? fn->str() : *ident;
+  attachUsr(out, ctx, *ident);
   llvm::json::Array arr;
   for (const auto &pr : paths)
     arr.push_back(pathResultToJson(pr));
@@ -1252,10 +1434,17 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
 
 static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
                                              const McpToolContext &ctx) {
-  auto a = args.getString("fn_a");
-  auto b = args.getString("fn_b");
+  std::optional<llvm::json::Value> ambiguous;
+  auto a = resolveIdentity(args, ctx, "fn_a", "fn_a_usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
+  auto b = resolveIdentity(args, ctx, "fn_b", "fn_b_usr", ambiguous);
+  if (ambiguous)
+    return std::move(*ambiguous);
   if (!a || !b)
-    return makeErrorResult("Missing required parameters 'fn_a' and 'fn_b'");
+    return makeErrorResult(
+        "Missing required parameters 'fn_a' and 'fn_b' (or their *_usr "
+        "twins)");
 
   unsigned maxDepth = kDefaultMaxDepth;
   if (auto md = args.getInteger("max_depth"))
@@ -1277,10 +1466,10 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
 
   bool truncA = false, truncB = false;
   std::map<std::string, size_t> skippedHubs;
-  auto pathsA = collectLocksHeld(ctx.graph, ctx.cfIndex, a->str(),
+  auto pathsA = collectLocksHeld(ctx.graph, ctx.cfIndex, *a,
                                   entryPoints, maxDepth, maxFanIn,
                                   skippedHubs, truncA);
-  auto pathsB = collectLocksHeld(ctx.graph, ctx.cfIndex, b->str(),
+  auto pathsB = collectLocksHeld(ctx.graph, ctx.cfIndex, *b,
                                   entryPoints, maxDepth, maxFanIn,
                                   skippedHubs, truncB);
 
@@ -1316,8 +1505,12 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
   }
 
   llvm::json::Object out;
-  out["fn_a"] = a->str();
-  out["fn_b"] = b->str();
+  auto aName = args.getString("fn_a");
+  auto bName = args.getString("fn_b");
+  out["fn_a"] = aName ? aName->str() : *a;
+  out["fn_b"] = bName ? bName->str() : *b;
+  attachUsr(out, ctx, *a, "fn_a_usr");
+  attachUsr(out, ctx, *b, "fn_b_usr");
   out["sharedLocks"] = std::move(sharedArr);
   out["shared"] = sharedCount;
   out["aOnly"] =
@@ -1818,17 +2011,24 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 1. lookup_function
   {
     llvm::json::Object props;
-    props["name"] = stringProp("Qualified function name (e.g. 'MyClass::process')");
-    llvm::json::Array req;
-    req.push_back("name");
+    props["name"] = stringProp(
+        "Qualified function name (e.g. 'MyClass::process'). Provide 'name' "
+        "or 'usr' (usr wins when both are present).");
+    props["usr"] = stringProp(
+        "Exact function USR (from search_functions results or a prior "
+        "disambiguation response). Bypasses name resolution entirely — use "
+        "it to pick one overload/specialization when a name is ambiguous.");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"lookup_function",
                      "Look up metadata for a function by qualified name. "
-                     "Returns file, line, class membership, and virtual status.",
+                     "Returns file, line, class membership, and virtual "
+                     "status. If several functions share the name "
+                     "(overloads, template specializations), returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with the "
+                     "'usr' of the intended candidate.",
                      llvm::json::Value(std::move(schema)),
                      handleLookupFunction});
   }
@@ -1836,7 +2036,13 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 2. get_callees
   {
     llvm::json::Object props;
-    props["name"] = stringProp("Qualified name of the caller function");
+    props["name"] = stringProp(
+        "Qualified name of the caller function. Provide 'name' or 'usr' "
+        "(usr wins when both are present).");
+    props["usr"] = stringProp(
+        "Exact function USR of the caller. Bypasses name resolution — use "
+        "it to pick one overload/specialization when the name is "
+        "ambiguous.");
     props["edge_kinds"] = stringArrayProp(
         "Filter by edge kind: DirectCall, VirtualDispatch, FunctionPointer, "
         "ConstructorCall, DestructorCall, OperatorCall, TemplateInstantiation, "
@@ -1851,16 +2057,15 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["execution_contexts"] = stringArrayProp(
         "Filter by execution context: Synchronous, ThreadSpawn, AsyncTask, "
         "PackagedTask, Invoke. Default: all contexts.");
-    llvm::json::Array req;
-    req.push_back("name");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"get_callees",
                      "List all functions called by a given function. "
-                     "Supports filtering by edge kind and confidence level.",
+                     "Supports filtering by edge kind and confidence level. "
+                     "An ambiguous name returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with 'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleGetCallees});
   }
@@ -1868,7 +2073,13 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 3. get_callers
   {
     llvm::json::Object props;
-    props["name"] = stringProp("Qualified name of the callee function");
+    props["name"] = stringProp(
+        "Qualified name of the callee function. Provide 'name' or 'usr' "
+        "(usr wins when both are present).");
+    props["usr"] = stringProp(
+        "Exact function USR of the callee. Bypasses name resolution — use "
+        "it to pick one overload/specialization when the name is "
+        "ambiguous.");
     props["edge_kinds"] = stringArrayProp(
         "Filter by edge kind: DirectCall, VirtualDispatch, FunctionPointer, "
         "ConstructorCall, DestructorCall, OperatorCall, TemplateInstantiation, "
@@ -1882,16 +2093,15 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["execution_contexts"] = stringArrayProp(
         "Filter by execution context: Synchronous, ThreadSpawn, AsyncTask, "
         "PackagedTask, Invoke. Default: all contexts.");
-    llvm::json::Array req;
-    req.push_back("name");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"get_callers",
                      "List all functions that call a given function. "
-                     "Supports filtering by edge kind and confidence level.",
+                     "Supports filtering by edge kind and confidence level. "
+                     "An ambiguous name returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with 'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleGetCallers});
   }
@@ -1901,7 +2111,15 @@ std::vector<McpToolEntry> getRegisteredTools() {
     llvm::json::Object props;
     props["from"] = stringProp(
         "Source function qualified name (omit to use entry points)");
-    props["to"] = stringProp("Target function qualified name");
+    props["from_usr"] = stringProp(
+        "Exact USR of the source function. Bypasses name resolution for "
+        "'from' when the name is ambiguous.");
+    props["to"] = stringProp(
+        "Target function qualified name. Provide 'to' or 'to_usr' (to_usr "
+        "wins when both are present).");
+    props["to_usr"] = stringProp(
+        "Exact USR of the target function. Bypasses name resolution for "
+        "'to' when the name is ambiguous.");
     props["max_paths"] =
         intProp("Maximum number of paths to return (default: 10)");
     props["max_depth"] = intProp(
@@ -1919,19 +2137,18 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Skip expanding the ancestry of functions with more stored callers "
         "than this (high-fan-in hubs like loggers); skipped hubs are listed "
         "in the response. 0 disables the cutoff (default: 1000).");
-    llvm::json::Array req;
-    req.push_back("to");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"find_call_chain",
                      "Find call chains from a source function (or entry points) "
                      "to a target function. Each path is an array of hop "
                      "objects with {from, to, kind, confidence, callSite, "
                      "executionContext?}. executionContext is only emitted on "
-                     "ThreadEntry hops and other non-Synchronous edges.",
+                     "ThreadEntry hops and other non-Synchronous edges. An "
+                     "ambiguous 'from' or 'to' name returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with the *_usr parameter.",
                      llvm::json::Value(std::move(schema)),
                      handleFindCallChain});
   }
@@ -1963,22 +2180,27 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 5. query_exception_safety
   {
     llvm::json::Object props;
-    props["function"] = stringProp("Target function qualified name");
+    props["function"] = stringProp(
+        "Target function qualified name. Provide 'function' or 'usr' (usr "
+        "wins when both are present).");
+    props["usr"] = stringProp(
+        "Exact USR of the target function. Bypasses name resolution — use "
+        "it to pick one overload/specialization when the name is "
+        "ambiguous.");
     props["exception_type"] = stringProp(
         "Exception type to check (e.g. 'std::runtime_error')");
     props["entry_points"] = stringArrayProp(
         "Entry point function names (default: configured entry points)");
-    llvm::json::Array req;
-    req.push_back("function");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"query_exception_safety",
                      "Determine whether a function is protected by try/catch "
                      "on its call paths from entry points. Reports always, "
-                     "sometimes, or never caught.",
+                     "sometimes, or never caught. An ambiguous name returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with "
+                     "'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryExceptionSafety});
   }
@@ -1990,6 +2212,11 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Call site location formatted as 'file:line:col'. The file path "
         "must match the compilation database canonicalization (typically "
         "an absolute path). Returns isError if the site is not indexed.");
+    props["caller"] = stringProp(
+        "Optional enclosing function (qualified name or USR). Needed when "
+        "several call sites share one spelling (a macro expanded in "
+        "different functions); without it such a spelling returns "
+        "{ambiguous:true, candidates:[...]} listing the callers.");
     llvm::json::Array req;
     req.push_back("call_site");
     llvm::json::Object schema;
@@ -2000,7 +2227,10 @@ std::vector<McpToolEntry> getRegisteredTools() {
     tools.push_back({"query_call_site_context",
                      "Get exception handling and guard context at a specific "
                      "call site location (file:line:col). Shows enclosing "
-                     "try/catch scopes and conditional guards.",
+                     "try/catch scopes and conditional guards. A spelling "
+                     "shared by several call sites (macro expansion) returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with "
+                     "'caller'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryCallSiteContext});
   }
@@ -2011,6 +2241,11 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["call_site"] = stringProp(
         "Call site location formatted as 'file:line:col'. Must match the "
         "compilation database canonicalization.");
+    props["caller"] = stringProp(
+        "Optional enclosing function (qualified name or USR). Needed when "
+        "several call sites share one spelling (a macro expanded in "
+        "different functions); without it such a spelling returns "
+        "{ambiguous:true, candidates:[...]} listing the callers.");
     props["kinds"] = stringArrayProp(
         "Filter by kind: lock, smart_ptr, other. Default: all kinds.");
     llvm::json::Array req;
@@ -2025,7 +2260,9 @@ std::vector<McpToolEntry> getRegisteredTools() {
                      "at a call site. Each entry is {typeName, varName, "
                      "kind, declLocation}, kind in {lock, smart_ptr, other}. "
                      "Use `kinds` to narrow the response (e.g. [\"lock\"] "
-                     "for concurrency audits).",
+                     "for concurrency audits). A spelling shared by several "
+                     "call sites (macro expansion) returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with 'caller'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryRaiiScopesAtCallsite});
   }
@@ -2033,8 +2270,13 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 6b. query_locks_held
   {
     llvm::json::Object props;
-    props["function"] =
-        stringProp("Qualified name of the target function");
+    props["function"] = stringProp(
+        "Qualified name of the target function. Provide 'function' or "
+        "'usr' (usr wins when both are present).");
+    props["usr"] = stringProp(
+        "Exact USR of the target function. Bypasses name resolution — use "
+        "it to pick one overload/specialization when the name is "
+        "ambiguous.");
     props["max_depth"] = intProp(
         "Maximum number of frames above the target to walk (default: 20)");
     props["max_fan_in"] = intProp(
@@ -2044,12 +2286,9 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["entry_points"] = stringArrayProp(
         "Entry points to root the reverse walk (default: configured "
         "entry points)");
-    llvm::json::Array req;
-    req.push_back("function");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"query_locks_held",
                      "For each entry point, enumerate call paths reaching "
@@ -2059,7 +2298,9 @@ std::vector<McpToolEntry> getRegisteredTools() {
                      "locksHeld:[{typeName, varName, heldAt}]}], truncated, "
                      "pathCount}. Truncated at 512 paths total. Walks only "
                      "through edges with stable callee identity "
-                     "(indirect/function-pointer targets are skipped).",
+                     "(indirect/function-pointer targets are skipped). An "
+                     "ambiguous name returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with 'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryLocksHeld});
   }
@@ -2067,8 +2308,18 @@ std::vector<McpToolEntry> getRegisteredTools() {
   // 6c. query_same_lock
   {
     llvm::json::Object props;
-    props["fn_a"] = stringProp("First function qualified name");
-    props["fn_b"] = stringProp("Second function qualified name");
+    props["fn_a"] = stringProp(
+        "First function qualified name. Provide 'fn_a' or 'fn_a_usr' "
+        "(the usr wins when both are present).");
+    props["fn_a_usr"] = stringProp(
+        "Exact USR of the first function. Bypasses name resolution for "
+        "'fn_a' when the name is ambiguous.");
+    props["fn_b"] = stringProp(
+        "Second function qualified name. Provide 'fn_b' or 'fn_b_usr' "
+        "(the usr wins when both are present).");
+    props["fn_b_usr"] = stringProp(
+        "Exact USR of the second function. Bypasses name resolution for "
+        "'fn_b' when the name is ambiguous.");
     props["max_depth"] = intProp(
         "Maximum number of frames above each target to walk (default: 20)");
     props["max_fan_in"] = intProp(
@@ -2078,13 +2329,9 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["entry_points"] = stringArrayProp(
         "Entry points to root the reverse walk (default: configured "
         "entry points)");
-    llvm::json::Array req;
-    req.push_back("fn_a");
-    req.push_back("fn_b");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"query_same_lock",
                      "Compute the intersection of locks held across paths "
@@ -2092,7 +2339,9 @@ std::vector<McpToolEntry> getRegisteredTools() {
                      "(typeName, varName); the same physical mutex under "
                      "different variable names will not match. Result: "
                      "{sharedLocks:[{typeName, varName, pathsA, pathsB}], "
-                     "shared, aOnly, bOnly, truncated}.",
+                     "shared, aOnly, bOnly, truncated}. An ambiguous name "
+                     "returns {ambiguous:true, candidates:[...]} — re-query "
+                     "with the *_usr parameter.",
                      llvm::json::Value(std::move(schema)),
                      handleQuerySameLock});
   }
@@ -2101,7 +2350,10 @@ std::vector<McpToolEntry> getRegisteredTools() {
   {
     llvm::json::Object props;
     props["entry_points"] = stringArrayProp(
-        "Entry point function names (default: configured entry points)");
+        "Entry point function names (default: configured entry points). "
+        "Entry points are reachability SEEDS: a name shared by several "
+        "functions (overloads) seeds ALL of them (deliberate union "
+        "semantics — no disambiguation round-trip here).");
     props["include_optimistic"] = boolProp(
         "Include optimistically-alive functions (default: true)");
     props["include_system"] = boolProp(

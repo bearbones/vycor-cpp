@@ -325,6 +325,22 @@ ControlFlowIndex::contextAtSite(const std::string &callSite,
 }
 
 std::vector<CallSiteContext>
+ControlFlowIndex::contextsAtSite(const std::string &callSite) const {
+  std::vector<CallSiteContext> result;
+  auto id = interner_.find(callSite);
+  if (!id)
+    return result;
+  auto it = bySite_.find(*id);
+  if (it == bySite_.end())
+    return result;
+  for (size_t idx : it->second) {
+    if (contexts_[idx].live)
+      result.push_back(materialize(contexts_[idx]));
+  }
+  return result;
+}
+
+std::vector<CallSiteContext>
 ControlFlowIndex::contextsForCallee(const std::string &calleeName) const {
   std::vector<CallSiteContext> result;
   const auto *indices = indicesFor(byCallee_, byCalleeDisplay_, calleeName);

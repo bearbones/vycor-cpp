@@ -171,6 +171,65 @@ def call(proc, req_id, tool, params):
 
 ---
 
+## Function identity and disambiguation
+
+Nodes are identified by their **Clang USR** (unique, signature-encoding);
+the qualified **name** is display-only. Two overloads of
+`MyClass::process`, or two specializations of `parse<T>`, are distinct
+nodes that share one display name. Every tool that takes a function
+identity therefore accepts two parameters:
+
+- `name` (or `from`/`to`, `function`, `fn_a`/`fn_b`) — the human-readable
+  qualified name. Resolved server-side.
+- `usr` (or `from_usr`/`to_usr`, `fn_a_usr`/`fn_b_usr`) — the exact USR.
+  Bypasses name resolution entirely; wins when both are given.
+
+**Resolution rules per identity parameter:**
+
+1. A name matching exactly one function behaves exactly as before — and
+   the response includes the resolved `"usr"` so you can pin it for later
+   queries.
+2. A name matching **several** functions returns a non-error
+   **disambiguation response** instead of the normal result. It is never a
+   silent union of the candidates, and never a hard error:
+
+```json
+{"ambiguous": true, "parameter": "name", "name": "precision::process",
+ "candidates": [
+   {"usr": "c:@N@precision@F@process#*1C#", "qualifiedName": "precision::process",
+    "file": "/src/overloads.cpp", "line": 5},
+   {"usr": "c:@N@precision@F@process#d#", "qualifiedName": "precision::process",
+    "file": "/src/overloads.cpp", "line": 6}],
+ "note": "Multiple functions share this name. Re-run with the 'usr' parameter of the intended candidate."}
+```
+
+3. Pick the intended candidate and re-run the same call with its `usr` —
+   one extra round-trip, then every result is precise to that overload.
+
+**Recommended agent flow:** `search_functions` first (each match carries
+its `usr`), pick the `usr`, then drive the precise queries with it:
+
+```python
+r = call(proc, 1, "search_functions", {"query": "process"})
+usr = r["matches"][0]["usr"]
+callers = call(proc, 2, "get_callers", {"usr": usr})
+```
+
+**Call-site tools** (`query_call_site_context`,
+`query_raii_scopes_at_callsite`) have the same contract on a different
+axis: a macro expanded in several functions gives multiple call sites one
+`file:line:col` spelling. A bare spelling that matches several contexts
+returns `{"ambiguous": true, "candidates": [{callSite, callerUsr,
+callerName}...]}` — re-query with the optional `caller` parameter
+(qualified name or USR of the enclosing function).
+
+**Deliberate exceptions:** `entry_points` arrays (`analyze_dead_code`,
+the lock tools) keep **union** semantics — entry points are reachability
+seeds, so a shared name seeding all its overloads is the intended
+behavior. `get_class_hierarchy` is display-keyed by design and untouched.
+
+---
+
 ## Effective analysis workflow
 
 ### Step 1 — Mine function names before querying
