@@ -953,75 +953,147 @@ static void collectLocksOnEdge(const ControlFlowIndex &cfIndex,
   }
 }
 
-// Reverse-DFS from `target` walking callersOf. When `path.back()` matches
-// any entry point, emit a PathResult for that entry point. path[0] is the
-// current frontier (closest to target); we reverse at emit time.
-static void reverseDfs(const CallGraph &graph,
-                       const ControlFlowIndex &cfIndex,
-                       const std::unordered_set<std::string> &entrySet,
-                       const std::string &target,
-                       std::vector<std::string> &path,
-                       std::vector<std::string> &edgeCallSites,
-                       std::unordered_set<std::string> &visitedEdges,
-                       unsigned maxDepth, size_t maxFanIn,
-                       std::map<std::string, size_t> &skippedHubs,
-                       std::vector<PathResult> &out,
-                       bool &truncated) {
-  if (out.size() >= kMaxPaths) {
-    truncated = true;
-    return;
+// Reverse path search from `target` walking caller edges, entirely in
+// interned-id space (the string-space version was measured >10 min on a
+// 938-TU graph — same exponential class find_call_chain had). Strings are
+// resolved only for emitted paths and skipped hubs. Two prunes bound the
+// walk (both proven on find_call_chain):
+//  - corridor: a forward BFS from the entry set over callee edges records
+//    min-edges-from-entry per node; the DFS only expands callers that can
+//    still complete an entry->...->target path within maxDepth.
+//  - dead-end memo: a node whose ancestry was exhaustively explored from
+//    depth d without reaching an entry cannot succeed on a revisit with
+//    depth >= d. Failures caused by the per-path edge exclusion or the
+//    kMaxPaths early-stop are search-state-dependent and never memoized;
+//    hub skips are deterministic per node and stay memoizable.
+// The per-path VISITED-EDGE exclusion (not a node-cycle guard) is
+// preserved from the original: parallel edges through the same node pair
+// at different call sites legitimately yield distinct lock paths.
+
+using SId = StringInterner::Id;
+
+struct EdgeVisitKey {
+  SId caller, callee, site;
+  bool operator==(const EdgeVisitKey &o) const {
+    return caller == o.caller && callee == o.callee && site == o.site;
+  }
+};
+struct EdgeVisitKeyHash {
+  size_t operator()(const EdgeVisitKey &k) const {
+    uint64_t h = (static_cast<uint64_t>(k.caller) << 32) | k.callee;
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= k.site;
+    h ^= (h >> 33);
+    return static_cast<size_t>(h);
+  }
+};
+
+namespace {
+struct RawLockPath {
+  SId entryPoint;
+  std::vector<SId> nodes;     // target -> ... -> entry (reversed at emit)
+  std::vector<SId> edgeSites; // parallel to edges along nodes
+};
+
+struct LockDfsState {
+  const CallGraph &graph;
+  const std::unordered_set<SId> &entrySet;
+  const std::unordered_map<SId, unsigned> &minFromEntry;
+  unsigned maxDepth;
+  size_t maxFanIn;
+  std::optional<SId> indirectId;
+  std::vector<SId> path;
+  std::vector<SId> edgeSites;
+  std::unordered_set<EdgeVisitKey, EdgeVisitKeyHash> visitedEdges;
+  std::unordered_map<SId, unsigned> deadAt;
+  std::unordered_map<SId, std::vector<CallGraph::EdgeRef>> callersMemo;
+  std::map<SId, size_t> skippedHubs;
+  std::vector<RawLockPath> out;
+  bool truncated = false;
+};
+} // namespace
+
+static int lockReverseDfs(LockDfsState &st) {
+  constexpr int kFound = 1, kBlocked = 2;
+  if (st.out.size() >= kMaxPaths) {
+    st.truncated = true;
+    return kBlocked;
   }
 
-  const std::string &cur = path.back();
-  if (entrySet.count(cur)) {
-    // Emit path from entry → target.
-    PathResult pr;
-    pr.entryPoint = cur;
-    pr.path.assign(path.rbegin(), path.rend());
-
-    std::unordered_set<LockKey, LockKeyHash> seen;
-    for (const auto &cs : edgeCallSites)
-      collectLocksOnEdge(cfIndex, cs, pr.locksHeld, seen);
-    out.push_back(std::move(pr));
-    return;
+  SId cur = st.path.back();
+  if (st.entrySet.count(cur)) {
+    RawLockPath rp;
+    rp.entryPoint = cur;
+    rp.nodes = st.path;
+    rp.edgeSites = st.edgeSites;
+    st.out.push_back(std::move(rp));
+    return kFound;
   }
 
-  if (path.size() >= maxDepth)
-    return;
+  if (st.path.size() >= st.maxDepth)
+    return 0; // budget failure — memoizable via the depth comparison
+
+  auto dit = st.deadAt.find(cur);
+  if (dit != st.deadAt.end() &&
+      static_cast<unsigned>(st.path.size()) >= dit->second)
+    return 0;
 
   // Hub cutoff: never refuse to expand the query target itself.
-  if (maxFanIn > 0 && path.size() > 1) {
-    size_t inDeg = graph.storedInDegree(cur);
-    if (inDeg > maxFanIn) {
-      skippedHubs.emplace(cur, inDeg);
-      return;
+  // Deterministic per node, so it does not poison the dead-end memo.
+  if (st.maxFanIn > 0 && st.path.size() > 1) {
+    size_t inDeg = st.graph.storedInDegree(cur);
+    if (inDeg > st.maxFanIn) {
+      st.skippedHubs.emplace(cur, inDeg);
+      return 0;
     }
   }
 
-  auto callers = graph.callersOf(cur);
+  int flags = 0;
+  auto cit = st.callersMemo.find(cur);
+  if (cit == st.callersMemo.end())
+    cit = st.callersMemo.emplace(cur, st.graph.callerRefsOf(cur)).first;
+  const auto &callers = cit->second;
   for (const auto &edge : callers) {
     // Skip indirect edges — they have no stable callee identity for
     // transitive lock inheritance.
-    if (edge.callerName == "<indirect>")
+    if (st.indirectId && edge.caller == *st.indirectId)
       continue;
-    std::string key = edge.callerName + "->" + edge.calleeName + "@" +
-                      edge.callSite;
-    if (!visitedEdges.insert(key).second)
+    // Corridor prune: the caller must be reachable from an entry with
+    // enough budget left to descend back to the target (path holds
+    // st.path.size() nodes; pushing the caller and completing via the
+    // entry needs minFromEntry more edges).
+    auto mit = st.minFromEntry.find(edge.caller);
+    if (mit == st.minFromEntry.end() ||
+        st.path.size() + 1 + mit->second > st.maxDepth)
       continue;
+    EdgeVisitKey key{edge.caller, edge.callee, edge.callSite};
+    if (!st.visitedEdges.insert(key).second) {
+      flags |= kBlocked; // path-dependent exclusion
+      continue;
+    }
 
-    path.push_back(edge.callerName);
-    edgeCallSites.push_back(edge.callSite);
-    reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
-               visitedEdges, maxDepth, maxFanIn, skippedHubs, out, truncated);
-    edgeCallSites.pop_back();
-    path.pop_back();
-    visitedEdges.erase(key);
+    st.path.push_back(edge.caller);
+    st.edgeSites.push_back(edge.callSite);
+    flags |= lockReverseDfs(st);
+    st.edgeSites.pop_back();
+    st.path.pop_back();
+    st.visitedEdges.erase(key);
 
-    if (out.size() >= kMaxPaths) {
-      truncated = true;
-      return;
+    if (st.out.size() >= kMaxPaths) {
+      st.truncated = true;
+      flags |= kBlocked; // exploration truncated, not exhausted
+      break;
     }
   }
+
+  if (!(flags & (kFound | kBlocked))) {
+    auto [it, inserted] =
+        st.deadAt.emplace(cur, static_cast<unsigned>(st.path.size()));
+    if (!inserted && static_cast<unsigned>(st.path.size()) < it->second)
+      it->second = static_cast<unsigned>(st.path.size());
+  }
+  return flags;
 }
 
 static std::vector<PathResult>
@@ -1036,13 +1108,66 @@ collectLocksHeld(const CallGraph &graph, const ControlFlowIndex &cfIndex,
   if (entryPoints.empty())
     return out;
 
-  std::unordered_set<std::string> entrySet(entryPoints.begin(),
-                                            entryPoints.end());
-  std::vector<std::string> path{target};
-  std::vector<std::string> edgeCallSites; // per edge caller→callee
-  std::unordered_set<std::string> visitedEdges;
-  reverseDfs(graph, cfIndex, entrySet, target, path, edgeCallSites,
-             visitedEdges, maxDepth, maxFanIn, skippedHubs, out, truncated);
+  const auto &interner = graph.interner();
+  auto targetId = interner.find(target);
+  if (!targetId)
+    return out;
+  std::unordered_set<SId> entrySet;
+  for (const auto &ep : entryPoints) {
+    if (auto id = interner.find(ep))
+      entrySet.insert(*id);
+  }
+  if (entrySet.empty())
+    return out;
+
+  // Corridor BFS: min edges from any entry, over callee edges, bounded by
+  // maxDepth (node budget; a path of N nodes has N-1 edges).
+  std::unordered_map<SId, unsigned> minFromEntry;
+  {
+    std::vector<SId> frontier(entrySet.begin(), entrySet.end());
+    for (SId e : frontier)
+      minFromEntry.emplace(e, 0);
+    unsigned dist = 0;
+    while (!frontier.empty() && dist + 1 < maxDepth) {
+      ++dist;
+      std::vector<SId> next;
+      for (SId node : frontier) {
+        for (const auto &edge : graph.calleeRefsOf(node)) {
+          if (minFromEntry.emplace(edge.callee, dist).second)
+            next.push_back(edge.callee);
+        }
+      }
+      frontier = std::move(next);
+    }
+  }
+  {
+    auto tmit = minFromEntry.find(*targetId);
+    if (tmit == minFromEntry.end() || tmit->second + 1 > maxDepth)
+      return out; // no entry->target corridor within budget
+  }
+
+  LockDfsState st{graph,    entrySet, minFromEntry,
+                  maxDepth, maxFanIn, interner.find("<indirect>")};
+  st.path.push_back(*targetId);
+  lockReverseDfs(st);
+  truncated = st.truncated;
+
+  // Resolve ids only for the emitted paths and skipped hubs.
+  out.reserve(st.out.size());
+  for (const auto &rp : st.out) {
+    PathResult pr;
+    pr.entryPoint = interner.resolve(rp.entryPoint);
+    pr.path.reserve(rp.nodes.size());
+    for (auto it = rp.nodes.rbegin(); it != rp.nodes.rend(); ++it)
+      pr.path.push_back(interner.resolve(*it));
+    std::unordered_set<LockKey, LockKeyHash> seen;
+    for (SId site : rp.edgeSites)
+      collectLocksOnEdge(cfIndex, interner.resolve(site), pr.locksHeld,
+                         seen);
+    out.push_back(std::move(pr));
+  }
+  for (const auto &[hubId, deg] : st.skippedHubs)
+    skippedHubs.emplace(interner.resolve(hubId), deg);
   return out;
 }
 
