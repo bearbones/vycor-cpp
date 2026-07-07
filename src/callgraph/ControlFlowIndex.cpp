@@ -344,6 +344,53 @@ std::vector<CallSiteContext> ControlFlowIndex::allContexts() const {
   return result;
 }
 
+void ControlFlowIndex::absorb(const ControlFlowIndex &shard) {
+  if (&shard == this)
+    return;
+  std::lock_guard<std::mutex> lockThis(mutex_);
+  std::lock_guard<std::mutex> lockShard(shard.mutex_);
+
+  // Shard string id -> master string id, by position.
+  std::vector<SId> remap;
+  remap.reserve(shard.interner_.size());
+  shard.interner_.forEachString(
+      [&](const std::string &s) { remap.push_back(interner_.intern(s)); });
+
+  // Set tables: shard index -> master index through the dedup key maps.
+  // Index 0 is the seeded empty set on both sides. Scope/guard tables hold
+  // plain strings, so their keys need no remap; the RAII table is in id
+  // space and must be remapped BEFORE its key is built.
+  std::vector<uint32_t> scopeRemap(shard.scopeSets_.size(), 0);
+  for (uint32_t i = 1; i < shard.scopeSets_.size(); ++i)
+    scopeRemap[i] =
+        internScopeSet(scopeSetKey(shard.scopeSets_[i]), shard.scopeSets_[i]);
+  std::vector<uint32_t> guardRemap(shard.guardSets_.size(), 0);
+  for (uint32_t i = 1; i < shard.guardSets_.size(); ++i)
+    guardRemap[i] =
+        internGuardSet(guardSetKey(shard.guardSets_[i]), shard.guardSets_[i]);
+  std::vector<uint32_t> raiiRemap(shard.raiiSets_.size(), 0);
+  for (uint32_t i = 1; i < shard.raiiSets_.size(); ++i) {
+    std::vector<StoredRaiiLocal> locals = shard.raiiSets_[i];
+    for (auto &l : locals) {
+      l.typeName = remap[l.typeName];
+      l.varName = remap[l.varName];
+      l.declLocation = remap[l.declLocation];
+    }
+    std::string key = raiiSetKey(locals);
+    raiiRemap[i] = internRaiiSet(std::move(key), std::move(locals));
+  }
+
+  for (const auto &se : shard.contexts_) {
+    if (!se.live)
+      continue;
+    SId tuId = se.tuPath == kNoString ? kNoString : remap[se.tuPath];
+    insertStored(remap[se.caller], remap[se.callee], remap[se.site], tuId,
+                 scopeRemap[se.scopeSet], guardRemap[se.guardSet],
+                 raiiRemap[se.raiiSet], se.callerNoexcept,
+                 se.insideCatchBlock);
+  }
+}
+
 size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
   std::string prefix = tuPath + ":";

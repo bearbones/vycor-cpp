@@ -67,6 +67,7 @@ add_executable(vycor_tests
   test_mcp.cpp
   test_deep_chains.cpp
   test_snapshot.cpp
+  test_worker_pool.cpp
 )
 
 target_link_libraries(vycor_tests PRIVATE

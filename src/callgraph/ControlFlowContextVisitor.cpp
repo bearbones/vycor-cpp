@@ -29,6 +29,7 @@
 #include <chrono>
 #include <csignal>
 #include <csetjmp>
+#include <functional>
 
 // Crash guard — same mechanism as CallGraphBuilder.cpp.
 // These are defined there and shared via the signal handler table.
@@ -73,11 +74,15 @@ std::atomic<unsigned> g_cfParseErrorCount{0};
 
 // Run one guarded parse, timing it and recording the outcome. `stats` may
 // be null (timing skipped); the parse-error counter always advances.
+// `preTu`, when set, fires before the parse (worker-mode WORKER-TU marker).
 void bakeRun(const clang::tooling::CompilationDatabase &compDb,
              const std::string &file,
              clang::tooling::FrontendActionFactory &factory,
              const vycor::PchCache *pchCache, const std::string &sysroot,
-             int phase, vycor::BuildStats *stats) {
+             int phase, vycor::BuildStats *stats,
+             const std::function<void(const std::string &)> &preTu) {
+  if (preTu)
+    preTu(file);
   auto t0 = std::chrono::steady_clock::now();
   int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
   if (status == 1)
@@ -851,7 +856,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const PchCache *pchCache,
                          const std::string &sysroot,
                          const LockTypeConfig &lockCfg,
-                         BuildStats *stats) {
+                         BuildStats *stats,
+                         std::function<void(const std::string &)> preTu) {
   BakedIndexes out;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
@@ -878,10 +884,10 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 
     for (const auto &file : files) {
       pool.async([&compDb, &out, collapsePtr, &lockCfg, pchCache, &sysroot,
-                  stats, file]() {
+                  stats, &preTu, file]() {
         BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                           &lockCfg, file);
-        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats);
+        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
       });
     }
     pool.wait();
@@ -889,7 +895,7 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
     for (const auto &file : files) {
       BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                         &lockCfg, file);
-      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats);
+      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
     }
   }
   if (stats)

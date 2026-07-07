@@ -23,6 +23,7 @@
 #include "vycor/morph/TransformPipeline.h"
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/Snapshot.h"
+#include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/PchCache.h"
 #include "vycor/mcp/McpServer.h"
 
@@ -31,8 +32,10 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -357,6 +360,36 @@ static llvm::cl::opt<std::string>
                        "if present (reindexing only changed TUs), and save "
                        "after building"),
         llvm::cl::value_desc("file"),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<bool>
+    McpIsolateWorkers("isolate-workers",
+        llvm::cl::desc("Bake the indexes in subprocess workers (a crashing "
+                       "TU costs only that TU; parent RSS stays bounded)"),
+        llvm::cl::init(false),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<unsigned>
+    McpWorkers("workers",
+        llvm::cl::desc("Number of worker processes for --isolate-workers "
+                       "(0 = the --threads value)"),
+        llvm::cl::init(0),
+        llvm::cl::sub(MegascopeCmd));
+
+// Worker-mode plumbing (spawned by the --isolate-workers parent; not part
+// of the user-facing surface).
+static llvm::cl::opt<bool>
+    McpBakeWorker("bake-worker",
+        llvm::cl::desc("Internal: bake the --source list and write a "
+                       "snapshot shard instead of serving"),
+        llvm::cl::Hidden,
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<std::string>
+    McpWorkerOut("worker-out",
+        llvm::cl::desc("Internal: shard output path for --bake-worker"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::Hidden,
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
@@ -714,6 +747,37 @@ int main(int argc, const char **argv) {
     vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
 
+    // ---- worker mode (spawned by an --isolate-workers parent) ------------
+    // Bake the batch with the existing in-process pipeline (crash guard
+    // still enabled — first line of defense stays in-process), write the v5
+    // snapshot shard, exit. No server loop, no snapshot warm start, no
+    // stats-json. The WORKER-TU stderr marker before each parse is the
+    // parent's poison identifier when this process dies.
+    if (McpBakeWorker) {
+      if (McpWorkerOut.empty()) {
+        llvm::errs() << "megascope: --bake-worker requires --worker-out\n";
+        return 1;
+      }
+      auto baked = vycor::bakeIndexes(
+          *compDb, files, collapsePaths, McpThreads, pchPtr, sysroot, lockCfg,
+          /*stats=*/nullptr, [](const std::string &f) {
+            llvm::errs() << "WORKER-TU " << f << "\n";
+          });
+      vycor::SnapshotMeta meta;
+      meta.collapsePaths = collapsePaths;
+      meta.lockAllowlist = lockCfg.userAllowlist;
+      meta.lockBuiltins = lockCfg.useBuiltins;
+      // meta.files stays empty: the parent ignores shard meta except as a
+      // config sanity check.
+      if (!vycor::SnapshotIO::save(McpWorkerOut, baked.graph, baked.cfIndex,
+                                   meta)) {
+        llvm::errs() << "megascope: worker: cannot write shard to "
+                     << McpWorkerOut << "\n";
+        return 1;
+      }
+      return 0;
+    }
+
     vycor::CallGraph graph;
     vycor::ControlFlowIndex cfIndex;
     bool needFullBuild = true;
@@ -804,9 +868,29 @@ int main(int argc, const char **argv) {
                    << files.size() << " files, "
                    << McpThreads << " threads)...\n";
       auto bakeStart = StatsClock::now();
-      auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
-                                      McpThreads, pchPtr, sysroot, lockCfg,
-                                      &buildStats);
+      vycor::BakedIndexes baked;
+      if (McpIsolateWorkers) {
+        // Full builds run in subprocess workers; the warm-start dirty-TU
+        // refresh above stays in-process (bakeTU) regardless of the flag.
+        unsigned workerCount =
+            McpWorkers ? McpWorkers.getValue() : McpThreads.getValue();
+        if (workerCount == 0)
+          workerCount = std::thread::hardware_concurrency();
+        static int selfExeAnchor; // address anchors getMainExecutable
+        std::string selfExe =
+            llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
+        vycor::McpBakeConfig bakeCfg;
+        bakeCfg.buildPath = McpBuildPath;
+        bakeCfg.collapsePaths = collapsePaths;
+        bakeCfg.extraArgs = vycor::globalExtraArgs();
+        bakeCfg.sysroot = sysroot;
+        bakeCfg.lockTypes = lockCfg.userAllowlist;
+        baked = vycor::bakeIsolated(selfExe, bakeCfg, files, workerCount,
+                                    &buildStats);
+      } else {
+        baked = vycor::bakeIndexes(*compDb, files, collapsePaths, McpThreads,
+                                   pchPtr, sysroot, lockCfg, &buildStats);
+      }
       bakeMs = msSince(bakeStart);
       graph = std::move(baked.graph);
       cfIndex = std::move(baked.cfIndex);
