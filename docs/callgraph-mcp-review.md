@@ -230,6 +230,59 @@ grouping, macro-before-include ordering). Not worth the complexity while
 bigger loss-free levers remain (items 10–11 above). Revisit if a target
 codebase is measured header-bound.
 
+### Template node growth: measured composition and policy (F8 follow-up, 2026-07-07)
+
+The F8 design carried a risk note: "every template instantiation becomes a
+node … if explosive, collapse instantiations of the same primary template
+behind a canonical USR." Measured on the 938-TU testbed (via the new
+`--dump-nodes` TSV: usr, display, file, line, caller usrs per node; the
+pre-F8 baseline extracted from the cached v5 snapshot's node section):
+
+**Where the +37,575 nodes (57,115 → 94,690) came from** (attribution exact;
+the three buckets below balance the delta to the node):
+
+| bucket | nodes | what it is |
+|---|---|---|
+| new arg-carrying names | +13.5k | class-template member instantiations (`SmallVector<Foo>::push_back`) |
+| new bare names, heavily split | +9.7k over 1,007 names | function-template instantiations of generic utilities (`llvm::cast` 858, `dyn_cast` 696, `isa` 610, `std::move` 554, …) |
+| same-name splits | +12.7k | 11.4k genuine signature overloads (the F8 precision win, previously WRONGLY merged), 3.7k template patterns, 3.3k more func-tmpl instantiations, 0.9k file-scoped statics (also a win — previously merged cross-TU) |
+
+(−94 names vanished: the one flaky-crasher TU, not an identity change.)
+
+Post-F8 inventory: 46% plain, 38% template-instantiation-minted, 13%
+overload splits, 3% lambda/synth. All 35.8k template nodes live in headers —
+24.1k in the analyzed codebase's own templates, 11.8k in the STL, so a
+"collapse system headers only" variant has only ~12% headroom.
+
+**Policy: keep instantiations distinct in storage; fix presentation, not
+identity.** Three measured reasons:
+
+1. **Growth is proportional, not explosive** (1.66× nodes, bake +2–4%, USR
+   strings 8.8 MB total, RSS +15%). The risk-note trigger is not met.
+2. **Collapse costs real precision broadly**: of 2,289 primaries with >1
+   instantiation, 67% have instantiations with DIFFERING caller sets
+   (30.9k nodes) — callers genuinely partition by template argument, which
+   is exactly the signal F8 bought (`parse<Json>` vs `parse<Yaml>`).
+   Only 753 groups (3.1k nodes) would collapse for free.
+3. **The felt cost is concentrated in ~21 display names**, all generic
+   library utilities with >100 instantiations each. 88.5% of names are
+   unambiguous; 97% of ambiguous names have ≤5 candidates (the intended
+   one-extra-round-trip flow).
+
+**The actionable follow-up** (seed for a future round): the disambiguation
+response is uncapped — `callers_of name="llvm::cast"` returns all 858
+candidates, a ≈188 KB context bomb that violates the F8 "cheap for an agent
+loop" ergonomics criterion, and candidate counts scale with codebase size.
+Cap the candidate list (e.g. 25) and, above the cap, return a summary form:
+total count, candidates grouped by primary template / file, and a note
+offering (a) refine by substring, (b) an explicit merged-by-name query — the
+graph API already computes merged results internally with an ambiguity flag.
+Presentation-level, no storage or snapshot change.
+
+**Trigger for revisiting storage collapse**: a target codebase where
+`nodes_`/interner become the binding RSS constraint (≫1M nodes) or node
+minting shows up in bake wall — neither is close at 938 TUs.
+
 Rationale for the order: 1 gates all real-world MCP use and is small. 3 is
 the largest UX win per line of code. 4–6 compound: the single-parse pipeline
 falls out of query-time expansion, and dedup/interning shrink what the

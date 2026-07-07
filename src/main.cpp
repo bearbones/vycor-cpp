@@ -401,6 +401,16 @@ static llvm::cl::opt<std::string>
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
+static llvm::cl::opt<std::string>
+    McpDumpNodes("dump-nodes",
+        llvm::cl::desc("Write the node inventory as TSV (usr, display name, "
+                       "file, line, comma-joined caller usrs) to this file "
+                       "once the index is ready, then serve normally. "
+                       "Measurement aid for identity/growth analysis "
+                       "(docs/design-f8-usr-identity.md risk note)"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(MegascopeCmd));
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -979,6 +989,35 @@ int main(int argc, const char **argv) {
         out << llvm::json::Value(std::move(root)) << "\n";
         llvm::errs() << "megascope: stats written to " << McpStatsJson
                      << "\n";
+      }
+    }
+
+    if (!McpDumpNodes.empty()) {
+      std::error_code ec;
+      llvm::raw_fd_ostream out(McpDumpNodes, ec);
+      if (ec) {
+        llvm::errs() << "megascope: WARNING: cannot write node dump to "
+                     << McpDumpNodes << ": " << ec.message() << "\n";
+      } else {
+        // Tabs/newlines cannot appear in USRs or qualified names; no
+        // escaping needed. Caller USRs come from the same materialized
+        // edge set callersOf serves to queries (virtual dispatch and
+        // function-return joins included), so offline analysis of a
+        // collapse policy sees query-level precision, not stored edges.
+        for (const vycor::CallGraphNode *node : graph.allNodes()) {
+          out << node->usr << '\t' << node->qualifiedName << '\t'
+              << node->file << '\t' << node->line << '\t';
+          bool first = true;
+          for (const auto &edge : graph.callersOf(node->usr)) {
+            if (!first)
+              out << ',';
+            out << edge.callerUsr;
+            first = false;
+          }
+          out << '\n';
+        }
+        llvm::errs() << "megascope: node dump (" << graph.nodeCount()
+                     << " nodes) written to " << McpDumpNodes << "\n";
       }
     }
 

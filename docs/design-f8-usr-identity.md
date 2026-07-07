@@ -116,6 +116,16 @@ Write these before the core swap; they must FAIL against today's build:
   Expect nodes ↑ (measure on the 938-TU testbed; if explosive, collapse
   instantiations of the same primary template behind a canonical USR
   and keep specializations distinct only when explicit).
+  **RESOLVED (2026-07-07): measured NOT explosive; policy is
+  keep-distinct.** 57,115 → 94,690 nodes (1.66×) on the 938-TU testbed,
+  attribution exact via `--dump-nodes` + the cached pre-F8 v5 snapshot;
+  67% of multi-instantiation primaries have differing caller sets, so
+  the collapse fallback would destroy real precision. The residual cost
+  is presentation-level (uncapped disambiguation lists on ~21 generic
+  utility names — `llvm::cast` returns 858 candidates ≈ 188 KB); the
+  follow-up is a candidate cap + grouped summary in the MCP layer, not
+  identity collapse. Full numbers and policy:
+  `docs/callgraph-mcp-review.md` §"Template node growth".
 - **USR stability across Clang majors** (18/20/21 CI matrix): USRs are
   stable in practice within a major; snapshots are already
   version-gated and machine-local, so cross-version drift only costs a
