@@ -22,10 +22,31 @@
 #include "llvm/Support/JSON.h"
 
 #include <functional>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace vycor {
+
+/// Whole-graph query results cached across tool calls. Owned by McpServer
+/// and cleared wholesale whenever the indexes mutate (reindex_tu), so a
+/// cached value is always consistent with the graph it was computed from.
+/// Used by handlers whose cost scales with the whole graph rather than the
+/// query (analyze_dead_code reruns full liveness; graph_summary
+/// materializes calleesOf for every node).
+struct QueryCache {
+  // Final JSON results (argument-independent queries, e.g. graph_summary).
+  std::map<std::string, llvm::json::Value> byKey;
+  // Typed intermediate results shared across argument variations (e.g. the
+  // dead-code liveness map, reused by every pagination/filter combination).
+  std::map<std::string, std::shared_ptr<void>> objects;
+
+  void clear() {
+    byKey.clear();
+    objects.clear();
+  }
+};
 
 /// Context passed to every tool handler.
 struct McpToolContext {
@@ -33,6 +54,9 @@ struct McpToolContext {
   const ControlFlowOracle &oracle;
   const ControlFlowIndex &cfIndex;
   const std::vector<std::string> &entryPoints;
+  /// Optional whole-graph result cache; null in contexts that do not want
+  /// caching (handlers must treat it as best-effort).
+  QueryCache *cache = nullptr;
 };
 
 /// Signature for a tool handler function.

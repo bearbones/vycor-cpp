@@ -65,6 +65,9 @@ private:
   ControlFlowOracle oracle_;
   std::vector<std::string> entryPoints_;
   McpBuildParams buildParams_;
+  // Whole-graph query results, valid until the next index mutation
+  // (reindexTU clears it).
+  QueryCache queryCache_;
   bool initialized_ = false;
   // Tool name -> handler, populated lazily on the first tools/call.
   std::unordered_map<std::string, McpToolHandler> handlers_;

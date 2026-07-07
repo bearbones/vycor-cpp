@@ -474,45 +474,82 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   std::set<std::string> onPath;
   std::map<std::string, size_t> skippedHubs; // name -> stored in-degree
 
-  std::function<void(const std::string &, unsigned)> dfs =
-      [&](const std::string &node, unsigned depth) {
+  // Dead-end memo. Without it the simple-path enumeration re-explores the
+  // whole ancestor cone once per permutation — exponential in the no-path
+  // case (and in the ancestry of any near-miss). deadAt[n] = d records
+  // that n's ancestry was exhaustively explored from depth d (budget
+  // maxDepth - d) finding no start, with the failure independent of the
+  // current path; a revisit at depth >= d has no more budget and cannot
+  // succeed. Failures caused by an on-path exclusion or by the maxPaths
+  // early-stop are path/search-state-dependent and are never memoized
+  // (kBlocked poisons cleanness up the recursion). Budget-exhaustion
+  // failures ARE memoizable: the depth comparison encodes the budget.
+  std::map<std::string, unsigned> deadAt;
+  // callersOf materializes strings for every edge (and synthesizes
+  // virtual-dispatch / deferred-return expansions); a node can be visited
+  // several times at different depths, so materialize once per call.
+  std::map<std::string, std::vector<CallGraphEdge>> callersMemo;
+  constexpr int kFound = 1, kBlocked = 2;
+
+  std::function<int(const std::string &, unsigned)> dfs =
+      [&](const std::string &node, unsigned depth) -> int {
         if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
-          return;
+          return kBlocked;
         if (depth > static_cast<unsigned>(maxDepth))
-          return;
+          return 0;
+        auto dit = deadAt.find(node);
+        if (dit != deadAt.end() && depth >= dit->second)
+          return 0;
 
         currentPath.push_back(node);
         onPath.insert(node);
+        int flags = 0;
 
         if (startSet.count(node)) {
           FoundPath fp;
           fp.nodes.assign(currentPath.rbegin(), currentPath.rend());
           fp.edges.assign(currentEdges.rbegin(), currentEdges.rend());
           foundPaths.push_back(std::move(fp));
+          flags |= kFound;
         } else if (maxFanIn > 0 && depth > 0 &&
                    ctx.graph.storedInDegree(node) >
                        static_cast<size_t>(maxFanIn)) {
           // Hub: expanding its ancestry would dominate the search. Record
           // and prune; the caller can re-run with a higher max_fan_in or
-          // query the hub directly.
+          // query the hub directly. Deterministic per node, so it does not
+          // poison the dead-end memo.
           skippedHubs.emplace(node, ctx.graph.storedInDegree(node));
         } else {
-          auto callers = ctx.graph.callersOf(node);
+          auto cit = callersMemo.find(node);
+          if (cit == callersMemo.end())
+            cit = callersMemo.emplace(node, ctx.graph.callersOf(node)).first;
+          const auto &callers = cit->second;
           for (const auto &edge : callers) {
-            if (onPath.count(edge.callerName))
+            if (onPath.count(edge.callerName)) {
+              flags |= kBlocked; // path-dependent exclusion
               continue;
+            }
             if (!filter.allows(edge))
               continue;
             currentEdges.push_back(edge);
-            dfs(edge.callerName, depth + 1);
+            flags |= dfs(edge.callerName, depth + 1);
             currentEdges.pop_back();
-            if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
+            if (static_cast<int64_t>(foundPaths.size()) >= maxPaths) {
+              flags |= kBlocked; // exploration truncated, not exhausted
               break;
+            }
           }
         }
 
         currentPath.pop_back();
         onPath.erase(node);
+
+        if (!(flags & (kFound | kBlocked))) {
+          auto [it, inserted] = deadAt.emplace(node, depth);
+          if (!inserted && depth < it->second)
+            it->second = depth;
+        }
+        return flags;
       };
 
   dfs(to->str(), 0);
@@ -1138,12 +1175,51 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
   if (offset < 0)
     offset = 0;
 
-  DeadCodeAnalyzer analyzer(ctx.graph, entryPoints);
-  analyzer.analyzePessimistic();
-  if (includeOptimistic)
-    analyzer.analyzeOptimistic();
+  // Two cache layers: the final JSON keyed on ALL args (identical repeat
+  // calls are free), and the liveness map keyed on the analysis inputs
+  // only (entry points + optimistic flag) so pagination/filter variations
+  // share the whole-graph BFS.
+  std::string fullKey;
+  if (ctx.cache) {
+    fullKey = "dead_code_json|";
+    fullKey += includeOptimistic ? '1' : '0';
+    fullKey += includeSystem ? '1' : '0';
+    fullKey += '|' + namePrefix + '|' + filePrefix + '|' +
+               std::to_string(limit) + '|' + std::to_string(offset);
+    for (const auto &ep : entryPoints) {
+      fullKey += '|';
+      fullKey += ep;
+    }
+    auto it = ctx.cache->byKey.find(fullKey);
+    if (it != ctx.cache->byKey.end())
+      return it->second;
+  }
 
-  auto results = analyzer.getResults();
+  using LivenessMap = std::unordered_map<std::string, Liveness>;
+  std::shared_ptr<const LivenessMap> resultsPtr;
+  std::string cacheKey;
+  if (ctx.cache) {
+    cacheKey = "dead_code|";
+    cacheKey += includeOptimistic ? '1' : '0';
+    for (const auto &ep : entryPoints) {
+      cacheKey += '|';
+      cacheKey += ep;
+    }
+    auto it = ctx.cache->objects.find(cacheKey);
+    if (it != ctx.cache->objects.end())
+      resultsPtr = std::static_pointer_cast<const LivenessMap>(it->second);
+  }
+  if (!resultsPtr) {
+    DeadCodeAnalyzer analyzer(ctx.graph, entryPoints);
+    analyzer.analyzePessimistic();
+    if (includeOptimistic)
+      analyzer.analyzeOptimistic();
+    auto computed = std::make_shared<LivenessMap>(analyzer.getResults());
+    if (ctx.cache)
+      ctx.cache->objects[cacheKey] = computed;
+    resultsPtr = std::move(computed);
+  }
+  const LivenessMap &results = *resultsPtr;
 
   // Counts of all categories, computed before filtering — aliveCount and
   // optimisticallyAliveCount are meta-stats, not affected by the dead-list
@@ -1209,7 +1285,10 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
   obj["dead"] = std::move(dead);
   obj["optimisticallyAlive"] = std::move(optimistic);
   // Omit alive list to keep response size down — caller usually wants dead.
-  return makeTextResult(llvm::json::Value(std::move(obj)));
+  auto out = makeTextResult(llvm::json::Value(std::move(obj)));
+  if (ctx.cache)
+    ctx.cache->byKey.insert_or_assign(fullKey, out);
+  return out;
 }
 
 // ============================================================================
@@ -1301,6 +1380,13 @@ handleListEntryPoints(const llvm::json::Object & /*args*/,
 static llvm::json::Value
 handleGraphSummary(const llvm::json::Object & /*args*/,
                    const McpToolContext &ctx) {
+  // Whole-graph scan (calleesOf materialized for every node); the result
+  // only changes when the graph does, so serve it from the cache.
+  if (ctx.cache) {
+    auto it = ctx.cache->byKey.find("graph_summary");
+    if (it != ctx.cache->byKey.end())
+      return it->second;
+  }
   size_t totalEdges = 0;
   std::unordered_map<Confidence, size_t> confHist;
   std::unordered_map<EdgeKind, size_t> kindHist;
@@ -1362,7 +1448,10 @@ handleGraphSummary(const llvm::json::Object & /*args*/,
   obj["edgeKindHistogram"] = llvm::json::Value(std::move(kinds));
   obj["topFanoutCallers"] = topN(std::move(callerFanout), 5);
   obj["topFanoutCallees"] = topN(std::move(calleeInVec), 5);
-  return makeTextResult(llvm::json::Value(std::move(obj)));
+  auto out = makeTextResult(llvm::json::Value(std::move(obj)));
+  if (ctx.cache)
+    ctx.cache->byKey.insert_or_assign("graph_summary", out);
+  return out;
 }
 
 // ============================================================================

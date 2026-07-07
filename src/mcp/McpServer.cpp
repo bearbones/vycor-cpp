@@ -33,6 +33,7 @@ McpServer::McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
 
 McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
   ReindexResult r{};
+  queryCache_.clear(); // graph is about to mutate
   r.edgesRemoved = graph_.removeTU(filePath);
   r.contextsRemoved = cfIndex_.removeTU(filePath);
 
@@ -214,7 +215,7 @@ llvm::json::Value McpServer::handleToolsCall(
     return llvm::json::Value(std::move(result));
   }
 
-  McpToolContext ctx{graph_, oracle_, cfIndex_, entryPoints_};
+  McpToolContext ctx{graph_, oracle_, cfIndex_, entryPoints_, &queryCache_};
   return it->second(args, ctx);
 }
 
