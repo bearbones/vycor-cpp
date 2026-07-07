@@ -200,6 +200,13 @@ private:
   std::unordered_map<SId, std::vector<size_t>> byCallee_;
   std::unordered_map<SId, std::vector<size_t>> byCaller_;
   std::unordered_map<SId, size_t> bySite_;
+  // TU provenance reverse index: removeTU visits exactly the TU's own
+  // contexts instead of scanning all of them (6.37M on the llvm testbed).
+  // Contexts recorded without a tuPath (hand-built tests, pre-provenance
+  // snapshots) land in noProvenance_ and keep the legacy callSite-prefix
+  // fallback.
+  std::unordered_map<SId, std::vector<size_t>> byTu_;
+  std::vector<size_t> noProvenance_;
   size_t liveCount_ = 0;
 };
 

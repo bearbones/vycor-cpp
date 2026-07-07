@@ -16,6 +16,7 @@
 #include "vycor/callgraph/CallGraph.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace vycor {
 
@@ -34,6 +35,7 @@ CallGraph::CallGraph(CallGraph &&other) noexcept
       returnedBy_(std::move(other.returnedBy_)),
       tuEdges_(std::move(other.tuEdges_)),
       nodeContributors_(std::move(other.nodeContributors_)),
+      tuNodes_(std::move(other.tuNodes_)),
       liveEdgeCount_(other.liveEdgeCount_) {}
 
 CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
@@ -51,6 +53,7 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   returnedBy_ = std::move(other.returnedBy_);
   tuEdges_ = std::move(other.tuEdges_);
   nodeContributors_ = std::move(other.nodeContributors_);
+  tuNodes_ = std::move(other.tuNodes_);
   liveEdgeCount_ = other.liveEdgeCount_;
   return *this;
 }
@@ -88,7 +91,8 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   }
   if (!tuPath.empty()) {
     SId tuId = interner_.intern(tuPath);
-    nodeContributors_[nameId].insert(tuId);
+    if (nodeContributors_[nameId].insert(tuId).second)
+      tuNodes_[tuId].push_back(nameId);
   }
 }
 
@@ -547,6 +551,12 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
 
   auto eit = tuEdges_.find(tuId);
   if (eit != tuEdges_.end()) {
+    // Two passes: mark dead edges first, then scrub each affected
+    // adjacency vector ONCE. The old per-edge std::remove was
+    // O(degree) per removed edge — quadratic when a removed TU touches a
+    // high-fan-in hub.
+    std::unordered_set<size_t> dead;
+    std::unordered_set<SId> affectedCallers, affectedCallees;
     for (size_t idx : eit->second) {
       auto &edge = edges_[idx];
       if (edge.refs == 0)
@@ -555,26 +565,43 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
       // contributors (TUs or untagged additions) still reference it.
       if (--edge.refs > 0)
         continue;
-      auto &ov = outEdges_[edge.caller];
-      ov.erase(std::remove(ov.begin(), ov.end(), idx), ov.end());
-      auto &iv = inEdges_[edge.callee];
-      iv.erase(std::remove(iv.begin(), iv.end(), idx), iv.end());
+      dead.insert(idx);
+      affectedCallers.insert(edge.caller);
+      affectedCallees.insert(edge.callee);
       edgeIndex_.erase(keyOf(edge));
       --liveEdgeCount_;
       ++removed;
     }
+    for (SId c : affectedCallers) {
+      auto &ov = outEdges_[c];
+      ov.erase(std::remove_if(ov.begin(), ov.end(),
+                              [&](size_t i) { return dead.count(i) > 0; }),
+               ov.end());
+    }
+    for (SId c : affectedCallees) {
+      auto &iv = inEdges_[c];
+      iv.erase(std::remove_if(iv.begin(), iv.end(),
+                              [&](size_t i) { return dead.count(i) > 0; }),
+               iv.end());
+    }
     tuEdges_.erase(eit);
   }
 
-  std::vector<SId> deadNodes;
-  for (auto &[nodeId, tus] : nodeContributors_) {
-    tus.erase(tuId);
-    if (tus.empty())
-      deadNodes.push_back(nodeId);
-  }
-  for (SId nid : deadNodes) {
-    nodes_.erase(nid);
-    nodeContributors_.erase(nid);
+  // Visit exactly the nodes this TU contributed (reverse list) instead of
+  // scanning every node in the graph.
+  auto nit = tuNodes_.find(tuId);
+  if (nit != tuNodes_.end()) {
+    for (SId nodeId : nit->second) {
+      auto cit = nodeContributors_.find(nodeId);
+      if (cit == nodeContributors_.end())
+        continue;
+      cit->second.erase(tuId);
+      if (cit->second.empty()) {
+        nodes_.erase(nodeId);
+        nodeContributors_.erase(cit);
+      }
+    }
+    tuNodes_.erase(nit);
   }
 
   return removed;

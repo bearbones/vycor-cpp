@@ -16,6 +16,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace vycor {
 
@@ -25,6 +26,8 @@ ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
       byCallee_(std::move(other.byCallee_)),
       byCaller_(std::move(other.byCaller_)),
       bySite_(std::move(other.bySite_)),
+      byTu_(std::move(other.byTu_)),
+      noProvenance_(std::move(other.noProvenance_)),
       liveCount_(other.liveCount_) {}
 
 ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
@@ -33,6 +36,8 @@ ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept
   byCallee_ = std::move(other.byCallee_);
   byCaller_ = std::move(other.byCaller_);
   bySite_ = std::move(other.bySite_);
+  byTu_ = std::move(other.byTu_);
+  noProvenance_ = std::move(other.noProvenance_);
   liveCount_ = other.liveCount_;
   return *this;
 }
@@ -53,6 +58,10 @@ void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
   byCallee_[calleeId].push_back(idx);
   byCaller_[callerId].push_back(idx);
   bySite_[siteId] = idx;
+  if (!ctx.tuPath.empty())
+    byTu_[interner_.intern(ctx.tuPath)].push_back(idx);
+  else
+    noProvenance_.push_back(idx);
   contexts_.push_back(std::move(ctx));
   ++liveCount_;
 }
@@ -151,35 +160,63 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
   std::string prefix = tuPath + ":";
   size_t removed = 0;
 
-  for (size_t i = 0; i < contexts_.size(); ++i) {
+  // Candidates: exactly this TU's contexts via the reverse index, plus the
+  // no-provenance list (legacy fallback matches on a callSite prefix).
+  // The old implementation scanned every stored context per removeTU and
+  // scrubbed byCallee_/byCaller_ once per removed context (O(degree)
+  // each); candidates are now O(TU size) and each affected adjacency
+  // vector is scrubbed once.
+  std::vector<size_t> candidates;
+  if (auto tuId = interner_.find(tuPath)) {
+    auto it = byTu_.find(*tuId);
+    if (it != byTu_.end())
+      candidates = it->second;
+  }
+  size_t provenanced = candidates.size();
+  candidates.insert(candidates.end(), noProvenance_.begin(),
+                    noProvenance_.end());
+
+  std::unordered_set<size_t> dead;
+  std::unordered_set<SId> affectedCallees, affectedCallers;
+  for (size_t n = 0; n < candidates.size(); ++n) {
+    size_t i = candidates[n];
     auto &ctx = contexts_[i];
     if (ctx.callerName.empty())
-      continue;
-    if (!ctx.tuPath.empty()) {
-      if (ctx.tuPath != tuPath)
-        continue;
-    } else if (ctx.callSite.compare(0, prefix.size(), prefix) != 0) {
-      continue;
-    }
+      continue; // tombstoned earlier
+    if (n >= provenanced &&
+        ctx.callSite.compare(0, prefix.size(), prefix) != 0)
+      continue; // no-provenance context from a different TU
 
-    auto calleeId = interner_.find(ctx.calleeName);
-    if (calleeId) {
-      auto &cv = byCallee_[*calleeId];
-      cv.erase(std::remove(cv.begin(), cv.end(), i), cv.end());
-    }
-    auto callerId = interner_.find(ctx.callerName);
-    if (callerId) {
-      auto &cv = byCaller_[*callerId];
-      cv.erase(std::remove(cv.begin(), cv.end(), i), cv.end());
-    }
-    auto siteId = interner_.find(ctx.callSite);
-    if (siteId)
+    if (auto calleeId = interner_.find(ctx.calleeName))
+      affectedCallees.insert(*calleeId);
+    if (auto callerId = interner_.find(ctx.callerName))
+      affectedCallers.insert(*callerId);
+    if (auto siteId = interner_.find(ctx.callSite))
       bySite_.erase(*siteId);
 
+    dead.insert(i);
     ctx.callerName.clear();
     ctx.calleeName.clear();
     --liveCount_;
     ++removed;
+  }
+
+  auto scrub = [&dead](std::vector<size_t> &v) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](size_t i) { return dead.count(i) > 0; }),
+            v.end());
+  };
+  for (SId id : affectedCallees)
+    scrub(byCallee_[id]);
+  for (SId id : affectedCallers)
+    scrub(byCaller_[id]);
+  if (!dead.empty()) {
+    if (auto tuId = interner_.find(tuPath)) {
+      auto it = byTu_.find(*tuId);
+      if (it != byTu_.end())
+        byTu_.erase(it);
+    }
+    scrub(noProvenance_);
   }
   return removed;
 }
@@ -191,6 +228,8 @@ void ControlFlowIndex::compact() {
   std::unordered_map<SId, std::vector<size_t>> newByCallee;
   std::unordered_map<SId, std::vector<size_t>> newByCaller;
   std::unordered_map<SId, size_t> newBySite;
+  std::unordered_map<SId, std::vector<size_t>> newByTu;
+  std::vector<size_t> newNoProvenance;
 
   for (auto &ctx : contexts_) {
     if (ctx.callerName.empty())
@@ -202,6 +241,10 @@ void ControlFlowIndex::compact() {
     newByCallee[calleeId].push_back(idx);
     newByCaller[callerId].push_back(idx);
     newBySite[siteId] = idx;
+    if (!ctx.tuPath.empty())
+      newByTu[interner_.intern(ctx.tuPath)].push_back(idx);
+    else
+      newNoProvenance.push_back(idx);
     newCtx.push_back(std::move(ctx));
   }
 
@@ -209,6 +252,8 @@ void ControlFlowIndex::compact() {
   byCallee_ = std::move(newByCallee);
   byCaller_ = std::move(newByCaller);
   bySite_ = std::move(newBySite);
+  byTu_ = std::move(newByTu);
+  noProvenance_ = std::move(newNoProvenance);
 }
 
 } // namespace vycor
