@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
@@ -25,6 +26,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <csetjmp>
 
@@ -45,22 +47,47 @@ void cfCrashHandler(int sig) {
   std::raise(sig);
 }
 
-bool runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
-                      const std::string &file,
-                      clang::tooling::FrontendActionFactory &factory,
-                      const vycor::PchCache *pchCache,
-                      const std::string &sysroot = "") {
+int runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
+                     const std::string &file,
+                     clang::tooling::FrontendActionFactory &factory,
+                     const vycor::PchCache *pchCache,
+                     const std::string &sysroot = "") {
   tl_cfGuardActive = 1;
   int sig = sigsetjmp(tl_cfJumpBuf, 1);
   if (sig != 0) {
     llvm::errs() << "CRASH (signal " << sig << ") in CF index for " << file
                  << " — skipping\n";
-    return false;
+    return -1;
   }
   auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
-  tool.run(&factory);
+  int status = tool.run(&factory);
   tl_cfGuardActive = 0;
-  return true;
+  return status;
+}
+
+// TUs whose parse reported at least one error, per bake. Surfaced loudly at
+// the end of bakeIndexes: a hollow index built from failed parses looks
+// superficially plausible (headers index partially before the fatal error),
+// so a silent stderr scroll-past is not enough.
+std::atomic<unsigned> g_cfParseErrorCount{0};
+
+// Run one guarded parse, timing it and recording the outcome. `stats` may
+// be null (timing skipped); the parse-error counter always advances.
+void bakeRun(const clang::tooling::CompilationDatabase &compDb,
+             const std::string &file,
+             clang::tooling::FrontendActionFactory &factory,
+             const vycor::PchCache *pchCache, const std::string &sysroot,
+             int phase, vycor::BuildStats *stats) {
+  auto t0 = std::chrono::steady_clock::now();
+  int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+  if (status == 1)
+    g_cfParseErrorCount.fetch_add(1, std::memory_order_relaxed);
+  if (stats) {
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count();
+    stats->addTuStat({file, phase, ms, status});
+  }
 }
 } // anonymous namespace
 
@@ -860,7 +887,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          unsigned threadCount,
                          const PchCache *pchCache,
                          const std::string &sysroot,
-                         const LockTypeConfig &lockCfg) {
+                         const LockTypeConfig &lockCfg,
+                         BuildStats *stats) {
   BakedIndexes out;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
@@ -869,8 +897,12 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
   g_cfCrashCount.store(0, std::memory_order_relaxed);
+  g_cfParseErrorCount.store(0, std::memory_order_relaxed);
+  if (stats)
+    stats->threads = threadCount;
 
   bool parallel = threadCount != 1 && files.size() > 1;
+  auto phase1Start = std::chrono::steady_clock::now();
 
   if (parallel) {
 #if VYCOR_LLVM_AT_LEAST(19)
@@ -881,39 +913,65 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 
     // Phase 1: declarations, hierarchy, function returns.
     for (const auto &file : files) {
-      pool.async([&compDb, &out, pchCache, &sysroot, file]() {
+      pool.async([&compDb, &out, pchCache, &sysroot, stats, file]() {
         BakeIndexerFactory factory(out.graph, file);
-        runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+        bakeRun(compDb, file, factory, pchCache, sysroot, 1, stats);
       });
     }
     pool.wait();
+    auto phase2Start = std::chrono::steady_clock::now();
+    if (stats)
+      stats->phase1WallMs = std::chrono::duration<double, std::milli>(
+                                phase2Start - phase1Start)
+                                .count();
 
     // Phase 2+3 on one parse per TU, with full Phase 1 knowledge.
     for (const auto &file : files) {
       pool.async([&compDb, &out, collapsePtr, &lockCfg, pchCache, &sysroot,
-                  file]() {
+                  stats, file]() {
         BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                           &lockCfg, file);
-        runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+        bakeRun(compDb, file, factory, pchCache, sysroot, 2, stats);
       });
     }
     pool.wait();
+    if (stats)
+      stats->phase2WallMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - phase2Start)
+                                .count();
   } else {
     for (const auto &file : files) {
       BakeIndexerFactory factory(out.graph, file);
-      runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+      bakeRun(compDb, file, factory, pchCache, sysroot, 1, stats);
     }
+    auto phase2Start = std::chrono::steady_clock::now();
+    if (stats)
+      stats->phase1WallMs = std::chrono::duration<double, std::milli>(
+                                phase2Start - phase1Start)
+                                .count();
     for (const auto &file : files) {
       BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                         &lockCfg, file);
-      runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+      bakeRun(compDb, file, factory, pchCache, sysroot, 2, stats);
     }
+    if (stats)
+      stats->phase2WallMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - phase2Start)
+                                .count();
   }
 
   unsigned crashes = g_cfCrashCount.load(std::memory_order_relaxed);
   if (crashes > 0) {
     llvm::errs() << "bake: " << crashes << " TU parse(s) crashed and were "
                  << "skipped (" << files.size() << " TUs total)\n";
+  }
+  unsigned parseErrors = g_cfParseErrorCount.load(std::memory_order_relaxed);
+  if (parseErrors > 0) {
+    llvm::errs() << "bake: WARNING: " << parseErrors << " of "
+                 << 2 * files.size() << " TU parse(s) reported errors — the "
+                 << "index may be missing nodes/edges/contexts. Check include "
+                 << "paths (--extra-arg can inject e.g. "
+                 << "--gcc-install-dir=/usr/lib/gcc/<triple>/<ver>)\n";
   }
 
   std::signal(SIGSEGV, prevSegv);

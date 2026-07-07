@@ -15,6 +15,7 @@
 
 #include "vycor/anneal/Analyzer.h"
 #include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
@@ -28,10 +29,17 @@
 #include "clang/Tooling/CompilationDatabase.h"
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 #include <unordered_map>
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
+#include "vycor/compat/ToolAdjusters.h"
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Subcommands
@@ -52,6 +60,21 @@ static llvm::cl::SubCommand
 static llvm::cl::SubCommand
     MegascopeCmd("megascope",
                 "Start MCP server for interactive call graph queries");
+
+// ---------------------------------------------------------------------------
+// options common to all subcommands
+// ---------------------------------------------------------------------------
+
+// Extra compiler args appended to every compile command. The escape hatch
+// for host-toolchain mismatches the adjusters cannot fix generically, e.g.
+// --extra-arg=--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13 on hosts
+// whose newest GCC directory has no matching libstdc++ headers.
+static llvm::cl::list<std::string>
+    ExtraArgs("extra-arg",
+        llvm::cl::desc("Additional compiler argument appended to every "
+                       "compile command (repeatable)"),
+        llvm::cl::value_desc("arg"),
+        llvm::cl::sub(llvm::cl::SubCommand::getAll()));
 
 // ---------------------------------------------------------------------------
 // anneal options
@@ -336,6 +359,15 @@ static llvm::cl::opt<std::string>
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
+static llvm::cl::opt<std::string>
+    McpStatsJson("stats-json",
+        llvm::cl::desc("Write index-build efficiency statistics (per-phase "
+                       "and per-TU timings, parse outcomes, graph sizes, "
+                       "snapshot timings, peak RSS) as JSON to this file "
+                       "once the server is ready"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(MegascopeCmd));
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -349,6 +381,8 @@ int main(int argc, const char **argv) {
       "  morph     Apply rule-driven AST matcher transformations\n"
       "  prism    Query control flow and exception handling context\n"
       "  megascope  Start MCP server for interactive call graph queries\n");
+
+  vycor::appendGlobalExtraArgs({ExtraArgs.begin(), ExtraArgs.end()});
 
   // ---- anneal ---------------------------------------------------------------
   if (AnnealCmd) {
@@ -684,12 +718,26 @@ int main(int argc, const char **argv) {
     vycor::ControlFlowIndex cfIndex;
     bool needFullBuild = true;
 
+    // Efficiency stats, dumped to --stats-json once the server is ready.
+    vycor::BuildStats buildStats;
+    using StatsClock = std::chrono::steady_clock;
+    auto msSince = [](StatsClock::time_point t0) {
+      return std::chrono::duration<double, std::milli>(StatsClock::now() -
+                                                       t0)
+          .count();
+    };
+    double snapLoadMs = 0, snapSaveMs = 0, warmRefreshMs = 0, bakeMs = 0;
+    bool snapLoaded = false;
+    size_t warmRefreshed = 0, warmDropped = 0;
+
     // Stamps are taken before any parsing: a file modified mid-build gets a
     // stale stamp and is conservatively re-indexed on the next warm start.
     auto currentStamps = vycor::SnapshotIO::stampFiles(files);
 
+    auto snapLoadStart = StatsClock::now();
     if (!McpSnapshot.empty()) {
       if (auto snap = vycor::SnapshotIO::load(McpSnapshot)) {
+        snapLoadMs = msSince(snapLoadStart);
         bool configMatch =
             snap->meta.collapsePaths == collapsePaths &&
             snap->meta.lockAllowlist == lockCfg.userAllowlist &&
@@ -701,6 +749,8 @@ int main(int argc, const char **argv) {
           graph = std::move(snap->graph);
           cfIndex = std::move(snap->cfIndex);
           needFullBuild = false;
+          snapLoaded = true;
+          auto refreshStart = StatsClock::now();
 
           std::unordered_map<std::string, const vycor::FileStamp *> baked;
           for (const auto &fs : snap->meta.files)
@@ -727,6 +777,9 @@ int main(int argc, const char **argv) {
                           collapsePaths, pchPtr, sysroot, lockCfg);
             ++refreshed;
           }
+          warmRefreshMs = msSince(refreshStart);
+          warmRefreshed = refreshed;
+          warmDropped = dropped;
           llvm::errs() << "megascope: warm start from " << McpSnapshot
                        << " (" << refreshed << " TU(s) re-indexed, "
                        << dropped << " dropped, "
@@ -744,8 +797,11 @@ int main(int argc, const char **argv) {
       llvm::errs() << "megascope: baking call graph + control flow index ("
                    << files.size() << " files, "
                    << McpThreads << " threads)...\n";
+      auto bakeStart = StatsClock::now();
       auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
-                                      McpThreads, pchPtr, sysroot, lockCfg);
+                                      McpThreads, pchPtr, sysroot, lockCfg,
+                                      &buildStats);
+      bakeMs = msSince(bakeStart);
       graph = std::move(baked.graph);
       cfIndex = std::move(baked.cfIndex);
       llvm::errs() << "megascope: indexes built ("
@@ -760,11 +816,78 @@ int main(int argc, const char **argv) {
       meta.lockAllowlist = lockCfg.userAllowlist;
       meta.lockBuiltins = lockCfg.useBuiltins;
       meta.files = std::move(currentStamps);
-      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta))
+      auto snapSaveStart = StatsClock::now();
+      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta)) {
+        snapSaveMs = msSince(snapSaveStart);
         llvm::errs() << "megascope: snapshot saved to " << McpSnapshot << "\n";
-      else
+      } else {
         llvm::errs() << "megascope: WARNING: could not save snapshot to "
                      << McpSnapshot << "\n";
+      }
+    }
+
+    if (!McpStatsJson.empty()) {
+      llvm::json::Object root;
+      root["mode"] = needFullBuild ? "cold" : "warm";
+      root["files"] = static_cast<int64_t>(files.size());
+      root["threads"] = static_cast<int64_t>(McpThreads);
+      root["bake_wall_ms"] = bakeMs;
+      root["phase1_wall_ms"] = buildStats.phase1WallMs;
+      root["phase2_wall_ms"] = buildStats.phase2WallMs;
+      root["parse_errors"] = static_cast<int64_t>(buildStats.parseErrorCount());
+      root["crashes"] = static_cast<int64_t>(buildStats.crashCount());
+
+      llvm::json::Object snap;
+      snap["loaded"] = snapLoaded;
+      snap["load_ms"] = snapLoadMs;
+      snap["save_ms"] = snapSaveMs;
+      snap["warm_refresh_ms"] = warmRefreshMs;
+      snap["refreshed_tus"] = static_cast<int64_t>(warmRefreshed);
+      snap["dropped_tus"] = static_cast<int64_t>(warmDropped);
+      root["snapshot"] = std::move(snap);
+
+      llvm::json::Object g;
+      g["nodes"] = static_cast<int64_t>(graph.nodeCount());
+      g["edges"] = static_cast<int64_t>(graph.edgeCount());
+      g["call_sites"] = static_cast<int64_t>(cfIndex.size());
+      g["interner_strings"] = static_cast<int64_t>(graph.interner().size());
+      g["interner_payload_bytes"] =
+          static_cast<int64_t>(graph.interner().payloadBytes());
+      root["graph"] = std::move(g);
+
+#if defined(__unix__) || defined(__APPLE__)
+      struct rusage ru;
+      if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        // ru_maxrss is KB on Linux, bytes on macOS.
+#if defined(__APPLE__)
+        root["peak_rss_kb"] = static_cast<int64_t>(ru.ru_maxrss / 1024);
+#else
+        root["peak_rss_kb"] = static_cast<int64_t>(ru.ru_maxrss);
+#endif
+      }
+#endif
+
+      llvm::json::Array tus;
+      for (const auto &t : buildStats.tuStats) {
+        llvm::json::Object o;
+        o["file"] = t.file;
+        o["phase"] = static_cast<int64_t>(t.phase);
+        o["ms"] = t.ms;
+        o["status"] = static_cast<int64_t>(t.toolStatus);
+        tus.push_back(std::move(o));
+      }
+      root["tu"] = std::move(tus);
+
+      std::error_code ec;
+      llvm::raw_fd_ostream out(McpStatsJson, ec);
+      if (ec) {
+        llvm::errs() << "megascope: WARNING: cannot write stats to "
+                     << McpStatsJson << ": " << ec.message() << "\n";
+      } else {
+        out << llvm::json::Value(std::move(root)) << "\n";
+        llvm::errs() << "megascope: stats written to " << McpStatsJson
+                     << "\n";
+      }
     }
 
     std::vector<std::string> entryPoints(McpEntryPoints.begin(),

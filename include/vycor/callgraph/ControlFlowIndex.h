@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/StringInterner.h"
 
@@ -242,13 +243,16 @@ struct BakedIndexes {
 // each TU. Equivalent output to buildCallGraph + buildControlFlowIndex at
 // two-thirds the frontend cost. Phase 1 stays a separate parse because edge
 // building consults cross-TU hierarchy and function-return data.
+// When `stats` is non-null, per-phase wall times and per-TU parse timings
+// and outcomes are recorded into it (see BuildStats.h).
 BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const std::vector<std::string> &files,
                          const std::vector<std::string> &collapsePaths = {},
                          unsigned threadCount = 0,
                          const PchCache *pchCache = nullptr,
                          const std::string &sysroot = "",
-                         const LockTypeConfig &lockCfg = {});
+                         const LockTypeConfig &lockCfg = {},
+                         BuildStats *stats = nullptr);
 
 // Single-TU variant for incremental reindex: Phase 1 parse + combined
 // Phase 2+3 parse. Call graph.removeTU(file) and cfIndex.removeTU(file)

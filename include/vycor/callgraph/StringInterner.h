@@ -86,6 +86,16 @@ public:
     return strings_.size();
   }
 
+  /// Total bytes of interned string payload (excludes container overhead).
+  /// For memory diagnostics; O(n).
+  size_t payloadBytes() const {
+    std::shared_lock lock(mutex_);
+    size_t total = 0;
+    for (const auto &s : strings_)
+      total += s.size();
+    return total;
+  }
+
 private:
   mutable std::shared_mutex mutex_;
   std::deque<std::string> strings_;
