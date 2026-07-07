@@ -30,6 +30,7 @@ target_link_libraries(vycor_lib PUBLIC
   clangDynamicASTMatchers
   clangASTMatchers
   clangAST
+  clangIndex
   clangBasic
   clangDriver
   clangFrontend

@@ -17,6 +17,7 @@
 
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CollapseFilter.h"
+#include "vycor/callgraph/UsrIdent.h"
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -55,10 +56,12 @@ private:
   clang::ASTContext *ctx_ = nullptr;
   std::string tuPath_;
   std::vector<clang::FunctionDecl *> funcStack_;
+  // Per-TU (usr, display) memo; getCurrentFunction is const but memoizes.
+  mutable UsrCache usrs_;
 
   std::string getFilePath(clang::SourceLocation loc) const;
   std::string formatLocation(clang::SourceLocation loc) const;
-  std::string getCurrentFunction() const;
+  Ident getCurrentFunction() const;
   void computeEffectiveImpls(const clang::CXXRecordDecl *cls);
 };
 
@@ -96,37 +99,50 @@ private:
   std::set<const clang::DeclRefExpr *> handledRefs_;
 
   // Track callable-typed vars initialized from a direct call, keyed to the
-  // *returning* function's qualified name. Consumed by processCallableArgs
-  // as deferred FunctionPointerReturn edges; the function-returns join
-  // happens at query time (CallGraph::calleesOf/callersOf), so edge
-  // building never reads cross-TU state.
+  // *returning* function's USR. Consumed by processCallableArgs as deferred
+  // FunctionPointerReturn edges; the function-returns join happens at query
+  // time (CallGraph::calleesOf/callersOf), so edge building never reads
+  // cross-TU state.
   std::map<const clang::VarDecl *, std::string> varCallSources_;
 
   // Track local vars initialized from a LambdaExpr so concurrency spawners
-  // and downstream callers can resolve the synthetic lambda name.
+  // and downstream callers can resolve the synthetic lambda USR.
   std::map<const clang::VarDecl *, std::string> varLambdaSources_;
+
+  // Per-TU (usr, display) memo; getCurrentFunction is const but memoizes.
+  mutable UsrCache usrs_;
+
+  // Callee decls whose node this visitor registered (see identForCallee).
+  std::set<const clang::FunctionDecl *> auxNodes_;
 
   std::string getFilePath(clang::SourceLocation loc) const;
   std::string formatLocation(clang::SourceLocation loc) const;
-  std::string getCurrentFunction() const;
+  Ident getCurrentFunction() const;
+
+  // identFor + node registration for callees the indexer never visits
+  // (implicit members, template instantiations — RecursiveASTVisitor skips
+  // instantiations), so display-name resolution can find their edges.
+  Ident identForCallee(const clang::FunctionDecl *decl);
+
   bool isInUserCode(clang::SourceLocation loc) const;
   bool isCollapsedEdge(clang::SourceLocation callerLoc,
                        clang::SourceLocation calleeLoc) const;
 
-  void handleVirtualDispatch(const std::string &caller,
+  void handleVirtualDispatch(const std::string &callerUsr,
                              clang::CXXMethodDecl *method,
                              clang::SourceLocation loc);
-  void addConcreteTypeEdges(const std::string &caller,
+  void addConcreteTypeEdges(const std::string &callerUsr,
                             const clang::CXXRecordDecl *cls,
                             clang::SourceLocation loc);
 
   // Shared argument scan for both CallExpr and CXXConstructExpr spawners.
-  // Emits edges from `caller` for every argument that resolves to a callable
-  // (FunctionDecl, LambdaExpr, or a local var tracked in varCallSources_ /
-  // varLambdaSources_). If `spawnerCtx` is Synchronous, emits FunctionPointer
-  // edges; otherwise emits ThreadEntry edges with the given context.
+  // Emits edges from `callerUsr` for every argument that resolves to a
+  // callable (FunctionDecl, LambdaExpr, or a local var tracked in
+  // varCallSources_ / varLambdaSources_). If `spawnerCtx` is Synchronous,
+  // emits FunctionPointer edges; otherwise emits ThreadEntry edges with the
+  // given context.
   void processCallableArgs(llvm::ArrayRef<clang::Expr *> args,
-                           const std::string &caller,
+                           const std::string &callerUsr,
                            clang::SourceLocation callSite,
                            ExecutionContext spawnerCtx);
 

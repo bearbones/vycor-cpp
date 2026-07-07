@@ -292,6 +292,7 @@ static llvm::json::Value handleLookupFunction(const llvm::json::Object &args,
 
   llvm::json::Object obj;
   obj["qualifiedName"] = node->qualifiedName;
+  obj["usr"] = node->usr;
   obj["file"] = node->file;
   obj["line"] = static_cast<int64_t>(node->line);
   obj["isEntryPoint"] = node->isEntryPoint;
@@ -385,6 +386,7 @@ handleSearchFunctions(const llvm::json::Object &args,
       break;
     llvm::json::Object entry;
     entry["qualifiedName"] = hit.node->qualifiedName;
+    entry["usr"] = hit.node->usr;
     entry["file"] = hit.node->file;
     entry["line"] = static_cast<int64_t>(hit.node->line);
     if (!hit.node->enclosingClass.empty())
@@ -1460,6 +1462,7 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
     if (node) {
       entry["file"] = node->file;
       entry["line"] = static_cast<int64_t>(node->line);
+      entry["usr"] = node->usr;
     }
 
     switch (kv.second) {
@@ -1542,7 +1545,7 @@ handleGetClassHierarchy(const llvm::json::Object &args,
         continue;
       if (!node->isVirtual)
         continue;
-      auto overrides = ctx.graph.getOverrides(node->qualifiedName);
+      auto overrides = ctx.graph.getOverrides(node->usr);
       if (overrides.empty())
         continue;
       llvm::json::Object methodObj;
@@ -1606,7 +1609,9 @@ handleGraphSummary(const llvm::json::Object & /*args*/,
   std::unordered_map<std::string, size_t> calleeInDegree;
 
   for (auto *node : ctx.graph.allNodes()) {
-    auto edges = ctx.graph.calleesOf(node->qualifiedName);
+    // Per-node scan queries by usr: exact identity, so two nodes sharing a
+    // display name are not double-counted through the by-name union.
+    auto edges = ctx.graph.calleesOf(node->usr);
     if (!edges.empty())
       callerFanout.emplace_back(node->qualifiedName, edges.size());
     for (const auto &e : edges) {
@@ -1679,7 +1684,7 @@ handleListCallbackSites(const llvm::json::Object &args,
   // temporary vector per node).
   std::map<std::string, std::vector<CallGraphEdge>> byTarget;
   for (auto *node : ctx.graph.allNodes()) {
-    for (const auto &e : ctx.graph.calleesOf(node->qualifiedName)) {
+    for (const auto &e : ctx.graph.calleesOf(node->usr)) {
       if (e.kind != EdgeKind::FunctionPointer &&
           e.kind != EdgeKind::LambdaCall)
         continue;
@@ -1745,7 +1750,7 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
   llvm::json::Array entries;
   size_t total = 0;
   for (auto *node : ctx.graph.allNodes()) {
-    for (const auto &e : ctx.graph.calleesOf(node->qualifiedName)) {
+    for (const auto &e : ctx.graph.calleesOf(node->usr)) {
       if (e.kind != EdgeKind::ThreadEntry)
         continue;
       if (!ctxFilter.empty() && !ctxFilter.count(e.execContext))

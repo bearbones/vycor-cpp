@@ -83,7 +83,11 @@ public:
   ///     load (no per-record re-interning). The v4 global string pool is
   ///     gone; the few non-interned strings (meta, node file/class, scope/
   ///     guard tables) are written inline.
-  static constexpr uint32_t kFormatVersion = 5;
+  /// v6: USR identity (F8) — node records carry the display-name id next to
+  ///     the usr key id; control-flow context records carry caller/callee
+  ///     display ids next to the usr ids. The by-name indexes (CallGraph::
+  ///     byName_, ControlFlowIndex display maps) are rebuilt on load.
+  static constexpr uint32_t kFormatVersion = 6;
 
   /// Serialize graph + cfIndex + meta to `path` (atomically, via a temp file
   /// and rename). Returns false on I/O failure.

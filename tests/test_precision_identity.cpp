@@ -1,16 +1,11 @@
-// test_precision_identity.cpp — F8 identity-precision gate (PR A of
-// docs/design-f8-usr-identity.md).
+// test_precision_identity.cpp — F8 identity-precision gate
+// (docs/design-f8-usr-identity.md).
 //
 // These tests assert the PRECISE identity semantics the USR core (PR B)
-// must deliver, against the examples/precision fixtures. Until PR B
-// lands, name-keyed identity collapses the fixture nodes, so the
-// assertions are genuinely red — the [!shouldfail] tag keeps the suite
-// green while pinning the redness: if identity precision arrives (or the
-// fixtures rot), the tag makes the unexpected PASS a suite failure,
-// flagging that the tag must be removed.
-//
-// PR B removes the [!shouldfail] tags in the same change that makes the
-// assertions pass.
+// delivers, against the examples/precision fixtures. They were authored in
+// PR A as [!shouldfail]-tagged red tests; PR B (nodes keyed by USR, the
+// compound (site, caller) context key) removed the tags in the same change
+// that made the assertions pass.
 
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
@@ -52,7 +47,7 @@ size_t nodesNamed(const CallGraph &g, const std::string &displayName) {
 } // namespace
 
 TEST_CASE("overloads are distinct nodes",
-          "[precision][identity][!shouldfail]") {
+          "[precision][identity]") {
   auto g = buildPrecisionGraph({"overloads.cpp"});
 
   // Two overloads of precision::process exist in the fixture with
@@ -62,7 +57,7 @@ TEST_CASE("overloads are distinct nodes",
 }
 
 TEST_CASE("template specializations are distinct nodes",
-          "[precision][identity][!shouldfail]") {
+          "[precision][identity]") {
   auto g = buildPrecisionGraph({"templates.cpp"});
 
   // parse<Json> and parse<Yaml> are explicit specializations with
@@ -74,12 +69,9 @@ TEST_CASE("macro-shared call-site spellings keep distinct contexts",
           "[precision][identity]") {
   // Two functions expand CALL_GUARDED, so their calls to
   // precision::guarded share a SPELLING location (the macro definition
-  // line). Both contexts are stored and reachable by callee today; the
-  // still-missing precision (PR B: compound (site, caller) key) is
-  // site-keyed retrieval of a SPECIFIC one — that assertion requires the
-  // PR-B API and is added there. This test pins the fixture's premise so
-  // it cannot rot silently: exactly two guarded-contexts, one per caller,
-  // sharing one spelling.
+  // line). Both contexts must be stored, reachable by callee, and — the
+  // PR-B compound (site, caller) key — retrievable INDIVIDUALLY by
+  // caller-qualified site lookup.
   clang::tooling::FixedCompilationDatabase compDb(
       ".", {"-std=c++17", "-I" + fixtureDir()});
   std::vector<std::string> paths{fixtureDir() + "macro_sites.cpp"};
@@ -91,4 +83,19 @@ TEST_CASE("macro-shared call-site spellings keep distinct contexts",
   CHECK(contexts[0].callerName != contexts[1].callerName);
   // The macro collision itself: one spelling for both sites.
   CHECK(contexts[0].callSite == contexts[1].callSite);
+
+  // Compound-key retrieval: the shared spelling plus a caller resolves to
+  // that caller's specific context.
+  const std::string &spelling = contexts[0].callSite;
+  auto one = cf.contextAtSite(spelling, "precision::userOne");
+  auto two = cf.contextAtSite(spelling, "precision::userTwo");
+  REQUIRE(one.has_value());
+  REQUIRE(two.has_value());
+  CHECK(one->callerName == "precision::userOne");
+  CHECK(two->callerName == "precision::userTwo");
+  CHECK(one->calleeName == "precision::guarded");
+  CHECK(two->calleeName == "precision::guarded");
+  CHECK(one->callerUsr != two->callerUsr);
+  // The spelling-only lookup still answers (first match, documented).
+  CHECK(cf.contextAtSite(spelling).has_value());
 }
