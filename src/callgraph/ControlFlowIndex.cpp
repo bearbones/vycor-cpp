@@ -37,6 +37,13 @@ ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept
   return *this;
 }
 
+void ControlFlowIndex::reserveContexts(size_t n) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  byCallee_.reserve(n);
+  byCaller_.reserve(n);
+  bySite_.reserve(n);
+}
+
 void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
   std::lock_guard<std::mutex> lock(mutex_);
   SId calleeId = interner_.intern(ctx.calleeName);

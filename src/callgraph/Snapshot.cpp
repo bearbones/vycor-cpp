@@ -403,6 +403,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
 
   // Nodes.
   uint32_t nodeCount = r.count();
+  out.graph.reserveNodes(nodeCount);
   for (uint32_t i = 0; r.ok && i < nodeCount; ++i) {
     CallGraphNode node;
     node.qualifiedName = r.str();
@@ -424,6 +425,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
   // Edges. Re-adding once per contributor reconstructs the dedup refcount
   // and TU provenance through the public API.
   uint32_t edgeCount = r.count();
+  out.graph.reserveEdges(edgeCount);
   for (uint32_t i = 0; r.ok && i < edgeCount; ++i) {
     CallGraphEdge e;
     e.callerName = r.str();
@@ -466,6 +468,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
 
   // Control flow contexts.
   uint32_t ctxCount = r.count();
+  out.cfIndex.reserveContexts(ctxCount);
   for (uint32_t i = 0; r.ok && i < ctxCount; ++i) {
     CallSiteContext ctx;
     ctx.callerName = r.str();

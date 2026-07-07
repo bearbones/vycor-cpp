@@ -149,6 +149,10 @@ public:
 
   void addCallSiteContext(CallSiteContext ctx);
 
+  // Pre-size the site/caller/callee maps for a known bulk insert (snapshot
+  // load): avoids repeated rehashing of multi-million-entry tables.
+  void reserveContexts(size_t n);
+
   // Look up context at a specific call site (file:line:col).
   const CallSiteContext *contextAtSite(const std::string &callSite) const;
 

@@ -186,8 +186,47 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 5 | Query-time virtual dispatch expansion | F3 | ✅ done |
 | 6 | Edge dedup + interned IDs in edges | F4, F5 | ✅ done (edges; CallSiteContext scope-sharing from F5 still open) |
 | 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | ✅ done |
+| 7b | Whole-graph query cache (graph_summary, dead-code liveness) + id-space path search with corridor pruning | F11, F13 | ✅ done — see scale table below |
 | 8 | USR-based node identity | F8 | |
 | 9 | Subprocess worker isolation | F12 | |
+| 10 | ControlFlowIndex string interning (F5 completion) | F5 | open — at 6.37M call sites the per-context string copies (callerName/calleeName/callSite/tuPath, the last never deduplicated) dominate warm RSS (4.95 GB) and the 301 MB snapshot |
+| 11 | Snapshot bulk-load fast path | F9 | partially done — map pre-reserving landed (~4%: the cost is string copies + re-interning, i.e. item 10 territory), and unchanged warm starts skip the 3.1s snapshot re-save (14.9s → 11.6s total warm start). The remaining 8s load wants the id-preserving format that falls out of item 10 |
+
+---
+
+## Scale measurements (2026-07-06)
+
+Testbed: llvm-project (submodule), 938 TUs across lib/{Support,IR,MC,
+Object,Analysis,Transforms/{Utils,Scalar},…}, Release build, 12 threads,
+measured with scripts/bench.py and a warm-snapshot query driver. Graph:
+57k nodes, 345k stored edges, 6.37M call sites, 31 MB interned strings.
+
+| metric | before this round | after |
+|---|---|---|
+| cold bake (149-TU Support subset) | 17.1 s (two parses/TU) | 9.9 s (single parse) |
+| cold bake (938 TUs) | — | 149.6 s |
+| warm start (938 TUs) | — | 12.2 s (8.3 s snapshot load) |
+| peak RSS cold / warm | — | 8.1 / 4.95 GB |
+| graph_summary | 11 ms (whole-graph scan per call) | 0.04 ms (cached) |
+| analyze_dead_code | 23 ms (liveness per call) | 0.8–1.2 ms (cached liveness + JSON) |
+| search_functions | 14.2 ms (re-lowercase per query) | 3.0 ms (cached lowered index) |
+| find_call_chain | 5,448 ms (string-space DFS over ancestor cone) | 0.02 ms no-path / 2.5 ms deep 5-path (id-space + corridor prune) |
+
+### Auto-PCH: measured ceiling, deliberately not built
+
+A shared PCH synthesized from the most common direct includes was
+prototyped externally to size the prize before building a feature:
+
+- llvm lib/Support TUs (lean headers): 350 → 200 ms per parse, **1.75×**,
+  PCH build cost 0.8 s.
+- vycor-cpp's own TUs (clang-tooling heavy): 1879 → 1776 ms, **1.06×** —
+  these TUs are template-instantiation-bound (RecursiveASTVisitor), which
+  a PCH does not skip.
+
+Verdict: workload-dependent 1.1–1.75×, plus correctness caveats (flag
+grouping, macro-before-include ordering). Not worth the complexity while
+bigger loss-free levers remain (items 10–11 above). Revisit if a target
+codebase is measured header-bound.
 
 Rationale for the order: 1 gates all real-world MCP use and is small. 3 is
 the largest UX win per line of code. 4–6 compound: the single-parse pipeline
