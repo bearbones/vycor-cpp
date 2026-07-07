@@ -64,24 +64,39 @@ void restoreCrashGuard(const SavedHandlers &saved) {
 }
 
 /// Run a ClangTool on a single file with crash recovery.
-/// Returns true if the TU was processed without crashing.
-bool runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
-                    const std::string &file,
-                    clang::tooling::FrontendActionFactory &factory,
-                    const vycor::PchCache *pchCache,
-                    const std::string &sysroot = "") {
+/// Returns the ClangTool::run() status (0 = success, 1 = errors occurred —
+/// the AST may be partial, 2 = no compile command), or -1 if the TU crashed
+/// and was skipped by the crash guard.
+int runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
+                   const std::string &file,
+                   clang::tooling::FrontendActionFactory &factory,
+                   const vycor::PchCache *pchCache,
+                   const std::string &sysroot = "") {
   tl_guardActive = 1;
   int sig = sigsetjmp(tl_jumpBuf, 1);
   if (sig != 0) {
     llvm::errs() << "CRASH (signal " << sig << ") processing " << file
                  << " — skipping\n";
-    return false;
+    return -1;
   }
 
   auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
-  tool.run(&factory);
+  int status = tool.run(&factory);
   tl_guardActive = 0;
-  return true;
+  return status;
+}
+
+// TUs whose parse reported at least one error. A hollow index built from
+// failed parses looks superficially plausible (headers index partially
+// before the fatal error), so surfacing this loudly is load-bearing.
+std::atomic<unsigned> g_parseErrorCount{0};
+
+void notedRun(const clang::tooling::CompilationDatabase &compDb,
+              const std::string &file,
+              clang::tooling::FrontendActionFactory &factory,
+              const vycor::PchCache *pchCache, const std::string &sysroot) {
+  if (runToolGuarded(compDb, file, factory, pchCache, sysroot) == 1)
+    g_parseErrorCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // anonymous namespace
@@ -1033,6 +1048,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
 
   auto saved = installCrashGuard();
   g_crashCount.store(0, std::memory_order_relaxed);
+  g_parseErrorCount.store(0, std::memory_order_relaxed);
 
   bool parallel = threadCount != 1 && files.size() > 1;
 
@@ -1049,7 +1065,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
     for (const auto &file : files) {
       pool.async([&compDb, &graph, pchCache, &sysroot, file]() {
         IndexerOnlyFactory factory(graph, file);
-        runToolGuarded(compDb, file, factory, pchCache, sysroot);
+        notedRun(compDb, file, factory, pchCache, sysroot);
       });
     }
     pool.wait();
@@ -1058,7 +1074,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
     for (const auto &file : files) {
       pool.async([&compDb, &graph, collapsePtr, pchCache, &sysroot, file]() {
         EdgeOnlyFactory factory(graph, collapsePtr, file);
-        runToolGuarded(compDb, file, factory, pchCache, sysroot);
+        notedRun(compDb, file, factory, pchCache, sysroot);
       });
     }
     pool.wait();
@@ -1066,11 +1082,11 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
     // Serial path — process per-file for crash isolation.
     for (const auto &file : files) {
       IndexerOnlyFactory factory(graph, file);
-      runToolGuarded(compDb, file, factory, pchCache, sysroot);
+      notedRun(compDb, file, factory, pchCache, sysroot);
     }
     for (const auto &file : files) {
       EdgeOnlyFactory factory(graph, collapsePtr, file);
-      runToolGuarded(compDb, file, factory, pchCache, sysroot);
+      notedRun(compDb, file, factory, pchCache, sysroot);
     }
   }
 
@@ -1078,6 +1094,13 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
   if (crashes > 0) {
     llvm::errs() << "callgraph: " << crashes << " TU(s) crashed and were skipped"
                  << " (" << files.size() << " total)\n";
+  }
+  unsigned parseErrors = g_parseErrorCount.load(std::memory_order_relaxed);
+  if (parseErrors > 0) {
+    llvm::errs() << "callgraph: WARNING: " << parseErrors << " of "
+                 << 2 * files.size() << " TU parse(s) reported errors — the "
+                 << "index may be missing nodes/edges. Check include paths "
+                 << "(--extra-arg can inject e.g. --gcc-install-dir=...)\n";
   }
 
   restoreCrashGuard(saved);

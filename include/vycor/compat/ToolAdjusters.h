@@ -21,10 +21,49 @@
 #include "clang/Tooling/Tooling.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace vycor {
+
+/// Process-global extra compiler arguments appended to the end of every
+/// compile command by makeClangTool(). Seeded from the VYCOR_EXTRA_ARGS
+/// environment variable (whitespace-separated) so test binaries inherit
+/// host-toolchain fixes too, then extended by the CLI (--extra-arg). These
+/// describe the machine/toolchain the tool runs on (e.g.
+/// --gcc-install-dir=... on hosts whose newest /usr/lib/gcc directory lacks
+/// matching libstdc++ headers), so they are genuinely process-wide. Not
+/// thread-safe to mutate after worker threads start; set before any build
+/// begins.
+inline std::vector<std::string> &globalExtraArgs() {
+  static std::vector<std::string> args = [] {
+    std::vector<std::string> seed;
+    if (const char *env = std::getenv("VYCOR_EXTRA_ARGS")) {
+      std::string cur;
+      for (const char *p = env;; ++p) {
+        if (*p == '\0' || *p == ' ' || *p == '\t') {
+          if (!cur.empty()) {
+            seed.push_back(cur);
+            cur.clear();
+          }
+          if (*p == '\0')
+            break;
+        } else {
+          cur.push_back(*p);
+        }
+      }
+    }
+    return seed;
+  }();
+  return args;
+}
+
+/// Append CLI-provided extra args to the env-seeded set.
+inline void appendGlobalExtraArgs(const std::vector<std::string> &args) {
+  auto &g = globalExtraArgs();
+  g.insert(g.end(), args.begin(), args.end());
+}
 
 /// Strip compiler flags that are incompatible with our LibTooling build.
 /// This lets us consume compilation databases produced by toolchains whose
@@ -238,6 +277,10 @@ makeClangTool(const clang::tooling::CompilationDatabase &compDb,
       clang::tooling::getClangStripDependencyFileAdjuster());
   tool.appendArgumentsAdjuster(getSysrootAdjuster(sysroot));
   tool.appendArgumentsAdjuster(getResourceDirAdjuster());
+  if (!globalExtraArgs().empty()) {
+    tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+        globalExtraArgs(), clang::tooling::ArgumentInsertPosition::END));
+  }
   return tool;
 }
 
