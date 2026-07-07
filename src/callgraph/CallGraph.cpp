@@ -31,6 +31,7 @@ CallGraph::CallGraph(CallGraph &&other) noexcept
       overrideBases_(std::move(other.overrideBases_)),
       effectiveImplClasses_(std::move(other.effectiveImplClasses_)),
       functionReturns_(std::move(other.functionReturns_)),
+      returnedBy_(std::move(other.returnedBy_)),
       tuEdges_(std::move(other.tuEdges_)),
       nodeContributors_(std::move(other.nodeContributors_)),
       liveEdgeCount_(other.liveEdgeCount_) {}
@@ -47,6 +48,7 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   overrideBases_ = std::move(other.overrideBases_);
   effectiveImplClasses_ = std::move(other.effectiveImplClasses_);
   functionReturns_ = std::move(other.functionReturns_);
+  returnedBy_ = std::move(other.returnedBy_);
   tuEdges_ = std::move(other.tuEdges_);
   nodeContributors_ = std::move(other.nodeContributors_);
   liveEdgeCount_ = other.liveEdgeCount_;
@@ -163,6 +165,9 @@ CallGraph::calleesOf(const std::string &name) const {
     const StoredEdge &se = edges_[idx];
     if (se.refs == 0)
       continue;
+    // Deferred join rows are expanded below, never shown raw.
+    if (se.kind == EdgeKind::FunctionPointerReturn)
+      continue;
     if (se.kind == EdgeKind::VirtualDispatch)
       seen.insert({se.callee, se.callSite});
     result.push_back(materialize(se));
@@ -179,6 +184,28 @@ CallGraph::calleesOf(const std::string &name) const {
         continue;
       CallGraphEdge synth = materialize(se);
       synth.calleeName = interner_.resolve(ovId);
+      result.push_back(std::move(synth));
+    }
+  }
+
+  // Expand deferred function-pointer-through-return edges: the stored
+  // callee is the returning function; synthesize an edge to each function
+  // it is known (now, at query time) to return. Empty joins yield nothing.
+  for (size_t idx : it->second) {
+    const StoredEdge &se = edges_[idx];
+    if (se.refs == 0 || se.kind != EdgeKind::FunctionPointerReturn)
+      continue;
+    auto rit = functionReturns_.find(se.callee);
+    if (rit == functionReturns_.end())
+      continue;
+    for (SId retId : rit->second) {
+      if (!seen.insert({retId, se.callSite}).second)
+        continue;
+      CallGraphEdge synth = materialize(se);
+      synth.calleeName = interner_.resolve(retId);
+      synth.kind = se.execContext != ExecutionContext::Synchronous
+                       ? EdgeKind::ThreadEntry
+                       : EdgeKind::FunctionPointer;
       result.push_back(std::move(synth));
     }
   }
@@ -199,8 +226,11 @@ CallGraph::callersOf(const std::string &name) const {
       const StoredEdge &se = edges_[idx];
       if (se.refs == 0)
         continue;
-      if (se.kind == EdgeKind::VirtualDispatch)
-        seen.insert({se.caller, se.callSite});
+      // Deferred join rows point at the *returning* function; they are
+      // expanded onto the returned targets below, never shown raw.
+      if (se.kind == EdgeKind::FunctionPointerReturn)
+        continue;
+      seen.insert({se.caller, se.callSite});
       result.push_back(materialize(se));
     }
   }
@@ -221,6 +251,30 @@ CallGraph::callersOf(const std::string &name) const {
       CallGraphEdge synth = materialize(se);
       synth.calleeName = name;
       result.push_back(std::move(synth));
+    }
+  }
+
+  // Deferred function-pointer-through-return expansion: any call site that
+  // consumed a pointer returned by F reaches `name` when F returns it.
+  auto rbIt = returnedBy_.find(*id);
+  if (rbIt != returnedBy_.end()) {
+    for (SId returner : rbIt->second) {
+      auto rin = inEdges_.find(returner);
+      if (rin == inEdges_.end())
+        continue;
+      for (size_t idx : rin->second) {
+        const StoredEdge &se = edges_[idx];
+        if (se.refs == 0 || se.kind != EdgeKind::FunctionPointerReturn)
+          continue;
+        if (!seen.insert({se.caller, se.callSite}).second)
+          continue;
+        CallGraphEdge synth = materialize(se);
+        synth.calleeName = name;
+        synth.kind = se.execContext != ExecutionContext::Synchronous
+                         ? EdgeKind::ThreadEntry
+                         : EdgeKind::FunctionPointer;
+        result.push_back(std::move(synth));
+      }
     }
   }
   return result;
@@ -406,7 +460,8 @@ void CallGraph::addFunctionReturn(const std::string &funcName,
   std::lock_guard<std::mutex> lock(mutex_);
   SId funcId = interner_.intern(funcName);
   SId retId = interner_.intern(returnedFunc);
-  functionReturns_[funcId].insert(retId);
+  if (functionReturns_[funcId].insert(retId).second)
+    returnedBy_[retId].push_back(funcId);
 }
 
 std::set<std::string>

@@ -760,53 +760,12 @@ void indexTUControlFlow(ControlFlowIndex &index,
 
 namespace {
 
-// Phase 1 (declarations/hierarchy) — same visitor as buildCallGraph's first
-// pass, driven from this TU so the bake pipeline owns its crash guard.
-class BakeIndexerConsumer : public clang::ASTConsumer {
-public:
-  BakeIndexerConsumer(CallGraph &graph, clang::SourceManager &sm,
-                      const std::string &tuPath)
-      : visitor_(graph, sm, tuPath) {}
-  void HandleTranslationUnit(clang::ASTContext &ctx) override {
-    visitor_.setASTContext(&ctx);
-    visitor_.TraverseDecl(ctx.getTranslationUnitDecl());
-  }
-
-private:
-  CallGraphIndexerVisitor visitor_;
-};
-
-class BakeIndexerAction : public clang::ASTFrontendAction {
-public:
-  BakeIndexerAction(CallGraph &graph, const std::string &tuPath)
-      : graph_(graph), tuPath_(tuPath) {}
-  std::unique_ptr<clang::ASTConsumer>
-  CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
-    return std::make_unique<BakeIndexerConsumer>(graph_,
-                                                 ci.getSourceManager(),
-                                                 tuPath_);
-  }
-
-private:
-  CallGraph &graph_;
-  std::string tuPath_;
-};
-
-class BakeIndexerFactory : public clang::tooling::FrontendActionFactory {
-public:
-  BakeIndexerFactory(CallGraph &graph, const std::string &tuPath)
-      : graph_(graph), tuPath_(tuPath) {}
-  std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<BakeIndexerAction>(graph_, tuPath_);
-  }
-
-private:
-  CallGraph &graph_;
-  std::string tuPath_;
-};
-
-// Phase 2+3: edge building and control-flow context extraction over the
-// same ASTContext — one frontend parse instead of two.
+// All three phases — node/hierarchy index, edge building, and control-flow
+// context extraction — over the same ASTContext: ONE frontend parse per TU.
+// Safe because edge building has no cross-TU reads (the virtual-dispatch
+// fan-out and the function-pointer-through-return join are both deferred to
+// query time) and the CF visitor never reads the graph during traversal.
+// The indexer runs first so same-TU state precedes the edge walk.
 class BakeEdgeAndContextConsumer : public clang::ASTConsumer {
 public:
   BakeEdgeAndContextConsumer(CallGraph &graph, ControlFlowIndex &index,
@@ -814,7 +773,8 @@ public:
                              const CollapseFilter *collapse,
                              const LockTypeConfig *lockCfg,
                              const std::string &tuPath)
-      : edgeVisitor_(graph, sm, tuPath),
+      : indexerVisitor_(graph, sm, tuPath),
+        edgeVisitor_(graph, sm, tuPath),
         cfVisitor_(index, graph, sm, tuPath) {
     edgeVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setCollapseFilter(collapse);
@@ -822,6 +782,8 @@ public:
   }
 
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
+    indexerVisitor_.setASTContext(&ctx);
+    indexerVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
     edgeVisitor_.setASTContext(&ctx);
     edgeVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
     cfVisitor_.setASTContext(&ctx);
@@ -829,6 +791,7 @@ public:
   }
 
 private:
+  CallGraphIndexerVisitor indexerVisitor_;
   CallGraphEdgeVisitor edgeVisitor_;
   ControlFlowContextVisitor cfVisitor_;
 };
@@ -902,8 +865,10 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
     stats->threads = threadCount;
 
   bool parallel = threadCount != 1 && files.size() > 1;
-  auto phase1Start = std::chrono::steady_clock::now();
+  auto bakeStart = std::chrono::steady_clock::now();
 
+  // Single pass: all three visitor phases share one frontend parse per TU
+  // (no phase barrier — edge building has no cross-TU reads).
   if (parallel) {
 #if VYCOR_LLVM_AT_LEAST(19)
     llvm::DefaultThreadPool pool(llvm::hardware_concurrency(threadCount));
@@ -911,54 +876,26 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
     llvm::ThreadPool pool(llvm::hardware_concurrency(threadCount));
 #endif
 
-    // Phase 1: declarations, hierarchy, function returns.
-    for (const auto &file : files) {
-      pool.async([&compDb, &out, pchCache, &sysroot, stats, file]() {
-        BakeIndexerFactory factory(out.graph, file);
-        bakeRun(compDb, file, factory, pchCache, sysroot, 1, stats);
-      });
-    }
-    pool.wait();
-    auto phase2Start = std::chrono::steady_clock::now();
-    if (stats)
-      stats->phase1WallMs = std::chrono::duration<double, std::milli>(
-                                phase2Start - phase1Start)
-                                .count();
-
-    // Phase 2+3 on one parse per TU, with full Phase 1 knowledge.
     for (const auto &file : files) {
       pool.async([&compDb, &out, collapsePtr, &lockCfg, pchCache, &sysroot,
                   stats, file]() {
         BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                           &lockCfg, file);
-        bakeRun(compDb, file, factory, pchCache, sysroot, 2, stats);
+        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats);
       });
     }
     pool.wait();
-    if (stats)
-      stats->phase2WallMs = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - phase2Start)
-                                .count();
   } else {
-    for (const auto &file : files) {
-      BakeIndexerFactory factory(out.graph, file);
-      bakeRun(compDb, file, factory, pchCache, sysroot, 1, stats);
-    }
-    auto phase2Start = std::chrono::steady_clock::now();
-    if (stats)
-      stats->phase1WallMs = std::chrono::duration<double, std::milli>(
-                                phase2Start - phase1Start)
-                                .count();
     for (const auto &file : files) {
       BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                         &lockCfg, file);
-      bakeRun(compDb, file, factory, pchCache, sysroot, 2, stats);
+      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats);
     }
-    if (stats)
-      stats->phase2WallMs = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - phase2Start)
-                                .count();
   }
+  if (stats)
+    stats->phase2WallMs = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - bakeStart)
+                              .count();
 
   unsigned crashes = g_cfCrashCount.load(std::memory_order_relaxed);
   if (crashes > 0) {
@@ -968,7 +905,7 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   unsigned parseErrors = g_cfParseErrorCount.load(std::memory_order_relaxed);
   if (parseErrors > 0) {
     llvm::errs() << "bake: WARNING: " << parseErrors << " of "
-                 << 2 * files.size() << " TU parse(s) reported errors — the "
+                 << files.size() << " TU parse(s) reported errors — the "
                  << "index may be missing nodes/edges/contexts. Check include "
                  << "paths (--extra-arg can inject e.g. "
                  << "--gcc-install-dir=/usr/lib/gcc/<triple>/<ver>)\n";
@@ -992,9 +929,6 @@ void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
-
-  BakeIndexerFactory indexerFactory(graph, file);
-  runCfToolGuarded(compDb, file, indexerFactory, pchCache, sysroot);
 
   BakeEdgeAndContextFactory combinedFactory(graph, cfIndex, collapsePtr,
                                             &lockCfg, file);

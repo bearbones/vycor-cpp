@@ -229,7 +229,7 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const LockTypeConfig &lockCfg = {});
 
 // ============================================================================
-// Combined bake — two frontend parses per TU instead of three
+// Combined bake — ONE frontend parse per TU
 // ============================================================================
 
 struct BakedIndexes {
@@ -237,12 +237,14 @@ struct BakedIndexes {
   ControlFlowIndex cfIndex;
 };
 
-// Build both indexes with one parse per phase barrier: Phase 1 (declarations,
-// hierarchy, function returns) parses every TU, then Phase 2 (edges) and
-// Phase 3 (control-flow contexts) run together on a single second parse of
-// each TU. Equivalent output to buildCallGraph + buildControlFlowIndex at
-// two-thirds the frontend cost. Phase 1 stays a separate parse because edge
-// building consults cross-TU hierarchy and function-return data.
+// Build both indexes in a single frontend parse per TU: the node/hierarchy
+// index, edge building, and control-flow context extraction all run over
+// the same ASTContext. Equivalent query results to the historical
+// three-parse build at one-third the frontend cost: the two builds that
+// used to need cross-TU Phase-1 data (virtual-dispatch fan-out and the
+// function-pointer-through-return join) are deferred to query time
+// (CallGraph::calleesOf/callersOf), which also keeps incremental reindexing
+// consistent with a full rebuild.
 // When `stats` is non-null, per-phase wall times and per-TU parse timings
 // and outcomes are recorded into it (see BuildStats.h).
 BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
@@ -254,9 +256,9 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const LockTypeConfig &lockCfg = {},
                          BuildStats *stats = nullptr);
 
-// Single-TU variant for incremental reindex: Phase 1 parse + combined
-// Phase 2+3 parse. Call graph.removeTU(file) and cfIndex.removeTU(file)
-// first when re-indexing a changed file.
+// Single-TU variant for incremental reindex (one parse). Call
+// graph.removeTU(file) and cfIndex.removeTU(file) first when re-indexing a
+// changed file.
 void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
             const clang::tooling::CompilationDatabase &compDb,
             const std::string &file,

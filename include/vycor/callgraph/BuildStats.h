@@ -28,7 +28,8 @@ namespace vycor {
 /// the crash guard.
 struct TuBuildStat {
   std::string file;
-  int phase = 0;   // 1 = node index, 2 = combined edge + control-flow parse
+  int phase = 0;   // 0 = combined single-parse (index+edges+CF); legacy
+                   // builds used 1 = node index, 2 = edges+CF
   double ms = 0.0; // wall-clock for this TU's parse + traversal
   int toolStatus = 0;
 };
@@ -37,8 +38,8 @@ struct TuBuildStat {
 /// Collected by bakeIndexes() when a non-null pointer is passed; the
 /// per-TU vector is appended under a mutex from worker threads.
 struct BuildStats {
-  double phase1WallMs = 0.0; // node-index barrier wall time
-  double phase2WallMs = 0.0; // edge+CF barrier wall time
+  double phase1WallMs = 0.0; // 0 under the single-parse pipeline
+  double phase2WallMs = 0.0; // wall time of the (single) parse pass
   unsigned threads = 0;      // requested thread count (0 = hardware)
   std::vector<TuBuildStat> tuStats;
 
