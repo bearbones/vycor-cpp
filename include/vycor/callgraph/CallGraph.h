@@ -44,7 +44,18 @@ enum class EdgeKind {
   // std::async, std::packaged_task, std::invoke, std::bind). The edge points
   // from the spawner to the target callable; execContext records which
   // primitive triggered the edge.
-  ThreadEntry
+  ThreadEntry,
+  // Deferred function-pointer-through-return edge: `auto v = pick(); v();`
+  // or `spawn(v)`. The stored edge's callee is the *returning* function
+  // (pick), not the eventual target. At query time calleesOf/callersOf join
+  // the edge through the functionReturns_ relation and synthesize
+  // FunctionPointer (or ThreadEntry, per execContext) edges to each function
+  // `pick` is known to return; the raw edge itself is never materialized.
+  // Deferring the join keeps edge building free of cross-TU reads (the last
+  // blocker to the single-parse bake pipeline) and keeps incremental
+  // reindexing correct: returns recorded later become visible to existing
+  // call sites without re-baking them.
+  FunctionPointerReturn
 };
 
 enum class Confidence {
@@ -260,6 +271,9 @@ private:
   std::unordered_map<SId, std::vector<SId>> overrideBases_;
   std::unordered_map<SId, std::set<SId>> effectiveImplClasses_;
   std::unordered_map<SId, std::set<SId>> functionReturns_;
+  // Reverse of functionReturns_: returned function -> functions returning it.
+  // Drives callersOf expansion of FunctionPointerReturn edges.
+  std::unordered_map<SId, std::vector<SId>> returnedBy_;
 
   // Per-TU provenance tracking for incremental re-indexing.
   std::unordered_map<SId, std::vector<size_t>> tuEdges_;

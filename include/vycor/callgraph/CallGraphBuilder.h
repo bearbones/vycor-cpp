@@ -95,8 +95,12 @@ private:
   // so VisitDeclRefExpr can add Plausible edges only for uncovered refs.
   std::set<const clang::DeclRefExpr *> handledRefs_;
 
-  // Track vars assigned from functions that return function pointers.
-  std::map<const clang::VarDecl *, std::set<std::string>> varFuncSources_;
+  // Track callable-typed vars initialized from a direct call, keyed to the
+  // *returning* function's qualified name. Consumed by processCallableArgs
+  // as deferred FunctionPointerReturn edges; the function-returns join
+  // happens at query time (CallGraph::calleesOf/callersOf), so edge
+  // building never reads cross-TU state.
+  std::map<const clang::VarDecl *, std::string> varCallSources_;
 
   // Track local vars initialized from a LambdaExpr so concurrency spawners
   // and downstream callers can resolve the synthetic lambda name.
@@ -118,7 +122,7 @@ private:
 
   // Shared argument scan for both CallExpr and CXXConstructExpr spawners.
   // Emits edges from `caller` for every argument that resolves to a callable
-  // (FunctionDecl, LambdaExpr, or a local var tracked in varFuncSources_ /
+  // (FunctionDecl, LambdaExpr, or a local var tracked in varCallSources_ /
   // varLambdaSources_). If `spawnerCtx` is Synchronous, emits FunctionPointer
   // edges; otherwise emits ThreadEntry edges with the given context.
   void processCallableArgs(llvm::ArrayRef<clang::Expr *> args,

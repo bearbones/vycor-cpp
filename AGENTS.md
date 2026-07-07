@@ -83,12 +83,17 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `ControlFlowOracle.h/.cpp` | Query engine: exception safety, path analysis, call site context |
 
-**Three-phase build** (used by both `prism` and `megascope`):
-`bakeIndexes(compDb, files, ...)` runs Phase 1 (declaration/hierarchy index)
-as one parse per TU, then Phase 2 (edges) and Phase 3 (CF context) together
-on a single second parse per TU — two frontend parses instead of three.
-`buildCallGraph` / `buildControlFlowIndex` remain for callers that need only
-one of the two indexes.
+**Single-parse build** (used by both `prism` and `megascope`):
+`bakeIndexes(compDb, files, ...)` runs all three visitor phases —
+declaration/hierarchy index, edge building, CF context — over ONE frontend
+parse per TU. No phase barrier is needed because edge building has no
+cross-TU reads: the two joins that used to require completed Phase-1 data
+(virtual-dispatch fan-out and the function-pointer-through-return join,
+`EdgeKind::FunctionPointerReturn`) are performed at query time in
+`CallGraph::calleesOf`/`callersOf`. Measured on llvm-project lib/Support
+(149 TUs, 12 threads): cold bake 17.1s → 9.9s vs the old two-parse bake,
+identical query results. `buildCallGraph` / `buildControlFlowIndex` remain
+for callers that need only one of the two indexes (also single-parse).
 
 **Virtual dispatch** is stored as ONE Plausible `VirtualDispatch` edge to the
 static target per call site. `CallGraph::calleesOf`/`callersOf` expand it
@@ -340,7 +345,6 @@ applicable release branch via the `backport/llvm-NN` PR label. See
 | Concurrency | `query_raii_scopes_at_callsite` — list RAII objects live at a call site |
 | Concurrency | `query_locks_held(function)` — trace callers to find implicit locks |
 | Concurrency | `query_same_lock(fn_a, fn_b)` — confirm two functions share a lock |
-| Scaling | Parallel multi-TU graph construction (currently serial) |
 
 ---
 

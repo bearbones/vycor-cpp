@@ -62,3 +62,4 @@ scripts/mcp-smoke-out/
 
 # Generated compile_commands.json for fixtures
 examples/deep_chains/compile_commands.json
+bench-out/

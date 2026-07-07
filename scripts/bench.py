@@ -270,11 +270,15 @@ def summarize(report: dict) -> str:
     lines.append(f"# bench: {report['label']}")
     lines.append(f"binary: {report['binary']}")
     lines.append(f"TUs: {s.get('files')}  threads: {s.get('threads')}")
+    if s.get("phase1_wall_ms"):
+        phases = (f"(phase1 {s.get('phase1_wall_ms', 0)/1000:.2f}s, "
+                  f"phase2+3 {s.get('phase2_wall_ms', 0)/1000:.2f}s), ")
+    else:
+        phases = "(single-parse), "
     lines.append(
         f"cold bake: {s.get('bake_wall_ms', 0)/1000:.2f}s wall "
-        f"(phase1 {s.get('phase1_wall_ms', 0)/1000:.2f}s, "
-        f"phase2+3 {s.get('phase2_wall_ms', 0)/1000:.2f}s), "
-        f"ready-to-serve {report.get('cold_ready_s', 0):.2f}s")
+        + phases
+        + f"ready-to-serve {report.get('cold_ready_s', 0):.2f}s")
     lines.append(
         f"graph: {g.get('nodes')} nodes, {g.get('edges')} edges, "
         f"{g.get('call_sites')} call sites, "

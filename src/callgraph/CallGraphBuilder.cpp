@@ -184,6 +184,23 @@ static const clang::LambdaExpr *asLambdaExpr(const clang::Expr *expr) {
   return nullptr;
 }
 
+// Does this type plausibly hold a callable produced by another function?
+// Gate for deferred function-pointer-through-return tracking: function
+// pointers, member-function pointers, and std::function-like wrappers.
+static bool isCallableLikeType(clang::QualType ty) {
+  if (ty.isNull())
+    return false;
+  ty = ty.getNonReferenceType();
+  if (ty->isFunctionPointerType() || ty->isMemberFunctionPointerType())
+    return true;
+  if (auto *rd = ty->getAsCXXRecordDecl()) {
+    std::string qn = rd->getQualifiedNameAsString();
+    if (qn == "std::function" || qn == "std::move_only_function")
+      return true;
+  }
+  return false;
+}
+
 // Map a well-known concurrency-spawner qualified name to its ExecutionContext.
 // Returns Synchronous for non-spawners; callers check for != Synchronous.
 static ExecutionContext spawnerContextFor(llvm::StringRef qualifiedName) {
@@ -586,12 +603,16 @@ void CallGraphEdgeVisitor::processCallableArgs(
         handledRefs_.insert(dre);
       } else if (auto *varDecl =
                      llvm::dyn_cast<clang::VarDecl>(dre->getDecl())) {
-        auto fnIt = varFuncSources_.find(varDecl);
-        if (fnIt != varFuncSources_.end()) {
-          for (const auto &funcName : fnIt->second) {
-            graph_.addEdge({caller, funcName, ptrEdgeKind,
-                            Confidence::Proven, siteStr, 2, spawnerCtx}, tuPath_);
-          }
+        auto fnIt = varCallSources_.find(varDecl);
+        if (fnIt != varCallSources_.end()) {
+          // Deferred: the stored callee is the function that produced the
+          // pointer; CallGraph::calleesOf joins it through functionReturns_
+          // at query time and synthesizes the ptrEdgeKind edges (empty
+          // joins synthesize nothing). This keeps edge building free of
+          // cross-TU reads so all phases share one parse.
+          graph_.addEdge({caller, fnIt->second,
+                          EdgeKind::FunctionPointerReturn, Confidence::Proven,
+                          siteStr, 2, spawnerCtx}, tuPath_);
           handledRefs_.insert(dre);
         }
         auto lamIt = varLambdaSources_.find(varDecl);
@@ -776,16 +797,18 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   if (caller.empty())
     return true;
 
-  // Track variables assigned from functions returning function pointers.
+  // Track callable-typed variables initialized from a direct call. The
+  // callee may return function pointers (recorded by the indexer visitor as
+  // functionReturns); resolving WHICH functions it returns is deferred to
+  // query time, so no cross-TU graph read happens here. The type gate keeps
+  // the tracking to plausibly-callable vars (function pointers,
+  // member-function pointers, std::function).
   if (auto *init = decl->getInit()) {
     auto *initExpr = init->IgnoreParenImpCasts();
     if (auto *callExpr = llvm::dyn_cast<clang::CallExpr>(initExpr)) {
       auto *callee = callExpr->getDirectCallee();
-      if (callee) {
-        auto returns =
-            graph_.getFunctionReturns(callee->getQualifiedNameAsString());
-        if (!returns.empty())
-          varFuncSources_[decl] = std::move(returns);
+      if (callee && isCallableLikeType(decl->getType())) {
+        varCallSources_[decl] = callee->getQualifiedNameAsString();
       }
     }
 
@@ -942,74 +965,40 @@ std::unique_ptr<clang::FrontendAction> CallGraphBuilderFactory::create() {
 
 namespace {
 
-class IndexerOnlyConsumer : public clang::ASTConsumer {
+// Index + edges on ONE frontend parse per TU. Safe because edge building
+// has no cross-TU reads: the virtual-dispatch fan-out (task: F3) and the
+// function-pointer-through-return join (FunctionPointerReturn) are both
+// deferred to query time. The indexer runs first so same-TU state (nodes,
+// hierarchy, function returns) precedes the edge walk, matching the
+// single-TU CallGraphBuilderConsumer.
+class IndexEdgeConsumer : public clang::ASTConsumer {
 public:
-  IndexerOnlyConsumer(CallGraph &graph, clang::SourceManager &sm,
-                      const std::string &tuPath)
-      : visitor_(graph, sm, tuPath) {}
-  void HandleTranslationUnit(clang::ASTContext &ctx) override {
-    visitor_.setASTContext(&ctx);
-    visitor_.TraverseDecl(ctx.getTranslationUnitDecl());
-  }
-
-private:
-  CallGraphIndexerVisitor visitor_;
-};
-
-class IndexerOnlyAction : public clang::ASTFrontendAction {
-public:
-  IndexerOnlyAction(CallGraph &g, const std::string &tuPath)
-      : graph_(g), tuPath_(tuPath) {}
-  std::unique_ptr<clang::ASTConsumer>
-  CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
-    return std::make_unique<IndexerOnlyConsumer>(graph_,
-                                                 ci.getSourceManager(),
-                                                 tuPath_);
-  }
-
-private:
-  CallGraph &graph_;
-  std::string tuPath_;
-};
-
-class IndexerOnlyFactory : public clang::tooling::FrontendActionFactory {
-public:
-  IndexerOnlyFactory(CallGraph &g, const std::string &tuPath)
-      : graph_(g), tuPath_(tuPath) {}
-  std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<IndexerOnlyAction>(graph_, tuPath_);
-  }
-
-private:
-  CallGraph &graph_;
-  std::string tuPath_;
-};
-
-class EdgeOnlyConsumer : public clang::ASTConsumer {
-public:
-  EdgeOnlyConsumer(CallGraph &graph, clang::SourceManager &sm,
-                   const CollapseFilter *collapse, const std::string &tuPath)
-      : visitor_(graph, sm, tuPath) {
-    visitor_.setCollapseFilter(collapse);
+  IndexEdgeConsumer(CallGraph &graph, clang::SourceManager &sm,
+                    const CollapseFilter *collapse, const std::string &tuPath)
+      : indexer_(graph, sm, tuPath), edges_(graph, sm, tuPath) {
+    edges_.setCollapseFilter(collapse);
   }
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
-    visitor_.setASTContext(&ctx);
-    visitor_.TraverseDecl(ctx.getTranslationUnitDecl());
+    indexer_.setASTContext(&ctx);
+    indexer_.TraverseDecl(ctx.getTranslationUnitDecl());
+    edges_.setASTContext(&ctx);
+    edges_.TraverseDecl(ctx.getTranslationUnitDecl());
   }
 
 private:
-  CallGraphEdgeVisitor visitor_;
+  CallGraphIndexerVisitor indexer_;
+  CallGraphEdgeVisitor edges_;
 };
 
-class EdgeOnlyAction : public clang::ASTFrontendAction {
+class IndexEdgeAction : public clang::ASTFrontendAction {
 public:
-  EdgeOnlyAction(CallGraph &g, const CollapseFilter *collapse,
-                 const std::string &tuPath)
+  IndexEdgeAction(CallGraph &g, const CollapseFilter *collapse,
+                  const std::string &tuPath)
       : graph_(g), collapse_(collapse), tuPath_(tuPath) {}
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
-    return std::make_unique<EdgeOnlyConsumer>(graph_, ci.getSourceManager(),
-                                              collapse_, tuPath_);
+    return std::make_unique<IndexEdgeConsumer>(graph_, ci.getSourceManager(),
+                                               collapse_, tuPath_);
   }
 
 private:
@@ -1018,13 +1007,13 @@ private:
   std::string tuPath_;
 };
 
-class EdgeOnlyFactory : public clang::tooling::FrontendActionFactory {
+class IndexEdgeFactory : public clang::tooling::FrontendActionFactory {
 public:
-  EdgeOnlyFactory(CallGraph &g, const CollapseFilter *collapse,
-                  const std::string &tuPath)
+  IndexEdgeFactory(CallGraph &g, const CollapseFilter *collapse,
+                   const std::string &tuPath)
       : graph_(g), collapse_(collapse), tuPath_(tuPath) {}
   std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<EdgeOnlyAction>(graph_, collapse_, tuPath_);
+    return std::make_unique<IndexEdgeAction>(graph_, collapse_, tuPath_);
   }
 
 private:
@@ -1061,19 +1050,12 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
         llvm::hardware_concurrency(threadCount));
 #endif
 
-    // Pass 1: Parallel index of all declarations and class hierarchy.
-    for (const auto &file : files) {
-      pool.async([&compDb, &graph, pchCache, &sysroot, file]() {
-        IndexerOnlyFactory factory(graph, file);
-        notedRun(compDb, file, factory, pchCache, sysroot);
-      });
-    }
-    pool.wait();
-
-    // Pass 2: Parallel edge building with full hierarchy knowledge.
+    // Single pass: index + edges share one frontend parse per TU. Edge
+    // building has no cross-TU reads (virtual dispatch and function-return
+    // joins are query-time), so no phase barrier is needed.
     for (const auto &file : files) {
       pool.async([&compDb, &graph, collapsePtr, pchCache, &sysroot, file]() {
-        EdgeOnlyFactory factory(graph, collapsePtr, file);
+        IndexEdgeFactory factory(graph, collapsePtr, file);
         notedRun(compDb, file, factory, pchCache, sysroot);
       });
     }
@@ -1081,11 +1063,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
   } else {
     // Serial path — process per-file for crash isolation.
     for (const auto &file : files) {
-      IndexerOnlyFactory factory(graph, file);
-      notedRun(compDb, file, factory, pchCache, sysroot);
-    }
-    for (const auto &file : files) {
-      EdgeOnlyFactory factory(graph, collapsePtr, file);
+      IndexEdgeFactory factory(graph, collapsePtr, file);
       notedRun(compDb, file, factory, pchCache, sysroot);
     }
   }
@@ -1098,7 +1076,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
   unsigned parseErrors = g_parseErrorCount.load(std::memory_order_relaxed);
   if (parseErrors > 0) {
     llvm::errs() << "callgraph: WARNING: " << parseErrors << " of "
-                 << 2 * files.size() << " TU parse(s) reported errors — the "
+                 << files.size() << " TU parse(s) reported errors — the "
                  << "index may be missing nodes/edges. Check include paths "
                  << "(--extra-arg can inject e.g. --gcc-install-dir=...)\n";
   }
@@ -1120,11 +1098,8 @@ void indexTU(CallGraph &graph,
   auto saved = installCrashGuard();
   g_crashCount.store(0, std::memory_order_relaxed);
 
-  IndexerOnlyFactory indexerFactory(graph, file);
-  runToolGuarded(compDb, file, indexerFactory, pchCache, sysroot);
-
-  EdgeOnlyFactory edgeFactory(graph, collapsePtr, file);
-  runToolGuarded(compDb, file, edgeFactory, pchCache, sysroot);
+  IndexEdgeFactory factory(graph, collapsePtr, file);
+  runToolGuarded(compDb, file, factory, pchCache, sysroot);
 
   restoreCrashGuard(saved);
 }
