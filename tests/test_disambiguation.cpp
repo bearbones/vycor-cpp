@@ -340,3 +340,238 @@ TEST_CASE("call-site tools disambiguate a macro-shared spelling by caller",
     CHECK(pobj.getArray("locals") != nullptr);
   }
 }
+
+// ============================================================================
+// Candidate cap + site/filter refinement (the node-growth-policy follow-up:
+// generic utilities can have hundreds of instantiations under one display
+// name; the response must stay agent-loop-cheap).
+// ============================================================================
+
+namespace {
+
+// A graph with `n` same-display-name nodes (distinct usrs, two files) plus
+// one caller wired to a single instantiation through both the edge set and
+// a call-site context.
+struct BigOverloadFixture {
+  CallGraph graph;
+  ControlFlowIndex cfIndex;
+
+  explicit BigOverloadFixture(int n) {
+    for (int i = 0; i < n; ++i) {
+      CallGraphNode node;
+      node.qualifiedName = "big::process";
+      node.file = (i % 2 == 0) ? "even.h" : "odd.h";
+      node.line = 10 + i;
+      node.usr = "c:@N@big@F@process#inst" + pad(i) + "#";
+      graph.addNode(std::move(node), "tu.cpp");
+    }
+    CallGraphNode caller;
+    caller.qualifiedName = "big::caller";
+    caller.file = "caller.cpp";
+    caller.line = 1;
+    caller.usr = "c:@N@big@F@caller#";
+    graph.addNode(std::move(caller), "tu.cpp");
+
+    graph.addEdge({"c:@N@big@F@caller#", "c:@N@big@F@process#inst" + pad(7) + "#",
+                   EdgeKind::DirectCall, Confidence::Proven,
+                   "caller.cpp:5:3"},
+                  "tu.cpp");
+
+    CallSiteContext site;
+    site.callerName = "big::caller";
+    site.calleeName = "big::process";
+    site.callSite = "caller.cpp:5:3";
+    site.callerUsr = "c:@N@big@F@caller#";
+    site.calleeUsr = "c:@N@big@F@process#inst" + pad(7) + "#";
+    site.tuPath = "tu.cpp";
+    cfIndex.addCallSiteContext(std::move(site));
+  }
+
+  // Zero-pad so lexicographic candidate order matches numeric order.
+  static std::string pad(int i) {
+    std::string s = std::to_string(i);
+    return std::string(2 - std::min<size_t>(2, s.size()), '0') + s;
+  }
+};
+
+} // namespace
+
+TEST_CASE("ambiguous candidate list is capped with a by-file summary",
+          "[mcp][disambiguation][cap]") {
+  BigOverloadFixture fx(30);
+  ControlFlowOracle oracle(fx.graph, fx.cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{fx.graph, oracle, fx.cfIndex, eps};
+  auto handler = findHandler("lookup_function");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["name"] = "big::process";
+  auto result = handler(args, ctx);
+  CHECK_FALSE(isErrorResult(result));
+  auto obj = parseToolResult(result);
+  CHECK(obj.getBoolean("ambiguous") == true);
+  CHECK(obj.getInteger("total_candidates") == 30);
+  CHECK(obj.getBoolean("truncated") == true);
+  auto *candidates = obj.getArray("candidates");
+  REQUIRE(candidates != nullptr);
+  CHECK(candidates->size() == 25);
+
+  // By-file summary covers ALL candidates, not just the emitted prefix.
+  auto *byFile = obj.getArray("candidates_by_file");
+  REQUIRE(byFile != nullptr);
+  int64_t sum = 0;
+  for (const auto &f : *byFile)
+    sum += f.getAsObject()->getInteger("count").value_or(0);
+  CHECK(sum == 30);
+
+  // The note teaches the refinement parameters.
+  auto note = obj.getString("note");
+  REQUIRE(note.has_value());
+  CHECK(note->contains("site"));
+  CHECK(note->contains("filter"));
+}
+
+TEST_CASE("small ambiguous sets are not truncated",
+          "[mcp][disambiguation][cap]") {
+  BigOverloadFixture fx(3);
+  ControlFlowOracle oracle(fx.graph, fx.cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{fx.graph, oracle, fx.cfIndex, eps};
+  auto handler = findHandler("lookup_function");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["name"] = "big::process";
+  auto result = handler(args, ctx);
+  auto obj = parseToolResult(result);
+  CHECK(obj.getBoolean("ambiguous") == true);
+  CHECK(obj.getInteger("total_candidates") == 3);
+  CHECK_FALSE(obj.getBoolean("truncated").has_value());
+  CHECK(obj.getArray("candidates")->size() == 3);
+}
+
+TEST_CASE("filter narrows an ambiguous name", "[mcp][disambiguation][filter]") {
+  BigOverloadFixture fx(30);
+  ControlFlowOracle oracle(fx.graph, fx.cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{fx.graph, oracle, fx.cfIndex, eps};
+  auto handler = findHandler("lookup_function");
+  REQUIRE(handler);
+
+  SECTION("unique survivor resolves") {
+    llvm::json::Object args;
+    args["name"] = "big::process";
+    args["filter"] = "inst07";
+    auto result = handler(args, ctx);
+    CHECK_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    CHECK_FALSE(obj.getBoolean("ambiguous").has_value());
+    CHECK(obj.getString("usr") == "c:@N@big@F@process#inst07#");
+  }
+
+  SECTION("multi-match filter narrows the candidate list") {
+    llvm::json::Object args;
+    args["name"] = "big::process";
+    args["filter"] = "even.h"; // matches candidate file
+    auto result = handler(args, ctx);
+    auto obj = parseToolResult(result);
+    CHECK(obj.getBoolean("ambiguous") == true);
+    CHECK(obj.getInteger("total_candidates") == 15);
+    CHECK(obj.getString("note")->contains("narrowed by filter"));
+  }
+
+  SECTION("no-match filter falls back to the unfiltered set") {
+    llvm::json::Object args;
+    args["name"] = "big::process";
+    args["filter"] = "no_such_thing";
+    auto result = handler(args, ctx);
+    auto obj = parseToolResult(result);
+    CHECK(obj.getBoolean("ambiguous") == true);
+    CHECK(obj.getInteger("total_candidates") == 30);
+    CHECK(obj.getString("note")->contains("matched no candidate"));
+  }
+}
+
+TEST_CASE("site resolves an ambiguous name to the instantiation called there",
+          "[mcp][disambiguation][site]") {
+  BigOverloadFixture fx(30);
+  ControlFlowOracle oracle(fx.graph, fx.cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{fx.graph, oracle, fx.cfIndex, eps};
+  auto handler = findHandler("lookup_function");
+  REQUIRE(handler);
+
+  SECTION("site alone resolves") {
+    llvm::json::Object args;
+    args["site"] = "caller.cpp:5:3";
+    auto result = handler(args, ctx);
+    CHECK_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    CHECK(obj.getString("usr") == "c:@N@big@F@process#inst07#");
+  }
+
+  SECTION("site plus agreeing name resolves") {
+    llvm::json::Object args;
+    args["name"] = "big::process";
+    args["site"] = "caller.cpp:5:3";
+    auto result = handler(args, ctx);
+    CHECK_FALSE(isErrorResult(result));
+    auto obj = parseToolResult(result);
+    CHECK(obj.getString("usr") == "c:@N@big@F@process#inst07#");
+  }
+
+  SECTION("site plus disagreeing name is a clear error") {
+    llvm::json::Object args;
+    args["name"] = "big::caller"; // the site calls big::process, not this
+    args["site"] = "caller.cpp:5:3";
+    auto result = handler(args, ctx);
+    CHECK(isErrorResult(result));
+  }
+
+  SECTION("unknown site is a clear error") {
+    llvm::json::Object args;
+    args["name"] = "big::process";
+    args["site"] = "nowhere.cpp:1:1";
+    auto result = handler(args, ctx);
+    CHECK(isErrorResult(result));
+  }
+
+  SECTION("explicit usr still wins over site") {
+    llvm::json::Object args;
+    args["usr"] = "c:@N@big@F@process#inst03#";
+    args["site"] = "caller.cpp:5:3";
+    auto result = handler(args, ctx);
+    auto obj = parseToolResult(result);
+    CHECK(obj.getString("usr") == "c:@N@big@F@process#inst03#");
+  }
+}
+
+TEST_CASE("macro-shared site with distinct callees lists the small set",
+          "[mcp][disambiguation][site]") {
+  BigOverloadFixture fx(4);
+  // A second context at the SAME spelling calling a DIFFERENT instantiation
+  // (macro expanded in two functions).
+  CallSiteContext other;
+  other.callerName = "big::caller2";
+  other.calleeName = "big::process";
+  other.callSite = "caller.cpp:5:3";
+  other.callerUsr = "c:@N@big@F@caller2#";
+  other.calleeUsr = "c:@N@big@F@process#inst01#";
+  other.tuPath = "tu.cpp";
+  fx.cfIndex.addCallSiteContext(std::move(other));
+
+  ControlFlowOracle oracle(fx.graph, fx.cfIndex);
+  std::vector<std::string> eps = {"main"};
+  McpToolContext ctx{fx.graph, oracle, fx.cfIndex, eps};
+  auto handler = findHandler("lookup_function");
+  REQUIRE(handler);
+
+  llvm::json::Object args;
+  args["site"] = "caller.cpp:5:3";
+  auto result = handler(args, ctx);
+  CHECK_FALSE(isErrorResult(result));
+  auto obj = parseToolResult(result);
+  CHECK(obj.getBoolean("ambiguous") == true);
+  CHECK(obj.getInteger("total_candidates") == 2);
+}

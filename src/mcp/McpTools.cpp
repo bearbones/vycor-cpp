@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -280,20 +281,43 @@ static bool isSystemPath(llvm::StringRef path) {
 // F8 identity resolution (docs/design-f8-usr-identity.md §4, PR C)
 // ============================================================================
 
+// Candidate-list cap for disambiguation responses. Generic library
+// utilities can have hundreds of instantiations under one display name
+// (llvm::cast: 858 on the 938-TU testbed ≈ 188 KB uncapped — see the
+// review doc §"Template node growth"); above the cap the response keeps a
+// deterministic prefix plus a by-file group summary and refinement hints.
+static constexpr size_t kMaxAmbiguousCandidates = 25;
+
 // Non-error disambiguation response for an ambiguous display name: the
-// client picks a candidate and re-queries with its `usr`. Candidates are
-// sorted by usr string so the response is deterministic.
+// client picks a candidate and re-queries with its `usr`, or refines with
+// the `site`/`filter` parameters named in the note. Candidates are sorted
+// by usr string so the response is deterministic.
 static llvm::json::Value makeAmbiguousNameResult(const McpToolContext &ctx,
                                                  llvm::StringRef paramName,
                                                  llvm::StringRef name,
-                                                 std::vector<std::string> usrs) {
+                                                 std::vector<std::string> usrs,
+                                                 llvm::StringRef filterNote = "") {
   std::sort(usrs.begin(), usrs.end());
+  const size_t total = usrs.size();
+  const bool truncated = total > kMaxAmbiguousCandidates;
+
+  // By-file group summary over ALL candidates (cheap discrimination when
+  // the list is long: overloads and statics often split by file even when
+  // every candidate prints the same display name).
+  std::map<std::string, int64_t> byFile;
   llvm::json::Array candidates;
+  size_t emitted = 0;
   for (const auto &usr : usrs) {
+    const auto *node = ctx.graph.findNode(usr);
+    if (node)
+      ++byFile[node->file];
+    if (emitted >= kMaxAmbiguousCandidates)
+      continue;
+    ++emitted;
     llvm::json::Object cand;
     cand["usr"] = usr;
     // Nodes are usr-keyed; findNode(usr) is the exact node.
-    if (const auto *node = ctx.graph.findNode(usr)) {
+    if (node) {
       cand["qualifiedName"] = node->qualifiedName;
       cand["file"] = node->file;
       cand["line"] = static_cast<int64_t>(node->line);
@@ -306,22 +330,68 @@ static llvm::json::Value makeAmbiguousNameResult(const McpToolContext &ctx,
   obj["ambiguous"] = true;
   obj["parameter"] = paramName.str();
   obj["name"] = name.str();
+  obj["total_candidates"] = static_cast<int64_t>(total);
   obj["candidates"] = std::move(candidates);
-  obj["note"] = "Multiple functions share this name. Re-run with the 'usr' "
-                "parameter of the intended candidate.";
+  if (truncated) {
+    obj["truncated"] = true;
+    llvm::json::Array files;
+    for (const auto &[file, count] : byFile) {
+      llvm::json::Object f;
+      f["file"] = file;
+      f["count"] = count;
+      files.push_back(llvm::json::Value(std::move(f)));
+    }
+    obj["candidates_by_file"] = std::move(files);
+  }
+  std::string note =
+      "Multiple functions share this name. Re-run with the 'usr' parameter "
+      "of the intended candidate, or narrow with 'site' (a call-site "
+      "'file:line:col' resolves to the exact overload/instantiation called "
+      "there) or 'filter' (a literal substring matched against candidate "
+      "usr/name/file — not type-aware).";
+  if (truncated)
+    note += " Candidate list truncated to " +
+            std::to_string(kMaxAmbiguousCandidates) + " of " +
+            std::to_string(total) + ".";
+  if (!filterNote.empty())
+    note += " " + filterNote.str();
+  obj["note"] = std::move(note);
   return makeTextResult(llvm::json::Value(std::move(obj)));
+}
+
+// Companion parameter name for an identity's usr parameter: "usr" ->
+// "site"/"filter", "to_usr" -> "to_site"/"to_filter", "fn_a_usr" ->
+// "fn_a_site"/"fn_a_filter". Keeps multi-identity tools (find_call_chain,
+// query_same_lock) unambiguous about which identity a refinement applies to.
+static std::string companionParam(llvm::StringRef usrParam,
+                                  llvm::StringRef suffix) {
+  llvm::StringRef prefix = usrParam;
+  prefix.consume_back("usr");
+  return (prefix + suffix).str();
 }
 
 // Resolves an identity parameter per the F8 disambiguation contract:
 //   1. `usrParam` present -> that string verbatim (no name lookup).
-//   2. `nameParam` resolving to 0 or 1 USRs -> the unique USR (or the name
+//   2. site parameter ("site"/"to_site"/...) present -> the calleeUsr of the
+//      call-site context at that 'file:line:col' spelling (the stored edge
+//      set already maps every call site to the exact overload/instantiation
+//      called there — no name guessing). A macro-shared spelling with
+//      several distinct callees returns the small disambiguation list; a
+//      name given alongside must agree with the site's callee or the
+//      response says so.
+//   3. `nameParam` resolving to 0 or 1 USRs -> the unique USR (or the name
 //      itself when unknown: downstream queries treat it as an unregistered
 //      endpoint, exactly as the by-name path does today).
-//   3. N >= 2 USRs -> nullopt with `ambiguous` set to the NON-error
+//   4. N >= 2 USRs: a filter parameter ("filter"/"to_filter"/...) — a
+//      literal substring matched against candidate usr, display name, and
+//      file (deliberately NOT type-aware: USRs encode types in Clang's own
+//      grammar, so matching agent-guessed C++ type spellings would be false
+//      precision) — narrows the set first; a unique survivor resolves.
+//      Otherwise nullopt with `ambiguous` set to the NON-error
 //      disambiguation response the handler must return. Never a silent
 //      union; never a hard error.
-// Returns nullopt with `ambiguous` UNSET when neither parameter is present;
-// the handler emits its own missing-parameter error.
+// Returns nullopt with `ambiguous` UNSET when no identity parameter is
+// present; the handler emits its own missing-parameter error.
 static std::optional<std::string>
 resolveIdentity(const llvm::json::Object &args, const McpToolContext &ctx,
                 llvm::StringRef nameParam, llvm::StringRef usrParam,
@@ -329,12 +399,77 @@ resolveIdentity(const llvm::json::Object &args, const McpToolContext &ctx,
   if (auto usr = args.getString(usrParam))
     return usr->str();
   auto name = args.getString(nameParam);
+
+  if (auto site = args.getString(companionParam(usrParam, "site"))) {
+    auto contexts = ctx.cfIndex.contextsAtSite(site->str());
+    // Distinct callees at this spelling (macro expansion can stack several
+    // contexts on one file:line:col; usually they call the same function).
+    std::set<std::string> callees;
+    for (const auto &c : contexts)
+      callees.insert(c.calleeUsr.empty() ? c.calleeName : c.calleeUsr);
+    if (callees.empty()) {
+      ambiguous = makeErrorResult(
+          "No call site found at '" + site->str() +
+          "' (expected 'file:line:col' as spelled in the compile command; "
+          "use query_call_site_context to inspect a site).");
+      return std::nullopt;
+    }
+    // A name given alongside must agree with the site's callee.
+    if (name) {
+      std::set<std::string> named;
+      for (auto &u : ctx.graph.usrsForName(name->str()))
+        named.insert(std::move(u));
+      named.insert(name->str());
+      std::set<std::string> agreeing;
+      for (const auto &c : callees)
+        if (named.count(c))
+          agreeing.insert(c);
+      if (agreeing.empty()) {
+        ambiguous = makeErrorResult(
+            "Call site '" + site->str() + "' does not call '" +
+            name->str() + "' (it calls: " + *callees.begin() +
+            (callees.size() > 1 ? ", ..." : "") + ").");
+        return std::nullopt;
+      }
+      callees = std::move(agreeing);
+    }
+    if (callees.size() == 1)
+      return *callees.begin();
+    ambiguous = makeAmbiguousNameResult(
+        ctx, usrParam, name ? *name : llvm::StringRef(site->str()),
+        std::vector<std::string>(callees.begin(), callees.end()),
+        "Several distinct functions are called at this spelling "
+        "(macro-expanded call site).");
+    return std::nullopt;
+  }
+
   if (!name)
     return std::nullopt;
   auto usrs = ctx.graph.usrsForName(name->str());
   if (usrs.size() >= 2) {
-    ambiguous =
-        makeAmbiguousNameResult(ctx, nameParam, *name, std::move(usrs));
+    std::string filterNote;
+    if (auto filter = args.getString(companionParam(usrParam, "filter"))) {
+      std::vector<std::string> kept;
+      for (auto &u : usrs) {
+        const auto *node = ctx.graph.findNode(u);
+        if (llvm::StringRef(u).contains(*filter) ||
+            (node && (llvm::StringRef(node->qualifiedName).contains(*filter) ||
+                      llvm::StringRef(node->file).contains(*filter))))
+          kept.push_back(std::move(u));
+      }
+      if (kept.size() == 1)
+        return std::move(kept.front());
+      if (kept.empty())
+        filterNote = "The filter '" + filter->str() +
+                     "' matched no candidate; showing the unfiltered set.";
+      else {
+        filterNote = "Candidates already narrowed by filter '" +
+                     filter->str() + "'.";
+        usrs = std::move(kept);
+      }
+    }
+    ambiguous = makeAmbiguousNameResult(ctx, nameParam, *name,
+                                        std::move(usrs), filterNote);
     return std::nullopt;
   }
   if (usrs.size() == 1)
@@ -2001,6 +2136,24 @@ static llvm::json::Value stringArrayProp(llvm::StringRef desc) {
   return llvm::json::Value(std::move(p));
 }
 
+// The two identity-refinement parameters every identity-taking tool accepts
+// alongside <prefix>usr (resolved in resolveIdentity; see the disambiguation
+// contract there). `prefix` is "" for tools with a single identity, or
+// "to_"/"from_"/"fn_a_"/"fn_b_" for multi-identity tools.
+static void addIdentityRefinementProps(llvm::json::Object &props,
+                                       llvm::StringRef prefix) {
+  props[(prefix + "site").str()] = stringProp(
+      "Call site 'file:line:col' (as spelled in the compile command). "
+      "Resolves the identity to the exact overload/template instantiation "
+      "called at that site — the most precise disambiguator when you are "
+      "looking at a specific call.");
+  props[(prefix + "filter").str()] = stringProp(
+      "Literal substring matched against candidate usr, qualified name, and "
+      "file to narrow an ambiguous name; resolves when exactly one "
+      "candidate survives. NOT type-aware: use names that appear literally "
+      "(e.g. a template argument's class name), not guessed signatures.");
+}
+
 // ============================================================================
 // Tool registration
 // ============================================================================
@@ -2018,6 +2171,7 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Exact function USR (from search_functions results or a prior "
         "disambiguation response). Bypasses name resolution entirely — use "
         "it to pick one overload/specialization when a name is ambiguous.");
+    addIdentityRefinementProps(props, "");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
@@ -2043,6 +2197,7 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Exact function USR of the caller. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
         "ambiguous.");
+    addIdentityRefinementProps(props, "");
     props["edge_kinds"] = stringArrayProp(
         "Filter by edge kind: DirectCall, VirtualDispatch, FunctionPointer, "
         "ConstructorCall, DestructorCall, OperatorCall, TemplateInstantiation, "
@@ -2080,6 +2235,7 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Exact function USR of the callee. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
         "ambiguous.");
+    addIdentityRefinementProps(props, "");
     props["edge_kinds"] = stringArrayProp(
         "Filter by edge kind: DirectCall, VirtualDispatch, FunctionPointer, "
         "ConstructorCall, DestructorCall, OperatorCall, TemplateInstantiation, "
@@ -2114,12 +2270,14 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["from_usr"] = stringProp(
         "Exact USR of the source function. Bypasses name resolution for "
         "'from' when the name is ambiguous.");
+    addIdentityRefinementProps(props, "from_");
     props["to"] = stringProp(
         "Target function qualified name. Provide 'to' or 'to_usr' (to_usr "
         "wins when both are present).");
     props["to_usr"] = stringProp(
         "Exact USR of the target function. Bypasses name resolution for "
         "'to' when the name is ambiguous.");
+    addIdentityRefinementProps(props, "to_");
     props["max_paths"] =
         intProp("Maximum number of paths to return (default: 10)");
     props["max_depth"] = intProp(
@@ -2187,6 +2345,7 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Exact USR of the target function. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
         "ambiguous.");
+    addIdentityRefinementProps(props, "");
     props["exception_type"] = stringProp(
         "Exception type to check (e.g. 'std::runtime_error')");
     props["entry_points"] = stringArrayProp(
@@ -2277,6 +2436,7 @@ std::vector<McpToolEntry> getRegisteredTools() {
         "Exact USR of the target function. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
         "ambiguous.");
+    addIdentityRefinementProps(props, "");
     props["max_depth"] = intProp(
         "Maximum number of frames above the target to walk (default: 20)");
     props["max_fan_in"] = intProp(
@@ -2314,12 +2474,14 @@ std::vector<McpToolEntry> getRegisteredTools() {
     props["fn_a_usr"] = stringProp(
         "Exact USR of the first function. Bypasses name resolution for "
         "'fn_a' when the name is ambiguous.");
+    addIdentityRefinementProps(props, "fn_a_");
     props["fn_b"] = stringProp(
         "Second function qualified name. Provide 'fn_b' or 'fn_b_usr' "
         "(the usr wins when both are present).");
     props["fn_b_usr"] = stringProp(
         "Exact USR of the second function. Bypasses name resolution for "
         "'fn_b' when the name is ambiguous.");
+    addIdentityRefinementProps(props, "fn_b_");
     props["max_depth"] = intProp(
         "Maximum number of frames above each target to walk (default: 20)");
     props["max_fan_in"] = intProp(
