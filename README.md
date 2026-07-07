@@ -3,7 +3,7 @@
 A Clang LibTooling backend for safe, AST-aware C++ refactoring and static
 analysis. It exposes four features as subcommands:
 
-- **anneal** — detect problems such as fragile ADL/CTAD resolutions across translation units. `clang-tidy` wishes.
+- **anneal** — detect problems such as fragile ADL/CTAD resolutions across translation units. Like if `clang-tidy` went Super Saiyan.
 - **morph** — apply rule-driven, multi-pass AST matcher transformations
 - **prism** — query control flow, exception handling, and call site guard context from the command line
 - **megascope** — start an MCP (Model Context Protocol) server for interactive call graph queries, designed for LLM-assisted code analysis
