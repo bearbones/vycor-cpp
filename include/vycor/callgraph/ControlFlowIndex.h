@@ -175,6 +175,14 @@ public:
   contextAtSite(const std::string &callSite,
                 const std::string &callerUsrOrName) const;
 
+  // All live contexts sharing a spelling (macro expansion gives several
+  // call sites one file:line:col). Mirrors contextAtSite; the MCP
+  // disambiguation contract (PR C) enumerates these so a client can pick a
+  // caller and re-query through the precise overload. Insertion order;
+  // callers needing determinism sort the result.
+  std::vector<CallSiteContext>
+  contextsAtSite(const std::string &callSite) const;
+
   // All contexts where calleeName is the target (usr or display accepted).
   std::vector<CallSiteContext>
   contextsForCallee(const std::string &calleeName) const;
