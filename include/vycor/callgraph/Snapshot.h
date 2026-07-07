@@ -78,7 +78,12 @@ public:
   ///     misread them as ordinary edges.
   /// v4: control-flow contexts stored in deduplicated form (scope/guard/RAII
   ///     set tables + id refs).
-  static constexpr uint32_t kFormatVersion = 4;
+  /// v5: id-preserving — interner tables serialized in id order; node/edge/
+  ///     context records store raw interner ids and are bulk-installed on
+  ///     load (no per-record re-interning). The v4 global string pool is
+  ///     gone; the few non-interned strings (meta, node file/class, scope/
+  ///     guard tables) are written inline.
+  static constexpr uint32_t kFormatVersion = 5;
 
   /// Serialize graph + cfIndex + meta to `path` (atomically, via a temp file
   /// and rename). Returns false on I/O failure.
