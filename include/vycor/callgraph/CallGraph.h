@@ -221,6 +221,10 @@ public:
 
   const StringInterner &interner() const { return interner_; }
 
+  // Pre-size node/edge tables for a known bulk insert (snapshot load).
+  void reserveNodes(size_t n);
+  void reserveEdges(size_t n);
+
 private:
   using SId = StringInterner::Id;
 

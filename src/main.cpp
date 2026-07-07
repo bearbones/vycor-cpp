@@ -720,6 +720,11 @@ int main(int argc, const char **argv) {
 
     // Efficiency stats, dumped to --stats-json once the server is ready.
     vycor::BuildStats buildStats;
+    // Whether this process changed the indexes relative to the loaded
+    // snapshot (full build, or warm-start refresh/drop). An unchanged warm
+    // start skips the snapshot re-save — measured 3.1s per start on a
+    // 301 MB / 6.37M-call-site snapshot.
+    bool indexesChanged = true;
     using StatsClock = std::chrono::steady_clock;
     auto msSince = [](StatsClock::time_point t0) {
       return std::chrono::duration<double, std::milli>(StatsClock::now() -
@@ -780,6 +785,7 @@ int main(int argc, const char **argv) {
           warmRefreshMs = msSince(refreshStart);
           warmRefreshed = refreshed;
           warmDropped = dropped;
+          indexesChanged = refreshed > 0 || dropped > 0;
           llvm::errs() << "megascope: warm start from " << McpSnapshot
                        << " (" << refreshed << " TU(s) re-indexed, "
                        << dropped << " dropped, "
@@ -810,7 +816,9 @@ int main(int argc, const char **argv) {
                    << cfIndex.size() << " call sites)\n";
     }
 
-    if (!McpSnapshot.empty()) {
+    if (!McpSnapshot.empty() && !indexesChanged) {
+      llvm::errs() << "megascope: snapshot unchanged — skipping re-save\n";
+    } else if (!McpSnapshot.empty()) {
       vycor::SnapshotMeta meta;
       meta.collapsePaths = collapsePaths;
       meta.lockAllowlist = lockCfg.userAllowlist;

@@ -55,6 +55,19 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   return *this;
 }
 
+void CallGraph::reserveNodes(size_t n) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  nodes_.reserve(n);
+  nodeContributors_.reserve(n);
+  outEdges_.reserve(n);
+  inEdges_.reserve(n);
+}
+
+void CallGraph::reserveEdges(size_t n) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  edgeIndex_.reserve(n);
+}
+
 void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
   SId nameId = interner_.intern(node.qualifiedName);

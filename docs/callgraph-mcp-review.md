@@ -190,7 +190,7 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 8 | USR-based node identity | F8 | |
 | 9 | Subprocess worker isolation | F12 | |
 | 10 | ControlFlowIndex string interning (F5 completion) | F5 | open — at 6.37M call sites the per-context string copies (callerName/calleeName/callSite/tuPath, the last never deduplicated) dominate warm RSS (4.95 GB) and the 301 MB snapshot |
-| 11 | Snapshot bulk-load fast path | F9 | open — warm-start load replays 6.37M contexts through per-call locking + interning: 8.3s of the 12.2s warm start |
+| 11 | Snapshot bulk-load fast path | F9 | partially done — map pre-reserving landed (~4%: the cost is string copies + re-interning, i.e. item 10 territory), and unchanged warm starts skip the 3.1s snapshot re-save (14.9s → 11.6s total warm start). The remaining 8s load wants the id-preserving format that falls out of item 10 |
 
 ---
 
