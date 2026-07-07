@@ -27,6 +27,7 @@
 #include "llvm/ADT/SmallString.h"
 
 #include <fstream>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -84,12 +85,14 @@ void cleanup(const Built &b) {
     llvm::sys::fs::remove(b.path);
 }
 
-// Find the first CallSiteContext targeting `calleeName`. Returns nullptr if
+// Find the first CallSiteContext targeting `calleeName`. Returns nullopt if
 // none indexed.
-const CallSiteContext *findContext(const ControlFlowIndex &cf,
-                                   const std::string &calleeName) {
+std::optional<CallSiteContext> findContext(const ControlFlowIndex &cf,
+                                           const std::string &calleeName) {
   auto ctxs = cf.contextsForCallee(calleeName);
-  return ctxs.empty() ? nullptr : ctxs.front();
+  if (ctxs.empty())
+    return std::nullopt;
+  return std::move(ctxs.front());
 }
 
 } // namespace
@@ -121,8 +124,8 @@ TEST_CASE("Built-in std::lock_guard is captured as Lock kind",
   LockTypeConfig cfg; // useBuiltins=true by default
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "worker");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "worker");
+  REQUIRE(ctx.has_value());
   REQUIRE(ctx->liveRaiiLocals.size() >= 1);
 
   bool foundLock = false;
@@ -158,8 +161,8 @@ TEST_CASE("User allowlist promotes a custom type to Lock kind",
   cfg.userAllowlist.push_back("Arbiter");
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "worker");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "worker");
+  REQUIRE(ctx.has_value());
 
   bool foundArbiterLock = false;
   for (const auto &local : ctx->liveRaiiLocals) {
@@ -191,8 +194,8 @@ TEST_CASE("CapabilityAttr marks a type as Lock automatically",
   LockTypeConfig cfg; // no user allowlist
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "worker");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "worker");
+  REQUIRE(ctx.has_value());
 
   bool foundAttrLock = false;
   for (const auto &local : ctx->liveRaiiLocals) {
@@ -226,8 +229,8 @@ TEST_CASE("std::unique_ptr classifies as SmartPtr kind",
   LockTypeConfig cfg;
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "worker");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "worker");
+  REQUIRE(ctx.has_value());
 
   bool foundSmartPtr = false;
   for (const auto &local : ctx->liveRaiiLocals) {
@@ -272,16 +275,16 @@ TEST_CASE("RAII scope tracking respects nested CompoundStmt blocks",
   LockTypeConfig cfg;
   auto b = buildFromSource(code, cfg);
 
-  const auto *innerCtx = findContext(b.cfIndex, "inner");
-  REQUIRE(innerCtx != nullptr);
+  const auto innerCtx = findContext(b.cfIndex, "inner");
+  REQUIRE(innerCtx.has_value());
   unsigned innerLocks = 0;
   for (const auto &l : innerCtx->liveRaiiLocals)
     if (l.kind == RaiiKind::Lock)
       ++innerLocks;
   CHECK(innerLocks == 2);
 
-  const auto *outerCtx = findContext(b.cfIndex, "outerOnly");
-  REQUIRE(outerCtx != nullptr);
+  const auto outerCtx = findContext(b.cfIndex, "outerOnly");
+  REQUIRE(outerCtx.has_value());
   unsigned outerLocks = 0;
   for (const auto &l : outerCtx->liveRaiiLocals)
     if (l.kind == RaiiKind::Lock)
@@ -318,8 +321,8 @@ TEST_CASE("Catch handler body summary is captured",
   LockTypeConfig cfg;
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "dangerous");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "dangerous");
+  REQUIRE(ctx.has_value());
   REQUIRE(ctx->enclosingTryCatches.size() == 1);
   REQUIRE(ctx->enclosingTryCatches[0].handlers.size() == 1);
 
@@ -349,8 +352,8 @@ TEST_CASE("Catch(...) body is captured and isCatchAll is set",
   LockTypeConfig cfg;
   auto b = buildFromSource(code, cfg);
 
-  const auto *ctx = findContext(b.cfIndex, "dangerous");
-  REQUIRE(ctx != nullptr);
+  const auto ctx = findContext(b.cfIndex, "dangerous");
+  REQUIRE(ctx.has_value());
   REQUIRE(ctx->enclosingTryCatches.size() == 1);
   REQUIRE(ctx->enclosingTryCatches[0].handlers.size() == 1);
 

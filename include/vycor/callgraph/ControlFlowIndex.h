@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -141,7 +142,7 @@ struct CallSiteContext {
 
 class ControlFlowIndex {
 public:
-  ControlFlowIndex() = default;
+  ControlFlowIndex();
   ControlFlowIndex(ControlFlowIndex &&other) noexcept;
   ControlFlowIndex &operator=(ControlFlowIndex &&other) noexcept;
   ControlFlowIndex(const ControlFlowIndex &) = delete;
@@ -153,29 +154,31 @@ public:
   // load): avoids repeated rehashing of multi-million-entry tables.
   void reserveContexts(size_t n);
 
-  // Look up context at a specific call site (file:line:col).
-  const CallSiteContext *contextAtSite(const std::string &callSite) const;
+  // Look up context at a specific call site (file:line:col). Contexts are
+  // stored in a deduplicated internal form; queries materialize
+  // CallSiteContext values on the fly.
+  std::optional<CallSiteContext> contextAtSite(const std::string &callSite) const;
 
   // All contexts where calleeName is the target.
-  std::vector<const CallSiteContext *>
+  std::vector<CallSiteContext>
   contextsForCallee(const std::string &calleeName) const;
 
   // All contexts where callerName is the source.
-  std::vector<const CallSiteContext *>
+  std::vector<CallSiteContext>
   contextsForCaller(const std::string &callerName) const;
 
   // All call sites targeting calleeName that are inside a try/catch.
-  std::vector<const CallSiteContext *>
+  std::vector<CallSiteContext>
   protectedCallsTo(const std::string &calleeName) const;
 
   // All call sites targeting calleeName that are NOT inside a try/catch.
-  std::vector<const CallSiteContext *>
+  std::vector<CallSiteContext>
   unprotectedCallsTo(const std::string &calleeName) const;
 
   size_t size() const { return liveCount_; }
 
   // All stored contexts (for dump mode).
-  std::vector<const CallSiteContext *> allContexts() const;
+  std::vector<CallSiteContext> allContexts() const;
 
   // Remove all contexts contributed by the given TU. Matches on the
   // recorded tuPath; contexts without one (hand-built in tests, or from
@@ -183,20 +186,90 @@ public:
   // Returns the number of contexts removed.
   size_t removeTU(const std::string &tuPath);
 
-  // Compact the contexts vector, eliminating tombstones. Invalidates all
-  // previously returned const CallSiteContext * pointers.
+  // Compact the contexts vector, eliminating tombstones. The shared set
+  // tables are index-stable and left untouched.
   void compact();
 
   const StringInterner &interner() const { return interner_; }
 
 private:
+  friend class SnapshotIO;
+
   using SId = StringInterner::Id;
+
+  // "no tuPath recorded" sentinel (the interner never assigns UINT32_MAX).
+  static constexpr SId kNoString = UINT32_MAX;
+
+  // Interned form of RaiiLocal: three ids into interner_ plus the kind.
+  struct StoredRaiiLocal {
+    SId typeName;
+    SId varName;
+    SId declLocation;
+    RaiiKind kind;
+  };
+
+  // Deduplicated per-context record. The public CallSiteContext costs
+  // ~660 B/context on large testbeds (string/vector headers + heap blocks);
+  // this form is a few dozen bytes, with the string payload interned and
+  // the scope/guard/RAII vectors shared through the set tables below.
+  struct StoredContext {
+    SId caller;
+    SId callee;
+    SId site;
+    SId tuPath;          // kNoString when the context has no provenance
+    uint32_t scopeSet;   // index into scopeSets_
+    uint32_t guardSet;   // index into guardSets_
+    uint32_t raiiSet;    // index into raiiSets_
+    NoexceptSpec callerNoexcept;
+    bool insideCatchBlock;
+    bool live;           // false = tombstoned by removeTU
+  };
+
+  // Materialize the public value form of a stored context (resolve ids,
+  // copy the shared set-table vectors).
+  CallSiteContext materialize(const StoredContext &se) const;
+
+  // Set-table dedup: convert an incoming vector to its table index, reusing
+  // an existing entry when an identical set was seen before. Callers must
+  // hold mutex_. An empty set always maps to index 0 (seeded at
+  // construction), so "no try/catch" is exactly `scopeSet == 0`.
+  // Set-table dedup. Callers hold mutex_ and pass the precomputed
+  // canonical key (built OUTSIDE the lock — key construction is the
+  // expensive part of an insert). Empty sets return index 0 (the seeded
+  // empty entry) without touching the maps.
+  static std::string scopeSetKey(const std::vector<TryCatchScope> &scopes);
+  static std::string guardSetKey(const std::vector<ConditionalGuard> &guards);
+  static std::string raiiSetKey(const std::vector<StoredRaiiLocal> &locals);
+  uint32_t internScopeSet(std::string key, std::vector<TryCatchScope> scopes);
+  uint32_t internGuardSet(std::string key,
+                          std::vector<ConditionalGuard> guards);
+  uint32_t internRaiiSet(std::string key,
+                         std::vector<StoredRaiiLocal> locals);
+
+  // Core insert shared by addCallSiteContext and snapshot load; callers
+  // must hold mutex_ and pass already-interned ids / set indices.
+  void insertStored(SId caller, SId callee, SId site, SId tuPath,
+                    uint32_t scopeSet, uint32_t guardSet, uint32_t raiiSet,
+                    NoexceptSpec callerNoexcept, bool insideCatchBlock);
 
   mutable std::mutex mutex_;
   StringInterner interner_;
-  // deque, not vector: queries hand out pointers into this container, and
-  // growth must not invalidate them. compact() is the only invalidator.
-  std::deque<CallSiteContext> contexts_;
+  // deque, not vector: bulk growth without doubling-copy spikes; indices in
+  // the maps below stay valid until compact() rewrites them.
+  std::deque<StoredContext> contexts_;
+
+  // Deduplicated set tables. Entry 0 of each is the empty set; entries are
+  // append-only and index-stable (contexts reference them by index, and
+  // compact() leaves them in place).
+  std::deque<std::vector<TryCatchScope>> scopeSets_;
+  std::deque<std::vector<ConditionalGuard>> guardSets_;
+  std::deque<std::vector<StoredRaiiLocal>> raiiSets_;
+  // Canonical-key lookup for the tables (key = unambiguous field dump of
+  // the set's contents; see setKey helpers in the .cpp).
+  std::unordered_map<std::string, uint32_t> scopeSetIds_;
+  std::unordered_map<std::string, uint32_t> guardSetIds_;
+  std::unordered_map<std::string, uint32_t> raiiSetIds_;
+
   std::unordered_map<SId, std::vector<size_t>> byCallee_;
   std::unordered_map<SId, std::vector<size_t>> byCaller_;
   std::unordered_map<SId, size_t> bySite_;

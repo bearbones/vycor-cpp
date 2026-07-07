@@ -116,7 +116,7 @@ ControlFlowOracle::queryCallSite(const std::string &callSite) const {
   CallSiteExceptionInfo info;
   info.callSite = callSite;
 
-  const auto *ctx = cfIndex_.contextAtSite(callSite);
+  const auto ctx = cfIndex_.contextAtSite(callSite);
   if (!ctx)
     return info;
 
@@ -241,12 +241,12 @@ ExceptionPathResult ControlFlowOracle::queryExceptionProtection(
 
       // Find the call site context for this edge.
       auto contexts = cfIndex_.contextsForCaller(caller);
-      for (const auto *ctx : contexts) {
-        if (ctx->calleeName != callee)
+      for (const auto &ctx : contexts) {
+        if (ctx.calleeName != callee)
           continue;
 
         // Collect try/catch scopes on this edge.
-        for (const auto &scope : ctx->enclosingTryCatches) {
+        for (const auto &scope : ctx.enclosingTryCatches) {
           pi.tryCatchesOnPath.push_back(scope);
           if (!pi.isCaught && isCaughtByScope(exceptionType, scope)) {
             pi.isCaught = true;
@@ -262,11 +262,11 @@ ExceptionPathResult ControlFlowOracle::queryExceptionProtection(
         }
 
         // Collect guards on this edge.
-        for (const auto &guard : ctx->enclosingGuards)
+        for (const auto &guard : ctx.enclosingGuards)
           pi.guardsOnPath.push_back(guard);
 
         // Check noexcept barrier.
-        if (ctx->callerNoexcept == NoexceptSpec::Noexcept && !pi.isCaught) {
+        if (ctx.callerNoexcept == NoexceptSpec::Noexcept && !pi.isCaught) {
           // A noexcept function would std::terminate, not propagate.
           pi.isCaught = false; // Still not "caught" — it terminates.
         }
@@ -312,12 +312,12 @@ std::vector<PathInfo> ControlFlowOracle::queryAllPathContexts(
 
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
       auto contexts = cfIndex_.contextsForCaller(chain[i]);
-      for (const auto *ctx : contexts) {
-        if (ctx->calleeName != chain[i + 1])
+      for (const auto &ctx : contexts) {
+        if (ctx.calleeName != chain[i + 1])
           continue;
-        for (const auto &scope : ctx->enclosingTryCatches)
+        for (const auto &scope : ctx.enclosingTryCatches)
           pi.tryCatchesOnPath.push_back(scope);
-        for (const auto &guard : ctx->enclosingGuards)
+        for (const auto &guard : ctx.enclosingGuards)
           pi.guardsOnPath.push_back(guard);
         break;
       }
@@ -374,14 +374,14 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName) const {
       // Check if the call site has a try/catch.
       auto contexts = cfIndex_.contextsForCaller(edge.callerName);
       bool foundCatch = false;
-      for (const auto *ctx : contexts) {
-        if (ctx->calleeName != state.func)
+      for (const auto &ctx : contexts) {
+        if (ctx.calleeName != state.func)
           continue;
-        if (!ctx->enclosingTryCatches.empty()) {
+        if (!ctx.enclosingTryCatches.empty()) {
           NearestCatchInfo nci;
           nci.pathSegment = state.pathSoFar;
           nci.pathSegment.insert(nci.pathSegment.begin(), edge.callerName);
-          nci.scope = ctx->enclosingTryCatches.front(); // Innermost.
+          nci.scope = ctx.enclosingTryCatches.front(); // Innermost.
           nci.framesFromTarget = state.depth + 1;
           result.push_back(std::move(nci));
           foundCatch = true;
@@ -669,29 +669,29 @@ ControlFlowOracle::dumpIndexToJson(const ControlFlowIndex &index) {
 
   auto all = index.allContexts();
   for (size_t i = 0; i < all.size(); ++i) {
-    const auto *ctx = all[i];
+    const auto &ctx = all[i];
     ss << "    {\n";
-    ss << "      \"callerName\": \"" << escapeJson(ctx->callerName) << "\",\n";
-    ss << "      \"calleeName\": \"" << escapeJson(ctx->calleeName) << "\",\n";
-    ss << "      \"callSite\": \"" << escapeJson(ctx->callSite) << "\",\n";
+    ss << "      \"callerName\": \"" << escapeJson(ctx.callerName) << "\",\n";
+    ss << "      \"calleeName\": \"" << escapeJson(ctx.calleeName) << "\",\n";
+    ss << "      \"callSite\": \"" << escapeJson(ctx.callSite) << "\",\n";
     ss << "      \"insideCatchBlock\": "
-       << (ctx->insideCatchBlock ? "true" : "false") << ",\n";
+       << (ctx.insideCatchBlock ? "true" : "false") << ",\n";
     ss << "      \"callerNoexcept\": \""
-       << noexceptSpecToString(ctx->callerNoexcept) << "\",\n";
+       << noexceptSpecToString(ctx.callerNoexcept) << "\",\n";
 
     ss << "      \"enclosingTryCatches\": [\n";
-    for (size_t j = 0; j < ctx->enclosingTryCatches.size(); ++j) {
-      ss << tryCatchScopeToJson(ctx->enclosingTryCatches[j], "        ");
-      if (j + 1 < ctx->enclosingTryCatches.size())
+    for (size_t j = 0; j < ctx.enclosingTryCatches.size(); ++j) {
+      ss << tryCatchScopeToJson(ctx.enclosingTryCatches[j], "        ");
+      if (j + 1 < ctx.enclosingTryCatches.size())
         ss << ",";
       ss << "\n";
     }
     ss << "      ],\n";
 
     ss << "      \"enclosingGuards\": [\n";
-    for (size_t j = 0; j < ctx->enclosingGuards.size(); ++j) {
-      ss << guardToJson(ctx->enclosingGuards[j], "        ");
-      if (j + 1 < ctx->enclosingGuards.size())
+    for (size_t j = 0; j < ctx.enclosingGuards.size(); ++j) {
+      ss << guardToJson(ctx.enclosingGuards[j], "        ");
+      if (j + 1 < ctx.enclosingGuards.size())
         ss << ",";
       ss << "\n";
     }

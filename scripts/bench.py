@@ -297,6 +297,11 @@ def summarize(report: dict) -> str:
             f"{snap.get('refreshed_tus')} refreshed); snapshot size "
             f"{report.get('snapshot_bytes', 0)/1e6:.2f} MB; peak RSS "
             f"{(ws.get('peak_rss_kb') or 0)/1e6:.2f} GB")
+    ri = report.get("reindex")
+    if ri:
+        lines.append(
+            f"reindex_tu ({os.path.basename(ri['tu'])}): "
+            f"{ri['median_ms']:.0f} ms median")
     q = report.get("queries", {})
     if q:
         lines.append("query latencies (median ms):")
@@ -340,6 +345,9 @@ def compare(a_path: str, b_path: str) -> str:
     row("warm ready", (a.get("warm_ready_s") or 0) * 1000,
         (b.get("warm_ready_s") or 0) * 1000, "ms")
     row("snapshot bytes", a.get("snapshot_bytes"), b.get("snapshot_bytes"), "B")
+    ra, rb = a.get("reindex"), b.get("reindex")
+    if ra and rb:
+        row("reindex_tu", ra["median_ms"], rb["median_ms"], "ms")
     qa, qb = a.get("queries", {}), b.get("queries", {})
     for name in qa:
         if name.startswith("_") or name not in qb:
@@ -371,6 +379,10 @@ def main() -> int:
                     help="also measure snapshot save + warm start")
     ap.add_argument("--queries", action="store_true",
                     help="also measure MCP tool query latencies")
+    ap.add_argument("--reindex", metavar="TU_PATH",
+                    help="also measure reindex_tu latency for this TU "
+                         "(pick a small TU so removal cost is visible "
+                         "against the parse)")
     ap.add_argument("--query-reps", type=int, default=9)
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
     args = ap.parse_args()
@@ -411,10 +423,22 @@ def main() -> int:
         report["cold_ready_s"] = ready_s
         print(f"[bench] cold ready in {ready_s:.2f}s", file=sys.stderr)
 
+        client = None
         if args.queries:
             print("[bench] query benchmark...", file=sys.stderr)
             client = McpClient(proc)
             report["queries"] = run_query_benchmark(client, args.query_reps)
+        if args.reindex:
+            print("[bench] reindex benchmark...", file=sys.stderr)
+            if client is None:
+                client = McpClient(proc)
+                client.request("initialize", {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "bench.py", "version": "1"}})
+            report["reindex"] = timed(
+                lambda: client.tool("reindex_tu",
+                                    {"file": args.reindex}), 3)
+            report["reindex"]["tu"] = args.reindex
         shutdown(proc)
         report["cold_stats"] = json.loads(stats_path.read_text())
         report["cold_tu_digest"] = tu_digest(report["cold_stats"])

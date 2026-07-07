@@ -76,7 +76,9 @@ public:
   /// v3: EdgeKind::FunctionPointerReturn — deferred function-return join
   ///     rows that must be expanded at query time; older binaries would
   ///     misread them as ordinary edges.
-  static constexpr uint32_t kFormatVersion = 3;
+  /// v4: control-flow contexts stored in deduplicated form (scope/guard/RAII
+  ///     set tables + id refs).
+  static constexpr uint32_t kFormatVersion = 4;
 
   /// Serialize graph + cfIndex + meta to `path` (atomically, via a temp file
   /// and rename). Returns false on I/O failure.

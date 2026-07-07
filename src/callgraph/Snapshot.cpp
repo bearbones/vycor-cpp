@@ -297,17 +297,18 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     emitSetPairs(graph.functionReturns_);      // (func, returnedFunc)
   }
 
-  // Control flow contexts (live only, via the public accessor).
+  // Control flow contexts (v4: the deduplicated stored form — set tables
+  // followed by per-context id refs — read via friendship so save never
+  // materializes millions of CallSiteContext values). All table entries are
+  // serialized, including the empty set at index 0, so the stored indices
+  // are written raw.
   {
-    auto contexts = cfIndex.allContexts();
-    putU32(data, static_cast<uint32_t>(contexts.size()));
-    for (const CallSiteContext *ctx : contexts) {
-      putStr(data, pool, ctx->callerName);
-      putStr(data, pool, ctx->calleeName);
-      putStr(data, pool, ctx->callSite);
-      putStr(data, pool, ctx->tuPath);
-      putU32(data, static_cast<uint32_t>(ctx->enclosingTryCatches.size()));
-      for (const auto &scope : ctx->enclosingTryCatches) {
+    std::lock_guard<std::mutex> lock(cfIndex.mutex_);
+
+    putU32(data, static_cast<uint32_t>(cfIndex.scopeSets_.size()));
+    for (const auto &set : cfIndex.scopeSets_) {
+      putU32(data, static_cast<uint32_t>(set.size()));
+      for (const auto &scope : set) {
         putStr(data, pool, scope.tryLocation);
         putStr(data, pool, scope.enclosingFunction);
         putU32(data, scope.nestingDepth);
@@ -319,22 +320,48 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
           putStr(data, pool, h.bodySummary);
         }
       }
-      putU32(data, static_cast<uint32_t>(ctx->enclosingGuards.size()));
-      for (const auto &g : ctx->enclosingGuards) {
+    }
+
+    putU32(data, static_cast<uint32_t>(cfIndex.guardSets_.size()));
+    for (const auto &set : cfIndex.guardSets_) {
+      putU32(data, static_cast<uint32_t>(set.size()));
+      for (const auto &g : set) {
         putStr(data, pool, g.conditionText);
         putStr(data, pool, g.location);
         putU8(data, g.inTrueBranch ? 1 : 0);
         putU8(data, g.isAssertion ? 1 : 0);
       }
-      putU8(data, static_cast<uint8_t>(ctx->callerNoexcept));
-      putU8(data, ctx->insideCatchBlock ? 1 : 0);
-      putU32(data, static_cast<uint32_t>(ctx->liveRaiiLocals.size()));
-      for (const auto &l : ctx->liveRaiiLocals) {
-        putStr(data, pool, l.typeName);
-        putStr(data, pool, l.varName);
-        putStr(data, pool, l.declLocation);
+    }
+
+    putU32(data, static_cast<uint32_t>(cfIndex.raiiSets_.size()));
+    for (const auto &set : cfIndex.raiiSets_) {
+      putU32(data, static_cast<uint32_t>(set.size()));
+      for (const auto &l : set) {
+        putStr(data, pool, cfIndex.interner_.resolve(l.typeName));
+        putStr(data, pool, cfIndex.interner_.resolve(l.varName));
+        putStr(data, pool, cfIndex.interner_.resolve(l.declLocation));
         putU8(data, static_cast<uint8_t>(l.kind));
       }
+    }
+
+    // Live contexts only (tombstones dropped; the loaded index comes back
+    // pre-compacted).
+    putU32(data, static_cast<uint32_t>(cfIndex.liveCount_));
+    for (const auto &se : cfIndex.contexts_) {
+      if (!se.live)
+        continue;
+      putStr(data, pool, cfIndex.interner_.resolve(se.caller));
+      putStr(data, pool, cfIndex.interner_.resolve(se.callee));
+      putStr(data, pool, cfIndex.interner_.resolve(se.site));
+      putStr(data, pool,
+             se.tuPath == ControlFlowIndex::kNoString
+                 ? std::string()
+                 : cfIndex.interner_.resolve(se.tuPath));
+      putU32(data, se.scopeSet);
+      putU32(data, se.guardSet);
+      putU32(data, se.raiiSet);
+      putU8(data, static_cast<uint8_t>(se.callerNoexcept));
+      putU8(data, se.insideCatchBlock ? 1 : 0);
     }
   }
 
@@ -466,15 +493,12 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
     out.graph.addFunctionReturn(fn, ret);
   }
 
-  // Control flow contexts.
-  uint32_t ctxCount = r.count();
-  out.cfIndex.reserveContexts(ctxCount);
-  for (uint32_t i = 0; r.ok && i < ctxCount; ++i) {
-    CallSiteContext ctx;
-    ctx.callerName = r.str();
-    ctx.calleeName = r.str();
-    ctx.callSite = r.str();
-    ctx.tuPath = r.str();
+  // Control flow contexts (v4: set tables, then per-context id refs).
+  std::vector<std::vector<TryCatchScope>> scopeTable;
+  uint32_t scopeSetCount = r.count();
+  scopeTable.reserve(scopeSetCount);
+  for (uint32_t i = 0; r.ok && i < scopeSetCount; ++i) {
+    std::vector<TryCatchScope> set;
     uint32_t tryCount = r.count();
     for (uint32_t t = 0; r.ok && t < tryCount; ++t) {
       TryCatchScope scope;
@@ -490,8 +514,16 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
         info.bodySummary = r.str();
         scope.handlers.push_back(std::move(info));
       }
-      ctx.enclosingTryCatches.push_back(std::move(scope));
+      set.push_back(std::move(scope));
     }
+    scopeTable.push_back(std::move(set));
+  }
+
+  std::vector<std::vector<ConditionalGuard>> guardTable;
+  uint32_t guardSetCount = r.count();
+  guardTable.reserve(guardSetCount);
+  for (uint32_t i = 0; r.ok && i < guardSetCount; ++i) {
+    std::vector<ConditionalGuard> set;
     uint32_t guardCount = r.count();
     for (uint32_t g = 0; r.ok && g < guardCount; ++g) {
       ConditionalGuard guard;
@@ -499,10 +531,16 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
       guard.location = r.str();
       guard.inTrueBranch = r.u8() != 0;
       guard.isAssertion = r.u8() != 0;
-      ctx.enclosingGuards.push_back(std::move(guard));
+      set.push_back(std::move(guard));
     }
-    ctx.callerNoexcept = static_cast<NoexceptSpec>(r.u8());
-    ctx.insideCatchBlock = r.u8() != 0;
+    guardTable.push_back(std::move(set));
+  }
+
+  std::vector<std::vector<RaiiLocal>> raiiTable;
+  uint32_t raiiSetCount = r.count();
+  raiiTable.reserve(raiiSetCount);
+  for (uint32_t i = 0; r.ok && i < raiiSetCount; ++i) {
+    std::vector<RaiiLocal> set;
     uint32_t raiiCount = r.count();
     for (uint32_t l = 0; r.ok && l < raiiCount; ++l) {
       RaiiLocal local;
@@ -510,10 +548,74 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
       local.varName = r.str();
       local.declLocation = r.str();
       local.kind = static_cast<RaiiKind>(r.u8());
-      ctx.liveRaiiLocals.push_back(std::move(local));
+      set.push_back(std::move(local));
     }
-    if (r.ok)
-      out.cfIndex.addCallSiteContext(std::move(ctx));
+    raiiTable.push_back(std::move(set));
+  }
+  if (!r.ok)
+    return std::nullopt;
+
+  uint32_t ctxCount = r.count();
+  out.cfIndex.reserveContexts(ctxCount);
+  {
+    // Freshly constructed and not yet shared, but keep the mutating-ops-
+    // hold-mutex_ discipline while going through the friend interface.
+    ControlFlowIndex &cf = out.cfIndex;
+    std::lock_guard<std::mutex> lock(cf.mutex_);
+
+    // Install the loaded tables through the same dedup path
+    // addCallSiteContext uses, so post-load inserts dedup against them.
+    // Loaded index -> actual index (index 0, the empty set, maps to 0 by
+    // construction).
+    std::vector<uint32_t> scopeRemap, guardRemap, raiiRemap;
+    scopeRemap.reserve(scopeTable.size());
+    for (auto &set : scopeTable) {
+      std::string key =
+          set.empty() ? std::string() : ControlFlowIndex::scopeSetKey(set);
+      scopeRemap.push_back(cf.internScopeSet(std::move(key), std::move(set)));
+    }
+    guardRemap.reserve(guardTable.size());
+    for (auto &set : guardTable) {
+      std::string key =
+          set.empty() ? std::string() : ControlFlowIndex::guardSetKey(set);
+      guardRemap.push_back(cf.internGuardSet(std::move(key), std::move(set)));
+    }
+    raiiRemap.reserve(raiiTable.size());
+    for (auto &set : raiiTable) {
+      std::vector<ControlFlowIndex::StoredRaiiLocal> locals;
+      locals.reserve(set.size());
+      for (const auto &l : set)
+        locals.push_back({cf.interner_.intern(l.typeName),
+                          cf.interner_.intern(l.varName),
+                          cf.interner_.intern(l.declLocation), l.kind});
+      raiiRemap.push_back(cf.internRaiiSet(
+          ControlFlowIndex::raiiSetKey(locals), std::move(locals)));
+    }
+
+    for (uint32_t i = 0; r.ok && i < ctxCount; ++i) {
+      std::string caller = r.str();
+      std::string callee = r.str();
+      std::string site = r.str();
+      std::string tuPath = r.str();
+      uint32_t scopeSet = r.u32();
+      uint32_t guardSet = r.u32();
+      uint32_t raiiSet = r.u32();
+      auto noexceptSpec = static_cast<NoexceptSpec>(r.u8());
+      bool insideCatch = r.u8() != 0;
+      if (!r.ok)
+        break;
+      if (scopeSet >= scopeRemap.size() || guardSet >= guardRemap.size() ||
+          raiiSet >= raiiRemap.size()) {
+        r.ok = false;
+        break;
+      }
+      cf.insertStored(cf.interner_.intern(caller), cf.interner_.intern(callee),
+                      cf.interner_.intern(site),
+                      tuPath.empty() ? ControlFlowIndex::kNoString
+                                     : cf.interner_.intern(tuPath),
+                      scopeRemap[scopeSet], guardRemap[guardSet],
+                      raiiRemap[raiiSet], noexceptSpec, insideCatch);
+    }
   }
 
   if (!r.ok)

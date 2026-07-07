@@ -20,9 +20,72 @@
 
 namespace vycor {
 
+namespace {
+
+// ----------------------------------------------------------------------------
+// Set-table canonical keys. Every variable-length field is length-prefixed so
+// the dump is unambiguous (no separator can appear in a field and shift the
+// parse); two sets produce the same key iff they are field-for-field equal.
+// ----------------------------------------------------------------------------
+
+void keyU32(std::string &key, uint32_t v) {
+  key.append(reinterpret_cast<const char *>(&v), sizeof(v));
+}
+
+void keyStr(std::string &key, const std::string &s) {
+  keyU32(key, static_cast<uint32_t>(s.size()));
+  key.append(s);
+}
+
+} // anonymous namespace
+
+std::string
+ControlFlowIndex::scopeSetKey(const std::vector<TryCatchScope> &scopes) {
+  std::string key;
+  for (const auto &scope : scopes) {
+    keyStr(key, scope.tryLocation);
+    keyStr(key, scope.enclosingFunction);
+    keyU32(key, scope.nestingDepth);
+    keyU32(key, static_cast<uint32_t>(scope.handlers.size()));
+    for (const auto &h : scope.handlers) {
+      keyStr(key, h.caughtType);
+      key.push_back(h.isCatchAll ? 1 : 0);
+      keyStr(key, h.location);
+      keyStr(key, h.bodySummary);
+    }
+  }
+  return key;
+}
+
+std::string
+ControlFlowIndex::guardSetKey(const std::vector<ConditionalGuard> &guards) {
+  std::string key;
+  for (const auto &g : guards) {
+    keyStr(key, g.conditionText);
+    keyStr(key, g.location);
+    key.push_back(g.inTrueBranch ? 1 : 0);
+    key.push_back(g.isAssertion ? 1 : 0);
+  }
+  return key;
+}
+
+ControlFlowIndex::ControlFlowIndex() {
+  // Seed index 0 of each set table with the empty set, so "no scopes/guards/
+  // locals" is always set 0 (protectedCallsTo tests scopeSet != 0 directly).
+  scopeSets_.emplace_back();
+  guardSets_.emplace_back();
+  raiiSets_.emplace_back();
+}
+
 ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
     : interner_(std::move(other.interner_)),
       contexts_(std::move(other.contexts_)),
+      scopeSets_(std::move(other.scopeSets_)),
+      guardSets_(std::move(other.guardSets_)),
+      raiiSets_(std::move(other.raiiSets_)),
+      scopeSetIds_(std::move(other.scopeSetIds_)),
+      guardSetIds_(std::move(other.guardSetIds_)),
+      raiiSetIds_(std::move(other.raiiSetIds_)),
       byCallee_(std::move(other.byCallee_)),
       byCaller_(std::move(other.byCaller_)),
       bySite_(std::move(other.bySite_)),
@@ -33,6 +96,12 @@ ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
 ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
   interner_ = std::move(other.interner_);
   contexts_ = std::move(other.contexts_);
+  scopeSets_ = std::move(other.scopeSets_);
+  guardSets_ = std::move(other.guardSets_);
+  raiiSets_ = std::move(other.raiiSets_);
+  scopeSetIds_ = std::move(other.scopeSetIds_);
+  guardSetIds_ = std::move(other.guardSetIds_);
+  raiiSetIds_ = std::move(other.raiiSetIds_);
   byCallee_ = std::move(other.byCallee_);
   byCaller_ = std::move(other.byCaller_);
   bySite_ = std::move(other.bySite_);
@@ -49,37 +118,154 @@ void ControlFlowIndex::reserveContexts(size_t n) {
   bySite_.reserve(n);
 }
 
-void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  SId calleeId = interner_.intern(ctx.calleeName);
-  SId callerId = interner_.intern(ctx.callerName);
-  SId siteId = interner_.intern(ctx.callSite);
+uint32_t ControlFlowIndex::internScopeSet(std::string key,
+                                          std::vector<TryCatchScope> scopes) {
+  if (scopes.empty())
+    return 0;
+  auto it = scopeSetIds_.find(key);
+  if (it != scopeSetIds_.end())
+    return it->second;
+  uint32_t id = static_cast<uint32_t>(scopeSets_.size());
+  scopeSets_.push_back(std::move(scopes));
+  scopeSetIds_.emplace(std::move(key), id);
+  return id;
+}
+
+uint32_t
+ControlFlowIndex::internGuardSet(std::string key,
+                                 std::vector<ConditionalGuard> guards) {
+  if (guards.empty())
+    return 0;
+  auto it = guardSetIds_.find(key);
+  if (it != guardSetIds_.end())
+    return it->second;
+  uint32_t id = static_cast<uint32_t>(guardSets_.size());
+  guardSets_.push_back(std::move(guards));
+  guardSetIds_.emplace(std::move(key), id);
+  return id;
+}
+
+std::string
+ControlFlowIndex::raiiSetKey(const std::vector<StoredRaiiLocal> &locals) {
+  // RaiiLocal strings are already interned, so the ids are the identity.
+  std::string key;
+  for (const auto &l : locals) {
+    keyU32(key, l.typeName);
+    keyU32(key, l.varName);
+    keyU32(key, l.declLocation);
+    key.push_back(static_cast<char>(l.kind));
+  }
+  return key;
+}
+
+uint32_t ControlFlowIndex::internRaiiSet(std::string key,
+                                         std::vector<StoredRaiiLocal> locals) {
+  if (locals.empty())
+    return 0;
+  auto it = raiiSetIds_.find(key);
+  if (it != raiiSetIds_.end())
+    return it->second;
+  uint32_t id = static_cast<uint32_t>(raiiSets_.size());
+  raiiSets_.push_back(std::move(locals));
+  raiiSetIds_.emplace(std::move(key), id);
+  return id;
+}
+
+void ControlFlowIndex::insertStored(SId caller, SId callee, SId site,
+                                    SId tuPath, uint32_t scopeSet,
+                                    uint32_t guardSet, uint32_t raiiSet,
+                                    NoexceptSpec callerNoexcept,
+                                    bool insideCatchBlock) {
   size_t idx = contexts_.size();
-  byCallee_[calleeId].push_back(idx);
-  byCaller_[callerId].push_back(idx);
-  bySite_[siteId] = idx;
-  if (!ctx.tuPath.empty())
-    byTu_[interner_.intern(ctx.tuPath)].push_back(idx);
+  byCallee_[callee].push_back(idx);
+  byCaller_[caller].push_back(idx);
+  bySite_[site] = idx;
+  if (tuPath != kNoString)
+    byTu_[tuPath].push_back(idx);
   else
     noProvenance_.push_back(idx);
-  contexts_.push_back(std::move(ctx));
+  contexts_.push_back(StoredContext{caller, callee, site, tuPath, scopeSet,
+                                    guardSet, raiiSet, callerNoexcept,
+                                    insideCatchBlock, /*live=*/true});
   ++liveCount_;
 }
 
-const CallSiteContext *
+void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
+  // Intern strings and build set dedup keys BEFORE taking mutex_: the
+  // interner has its own reader/writer lock, so only the set-table lookups
+  // and the index insert need the exclusive index mutex. Keeps the critical
+  // section O(map ops) instead of O(strings) as worker counts grow
+  // (measured neutral at 12 threads; the whole insert path is ~3.4us per
+  // context).
+  SId calleeId = interner_.intern(ctx.calleeName);
+  SId callerId = interner_.intern(ctx.callerName);
+  SId siteId = interner_.intern(ctx.callSite);
+  SId tuId = ctx.tuPath.empty() ? kNoString : interner_.intern(ctx.tuPath);
+
+  std::vector<StoredRaiiLocal> locals;
+  locals.reserve(ctx.liveRaiiLocals.size());
+  for (const auto &l : ctx.liveRaiiLocals)
+    locals.push_back(StoredRaiiLocal{interner_.intern(l.typeName),
+                                     interner_.intern(l.varName),
+                                     interner_.intern(l.declLocation), l.kind});
+
+  std::string scopeKey = ctx.enclosingTryCatches.empty()
+                             ? std::string()
+                             : scopeSetKey(ctx.enclosingTryCatches);
+  std::string guardKey = ctx.enclosingGuards.empty()
+                             ? std::string()
+                             : guardSetKey(ctx.enclosingGuards);
+  std::string raiiKey = raiiSetKey(locals);
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  uint32_t scopeSet = internScopeSet(std::move(scopeKey),
+                                     std::move(ctx.enclosingTryCatches));
+  uint32_t guardSet =
+      internGuardSet(std::move(guardKey), std::move(ctx.enclosingGuards));
+  uint32_t raiiSet = internRaiiSet(std::move(raiiKey), std::move(locals));
+
+  insertStored(callerId, calleeId, siteId, tuId, scopeSet, guardSet, raiiSet,
+               ctx.callerNoexcept, ctx.insideCatchBlock);
+}
+
+CallSiteContext ControlFlowIndex::materialize(const StoredContext &se) const {
+  CallSiteContext ctx;
+  ctx.callerName = interner_.resolve(se.caller);
+  ctx.calleeName = interner_.resolve(se.callee);
+  ctx.callSite = interner_.resolve(se.site);
+  if (se.tuPath != kNoString)
+    ctx.tuPath = interner_.resolve(se.tuPath);
+  ctx.enclosingTryCatches = scopeSets_[se.scopeSet];
+  ctx.enclosingGuards = guardSets_[se.guardSet];
+  ctx.callerNoexcept = se.callerNoexcept;
+  ctx.insideCatchBlock = se.insideCatchBlock;
+  const auto &locals = raiiSets_[se.raiiSet];
+  ctx.liveRaiiLocals.reserve(locals.size());
+  for (const auto &l : locals)
+    ctx.liveRaiiLocals.push_back(RaiiLocal{interner_.resolve(l.typeName),
+                                           interner_.resolve(l.varName),
+                                           interner_.resolve(l.declLocation),
+                                           l.kind});
+  return ctx;
+}
+
+std::optional<CallSiteContext>
 ControlFlowIndex::contextAtSite(const std::string &callSite) const {
   auto id = interner_.find(callSite);
   if (!id)
-    return nullptr;
+    return std::nullopt;
   auto it = bySite_.find(*id);
   if (it == bySite_.end())
-    return nullptr;
-  return &contexts_[it->second];
+    return std::nullopt;
+  const StoredContext &se = contexts_[it->second];
+  if (!se.live)
+    return std::nullopt;
+  return materialize(se);
 }
 
-std::vector<const CallSiteContext *>
+std::vector<CallSiteContext>
 ControlFlowIndex::contextsForCallee(const std::string &calleeName) const {
-  std::vector<const CallSiteContext *> result;
+  std::vector<CallSiteContext> result;
   auto id = interner_.find(calleeName);
   if (!id)
     return result;
@@ -87,15 +273,15 @@ ControlFlowIndex::contextsForCallee(const std::string &calleeName) const {
   if (it == byCallee_.end())
     return result;
   for (size_t idx : it->second) {
-    if (!contexts_[idx].callerName.empty())
-      result.push_back(&contexts_[idx]);
+    if (contexts_[idx].live)
+      result.push_back(materialize(contexts_[idx]));
   }
   return result;
 }
 
-std::vector<const CallSiteContext *>
+std::vector<CallSiteContext>
 ControlFlowIndex::contextsForCaller(const std::string &callerName) const {
-  std::vector<const CallSiteContext *> result;
+  std::vector<CallSiteContext> result;
   auto id = interner_.find(callerName);
   if (!id)
     return result;
@@ -103,15 +289,15 @@ ControlFlowIndex::contextsForCaller(const std::string &callerName) const {
   if (it == byCaller_.end())
     return result;
   for (size_t idx : it->second) {
-    if (!contexts_[idx].callerName.empty())
-      result.push_back(&contexts_[idx]);
+    if (contexts_[idx].live)
+      result.push_back(materialize(contexts_[idx]));
   }
   return result;
 }
 
-std::vector<const CallSiteContext *>
+std::vector<CallSiteContext>
 ControlFlowIndex::protectedCallsTo(const std::string &calleeName) const {
-  std::vector<const CallSiteContext *> result;
+  std::vector<CallSiteContext> result;
   auto id = interner_.find(calleeName);
   if (!id)
     return result;
@@ -119,17 +305,19 @@ ControlFlowIndex::protectedCallsTo(const std::string &calleeName) const {
   if (it == byCallee_.end())
     return result;
   for (size_t idx : it->second) {
-    if (contexts_[idx].callerName.empty())
+    const StoredContext &se = contexts_[idx];
+    if (!se.live)
       continue;
-    if (!contexts_[idx].enclosingTryCatches.empty())
-      result.push_back(&contexts_[idx]);
+    // scopeSet 0 is the empty set: != 0 <=> enclosingTryCatches non-empty.
+    if (se.scopeSet != 0)
+      result.push_back(materialize(se));
   }
   return result;
 }
 
-std::vector<const CallSiteContext *>
+std::vector<CallSiteContext>
 ControlFlowIndex::unprotectedCallsTo(const std::string &calleeName) const {
-  std::vector<const CallSiteContext *> result;
+  std::vector<CallSiteContext> result;
   auto id = interner_.find(calleeName);
   if (!id)
     return result;
@@ -137,20 +325,21 @@ ControlFlowIndex::unprotectedCallsTo(const std::string &calleeName) const {
   if (it == byCallee_.end())
     return result;
   for (size_t idx : it->second) {
-    if (contexts_[idx].callerName.empty())
+    const StoredContext &se = contexts_[idx];
+    if (!se.live)
       continue;
-    if (contexts_[idx].enclosingTryCatches.empty())
-      result.push_back(&contexts_[idx]);
+    if (se.scopeSet == 0)
+      result.push_back(materialize(se));
   }
   return result;
 }
 
-std::vector<const CallSiteContext *> ControlFlowIndex::allContexts() const {
-  std::vector<const CallSiteContext *> result;
+std::vector<CallSiteContext> ControlFlowIndex::allContexts() const {
+  std::vector<CallSiteContext> result;
   result.reserve(liveCount_);
-  for (const auto &ctx : contexts_) {
-    if (!ctx.callerName.empty())
-      result.push_back(&ctx);
+  for (const auto &se : contexts_) {
+    if (se.live)
+      result.push_back(materialize(se));
   }
   return result;
 }
@@ -180,23 +369,19 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
   std::unordered_set<SId> affectedCallees, affectedCallers;
   for (size_t n = 0; n < candidates.size(); ++n) {
     size_t i = candidates[n];
-    auto &ctx = contexts_[i];
-    if (ctx.callerName.empty())
+    StoredContext &se = contexts_[i];
+    if (!se.live)
       continue; // tombstoned earlier
     if (n >= provenanced &&
-        ctx.callSite.compare(0, prefix.size(), prefix) != 0)
+        interner_.resolve(se.site).compare(0, prefix.size(), prefix) != 0)
       continue; // no-provenance context from a different TU
 
-    if (auto calleeId = interner_.find(ctx.calleeName))
-      affectedCallees.insert(*calleeId);
-    if (auto callerId = interner_.find(ctx.callerName))
-      affectedCallers.insert(*callerId);
-    if (auto siteId = interner_.find(ctx.callSite))
-      bySite_.erase(*siteId);
+    affectedCallees.insert(se.callee);
+    affectedCallers.insert(se.caller);
+    bySite_.erase(se.site);
 
     dead.insert(i);
-    ctx.callerName.clear();
-    ctx.calleeName.clear();
+    se.live = false;
     --liveCount_;
     ++removed;
   }
@@ -223,7 +408,7 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
 
 void ControlFlowIndex::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::deque<CallSiteContext> newCtx;
+  std::deque<StoredContext> newCtx;
 
   std::unordered_map<SId, std::vector<size_t>> newByCallee;
   std::unordered_map<SId, std::vector<size_t>> newByCaller;
@@ -231,21 +416,20 @@ void ControlFlowIndex::compact() {
   std::unordered_map<SId, std::vector<size_t>> newByTu;
   std::vector<size_t> newNoProvenance;
 
-  for (auto &ctx : contexts_) {
-    if (ctx.callerName.empty())
+  // Set tables are shared and index-stable: only the contexts and the
+  // index maps are rewritten.
+  for (const auto &se : contexts_) {
+    if (!se.live)
       continue;
     size_t idx = newCtx.size();
-    SId calleeId = interner_.intern(ctx.calleeName);
-    SId callerId = interner_.intern(ctx.callerName);
-    SId siteId = interner_.intern(ctx.callSite);
-    newByCallee[calleeId].push_back(idx);
-    newByCaller[callerId].push_back(idx);
-    newBySite[siteId] = idx;
-    if (!ctx.tuPath.empty())
-      newByTu[interner_.intern(ctx.tuPath)].push_back(idx);
+    newByCallee[se.callee].push_back(idx);
+    newByCaller[se.caller].push_back(idx);
+    newBySite[se.site] = idx;
+    if (se.tuPath != kNoString)
+      newByTu[se.tuPath].push_back(idx);
     else
       newNoProvenance.push_back(idx);
-    newCtx.push_back(std::move(ctx));
+    newCtx.push_back(se);
   }
 
   contexts_ = std::move(newCtx);

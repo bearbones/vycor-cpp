@@ -776,7 +776,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   }
 
   // Distinguish "not indexed" from "indexed with no enclosing try".
-  const auto *rawCtx = ctx.cfIndex.contextAtSite(raw);
+  const auto rawCtx = ctx.cfIndex.contextAtSite(raw);
   if (!rawCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + raw +
@@ -866,7 +866,7 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
   }
   bool filterByKind = !allowed.empty();
 
-  const auto *csCtx = ctx.cfIndex.contextAtSite(callSite->str());
+  const auto csCtx = ctx.cfIndex.contextAtSite(callSite->str());
   if (!csCtx) {
     return makeErrorResult(
         "Call site not indexed: '" + callSite->str() +
@@ -940,7 +940,7 @@ static void collectLocksOnEdge(const ControlFlowIndex &cfIndex,
                                const std::string &callSite,
                                std::vector<LockOccurrence> &out,
                                std::unordered_set<LockKey, LockKeyHash> &seen) {
-  const auto *cs = cfIndex.contextAtSite(callSite);
+  const auto cs = cfIndex.contextAtSite(callSite);
   if (!cs)
     return;
   for (const auto &l : cs->liveRaiiLocals) {
