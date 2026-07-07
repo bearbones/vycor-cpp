@@ -23,6 +23,7 @@ namespace vycor {
 CallGraph::CallGraph(CallGraph &&other) noexcept
     : interner_(std::move(other.interner_)),
       nodes_(std::move(other.nodes_)),
+      byName_(std::move(other.byName_)),
       edges_(std::move(other.edges_)),
       edgeIndex_(std::move(other.edgeIndex_)),
       outEdges_(std::move(other.outEdges_)),
@@ -41,6 +42,7 @@ CallGraph::CallGraph(CallGraph &&other) noexcept
 CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   interner_ = std::move(other.interner_);
   nodes_ = std::move(other.nodes_);
+  byName_ = std::move(other.byName_);
   edges_ = std::move(other.edges_);
   edgeIndex_ = std::move(other.edgeIndex_);
   outEdges_ = std::move(other.outEdges_);
@@ -73,9 +75,18 @@ void CallGraph::reserveEdges(size_t n) {
 
 void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
-  SId nameId = interner_.intern(node.qualifiedName);
+  // Name-only callers (hand-built graphs, tests) get usr == display, which
+  // keeps their edges — also name-keyed — consistent with the node key.
+  if (node.usr.empty())
+    node.usr = node.qualifiedName;
+  SId nameId = interner_.intern(node.usr);
+  SId displayId = interner_.intern(node.qualifiedName);
   auto it = nodes_.find(nameId);
   if (it == nodes_.end()) {
+    auto &candidates = byName_[displayId];
+    if (std::find(candidates.begin(), candidates.end(), nameId) ==
+        candidates.end())
+      candidates.push_back(nameId);
     nodes_.emplace(nameId, std::move(node));
   } else {
     if (!node.file.empty())
@@ -96,15 +107,46 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   }
 }
 
-CallGraphEdge CallGraph::materialize(const StoredEdge &se) const {
+const std::string &CallGraph::displayFor(SId usrId) const {
+  auto it = nodes_.find(usrId);
+  if (it != nodes_.end())
+    return it->second.qualifiedName;
+  return interner_.resolve(usrId);
+}
+
+std::vector<CallGraph::SId>
+CallGraph::resolveUsrIds(const std::string &name) const {
+  auto id = interner_.find(name);
+  if (!id)
+    return {};
+  // Exact-usr match first: the string keys a registered node directly.
+  if (nodes_.count(*id))
+    return {*id};
+  auto it = byName_.find(*id);
+  if (it != byName_.end() && !it->second.empty())
+    return it->second;
+  // Unregistered endpoint (edge without a node): usr and display coincide.
+  return {*id};
+}
+
+std::vector<std::string> CallGraph::usrsForName(const std::string &name) const {
+  std::vector<std::string> out;
+  for (SId id : resolveUsrIds(name))
+    out.push_back(interner_.resolve(id));
+  return out;
+}
+
+CallGraphEdge CallGraph::materialize(const EdgeRef &r) const {
   CallGraphEdge e;
-  e.callerName = interner_.resolve(se.caller);
-  e.calleeName = interner_.resolve(se.callee);
-  e.kind = se.kind;
-  e.confidence = se.confidence;
-  e.callSite = interner_.resolve(se.callSite);
-  e.indirectionDepth = se.indirectionDepth;
-  e.execContext = se.execContext;
+  e.callerName = displayFor(r.caller);
+  e.calleeName = displayFor(r.callee);
+  e.kind = r.kind;
+  e.confidence = r.confidence;
+  e.callSite = interner_.resolve(r.callSite);
+  e.indirectionDepth = r.indirectionDepth;
+  e.execContext = r.execContext;
+  e.callerUsr = interner_.resolve(r.caller);
+  e.calleeUsr = interner_.resolve(r.callee);
   return e;
 }
 
@@ -230,21 +272,14 @@ CallGraph::calleeRefsOf(StringInterner::Id caller) const {
 std::vector<CallGraphEdge>
 CallGraph::calleesOf(const std::string &name) const {
   std::vector<CallGraphEdge> result;
-  auto id = interner_.find(name);
-  if (!id)
-    return result;
-  auto refs = calleeRefsOf(*id);
-  result.reserve(refs.size());
-  for (const auto &r : refs) {
-    CallGraphEdge e;
-    e.callerName = interner_.resolve(r.caller);
-    e.calleeName = interner_.resolve(r.callee);
-    e.kind = r.kind;
-    e.confidence = r.confidence;
-    e.callSite = interner_.resolve(r.callSite);
-    e.indirectionDepth = r.indirectionDepth;
-    e.execContext = r.execContext;
-    result.push_back(std::move(e));
+  // Union over the display-name candidates. Concatenation cannot duplicate:
+  // every edge in a candidate's result carries that candidate as its caller,
+  // so results from distinct candidates are disjoint.
+  for (SId usrId : resolveUsrIds(name)) {
+    auto refs = calleeRefsOf(usrId);
+    result.reserve(result.size() + refs.size());
+    for (const auto &r : refs)
+      result.push_back(materialize(r));
   }
   return result;
 }
@@ -317,30 +352,22 @@ CallGraph::callerRefsOf(StringInterner::Id callee) const {
 std::vector<CallGraphEdge>
 CallGraph::callersOf(const std::string &name) const {
   std::vector<CallGraphEdge> result;
-  auto id = interner_.find(name);
-  if (!id)
-    return result;
-  auto refs = callerRefsOf(*id);
-  result.reserve(refs.size());
-  for (const auto &r : refs) {
-    CallGraphEdge e;
-    e.callerName = interner_.resolve(r.caller);
-    e.calleeName = interner_.resolve(r.callee);
-    e.kind = r.kind;
-    e.confidence = r.confidence;
-    e.callSite = interner_.resolve(r.callSite);
-    e.indirectionDepth = r.indirectionDepth;
-    e.execContext = r.execContext;
-    result.push_back(std::move(e));
+  // Union over the display-name candidates; disjoint by construction (every
+  // edge in a candidate's result targets that candidate as its callee).
+  for (SId usrId : resolveUsrIds(name)) {
+    auto refs = callerRefsOf(usrId);
+    result.reserve(result.size() + refs.size());
+    for (const auto &r : refs)
+      result.push_back(materialize(r));
   }
   return result;
 }
 
 size_t CallGraph::storedInDegree(const std::string &name) const {
-  auto id = interner_.find(name);
-  if (!id)
-    return 0;
-  return storedInDegree(*id);
+  size_t count = 0;
+  for (SId usrId : resolveUsrIds(name))
+    count += storedInDegree(usrId);
+  return count;
 }
 
 size_t CallGraph::storedInDegree(StringInterner::Id id) const {
@@ -369,13 +396,17 @@ std::vector<const CallGraphNode *> CallGraph::allNodes() const {
 
 const CallGraphNode *
 CallGraph::findNode(const std::string &qualifiedName) const {
-  auto id = interner_.find(qualifiedName);
-  if (!id)
-    return nullptr;
-  auto it = nodes_.find(*id);
-  if (it != nodes_.end())
-    return &it->second;
-  return nullptr;
+  const CallGraphNode *best = nullptr;
+  for (SId usrId : resolveUsrIds(qualifiedName)) {
+    auto it = nodes_.find(usrId);
+    if (it == nodes_.end())
+      continue;
+    // Ambiguous display name: deterministic pick by usr-string order (PR C
+    // surfaces the ambiguity itself; findNode serves metadata display).
+    if (!best || it->second.usr < best->usr)
+      best = &it->second;
+  }
+  return best;
 }
 
 // --- Class hierarchy ---
@@ -449,39 +480,40 @@ void CallGraph::addMethodOverride(const std::string &baseMethod,
 
 std::vector<std::string>
 CallGraph::getOverrides(const std::string &baseMethod) const {
-  auto id = interner_.find(baseMethod);
-  if (!id)
-    return {};
-  auto it = methodOverrides_.find(*id);
-  if (it != methodOverrides_.end()) {
-    std::vector<std::string> result;
-    result.reserve(it->second.size());
+  // Methods overload, so the override maps are usr-keyed: resolve the name
+  // to its candidates, union, and emit display names.
+  std::vector<std::string> result;
+  std::set<SId> seen;
+  for (SId usrId : resolveUsrIds(baseMethod)) {
+    auto it = methodOverrides_.find(usrId);
+    if (it == methodOverrides_.end())
+      continue;
     for (SId sid : it->second)
-      result.push_back(interner_.resolve(sid));
-    return result;
+      if (seen.insert(sid).second)
+        result.push_back(displayFor(sid));
   }
-  return {};
+  return result;
 }
 
 std::vector<std::string>
 CallGraph::getTransitiveOverrides(const std::string &baseMethod) const {
-  auto id = interner_.find(baseMethod);
-  if (!id)
-    return {};
   std::vector<std::string> result;
-  for (SId sid : transitiveClosure(*id, methodOverrides_))
-    result.push_back(interner_.resolve(sid));
+  std::set<SId> seen;
+  for (SId usrId : resolveUsrIds(baseMethod))
+    for (SId sid : transitiveClosure(usrId, methodOverrides_))
+      if (seen.insert(sid).second)
+        result.push_back(displayFor(sid));
   return result;
 }
 
 std::vector<std::string>
 CallGraph::getOverriddenBases(const std::string &method) const {
-  auto id = interner_.find(method);
-  if (!id)
-    return {};
   std::vector<std::string> result;
-  for (SId sid : transitiveClosure(*id, overrideBases_))
-    result.push_back(interner_.resolve(sid));
+  std::set<SId> seen;
+  for (SId usrId : resolveUsrIds(method))
+    for (SId sid : transitiveClosure(usrId, overrideBases_))
+      if (seen.insert(sid).second)
+        result.push_back(displayFor(sid));
   return result;
 }
 
@@ -498,18 +530,19 @@ void CallGraph::addEffectiveImpl(const std::string &concreteClass,
 
 std::vector<std::string>
 CallGraph::getClassesForImpl(const std::string &implMethod) const {
-  auto id = interner_.find(implMethod);
-  if (!id)
-    return {};
-  auto it = effectiveImplClasses_.find(*id);
-  if (it != effectiveImplClasses_.end()) {
-    std::vector<std::string> result;
-    result.reserve(it->second.size());
+  // implMethod is usr-keyed; the class values are display-keyed and resolve
+  // directly (classes do not overload).
+  std::vector<std::string> result;
+  std::set<SId> seen;
+  for (SId usrId : resolveUsrIds(implMethod)) {
+    auto it = effectiveImplClasses_.find(usrId);
+    if (it == effectiveImplClasses_.end())
+      continue;
     for (SId sid : it->second)
-      result.push_back(interner_.resolve(sid));
-    return result;
+      if (seen.insert(sid).second)
+        result.push_back(interner_.resolve(sid));
   }
-  return {};
+  return result;
 }
 
 // --- Function returns ---
@@ -526,17 +559,15 @@ void CallGraph::addFunctionReturn(const std::string &funcName,
 
 std::set<std::string>
 CallGraph::getFunctionReturns(const std::string &funcName) const {
-  auto id = interner_.find(funcName);
-  if (!id)
-    return {};
-  auto it = functionReturns_.find(*id);
-  if (it != functionReturns_.end()) {
-    std::set<std::string> result;
+  std::set<std::string> result;
+  for (SId usrId : resolveUsrIds(funcName)) {
+    auto it = functionReturns_.find(usrId);
+    if (it == functionReturns_.end())
+      continue;
     for (SId sid : it->second)
-      result.insert(interner_.resolve(sid));
-    return result;
+      result.insert(displayFor(sid));
   }
-  return {};
+  return result;
 }
 
 // --- Shard merge ---
@@ -554,11 +585,17 @@ void CallGraph::absorb(const CallGraph &shard) {
   shard.interner_.forEachString(
       [&](const std::string &s) { remap.push_back(interner_.intern(s)); });
 
-  // Nodes: addNode's union/backfill semantics, plus contributor provenance.
+  // Nodes: addNode's union/backfill semantics (including byName_
+  // maintenance), plus contributor provenance.
   for (const auto &[shardNameId, node] : shard.nodes_) {
     SId nameId = remap[shardNameId];
     auto it = nodes_.find(nameId);
     if (it == nodes_.end()) {
+      SId displayId = interner_.intern(node.qualifiedName);
+      auto &candidates = byName_[displayId];
+      if (std::find(candidates.begin(), candidates.end(), nameId) ==
+          candidates.end())
+        candidates.push_back(nameId);
       nodes_.emplace(nameId, node);
     } else {
       if (!node.file.empty())
@@ -715,7 +752,21 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
         continue;
       cit->second.erase(tuId);
       if (cit->second.empty()) {
-        nodes_.erase(nodeId);
+        auto nit2 = nodes_.find(nodeId);
+        if (nit2 != nodes_.end()) {
+          // Drop the disambiguation entry with the node.
+          if (auto displayId = interner_.find(nit2->second.qualifiedName)) {
+            auto bit = byName_.find(*displayId);
+            if (bit != byName_.end()) {
+              auto &vec = bit->second;
+              vec.erase(std::remove(vec.begin(), vec.end(), nodeId),
+                        vec.end());
+              if (vec.empty())
+                byName_.erase(bit);
+            }
+          }
+          nodes_.erase(nit2);
+        }
         nodeContributors_.erase(cit);
       }
     }

@@ -45,6 +45,8 @@ public:
 
   // Get combined results: Alive if pessimistic says alive,
   // OptimisticallyAlive if only optimistic says alive, Dead otherwise.
+  // Keyed by DISPLAY name; the reachability walk itself runs in usr space,
+  // and overloads sharing a display name merge to the most-alive verdict.
   std::unordered_map<std::string, Liveness> getResults() const;
 
   // Emit Diagnostic entries for dead code.
@@ -55,6 +57,7 @@ private:
   std::vector<std::string> entryPoints_;
   std::set<std::string> publicApi_;
 
+  // usr strings (BFS runs in usr space; see getResults for the name view).
   std::set<std::string> pessimisticAlive_;
   std::set<std::string> optimisticAlive_;
 

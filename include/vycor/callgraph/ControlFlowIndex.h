@@ -108,9 +108,15 @@ struct ConditionalGuard {
 // ============================================================================
 
 struct CallSiteContext {
-  std::string callerName; // Matches CallGraphEdge::callerName
-  std::string calleeName; // What's being called
+  std::string callerName; // Display name; matches CallGraphEdge::callerName
+  std::string calleeName; // Display name of what's being called
   std::string callSite;   // file:line:col (join key with CallGraphEdge)
+
+  // Canonical identities (F8). Visitors fill these with USRs; hand-built
+  // contexts may leave them empty, in which case addCallSiteContext falls
+  // back to the display names. Materialized query results always carry both.
+  std::string callerUsr;
+  std::string calleeUsr;
 
   // TU that produced this context (the path passed to indexTUControlFlow /
   // buildControlFlowIndex). Used by removeTU: callSite alone is unreliable
@@ -157,14 +163,23 @@ public:
 
   // Look up context at a specific call site (file:line:col). Contexts are
   // stored in a deduplicated internal form; queries materialize
-  // CallSiteContext values on the fly.
+  // CallSiteContext values on the fly. Several contexts can share one
+  // spelling (macro expanded in different functions); this overload returns
+  // the unique match, or the FIRST live one when several exist — use the
+  // caller-qualified overload for a specific context.
   std::optional<CallSiteContext> contextAtSite(const std::string &callSite) const;
 
-  // All contexts where calleeName is the target.
+  // Precise compound-key lookup (F8 macro fix): the context at `callSite`
+  // whose caller matches `callerUsrOrName` (accepted as usr or display).
+  std::optional<CallSiteContext>
+  contextAtSite(const std::string &callSite,
+                const std::string &callerUsrOrName) const;
+
+  // All contexts where calleeName is the target (usr or display accepted).
   std::vector<CallSiteContext>
   contextsForCallee(const std::string &calleeName) const;
 
-  // All contexts where callerName is the source.
+  // All contexts where callerName is the source (usr or display accepted).
   std::vector<CallSiteContext>
   contextsForCaller(const std::string &callerName) const;
 
@@ -224,8 +239,10 @@ private:
   // this form is a few dozen bytes, with the string payload interned and
   // the scope/guard/RAII vectors shared through the set tables below.
   struct StoredContext {
-    SId caller;
-    SId callee;
+    SId caller;          // usr id (F8 identity key)
+    SId callee;          // usr id
+    SId callerDisplay;   // display-name id (== caller for name-only inserts)
+    SId calleeDisplay;   // display-name id
     SId site;
     SId tuPath;          // kNoString when the context has no provenance
     uint32_t scopeSet;   // index into scopeSets_
@@ -259,9 +276,18 @@ private:
 
   // Core insert shared by addCallSiteContext and snapshot load; callers
   // must hold mutex_ and pass already-interned ids / set indices.
-  void insertStored(SId caller, SId callee, SId site, SId tuPath,
+  void insertStored(SId caller, SId callee, SId callerDisplay,
+                    SId calleeDisplay, SId site, SId tuPath,
                     uint32_t scopeSet, uint32_t guardSet, uint32_t raiiSet,
                     NoexceptSpec callerNoexcept, bool insideCatchBlock);
+
+  // usr-map lookup with display-map fallback: by-name queries accept either
+  // form; the usr key wins when both exist (they coincide for name-only
+  // inserts). Returns nullptr when the name matches neither.
+  const std::vector<size_t> *
+  indicesFor(const std::unordered_map<SId, std::vector<size_t>> &usrMap,
+             const std::unordered_map<SId, std::vector<size_t>> &displayMap,
+             const std::string &name) const;
 
   mutable std::mutex mutex_;
   StringInterner interner_;
@@ -281,9 +307,16 @@ private:
   std::unordered_map<std::string, uint32_t> guardSetIds_;
   std::unordered_map<std::string, uint32_t> raiiSetIds_;
 
+  // Keyed by usr id; the *Display_ twins are keyed by display-name id and
+  // carry only contexts whose display differs from the usr, so by-name
+  // queries keep working after the F8 identity shift.
   std::unordered_map<SId, std::vector<size_t>> byCallee_;
   std::unordered_map<SId, std::vector<size_t>> byCaller_;
-  std::unordered_map<SId, size_t> bySite_;
+  std::unordered_map<SId, std::vector<size_t>> byCalleeDisplay_;
+  std::unordered_map<SId, std::vector<size_t>> byCallerDisplay_;
+  // Spelling -> contexts. Vector-valued (F8): macro expansion gives several
+  // call sites one spelling; contextAtSite disambiguates by caller.
+  std::unordered_map<SId, std::vector<size_t>> bySite_;
   // TU provenance reverse index: removeTU visits exactly the TU's own
   // contexts instead of scanning all of them (6.37M on the llvm testbed).
   // Contexts recorded without a tuPath (hand-built tests, pre-provenance

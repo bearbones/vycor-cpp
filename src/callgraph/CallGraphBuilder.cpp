@@ -147,6 +147,16 @@ static std::string lambdaQualifiedName(clang::SourceManager &sm,
   return "lambda#" + site + "#" + parent;
 }
 
+// Lambda identity: the synthetic name is already identity-stable across
+// phases by construction, so it IS the usr (prefixed to keep the namespace
+// disjoint from real USRs) as well as the display name.
+static Ident lambdaIdent(std::string name) {
+  Ident id;
+  id.usr = "vycor-lambda:" + name;
+  id.display = std::move(name);
+  return id;
+}
+
 // Unwrap implicit/temporary/functional-cast wrappers and ask: does this
 // expression denote a LambdaExpr? Handles the common
 // std::function<…>(lambda) and std::thread(lambda, args…) argument shapes.
@@ -235,9 +245,9 @@ std::string CallGraphIndexerVisitor::formatLocation(
   return formatLocationHelper(sm_, loc);
 }
 
-std::string CallGraphIndexerVisitor::getCurrentFunction() const {
+Ident CallGraphIndexerVisitor::getCurrentFunction() const {
   if (funcStack_.empty())
-    return "";
+    return {};
   auto *top = funcStack_.back();
   if (auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(top)) {
     if (md->getParent() && md->getParent()->isLambda()) {
@@ -252,11 +262,11 @@ std::string CallGraphIndexerVisitor::getCurrentFunction() const {
         enclosing = fd->getQualifiedNameAsString();
         break;
       }
-      return lambdaQualifiedName(sm_, md->getParent()->getBeginLoc(),
-                                 enclosing);
+      return lambdaIdent(lambdaQualifiedName(
+          sm_, md->getParent()->getBeginLoc(), enclosing));
     }
   }
-  return top->getQualifiedNameAsString();
+  return usrs_.identFor(top);
 }
 
 bool CallGraphIndexerVisitor::TraverseFunctionDecl(
@@ -303,8 +313,10 @@ bool CallGraphIndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   if (decl->getPreviousDecl())
     return true;
 
+  const Ident &id = usrs_.identFor(decl);
   CallGraphNode node;
-  node.qualifiedName = decl->getQualifiedNameAsString();
+  node.usr = id.usr;
+  node.qualifiedName = id.display;
   node.file = getFilePath(decl->getLocation());
   node.line = sm_.getSpellingLineNumber(decl->getLocation());
 
@@ -333,14 +345,14 @@ bool CallGraphIndexerVisitor::VisitCXXRecordDecl(
       graph_.addDerivedClass(baseType->getQualifiedNameAsString(), className, tuPath_);
   }
 
-  // Record virtual method overrides.
+  // Record virtual method overrides (methods overload: usr-keyed).
   for (auto *method : decl->methods()) {
     if (!method->isVirtual() || method->isImplicit())
       continue;
 
     for (auto *overridden : method->overridden_methods()) {
-      graph_.addMethodOverride(overridden->getQualifiedNameAsString(),
-                               method->getQualifiedNameAsString(), tuPath_);
+      graph_.addMethodOverride(usrs_.identFor(overridden).usr,
+                               usrs_.identFor(method).usr, tuPath_);
     }
   }
 
@@ -374,8 +386,9 @@ void CallGraphIndexerVisitor::computeEffectiveImpls(
 
       if (!method->isPureVirtual()) {
         handledMethodNames.insert(methodName);
-        graph_.addEffectiveImpl(className,
-                                method->getQualifiedNameAsString(), tuPath_);
+        // Class stays display-keyed; the impl method is usr-keyed.
+        graph_.addEffectiveImpl(className, usrs_.identFor(method).usr,
+                                tuPath_);
       }
     }
 
@@ -421,9 +434,11 @@ bool CallGraphIndexerVisitor::VisitLambdaExpr(clang::LambdaExpr *expr) {
     break;
   }
 
+  Ident id = lambdaIdent(
+      lambdaQualifiedName(sm_, expr->getBeginLoc(), enclosing));
   CallGraphNode node;
-  node.qualifiedName =
-      lambdaQualifiedName(sm_, expr->getBeginLoc(), enclosing);
+  node.usr = std::move(id.usr);
+  node.qualifiedName = std::move(id.display);
   node.file = getFilePath(expr->getBeginLoc());
   node.line = sm_.getSpellingLineNumber(expr->getBeginLoc());
   node.enclosingClass = enclosing;
@@ -440,10 +455,10 @@ bool CallGraphIndexerVisitor::VisitReturnStmt(clang::ReturnStmt *stmt) {
   auto *expr = retVal->IgnoreParenImpCasts();
   if (auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
     if (auto *funcDecl = llvm::dyn_cast<clang::FunctionDecl>(dre->getDecl())) {
-      std::string enclosing = getCurrentFunction();
-      if (!enclosing.empty()) {
-        graph_.addFunctionReturn(enclosing,
-                                 funcDecl->getQualifiedNameAsString(), tuPath_);
+      Ident enclosing = getCurrentFunction();
+      if (!enclosing.usr.empty()) {
+        graph_.addFunctionReturn(enclosing.usr,
+                                 usrs_.identFor(funcDecl).usr, tuPath_);
       }
     }
   }
@@ -470,9 +485,9 @@ std::string CallGraphEdgeVisitor::formatLocation(
   return formatLocationHelper(sm_, loc);
 }
 
-std::string CallGraphEdgeVisitor::getCurrentFunction() const {
+Ident CallGraphEdgeVisitor::getCurrentFunction() const {
   if (funcStack_.empty())
-    return "";
+    return {};
   auto *top = funcStack_.back();
   if (auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(top)) {
     if (md->getParent() && md->getParent()->isLambda()) {
@@ -486,11 +501,38 @@ std::string CallGraphEdgeVisitor::getCurrentFunction() const {
         enclosing = fd->getQualifiedNameAsString();
         break;
       }
-      return lambdaQualifiedName(sm_, md->getParent()->getBeginLoc(),
-                                 enclosing);
+      return lambdaIdent(lambdaQualifiedName(
+          sm_, md->getParent()->getBeginLoc(), enclosing));
     }
   }
-  return top->getQualifiedNameAsString();
+  return usrs_.identFor(top);
+}
+
+Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
+  Ident id = usrs_.identFor(decl);
+  // The indexer never visits implicit members, and RecursiveASTVisitor
+  // does not walk template specializations (implicit instantiations or
+  // explicit specializations reached only through the template's
+  // specialization set), so such a callee has no node yet; register one
+  // here so the display-name index can resolve its edges. Redundant
+  // registration is a no-op (addNode unions).
+  if ((decl->isImplicit() ||
+       decl->getTemplateSpecializationKind() != clang::TSK_Undeclared) &&
+      auxNodes_.insert(decl).second) {
+    CallGraphNode node;
+    node.usr = id.usr;
+    node.qualifiedName = id.display;
+    node.file = getFilePath(decl->getLocation());
+    node.line = sm_.getSpellingLineNumber(decl->getLocation());
+    if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl)) {
+      node.isVirtual = method->isVirtual();
+      if (auto *parent =
+              llvm::dyn_cast<clang::CXXRecordDecl>(method->getParent()))
+        node.enclosingClass = parent->getQualifiedNameAsString();
+    }
+    graph_.addNode(std::move(node), tuPath_);
+  }
+  return id;
 }
 
 bool CallGraphEdgeVisitor::isInUserCode(clang::SourceLocation loc) const {
@@ -564,7 +606,7 @@ std::string CallGraphEdgeVisitor::enclosingNonLambdaName() const {
 }
 
 void CallGraphEdgeVisitor::processCallableArgs(
-    llvm::ArrayRef<clang::Expr *> args, const std::string &caller,
+    llvm::ArrayRef<clang::Expr *> args, const std::string &callerUsr,
     clang::SourceLocation callSite, ExecutionContext spawnerCtx) {
   const bool isSpawner = spawnerCtx != ExecutionContext::Synchronous;
   const EdgeKind ptrEdgeKind =
@@ -581,10 +623,10 @@ void CallGraphEdgeVisitor::processCallableArgs(
     // Lambda passed as argument (direct, or wrapped in std::function /
     // packaged_task / bind trampolines).
     if (auto *le = asLambdaExpr(argExpr)) {
-      std::string lambdaName = lambdaQualifiedName(
-          sm_, le->getBeginLoc(), enclosingNonLambdaName());
-      graph_.addEdge({caller, lambdaName, lambdaEdgeKind, Confidence::Proven,
-                      siteStr, 1, spawnerCtx}, tuPath_);
+      Ident lambda = lambdaIdent(lambdaQualifiedName(
+          sm_, le->getBeginLoc(), enclosingNonLambdaName()));
+      graph_.addEdge({callerUsr, lambda.usr, lambdaEdgeKind,
+                      Confidence::Proven, siteStr, 1, spawnerCtx}, tuPath_);
       continue;
     }
 
@@ -597,7 +639,7 @@ void CallGraphEdgeVisitor::processCallableArgs(
     if (auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(arg)) {
       if (auto *funcDecl =
               llvm::dyn_cast<clang::FunctionDecl>(dre->getDecl())) {
-        graph_.addEdge({caller, funcDecl->getQualifiedNameAsString(),
+        graph_.addEdge({callerUsr, identForCallee(funcDecl).usr,
                         ptrEdgeKind, Confidence::Proven, siteStr, 1,
                         spawnerCtx}, tuPath_);
         handledRefs_.insert(dre);
@@ -610,14 +652,14 @@ void CallGraphEdgeVisitor::processCallableArgs(
           // at query time and synthesizes the ptrEdgeKind edges (empty
           // joins synthesize nothing). This keeps edge building free of
           // cross-TU reads so all phases share one parse.
-          graph_.addEdge({caller, fnIt->second,
+          graph_.addEdge({callerUsr, fnIt->second,
                           EdgeKind::FunctionPointerReturn, Confidence::Proven,
                           siteStr, 2, spawnerCtx}, tuPath_);
           handledRefs_.insert(dre);
         }
         auto lamIt = varLambdaSources_.find(varDecl);
         if (lamIt != varLambdaSources_.end()) {
-          graph_.addEdge({caller, lamIt->second, lambdaEdgeKind,
+          graph_.addEdge({callerUsr, lamIt->second, lambdaEdgeKind,
                           Confidence::Proven, siteStr, 1, spawnerCtx}, tuPath_);
           handledRefs_.insert(dre);
         }
@@ -627,8 +669,8 @@ void CallGraphEdgeVisitor::processCallableArgs(
 }
 
 bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
-  std::string caller = getCurrentFunction();
-  if (caller.empty())
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
     return true;
 
   // Skip calls from within system headers.
@@ -662,7 +704,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   args.reserve(expr->getNumArgs());
   for (unsigned i = 0; i < expr->getNumArgs(); ++i)
     args.push_back(expr->getArg(i));
-  processCallableArgs(args, caller, expr->getBeginLoc(), spawnerCtx);
+  processCallableArgs(args, caller.usr, expr->getBeginLoc(), spawnerCtx);
 
   auto *callee = expr->getDirectCallee();
   if (!callee)
@@ -672,7 +714,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   if (auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr)) {
     auto *methodDecl = memberCall->getMethodDecl();
     if (methodDecl && methodDecl->isVirtual()) {
-      handleVirtualDispatch(caller, methodDecl,
+      handleVirtualDispatch(caller.usr, methodDecl,
                             expr->getBeginLoc());
       return true;
     }
@@ -680,7 +722,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
 
   // Handle CXXOperatorCallExpr.
   if (llvm::isa<clang::CXXOperatorCallExpr>(expr)) {
-    graph_.addEdge({caller, callee->getQualifiedNameAsString(),
+    graph_.addEdge({caller.usr, identForCallee(callee).usr,
                     EdgeKind::OperatorCall, Confidence::Proven,
                     formatLocation(expr->getBeginLoc()), 0}, tuPath_);
     return true;
@@ -701,23 +743,32 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
             for (auto *ctor : recordDecl->ctors()) {
               if (!ctor->isImplicit() || ctor->isCopyOrMoveConstructor())
                 continue;
-              graph_.addNode(
-                  {ctor->getQualifiedNameAsString(),
-                   getFilePath(ctor->getLocation()),
-                   sm_.getSpellingLineNumber(ctor->getLocation()), false, false,
-                   typeName});
-              graph_.addEdge({caller, ctor->getQualifiedNameAsString(),
+              Ident ctorId = identForCallee(ctor);
+              CallGraphNode ctorNode;
+              ctorNode.usr = ctorId.usr;
+              ctorNode.qualifiedName = ctorId.display;
+              ctorNode.file = getFilePath(ctor->getLocation());
+              ctorNode.line = sm_.getSpellingLineNumber(ctor->getLocation());
+              ctorNode.enclosingClass = typeName;
+              graph_.addNode(std::move(ctorNode));
+              graph_.addEdge({caller.usr, ctorId.usr,
                               EdgeKind::ConstructorCall, Confidence::Proven,
                               formatLocation(expr->getBeginLoc()), 0}, tuPath_);
             }
-            // Also just add a generic constructor node for the type.
+            // Also just add a generic constructor node for the type. It is
+            // synthesized (no decl backs "Type::Type" as spelled), so it
+            // takes the vycor-synth: fallback identity.
             std::string ctorName = typeName + "::" +
                                    recordDecl->getNameAsString();
-            graph_.addNode({ctorName, getFilePath(recordDecl->getLocation()),
-                            sm_.getSpellingLineNumber(recordDecl->getLocation()),
-                            false, false, typeName}, tuPath_);
-            graph_.addEdge({caller, ctorName, EdgeKind::ConstructorCall,
-                            Confidence::Proven,
+            CallGraphNode synth;
+            synth.usr = "vycor-synth:" + ctorName;
+            synth.qualifiedName = ctorName;
+            synth.file = getFilePath(recordDecl->getLocation());
+            synth.line = sm_.getSpellingLineNumber(recordDecl->getLocation());
+            synth.enclosingClass = typeName;
+            graph_.addNode(std::move(synth), tuPath_);
+            graph_.addEdge({caller.usr, "vycor-synth:" + ctorName,
+                            EdgeKind::ConstructorCall, Confidence::Proven,
                             formatLocation(expr->getBeginLoc()), 0}, tuPath_);
           }
         }
@@ -726,7 +777,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   }
 
   // Regular direct call.
-  graph_.addEdge({caller, callee->getQualifiedNameAsString(),
+  graph_.addEdge({caller.usr, identForCallee(callee).usr,
                   EdgeKind::DirectCall, Confidence::Proven,
                   formatLocation(expr->getBeginLoc()), 0}, tuPath_);
 
@@ -734,7 +785,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
 }
 
 void CallGraphEdgeVisitor::handleVirtualDispatch(
-    const std::string &caller, clang::CXXMethodDecl *method,
+    const std::string &callerUsr, clang::CXXMethodDecl *method,
     clang::SourceLocation loc) {
   // Record a single Plausible edge to the static target — even when it is
   // pure virtual, since it identifies the dispatch point. The feasible
@@ -743,15 +794,15 @@ void CallGraphEdgeVisitor::handleVirtualDispatch(
   // overrides indexed later (other TUs, incremental reindex) are visible
   // to this call site without re-baking, and edge storage stays one row
   // per call site instead of one per override.
-  graph_.addEdge({caller, method->getQualifiedNameAsString(),
+  graph_.addEdge({callerUsr, identForCallee(method).usr,
                   EdgeKind::VirtualDispatch, Confidence::Plausible,
                   formatLocation(loc), 0}, tuPath_);
 }
 
 bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
     clang::CXXConstructExpr *expr) {
-  std::string caller = getCurrentFunction();
-  if (caller.empty())
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
     return true;
 
   if (!isInUserCode(expr->getBeginLoc()))
@@ -768,22 +819,26 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
 
   // Concurrency spawner via constructor (e.g. `std::thread t(&fn, arg)`).
   // Emit ThreadEntry edges for each callable argument in addition to the
-  // normal ConstructorCall edge.
-  std::string ctorName = ctor->getQualifiedNameAsString();
-  ExecutionContext spawnerCtx = spawnerContextFor(ctorName);
+  // normal ConstructorCall edge. Spawner matching stays display-name-based.
+  Ident ctorId = identForCallee(ctor);
+  ExecutionContext spawnerCtx = spawnerContextFor(ctorId.display);
   if (spawnerCtx != ExecutionContext::Synchronous) {
     std::vector<clang::Expr *> args;
     args.reserve(expr->getNumArgs());
     for (unsigned i = 0; i < expr->getNumArgs(); ++i)
       args.push_back(expr->getArg(i));
-    processCallableArgs(args, caller, expr->getBeginLoc(), spawnerCtx);
+    processCallableArgs(args, caller.usr, expr->getBeginLoc(), spawnerCtx);
   }
 
   // Add constructor edge.
-  graph_.addNode({ctorName, getFilePath(ctor->getLocation()),
-                  sm_.getSpellingLineNumber(ctor->getLocation()), false, false,
-                  ctor->getParent()->getQualifiedNameAsString()}, tuPath_);
-  graph_.addEdge({caller, ctorName, EdgeKind::ConstructorCall,
+  CallGraphNode ctorNode;
+  ctorNode.usr = ctorId.usr;
+  ctorNode.qualifiedName = ctorId.display;
+  ctorNode.file = getFilePath(ctor->getLocation());
+  ctorNode.line = sm_.getSpellingLineNumber(ctor->getLocation());
+  ctorNode.enclosingClass = ctor->getParent()->getQualifiedNameAsString();
+  graph_.addNode(std::move(ctorNode), tuPath_);
+  graph_.addEdge({caller.usr, ctorId.usr, EdgeKind::ConstructorCall,
                   Confidence::Proven, formatLocation(expr->getBeginLoc()), 0}, tuPath_);
 
   return true;
@@ -793,8 +848,8 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   if (!decl->isLocalVarDecl())
     return true;
 
-  std::string caller = getCurrentFunction();
-  if (caller.empty())
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
     return true;
 
   // Track callable-typed variables initialized from a direct call. The
@@ -808,7 +863,7 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
     if (auto *callExpr = llvm::dyn_cast<clang::CallExpr>(initExpr)) {
       auto *callee = callExpr->getDirectCallee();
       if (callee && isCallableLikeType(decl->getType())) {
-        varCallSources_[decl] = callee->getQualifiedNameAsString();
+        varCallSources_[decl] = identForCallee(callee).usr;
       }
     }
 
@@ -826,7 +881,8 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
         break;
       }
       varLambdaSources_[decl] =
-          lambdaQualifiedName(sm_, le->getBeginLoc(), enclosing);
+          lambdaIdent(lambdaQualifiedName(sm_, le->getBeginLoc(), enclosing))
+              .usr;
     }
   }
 
@@ -839,12 +895,12 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   if (!recordDecl->isThisDeclarationADefinition())
     return true;
 
-  addConcreteTypeEdges(caller, recordDecl, decl->getLocation());
+  addConcreteTypeEdges(caller.usr, recordDecl, decl->getLocation());
   return true;
 }
 
 void CallGraphEdgeVisitor::addConcreteTypeEdges(
-    const std::string &caller, const clang::CXXRecordDecl *cls,
+    const std::string &callerUsr, const clang::CXXRecordDecl *cls,
     clang::SourceLocation loc) {
   std::string site = formatLocation(loc);
   std::set<std::string> handledMethodNames;
@@ -866,7 +922,7 @@ void CallGraphEdgeVisitor::addConcreteTypeEdges(
 
       if (!method->isPureVirtual()) {
         handledMethodNames.insert(methodName);
-        graph_.addEdge({caller, method->getQualifiedNameAsString(),
+        graph_.addEdge({callerUsr, identForCallee(method).usr,
                         EdgeKind::VirtualDispatch, Confidence::Proven, site,
                         0}, tuPath_);
       }
@@ -874,13 +930,17 @@ void CallGraphEdgeVisitor::addConcreteTypeEdges(
 
     // Also add destructor edges.
     if (auto *dtor = current->getDestructor()) {
-      std::string dtorName = dtor->getQualifiedNameAsString();
+      Ident dtorId = identForCallee(dtor);
       if (!handledMethodNames.count("~")) {
-        graph_.addNode({dtorName, getFilePath(dtor->getLocation()),
-                        sm_.getSpellingLineNumber(dtor->getLocation()), false,
-                        dtor->isVirtual(),
-                        current->getQualifiedNameAsString()}, tuPath_);
-        graph_.addEdge({caller, dtorName, EdgeKind::DestructorCall,
+        CallGraphNode dtorNode;
+        dtorNode.usr = dtorId.usr;
+        dtorNode.qualifiedName = dtorId.display;
+        dtorNode.file = getFilePath(dtor->getLocation());
+        dtorNode.line = sm_.getSpellingLineNumber(dtor->getLocation());
+        dtorNode.isVirtual = dtor->isVirtual();
+        dtorNode.enclosingClass = current->getQualifiedNameAsString();
+        graph_.addNode(std::move(dtorNode), tuPath_);
+        graph_.addEdge({callerUsr, dtorId.usr, EdgeKind::DestructorCall,
                         Confidence::Proven, site, 0}, tuPath_);
       }
     }
@@ -902,8 +962,8 @@ bool CallGraphEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *expr) {
   if (!funcDecl)
     return true;
 
-  std::string caller = getCurrentFunction();
-  if (caller.empty())
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
     return true;
 
   if (!isInUserCode(expr->getBeginLoc()))
@@ -916,7 +976,7 @@ bool CallGraphEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *expr) {
 
   // This is a function reference in a non-call, non-argument context.
   // Treat as address-taken: Plausible edge.
-  graph_.addEdge({caller, funcDecl->getQualifiedNameAsString(),
+  graph_.addEdge({caller.usr, identForCallee(funcDecl).usr,
                   EdgeKind::FunctionPointer, Confidence::Plausible,
                   formatLocation(expr->getBeginLoc()), 0}, tuPath_);
 

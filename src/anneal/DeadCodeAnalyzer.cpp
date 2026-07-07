@@ -37,17 +37,22 @@ void DeadCodeAnalyzer::analyzeOptimistic() {
 
 void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
                            std::set<std::string> &alive) {
+  // The walk runs in usr space (edges carry callerUsr/calleeUsr) so two
+  // overloads sharing a display name keep disjoint reachability; entry
+  // points and public API arrive as display names and are resolved through
+  // the graph's by-name union.
   std::queue<std::string> queue;
 
-  // Seed with entry points and public API.
-  for (const auto &ep : entryPoints_) {
-    if (alive.insert(ep).second)
-      queue.push(ep);
-  }
-  for (const auto &api : publicApi_) {
-    if (alive.insert(api).second)
-      queue.push(api);
-  }
+  auto seed = [&](const std::string &name) {
+    for (const auto &usr : graph_.usrsForName(name)) {
+      if (alive.insert(usr).second)
+        queue.push(usr);
+    }
+  };
+  for (const auto &ep : entryPoints_)
+    seed(ep);
+  for (const auto &api : publicApi_)
+    seed(api);
 
   // Track which classes have their constructors reachable.
   std::set<std::string> constructedClasses;
@@ -74,13 +79,13 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
 
     if (edge.kind == EdgeKind::VirtualDispatch) {
       // Only follow if the target's class is constructible.
-      auto classes = graph_.getClassesForImpl(edge.calleeName);
+      auto classes = graph_.getClassesForImpl(edge.calleeUsr);
       for (const auto &cls : classes) {
         if (constructedClasses.count(cls))
           return true;
       }
       // Also check: is the target node's enclosingClass directly constructed?
-      auto *node = graph_.findNode(edge.calleeName);
+      auto *node = graph_.findNode(edge.calleeUsr);
       if (node && !node->enclosingClass.empty()) {
         if (constructedClasses.count(node->enclosingClass))
           return true;
@@ -105,7 +110,7 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
       for (const auto &edge : edges) {
         // Track constructed classes from ConstructorCall edges.
         if (edge.kind == EdgeKind::ConstructorCall) {
-          auto *calleeNode = graph_.findNode(edge.calleeName);
+          auto *calleeNode = graph_.findNode(edge.calleeUsr);
           if (calleeNode && !calleeNode->enclosingClass.empty()) {
             if (constructedClasses.insert(calleeNode->enclosingClass).second) {
               changed = true; // New class constructed, may unlock deferred edges.
@@ -114,12 +119,12 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
         }
 
         if (shouldFollowEdge(edge)) {
-          if (alive.insert(edge.calleeName).second)
-            queue.push(edge.calleeName);
+          if (alive.insert(edge.calleeUsr).second)
+            queue.push(edge.calleeUsr);
         } else if (includeVirtualPlausible &&
                    edge.kind == EdgeKind::VirtualDispatch &&
                    edge.confidence == Confidence::Plausible) {
-          deferredVirtualEdges.push_back({edge.calleeName});
+          deferredVirtualEdges.push_back({edge.calleeUsr});
         }
       }
     }
@@ -159,17 +164,28 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
 
 std::unordered_map<std::string, Liveness>
 DeadCodeAnalyzer::getResults() const {
+  // Alive sets hold usrs; results are keyed by DISPLAY name (the shape
+  // consumers query by). When overloads share a display name the merged
+  // entry takes the most-alive verdict — the by-name union view; PR C's
+  // usr-carrying tool responses expose the per-overload split.
   std::unordered_map<std::string, Liveness> results;
 
+  auto rank = [](Liveness l) {
+    return l == Liveness::Alive ? 2
+           : l == Liveness::OptimisticallyAlive ? 1
+                                                : 0;
+  };
+
   for (const auto *node : graph_.allNodes()) {
-    const auto &name = node->qualifiedName;
-    if (pessimisticAlive_.count(name)) {
-      results[name] = Liveness::Alive;
-    } else if (optimisticAlive_.count(name)) {
-      results[name] = Liveness::OptimisticallyAlive;
-    } else {
-      results[name] = Liveness::Dead;
-    }
+    Liveness liveness = Liveness::Dead;
+    if (pessimisticAlive_.count(node->usr))
+      liveness = Liveness::Alive;
+    else if (optimisticAlive_.count(node->usr))
+      liveness = Liveness::OptimisticallyAlive;
+
+    auto [it, inserted] = results.emplace(node->qualifiedName, liveness);
+    if (!inserted && rank(liveness) > rank(it->second))
+      it->second = liveness;
   }
 
   return results;

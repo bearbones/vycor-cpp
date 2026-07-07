@@ -19,6 +19,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <chrono>
 #include <unordered_map>
 
@@ -203,12 +204,16 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
 
     emitInternerTable(data, graph.interner_);
 
-    // Nodes keyed by interned qualified-name id; qualifiedName itself is
-    // recovered from the interner on load. Contributor TU sets are raw ids;
-    // nodeContributors_/tuNodes_ are rebuilt from them on load.
+    // Nodes keyed by interned usr id, with the display-name id alongside
+    // (v6); both strings are recovered from the interner on load and the
+    // byName_ index is rebuilt from the pairs. Contributor TU sets are raw
+    // ids; nodeContributors_/tuNodes_ are rebuilt from them on load.
     putU32(data, static_cast<uint32_t>(graph.nodes_.size()));
     for (const auto &[nameId, node] : graph.nodes_) {
       putU32(data, nameId);
+      // addNode interns every display name, so the lookup cannot miss.
+      auto displayId = graph.interner_.find(node.qualifiedName);
+      putU32(data, displayId ? *displayId : nameId);
       putLenStr(data, node.file);
       putU32(data, node.line);
       uint8_t flags = (node.isEntryPoint ? 1 : 0) | (node.isVirtual ? 2 : 0);
@@ -351,6 +356,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
         continue;
       putU32(data, se.caller);
       putU32(data, se.callee);
+      putU32(data, se.callerDisplay);
+      putU32(data, se.calleeDisplay);
       putU32(data, se.site);
       putU32(data, se.tuPath);
       putU32(data, se.scopeSet);
@@ -435,6 +442,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
     g.inEdges_.reserve(nodeCount);
     for (uint32_t i = 0; r.ok && i < nodeCount; ++i) {
       SId nameId = gid(r.u32());
+      SId displayId = gid(r.u32());
       CallGraphNode node;
       node.file = r.lenStr();
       node.line = r.u32();
@@ -445,7 +453,13 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
       uint32_t contribCount = r.count();
       if (!r.ok)
         break;
-      node.qualifiedName = g.interner_.resolve(nameId);
+      node.usr = g.interner_.resolve(nameId);
+      node.qualifiedName = g.interner_.resolve(displayId);
+      // Rebuild the disambiguation index (no extra serialization needed).
+      auto &candidates = g.byName_[displayId];
+      if (std::find(candidates.begin(), candidates.end(), nameId) ==
+          candidates.end())
+        candidates.push_back(nameId);
       g.nodes_.emplace(nameId, std::move(node));
       for (uint32_t c = 0; r.ok && c < contribCount; ++c) {
         SId tuId = gid(r.u32());
@@ -638,6 +652,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
     for (uint32_t i = 0; r.ok && i < ctxCount; ++i) {
       SId caller = cid(r.u32());
       SId callee = cid(r.u32());
+      SId callerDisplay = cid(r.u32());
+      SId calleeDisplay = cid(r.u32());
       SId site = cid(r.u32());
       SId tuPath = r.u32();
       if (tuPath != ControlFlowIndex::kNoString)
@@ -652,8 +668,9 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
         r.ok = false;
       if (!r.ok)
         break;
-      cf.insertStored(caller, callee, site, tuPath, scopeSet, guardSet,
-                      raiiSet, noexceptSpec, insideCatch);
+      cf.insertStored(caller, callee, callerDisplay, calleeDisplay, site,
+                      tuPath, scopeSet, guardSet, raiiSet, noexceptSpec,
+                      insideCatch);
     }
   }
 

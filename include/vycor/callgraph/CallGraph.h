@@ -76,15 +76,24 @@ enum class ExecutionContext {
 };
 
 struct CallGraphNode {
-  std::string qualifiedName;
+  std::string qualifiedName; // display name (humans and LLMs query by this)
   std::string file;
   unsigned line = 0;
   bool isEntryPoint = false;
   bool isVirtual = false;
   std::string enclosingClass;
+  // Canonical identity (Clang USR, or a vycor-lambda:/vycor-synth: fallback;
+  // see docs/design-f8-usr-identity.md). Kept LAST so pre-USR aggregate
+  // initializers stay valid; addNode falls back to qualifiedName when empty,
+  // which keeps hand-built (name-only) graphs working unchanged.
+  std::string usr;
 };
 
 struct CallGraphEdge {
+  // Identity fields. Visitors pass USR strings here; hand-built graphs pass
+  // display names (which addNode's fallback makes the usr, so the two stay
+  // consistent). Query results (calleesOf/callersOf) materialize these as
+  // DISPLAY names; the precise identities ride in callerUsr/calleeUsr.
   std::string callerName;
   std::string calleeName;
   EdgeKind kind;
@@ -92,6 +101,9 @@ struct CallGraphEdge {
   std::string callSite;
   unsigned indirectionDepth = 0;
   ExecutionContext execContext = ExecutionContext::Synchronous;
+  // Filled in materialized query results only; ignored by addEdge.
+  std::string callerUsr;
+  std::string calleeUsr;
 };
 
 // Thread-safety contract: mutating methods (addNode, addEdge, add*, removeTU,
@@ -118,6 +130,19 @@ public:
 
   void addNode(CallGraphNode node, const std::string &tuPath = "");
   void addEdge(CallGraphEdge edge, const std::string &tuPath = "");
+
+  // ------------------------------------------------------------------
+  // By-name resolution (F8). Nodes are keyed by USR; public by-name
+  // queries accept either a usr or a display name and resolve:
+  //   1. exact-usr match (a registered node keyed by the string),
+  //   2. display-name candidates via byName_ (0 -> empty; 1 -> that usr;
+  //      N -> the UNION of the per-candidate results),
+  //   3. otherwise the string itself as an unregistered endpoint id
+  //      (usr and display coincide for endpoints without nodes).
+  // ------------------------------------------------------------------
+
+  // All node usr strings a name resolves to (empty if unknown).
+  std::vector<std::string> usrsForName(const std::string &name) const;
 
   // Query the graph. Virtual dispatch is expanded at query time: for every
   // stored Plausible VirtualDispatch edge (caller -> static target), edges
@@ -166,6 +191,10 @@ public:
   size_t edgeCount() const;
 
   std::vector<const CallGraphNode *> allNodes() const;
+  // Accepts a usr or a display name. Ambiguous display names resolve to the
+  // candidate with the smallest usr string (deterministic; PR C surfaces
+  // ambiguity through the MCP disambiguation contract — findNode is used by
+  // tools for metadata display).
   const CallGraphNode *findNode(const std::string &qualifiedName) const;
 
   // Class hierarchy tracking.
@@ -294,7 +323,14 @@ private:
             se.indirectionDepth};
   }
 
-  CallGraphEdge materialize(const StoredEdge &se) const;
+  CallGraphEdge materialize(const EdgeRef &r) const;
+
+  // usr ids a name resolves to (see the by-name resolution comment above).
+  std::vector<SId> resolveUsrIds(const std::string &name) const;
+
+  // Display name for a usr id: the registered node's qualifiedName, else
+  // the usr string itself (endpoints without nodes have usr == display).
+  const std::string &displayFor(SId usrId) const;
 
   // Snapshot serialization reads provenance maps (tuEdges_,
   // nodeContributors_) and edge storage that have no public accessors;
@@ -303,7 +339,12 @@ private:
 
   mutable std::mutex mutex_;
   StringInterner interner_;
+  // Keyed by usr id (F8); qualifiedName is display-only.
   std::unordered_map<SId, CallGraphNode> nodes_;
+  // Disambiguation index: display-name id -> usr ids of registered nodes
+  // carrying that display name. Maintained by addNode/absorb/removeTU and
+  // rebuilt on snapshot load.
+  std::unordered_map<SId, std::vector<SId>> byName_;
   // deque, not vector: indices into this container are held by the maps
   // below and must stay stable across growth (see class comment).
   std::deque<StoredEdge> edges_;

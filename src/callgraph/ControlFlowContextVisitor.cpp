@@ -18,6 +18,7 @@
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/UsrIdent.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/PchCache.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -242,7 +243,7 @@ public:
   bool TraverseCXXTryStmt(clang::CXXTryStmt *stmt) {
     TryScopeEntry entry;
     entry.tryLocation = formatLocation(stmt->getTryLoc());
-    entry.enclosingFunction = getCurrentFunction();
+    entry.enclosingFunction = getCurrentFunction().display;
     entry.depth = tryScopeStack_.size();
 
     for (unsigned i = 0; i < stmt->getNumHandlers(); ++i) {
@@ -325,28 +326,30 @@ public:
   // -- Visit call sites and snapshot context -------------------------------
 
   bool VisitCallExpr(clang::CallExpr *expr) {
-    std::string caller = getCurrentFunction();
-    if (caller.empty())
+    Ident caller = getCurrentFunction();
+    if (caller.display.empty())
       return true;
 
     if (!isInUserCode(expr->getBeginLoc()))
       return true;
 
-    std::string calleeName;
+    Ident calleeId;
     if (auto *callee = expr->getDirectCallee()) {
-      calleeName = callee->getQualifiedNameAsString();
+      calleeId = usrs_.identFor(callee);
       // Skip internal edges within collapsed paths.
       if (!funcStack_.empty() &&
           isCollapsedEdge(funcStack_.back()->getLocation(),
                           callee->getLocation()))
         return true;
     } else {
-      // Indirect call — record with placeholder name.
-      calleeName = "<indirect>";
+      // Indirect call — record with placeholder name (synth identity: no
+      // decl backs it).
+      calleeId.display = "<indirect>";
+      calleeId.usr = "vycor-synth:<indirect>";
     }
 
     // Check if this is an assertion macro (assert, DCHECK, etc.).
-    if (isAssertionCall(calleeName)) {
+    if (isAssertionCall(calleeId.display)) {
       // Record the assertion as a guard for subsequent calls in scope.
       // We handle this by checking the callee name — the assertion's
       // condition is the first argument.
@@ -366,15 +369,15 @@ public:
       return true;
     }
 
-    CallSiteContext ctx = buildContext(caller, calleeName,
+    CallSiteContext ctx = buildContext(caller, calleeId,
                                        expr->getBeginLoc());
     index_.addCallSiteContext(std::move(ctx));
     return true;
   }
 
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *expr) {
-    std::string caller = getCurrentFunction();
-    if (caller.empty())
+    Ident caller = getCurrentFunction();
+    if (caller.display.empty())
       return true;
 
     if (!isInUserCode(expr->getBeginLoc()))
@@ -389,8 +392,7 @@ public:
         isCollapsedEdge(funcStack_.back()->getLocation(), ctor->getLocation()))
       return true;
 
-    std::string calleeName = ctor->getQualifiedNameAsString();
-    CallSiteContext ctx = buildContext(caller, calleeName,
+    CallSiteContext ctx = buildContext(caller, usrs_.identFor(ctor),
                                        expr->getBeginLoc());
     index_.addCallSiteContext(std::move(ctx));
     return true;
@@ -429,10 +431,13 @@ private:
 
   bool insideCatchBlock_ = false;
 
-  std::string getCurrentFunction() const {
+  // Per-TU (usr, display) memo; getCurrentFunction is const but memoizes.
+  mutable UsrCache usrs_;
+
+  Ident getCurrentFunction() const {
     if (funcStack_.empty())
-      return "";
-    return funcStack_.back()->getQualifiedNameAsString();
+      return {};
+    return usrs_.identFor(funcStack_.back());
   }
 
   std::string formatLocation(clang::SourceLocation loc) const {
@@ -544,12 +549,13 @@ private:
            name.find("ASSERT") != std::string::npos;
   }
 
-  CallSiteContext buildContext(const std::string &caller,
-                               const std::string &calleeName,
+  CallSiteContext buildContext(const Ident &caller, const Ident &callee,
                                clang::SourceLocation callLoc) const {
     CallSiteContext ctx;
-    ctx.callerName = caller;
-    ctx.calleeName = calleeName;
+    ctx.callerName = caller.display;
+    ctx.calleeName = callee.display;
+    ctx.callerUsr = caller.usr;
+    ctx.calleeUsr = callee.usr;
     ctx.callSite = formatLocation(callLoc);
     ctx.tuPath = tuPath_;
     ctx.insideCatchBlock = insideCatchBlock_;
