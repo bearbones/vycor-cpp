@@ -539,6 +539,124 @@ CallGraph::getFunctionReturns(const std::string &funcName) const {
   return {};
 }
 
+// --- Shard merge ---
+
+void CallGraph::absorb(const CallGraph &shard) {
+  if (&shard == this)
+    return;
+  std::lock_guard<std::mutex> lockThis(mutex_);
+  std::lock_guard<std::mutex> lockShard(shard.mutex_);
+
+  // Shard string id -> master string id, by position (the shard interner is
+  // id-dense, so a flat vector is the whole remap).
+  std::vector<SId> remap;
+  remap.reserve(shard.interner_.size());
+  shard.interner_.forEachString(
+      [&](const std::string &s) { remap.push_back(interner_.intern(s)); });
+
+  // Nodes: addNode's union/backfill semantics, plus contributor provenance.
+  for (const auto &[shardNameId, node] : shard.nodes_) {
+    SId nameId = remap[shardNameId];
+    auto it = nodes_.find(nameId);
+    if (it == nodes_.end()) {
+      nodes_.emplace(nameId, node);
+    } else {
+      if (!node.file.empty())
+        it->second.file = node.file;
+      if (node.line != 0)
+        it->second.line = node.line;
+      if (node.isEntryPoint)
+        it->second.isEntryPoint = true;
+      if (node.isVirtual)
+        it->second.isVirtual = true;
+      if (!node.enclosingClass.empty())
+        it->second.enclosingClass = node.enclosingClass;
+    }
+    auto cit = shard.nodeContributors_.find(shardNameId);
+    if (cit != shard.nodeContributors_.end()) {
+      for (SId shardTu : cit->second) {
+        SId tuId = remap[shardTu];
+        if (nodeContributors_[nameId].insert(tuId).second)
+          tuNodes_[tuId].push_back(nameId);
+      }
+    }
+  }
+
+  // Edges: dedup probe per live shard edge; a hit adds the shard's
+  // registrations to refs, a miss appends. shardEdgeIdx -> masterEdgeIdx is
+  // kept so the shard's TU provenance can be re-pointed below.
+  constexpr size_t kDeadEdge = static_cast<size_t>(-1);
+  std::vector<size_t> edgeRemap(shard.edges_.size(), kDeadEdge);
+  for (size_t i = 0; i < shard.edges_.size(); ++i) {
+    const StoredEdge &src = shard.edges_[i];
+    if (src.refs == 0)
+      continue;
+    StoredEdge se = src;
+    se.caller = remap[src.caller];
+    se.callee = remap[src.callee];
+    se.callSite = remap[src.callSite];
+    EdgeKey key = keyOf(se);
+    size_t idx;
+    auto it = edgeIndex_.find(key);
+    if (it != edgeIndex_.end()) {
+      idx = it->second;
+      edges_[idx].refs += se.refs;
+    } else {
+      idx = edges_.size();
+      outEdges_[se.caller].push_back(idx);
+      inEdges_[se.callee].push_back(idx);
+      edgeIndex_.emplace(key, idx);
+      edges_.push_back(se);
+      ++liveEdgeCount_;
+    }
+    edgeRemap[i] = idx;
+  }
+
+  for (const auto &[shardTu, idxs] : shard.tuEdges_) {
+    SId tuId = remap[shardTu];
+    auto &vec = tuEdges_[tuId];
+    for (size_t i : idxs)
+      if (edgeRemap[i] != kDeadEdge) // tombstoned shard edges carry no refs
+        vec.push_back(edgeRemap[i]);
+  }
+
+  // Relations: remapped pairs with the public mutators' dedup + reverse-map
+  // maintenance.
+  for (const auto &[base, vec] : shard.derivedClasses_) {
+    auto &dst = derivedClasses_[remap[base]];
+    for (SId d : vec) {
+      SId derivedId = remap[d];
+      if (std::find(dst.begin(), dst.end(), derivedId) == dst.end())
+        dst.push_back(derivedId);
+    }
+  }
+  for (const auto &[base, vec] : shard.methodOverrides_) {
+    SId baseId = remap[base];
+    for (SId o : vec) {
+      SId overrideId = remap[o];
+      auto &fwd = methodOverrides_[baseId];
+      if (std::find(fwd.begin(), fwd.end(), overrideId) == fwd.end())
+        fwd.push_back(overrideId);
+      auto &rev = overrideBases_[overrideId];
+      if (std::find(rev.begin(), rev.end(), baseId) == rev.end())
+        rev.push_back(baseId);
+    }
+  }
+  for (const auto &[impl, classes] : shard.effectiveImplClasses_) {
+    auto &dst = effectiveImplClasses_[remap[impl]];
+    for (SId cls : classes)
+      dst.insert(remap[cls]);
+  }
+  for (const auto &[fn, rets] : shard.functionReturns_) {
+    SId fnId = remap[fn];
+    for (SId ret : rets) {
+      SId retId = remap[ret];
+      if (functionReturns_[fnId].insert(retId).second)
+        returnedBy_[retId].push_back(fnId);
+    }
+  }
+}
+
 // --- Per-TU removal ---
 
 size_t CallGraph::removeTU(const std::string &tuPath) {

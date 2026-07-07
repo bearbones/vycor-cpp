@@ -209,6 +209,20 @@ public:
   std::set<std::string>
   getFunctionReturns(const std::string &funcName) const;
 
+  // Merge another graph into this one, id-remapped (the worker-shard merge,
+  // and the merge primitive for any future distributed/incremental-shard
+  // scheme). The shard's strings are interned here once; nodes merge with
+  // addNode's backfill-union semantics; edges go through the edgeIndex_
+  // dedup probe, so identical edges registered by different shards
+  // accumulate refs exactly as multi-TU registrations do in-process; the
+  // relation maps keep their forward+reverse dedup semantics; and TU
+  // provenance (tuEdges_/nodeContributors_/tuNodes_) carries over, so
+  // removeTU afterwards behaves as if the shard's TUs had been baked here.
+  // Locks this->mutex_ then shard.mutex_: the shard is logically immutable
+  // during absorb (single-threaded parent), its mutex is held only to keep
+  // the private-state-reads-hold-the-lock discipline.
+  void absorb(const CallGraph &shard);
+
   // Per-TU incremental re-indexing. removeTU drops the given TU's
   // contribution: each of its edge registrations is released, and an edge
   // is tombstoned only when its last contributor is removed (header-inlined

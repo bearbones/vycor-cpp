@@ -187,8 +187,8 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 6 | Edge dedup + interned IDs in edges | F4, F5 | ✅ done (edges; CallSiteContext scope-sharing from F5 still open) |
 | 7 | `search_functions` tool; in-degree cutoffs in path queries | F10, F11 | ✅ done |
 | 7b | Whole-graph query cache (graph_summary, dead-code liveness) + id-space path search with corridor pruning | F11, F13 | ✅ done — see scale table below |
-| 8 | USR-based node identity | F8 | |
-| 9 | Subprocess worker isolation | F12 | |
+| 8 | USR-based node identity | F8 | design approved, sequenced after item 9 — `docs/design-f8-usr-identity.md` (fixtures-first gate) |
+| 9 | Subprocess worker isolation | F12 | in progress — `docs/design-f12-subprocess-workers.md` (v5 snapshot as the worker wire format; absorb() merge) |
 | 10 | ControlFlowIndex string interning (F5 completion) | F5 | ✅ done — contexts stored as interned ids + deduplicated scope/guard/RAII set tables, public API materializes values; snapshot v4 serializes the stored form. Warm RSS 4.95 → 1.60 GB (−68%), cold-bake peak 8.1 → 4.5 GB, bake wall neutral (interleaved A/B; insert path ~3.4 µs/context), query results identical |
 | 12 | removeTU asymptotics: TU-provenance reverse indexes + batched adjacency scrubbing | F9 (daemon story) | ✅ done — reindex_tu of a small TU at 6.37M call sites: 270 ms → 150 ms, where the remainder is the TU's own parse; removal cost is now O(TU size), independent of index size |
 | 13 | Lock-tool path search in id space (corridor prune + dead-end memo, per-path edge exclusion preserved) | F11 | ✅ done — query_locks_held on a deep 938-TU target: did not complete in 10 min → 21 ms at the 512-path cap; no-corridor case is one bounded BFS |

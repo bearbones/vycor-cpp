@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -180,6 +181,16 @@ public:
   // All stored contexts (for dump mode).
   std::vector<CallSiteContext> allContexts() const;
 
+  // Merge another index into this one, id-remapped (the worker-shard merge
+  // counterpart of CallGraph::absorb). The shard's strings are interned
+  // here once; scope/guard/RAII set tables dedup through the existing key
+  // maps (RAII ids are remapped before keying — that table's key is in id
+  // space); live contexts append through insertStored. Locks this->mutex_
+  // then shard.mutex_: the shard is logically immutable during absorb
+  // (single-threaded parent), its mutex is held only to keep the
+  // private-state-reads-hold-the-lock discipline.
+  void absorb(const ControlFlowIndex &shard);
+
   // Remove all contexts contributed by the given TU. Matches on the
   // recorded tuPath; contexts without one (hand-built in tests, or from
   // pre-provenance snapshots) fall back to a callSite prefix match.
@@ -331,6 +342,9 @@ struct BakedIndexes {
 // consistent with a full rebuild.
 // When `stats` is non-null, per-phase wall times and per-TU parse timings
 // and outcomes are recorded into it (see BuildStats.h).
+// When `preTu` is non-null it is called with the TU path immediately before
+// that TU's frontend parse starts (worker mode prints its WORKER-TU stderr
+// marker through this); under a parallel bake it may be called concurrently.
 BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const std::vector<std::string> &files,
                          const std::vector<std::string> &collapsePaths = {},
@@ -338,7 +352,9 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const PchCache *pchCache = nullptr,
                          const std::string &sysroot = "",
                          const LockTypeConfig &lockCfg = {},
-                         BuildStats *stats = nullptr);
+                         BuildStats *stats = nullptr,
+                         std::function<void(const std::string &)> preTu =
+                             nullptr);
 
 // Single-TU variant for incremental reindex (one parse). Call
 // graph.removeTU(file) and cfIndex.removeTU(file) first when re-indexing a
