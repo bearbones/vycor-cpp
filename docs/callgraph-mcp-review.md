@@ -190,6 +190,7 @@ exactly; contexts without provenance fall back to the old prefix match.
 | 8 | USR-based node identity | F8 | |
 | 9 | Subprocess worker isolation | F12 | |
 | 10 | ControlFlowIndex string interning (F5 completion) | F5 | open — at 6.37M call sites the per-context string copies (callerName/calleeName/callSite/tuPath, the last never deduplicated) dominate warm RSS (4.95 GB) and the 301 MB snapshot |
+| 12 | removeTU asymptotics: TU-provenance reverse indexes + batched adjacency scrubbing | F9 (daemon story) | ✅ done — reindex_tu of a small TU at 6.37M call sites: 270 ms → 150 ms, where the remainder is the TU's own parse; removal cost is now O(TU size), independent of index size |
 | 11 | Snapshot bulk-load fast path | F9 | partially done — map pre-reserving landed (~4%: the cost is string copies + re-interning, i.e. item 10 territory), and unchanged warm starts skip the 3.1s snapshot re-save (14.9s → 11.6s total warm start). The remaining 8s load wants the id-preserving format that falls out of item 10 |
 
 ---

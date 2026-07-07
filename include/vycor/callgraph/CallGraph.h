@@ -311,6 +311,10 @@ private:
   // Per-TU provenance tracking for incremental re-indexing.
   std::unordered_map<SId, std::vector<size_t>> tuEdges_;
   std::unordered_map<SId, std::set<SId>> nodeContributors_;
+  // Reverse of nodeContributors_: TU -> node ids it contributed (appended on
+  // first contribution only). Lets removeTU visit exactly the TU's own
+  // nodes instead of scanning every node in the graph.
+  std::unordered_map<SId, std::vector<SId>> tuNodes_;
   size_t liveEdgeCount_ = 0;
 
   // Transitive closure helpers over the override relation (callers must
