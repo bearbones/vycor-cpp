@@ -23,6 +23,7 @@ add_library(vycor_lib
 
 target_include_directories(vycor_lib PUBLIC
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated
 )
 
 target_link_libraries(vycor_lib PUBLIC
@@ -78,3 +79,10 @@ target_link_libraries(vycor-cpp PRIVATE vycor_lib)
 # Embed the default --clang path for PCH compilation into the executable.
 target_compile_definitions(vycor-cpp PRIVATE
   "VYCOR_DEFAULT_CLANG=\"${VYCOR_DEFAULT_CLANG}\"")
+
+# Release packaging: `cmake --install build --prefix <dir>` stages a single
+# self-contained bin/ dir that release.yml tars up. No CPack -- one binary
+# doesn't need it (see docs/toolchain-portability.md for why this project
+# keeps packaging minimal).
+include(GNUInstallDirs)
+install(TARGETS vycor-cpp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

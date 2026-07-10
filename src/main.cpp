@@ -26,6 +26,7 @@
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/PchCache.h"
 #include "vycor/mcp/McpServer.h"
+#include "vycor/Version.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 
@@ -416,6 +417,10 @@ static llvm::cl::opt<std::string>
 // ---------------------------------------------------------------------------
 
 int main(int argc, const char **argv) {
+  llvm::cl::AddExtraVersionPrinter([](llvm::raw_ostream &os) {
+    os << "vycor-cpp version " << VYCOR_VERSION_STRING << "\n";
+  });
+
   llvm::cl::ParseCommandLineOptions(
       argc, argv,
       "vycor-cpp: AST-based C++ analysis and transformation tool\n"

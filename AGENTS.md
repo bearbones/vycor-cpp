@@ -175,6 +175,13 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
 
 `CMakeLists.txt` (top-level):
 - Requires CMake 3.20+, C++17.
+- Reads the project's own SemVer from the root `VERSION` file into
+  `project(vycor-cpp VERSION ...)`, and `configure_file`s
+  `include/vycor/Version.h.in` into `${CMAKE_BINARY_DIR}/generated/vycor/Version.h`
+  (`VYCOR_VERSION_STRING` etc.) — `main.cpp` uses it to make `vycor-cpp
+  --version` report both the vycor-cpp version and the embedded LLVM
+  version. See `COMPATIBILITY.md` "Tagging and releases" for the version/tag
+  scheme this feeds.
 - Iterates `VYCOR_SUPPORTED_LLVM_VERSIONS` (currently `21 20 18`,
   newest first) via `find_package()`. The CI matrix in
   `.github/workflows/ci.yml` mirrors this list.
@@ -185,6 +192,9 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
 - See `COMPATIBILITY.md` for the support matrix, known API differences
   between supported LLVM majors, and the procedure for adding/removing a
   supported version.
+- `install(TARGETS vycor-cpp RUNTIME DESTINATION ...)` in `src/CMakeLists.txt`
+  supports `cmake --install` staging for release tarballs (no CPack — a
+  single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
 - Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, and `mcp/*.cpp`.
@@ -323,10 +333,23 @@ prefix (`fix/`, `feat/`, `docs/`, etc.) and a short description, e.g.
 
 Commit convention: descriptive imperative messages, no ticket numbers required.
 
-When release branches exist (`release/llvm-18`, `release/llvm-20`,
-`release/llvm-21`), bug fixes are cherry-picked from `main` to each
-applicable release branch via the `backport/llvm-NN` PR label. See
+Long-lived `release/llvm-18`, `release/llvm-20`, `release/llvm-21` branches
+track each supported LLVM major; bug fixes are cherry-picked from `main` to
+each applicable release branch via the `backport/llvm-NN` PR label. See
 `COMPATIBILITY.md` for the full cherry-pick policy.
+
+---
+
+## Cutting a Release
+
+A pushed tag matching `vX.Y.Z` (on `main`) or `vX.Y.Z-llvmNN` (on a
+`release/llvm-NN` branch) triggers `.github/workflows/release.yml`, which
+builds Linux + macOS binaries for the relevant LLVM major(s), attaches them
+as tarballs to a GitHub Release, and updates the `bearbones/homebrew-vycor-cpp`
+tap. Bump the root `VERSION` file, commit, then tag and push — see
+`COMPATIBILITY.md` "Tagging and releases" for the exact command sequence and
+the full tag grammar. Test with `workflow_dispatch`'s `dry_run` input before
+relying on a real tag push.
 
 ---
 
@@ -367,3 +390,9 @@ only, not a namespace boundary.
   and internal-package-manager builds" for organizations using
   internal mirrors or alternate package managers.
 - No other runtime dependencies.
+- **macOS install path**: the self-hosted Homebrew tap
+  `bearbones/homebrew-vycor-cpp` (`brew tap bearbones/vycor-cpp && brew
+  install vycor-cpp`), not `homebrew/core` — see `COMPATIBILITY.md`
+  "Tagging and releases". Each formula `depends_on "llvm@NN"`: Homebrew's
+  LLVM formulas link Clang/LLVM as shared libraries, so that dependency is
+  required at runtime, not just at build time.
