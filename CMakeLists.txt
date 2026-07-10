@@ -1,9 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
-project(vycor-cpp LANGUAGES C CXX)
+
+# vycor-cpp's own SemVer, independent of the LLVM major it's built against.
+# See COMPATIBILITY.md "Tagging and releases" for the tag grammar that
+# derives from this file.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VYCOR_VERSION_RAW LIMIT_COUNT 1)
+string(STRIP "${VYCOR_VERSION_RAW}" VYCOR_VERSION_RAW)
+
+project(vycor-cpp VERSION ${VYCOR_VERSION_RAW} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/vycor/Version.h.in"
+  "${CMAKE_BINARY_DIR}/generated/vycor/Version.h"
+  @ONLY)
 
 # --- Organization override hook ---
 # Forks can add cmake/org-overrides.cmake to customize dependency resolution,
