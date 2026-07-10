@@ -419,6 +419,8 @@ static llvm::cl::opt<std::string>
 int main(int argc, const char **argv) {
   llvm::cl::AddExtraVersionPrinter([](llvm::raw_ostream &os) {
     os << "vycor-cpp version " << VYCOR_VERSION_STRING << "\n";
+    os << "Host compiler: " << VYCOR_HOST_COMPILER_ID << " "
+       << VYCOR_HOST_COMPILER_VERSION << "\n";
   });
 
   llvm::cl::ParseCommandLineOptions(

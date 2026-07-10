@@ -53,36 +53,30 @@ sha256_of_url() {
 
 write_formula() {
   local major="$1" class_name="$2" out_path="$3"
-  local arm64_url x86_64_url arm64_sha x86_64_sha
+  local arm64_url arm64_sha
 
+  # macOS builds are Apple Silicon (arm64) only -- Apple has exited x86_64
+  # and GitHub's Intel-Mac runner path is on its own retirement clock. See
+  # COMPATIBILITY.md "macOS runner and Apple Clang".
   arm64_url=$(asset_url "macos-arm64" "$major")
-  x86_64_url=$(asset_url "macos-x86_64" "$major")
 
-  if [[ -z "$arm64_url" || -z "$x86_64_url" ]]; then
-    echo "error: could not find both macOS assets for llvm${major} on $RELEASE_TAG" >&2
+  if [[ -z "$arm64_url" ]]; then
+    echo "error: could not find the macos-arm64 asset for llvm${major} on $RELEASE_TAG" >&2
     exit 1
   fi
 
   arm64_sha=$(sha256_of_url "$arm64_url")
-  x86_64_sha=$(sha256_of_url "$x86_64_url")
 
   cat > "$out_path" <<EOF
 class ${class_name} < Formula
   desc "Clang LibTooling backend for C++ static analysis (LLVM ${major} build)"
   homepage "https://github.com/${SOURCE_REPO}"
+  url "${arm64_url}"
+  sha256 "${arm64_sha}"
   version "${VYCOR_VERSION}"
   license "Apache-2.0"
   depends_on "llvm@${major}"
-
-  on_macos do
-    if Hardware::CPU.arm?
-      url "${arm64_url}"
-      sha256 "${arm64_sha}"
-    else
-      url "${x86_64_url}"
-      sha256 "${x86_64_sha}"
-    end
-  end
+  depends_on arch: :arm64
 
   def install
     bin.install "bin/vycor-cpp"

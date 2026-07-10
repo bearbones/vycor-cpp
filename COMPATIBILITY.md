@@ -234,8 +234,7 @@ Pushing a matching tag runs `.github/workflows/release.yml`, which for each
    release gate (a release is never cut from a build that fails `ctest`).
 2. Stages it via `cmake --install` and packages it as
    `vycor-cpp-vX.Y.Z-<os-label>-llvmNN.tar.gz` (`os-label` is one of
-   `linux-x86_64`, `macos-x86_64`, `macos-arm64`), attached to a GitHub
-   Release on this repo.
+   `linux-x86_64`, `macos-arm64`), attached to a GitHub Release on this repo.
 3. On a non-test, non-dry-run tag, updates the Homebrew tap
    `bearbones/homebrew-vycor-cpp` (`.github/workflows/scripts/update-tap-formula.sh`)
    with a `Formula/vycor-cpp@NN.rb` per released major, plus a
@@ -245,22 +244,68 @@ Pushing a matching tag runs `.github/workflows/release.yml`, which for each
    vycor-cpp`, with no popularity/notability bar to clear.
 
 Linux runs on GitHub-hosted `ubuntu-24.04`; macOS runs on GitHub-hosted
-`macos-13` (Intel) and `macos-14` (Apple Silicon) — both come with Xcode /
-Apple Clang preinstalled, so no third-party cloud-Mac vendor is needed for
-this pipeline. Note: as of this writing, Homebrew has no `llvm@{18,20,21}`
-bottle for `macos-13`/Ventura (only `sonoma`+), so that leg compiles LLVM
-from source and is slower — budgeted via a longer timeout in the workflow,
-not a bug.
+`macos-latest` — both come with a full toolchain preinstalled, so no
+third-party cloud-Mac vendor is needed for this pipeline. See "macOS runner
+and Apple Clang" below for why the macOS leg is arm64-only and how the
+Apple Clang / Homebrew LLVM split works.
 
-A macOS release tarball is **not** fully self-contained: Homebrew's
-`llvm@NN` formulas link `libLLVM.dylib`/`libclang-cpp.dylib` dynamically, so
-a `vycor-cpp` binary built against one needs that same Homebrew keg present
-at runtime. This is why the tap (whose formulas `depends_on "llvm@NN"`) is
-the primary supported macOS install path; a raw tarball works too but
-requires the matching `brew install llvm@NN` first. Out of scope for now:
-code signing/notarization (use `xattr -d com.apple.quarantine` on a
-downloaded tarball if Gatekeeper objects) and re-linking tarballs into
-fully self-contained binaries.
+### macOS runner and Apple Clang
+
+**Runner label:** the workflow uses the floating `macos-latest` label, not a
+hardcoded `macos-NN`. GitHub's hardcoded macOS runner labels have a hard
+retirement date apiece — `macos-13` was fully retired Dec 2025, `macos-14`
+began its own deprecation window in July 2026 — while `macos-latest` is kept
+pointed at whatever major GitHub currently recommends. Re-verify this
+assumption periodically against
+[actions/runner-images](https://github.com/actions/runner-images) if a
+release build starts failing to find a runner.
+
+**Apple Silicon (arm64) only, no Intel build:** Apple itself has exited
+x86_64, and GitHub's only remaining Intel-Mac path (`macos-15-intel`)
+sunsets alongside `macos-15` in Fall 2027. Chasing a runner label already on
+a retirement clock for a shrinking installed base wasn't judged worth the
+matrix complexity; revisit if real Intel-Mac demand shows up.
+
+**Two independent Clang/LLVM toolchains are in play, on purpose:**
+1. **Host compiler** — the compiler that builds `vycor-cpp`'s own `.cpp`
+   files. Explicitly pinned in `release.yml` to the system Apple Clang
+   (`/usr/bin/clang`/`clang++`, from Xcode Command Line Tools) via
+   `-DCMAKE_C_COMPILER`/`-DCMAKE_CXX_COMPILER` — matching what a Mac user's
+   own default toolchain looks like, rather than relying on whichever
+   compiler happens to resolve first on `PATH`.
+2. **Tooling API** — the `clangAST`/`clangTooling`/etc. libraries vycor-cpp
+   links against to do its own AST analysis, from Homebrew's `llvm@NN`
+   (via `CMAKE_PREFIX_PATH`), same as the Linux legs' apt.llvm.org packages.
+
+These are deliberately independent: **Apple's Xcode Clang cannot supply
+(2)** — Apple ships the `clang`/`clang++` driver binaries and a minimal
+runtime, but not the LibTooling development headers, the static/dynamic
+`clangAST`/`clangTooling`/etc. libraries, or `ClangConfig.cmake`/
+`LLVMConfig.cmake`. There is no way to build a Clang-LibTooling-based tool
+against Xcode's Clang alone, on macOS or otherwise; a full LLVM/Clang dev
+package (Homebrew, an official LLVM release, or a from-source build) is
+always required for (2), independent of which compiler does (1).
+
+`vycor-cpp --version` reports both toolchains, e.g.:
+```
+vycor-cpp version 0.1.0
+Host compiler: AppleClang 16.0.0.16000021
+```
+(`AppleClang` is CMake's `CMAKE_CXX_COMPILER_ID` for Xcode's Clang, distinct
+from upstream/Homebrew Clang's plain `Clang` — useful for telling the two
+apart when debugging a mixed-toolchain build.) The existing LLVM-version
+line above it (from LLVM's own `cl::opt` version printer) still reports the
+Tooling API's LLVM major, i.e. toolchain (2).
+
+**Not fully self-contained:** Homebrew's `llvm@NN` formulas link
+`libLLVM.dylib`/`libclang-cpp.dylib` dynamically, so a `vycor-cpp` binary
+built against one needs that same Homebrew keg present at runtime. This is
+why the tap (whose formulas `depends_on "llvm@NN"`) is the primary supported
+macOS install path; a raw tarball works too but requires the matching
+`brew install llvm@NN` first. Out of scope for now: code signing/
+notarization (use `xattr -d com.apple.quarantine` on a downloaded tarball if
+Gatekeeper objects) and re-linking tarballs into fully self-contained
+binaries.
 
 ### Cutting a release
 
