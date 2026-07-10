@@ -21,3 +21,11 @@
 #define VYCOR_VERSION_MINOR @PROJECT_VERSION_MINOR@
 #define VYCOR_VERSION_PATCH @PROJECT_VERSION_PATCH@
 #define VYCOR_VERSION_STRING "@PROJECT_VERSION@"
+
+// The compiler used to build this binary -- distinct from the LLVM/Clang
+// version linked for the Tooling API. On macOS release builds this reads
+// "AppleClang" (CMake's id for Xcode's Clang) even though the Tooling API
+// comes from a separately-built Homebrew llvm@NN; the two are pinned
+// independently. See COMPATIBILITY.md "macOS runner and Apple Clang".
+#define VYCOR_HOST_COMPILER_ID "@CMAKE_CXX_COMPILER_ID@"
+#define VYCOR_HOST_COMPILER_VERSION "@CMAKE_CXX_COMPILER_VERSION@"
