@@ -297,12 +297,23 @@ apart when debugging a mixed-toolchain build.) The existing LLVM-version
 line above it (from LLVM's own `cl::opt` version printer) still reports the
 Tooling API's LLVM major, i.e. toolchain (2).
 
-**Not fully self-contained:** Homebrew's `llvm@NN` formulas link
-`libLLVM.dylib`/`libclang-cpp.dylib` dynamically, so a `vycor-cpp` binary
-built against one needs that same Homebrew keg present at runtime. This is
-why the tap (whose formulas `depends_on "llvm@NN"`) is the primary supported
-macOS install path; a raw tarball works too but requires the matching
-`brew install llvm@NN` first. Out of scope for now: code signing/
+**Not fully self-contained (both platforms):** Homebrew's `llvm@NN`
+formulas link `libLLVM.dylib`/`libclang-cpp.dylib` dynamically, so a
+`vycor-cpp` binary built against one needs that same Homebrew keg present
+at runtime. This is why the tap (whose formulas `depends_on "llvm@NN"`) is
+the primary supported macOS install path; a raw tarball works too but
+requires the matching `brew install llvm@NN` first.
+
+apt.llvm.org's packages have the identical shape on Linux: `ldd` on a
+shipped `vycor-cpp-vX.Y.Z-linux-x86_64-llvmNN.tar.gz` binary shows exactly
+one unresolved dependency, `libLLVM.so.NN.N` (verified against the v0.1.0
+llvm21 asset) — everything else resolves against ordinary system libs
+(`libstdc++`, `libc`, ...). A raw Linux tarball needs the matching
+`libllvmNN` package installed (`sudo ./llvm.sh NN` or `apt-get install
+libllvmNN` from apt.llvm.org) — lighter than the full `llvm-NN-dev` build
+dependency, since only the runtime `.so` is needed, not headers.
+
+Out of scope for now: code signing/
 notarization (use `xattr -d com.apple.quarantine` on a downloaded tarball if
 Gatekeeper objects) and re-linking tarballs into fully self-contained
 binaries.
