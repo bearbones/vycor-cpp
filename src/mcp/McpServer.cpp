@@ -25,10 +25,12 @@
 namespace vycor {
 
 McpServer::McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
+                     ChannelIndex &&channels,
                      std::vector<std::string> entryPoints,
                      McpBuildParams buildParams)
     : graph_(std::move(graph)), cfIndex_(std::move(cfIndex)),
-      oracle_(graph_, cfIndex_), entryPoints_(std::move(entryPoints)),
+      channels_(std::move(channels)), oracle_(graph_, cfIndex_),
+      entryPoints_(std::move(entryPoints)),
       buildParams_(std::move(buildParams)) {}
 
 McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
@@ -36,11 +38,13 @@ McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
   queryCache_.clear(); // graph is about to mutate
   r.edgesRemoved = graph_.removeTU(filePath);
   r.contextsRemoved = cfIndex_.removeTU(filePath);
+  channels_.removeTU(filePath);
 
   if (buildParams_.compDb) {
     bakeTU(graph_, cfIndex_, *buildParams_.compDb, filePath,
            buildParams_.collapsePaths, buildParams_.pchCache,
-           buildParams_.sysroot, buildParams_.lockCfg);
+           buildParams_.sysroot, buildParams_.lockCfg,
+           buildParams_.channelCfg, &channels_);
   }
 
   r.edgesAfter = graph_.edgeCount();
@@ -215,7 +219,8 @@ llvm::json::Value McpServer::handleToolsCall(
     return llvm::json::Value(std::move(result));
   }
 
-  McpToolContext ctx{graph_, oracle_, cfIndex_, entryPoints_, &queryCache_};
+  McpToolContext ctx{graph_,  oracle_,      cfIndex_,
+                    entryPoints_, &channels_, &queryCache_};
   return it->second(args, ctx);
 }
 

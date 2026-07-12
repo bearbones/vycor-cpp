@@ -129,6 +129,30 @@ struct Reader {
 // Section emitters
 // ----------------------------------------------------------------------------
 
+void emitChannelTypeSpec(std::string &out, const ChannelTypeSpec &spec) {
+  putLenStr(out, spec.qualifiedTypeName);
+  putU32(out, static_cast<uint32_t>(spec.produceMethods.size()));
+  for (const auto &m : spec.produceMethods)
+    putLenStr(out, m);
+  putU32(out, static_cast<uint32_t>(spec.consumeMethods.size()));
+  for (const auto &m : spec.consumeMethods)
+    putLenStr(out, m);
+  putLenStr(out, spec.category);
+}
+
+ChannelTypeSpec readChannelTypeSpec(Reader &r) {
+  ChannelTypeSpec spec;
+  spec.qualifiedTypeName = r.lenStr();
+  uint32_t n = r.count();
+  for (uint32_t i = 0; r.ok && i < n; ++i)
+    spec.produceMethods.push_back(r.lenStr());
+  n = r.count();
+  for (uint32_t i = 0; r.ok && i < n; ++i)
+    spec.consumeMethods.push_back(r.lenStr());
+  spec.category = r.lenStr();
+  return spec;
+}
+
 void emitMeta(std::string &out, const SnapshotMeta &meta) {
   putU32(out, static_cast<uint32_t>(meta.collapsePaths.size()));
   for (const auto &s : meta.collapsePaths)
@@ -137,6 +161,9 @@ void emitMeta(std::string &out, const SnapshotMeta &meta) {
   for (const auto &s : meta.lockAllowlist)
     putLenStr(out, s);
   putU8(out, meta.lockBuiltins ? 1 : 0);
+  putU32(out, static_cast<uint32_t>(meta.channelTypes.size()));
+  for (const auto &spec : meta.channelTypes)
+    emitChannelTypeSpec(out, spec);
   putU32(out, static_cast<uint32_t>(meta.files.size()));
   for (const auto &f : meta.files) {
     putLenStr(out, f.path);
@@ -153,6 +180,9 @@ bool readMeta(Reader &r, SnapshotMeta &meta) {
   for (uint32_t i = 0; r.ok && i < n; ++i)
     meta.lockAllowlist.push_back(r.lenStr());
   meta.lockBuiltins = r.u8() != 0;
+  n = r.count();
+  for (uint32_t i = 0; r.ok && i < n; ++i)
+    meta.channelTypes.push_back(readChannelTypeSpec(r));
   n = r.count();
   for (uint32_t i = 0; r.ok && i < n; ++i) {
     FileStamp fs;
@@ -188,7 +218,7 @@ bool readInternerTable(Reader &r, StringInterner &interner) {
 
 bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
                       const ControlFlowIndex &cfIndex,
-                      const SnapshotMeta &meta) {
+                      const SnapshotMeta &meta, const ChannelIndex &channels) {
   using SId = StringInterner::Id;
   std::string data;
 
@@ -365,6 +395,52 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       putU32(data, se.raiiSet);
       putU8(data, static_cast<uint8_t>(se.callerNoexcept));
       putU8(data, se.insideCatchBlock ? 1 : 0);
+    }
+  }
+
+  // Channel index (v7): not interner-backed by design (ChannelIndex.h), so
+  // records are plain length-prefixed strings rather than raw ids. Each
+  // live site carries its refs count and the list of TU paths currently
+  // contributing to it — same shape as CallGraph's edge/tuEdges_
+  // serialization — so a loaded ChannelIndex's removeTU keeps working
+  // correctly across several contributing TUs after a warm start.
+  {
+    std::lock_guard<std::mutex> lock(channels.mutex_);
+
+    std::unordered_map<size_t, std::vector<std::string>> siteTus;
+    for (const auto &[tuPath, idxs] : channels.byTu_)
+      for (size_t idx : idxs)
+        if (channels.sites_[idx].refs != 0)
+          siteTus[idx].push_back(tuPath);
+
+    putU32(data, static_cast<uint32_t>(channels.liveCount_));
+    for (size_t i = 0; i < channels.sites_.size(); ++i) {
+      const auto &se = channels.sites_[i];
+      if (!se.live)
+        continue;
+      putLenStr(data, se.site.channelId);
+      putLenStr(data, se.site.channelTypeName);
+      putLenStr(data, se.site.category);
+      putU8(data, static_cast<uint8_t>(se.site.op));
+      putLenStr(data, se.site.siteFunctionUsr);
+      putLenStr(data, se.site.siteFunctionDisplay);
+      putLenStr(data, se.site.callSite);
+      putU32(data, se.refs);
+      putU32(data, static_cast<uint32_t>(se.site.enclosingGuards.size()));
+      for (const auto &g : se.site.enclosingGuards) {
+        putLenStr(data, g.conditionText);
+        putLenStr(data, g.location);
+        putU8(data, g.inTrueBranch ? 1 : 0);
+        putU8(data, g.isAssertion ? 1 : 0);
+      }
+      auto tit = siteTus.find(i);
+      if (tit == siteTus.end()) {
+        putU32(data, 0);
+      } else {
+        putU32(data, static_cast<uint32_t>(tit->second.size()));
+        for (const auto &tu : tit->second)
+          putLenStr(data, tu);
+      }
     }
   }
 
@@ -676,6 +752,64 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path) {
 
   if (!r.ok)
     return std::nullopt;
+
+  {
+    ChannelIndex &ch = out.channels;
+    std::lock_guard<std::mutex> lock(ch.mutex_);
+    uint32_t count = r.count();
+    for (uint32_t i = 0; r.ok && i < count; ++i) {
+      ChannelSite site;
+      site.channelId = r.lenStr();
+      site.channelTypeName = r.lenStr();
+      site.category = r.lenStr();
+      site.op = static_cast<ChannelOperation>(r.u8());
+      site.siteFunctionUsr = r.lenStr();
+      site.siteFunctionDisplay = r.lenStr();
+      site.callSite = r.lenStr();
+      uint32_t refs = r.u32();
+      uint32_t guardCount = r.count();
+      for (uint32_t g = 0; r.ok && g < guardCount; ++g) {
+        ConditionalGuard guard;
+        guard.conditionText = r.lenStr();
+        guard.location = r.lenStr();
+        guard.inTrueBranch = r.u8() != 0;
+        guard.isAssertion = r.u8() != 0;
+        site.enclosingGuards.push_back(std::move(guard));
+      }
+      uint32_t tuCount = r.count();
+      std::vector<std::string> tus;
+      tus.reserve(tuCount);
+      for (uint32_t t = 0; r.ok && t < tuCount; ++t)
+        tus.push_back(r.lenStr());
+      if (!r.ok || refs == 0) {
+        r.ok = false;
+        break;
+      }
+      site.tuPath = tus.empty() ? std::string() : tus.front();
+
+      size_t idx = ch.sites_.size();
+      ChannelIndex::SiteKey key{site.channelId, site.callSite,
+                                site.siteFunctionUsr, site.op};
+      std::string channelId = site.channelId;
+      std::string funcUsr = site.siteFunctionUsr;
+      std::string funcDisplay = site.siteFunctionDisplay;
+      bool differentDisplay = funcDisplay != funcUsr;
+      ch.sites_.push_back(
+          ChannelIndex::StoredSite{std::move(site), refs, true});
+      ch.index_.emplace(key, idx);
+      ch.byChannel_[channelId].push_back(idx);
+      ch.byFunctionUsr_[funcUsr].push_back(idx);
+      if (differentDisplay)
+        ch.byFunctionDisplay_[funcDisplay].push_back(idx);
+      for (const auto &tu : tus)
+        ch.byTu_[tu].push_back(idx);
+      ++ch.liveCount_;
+    }
+  }
+
+  if (!r.ok)
+    return std::nullopt;
+
   return out;
 }
 

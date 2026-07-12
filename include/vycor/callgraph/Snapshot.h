@@ -16,6 +16,7 @@
 #pragma once
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 
 #include <cstdint>
@@ -58,6 +59,9 @@ struct SnapshotMeta {
   std::vector<std::string> collapsePaths;
   std::vector<std::string> lockAllowlist;
   bool lockBuiltins = true;
+  // Channel type registrations (--channel-types-json). A mismatch
+  // invalidates the snapshot for the same reason lockAllowlist does.
+  std::vector<ChannelTypeSpec> channelTypes;
 
   // Stamps of every TU baked into the snapshot.
   std::vector<FileStamp> files;
@@ -66,6 +70,7 @@ struct SnapshotMeta {
 struct SnapshotData {
   CallGraph graph;
   ControlFlowIndex cfIndex;
+  ChannelIndex channels;
   SnapshotMeta meta;
 };
 
@@ -87,12 +92,21 @@ public:
   ///     the usr key id; control-flow context records carry caller/callee
   ///     display ids next to the usr ids. The by-name indexes (CallGraph::
   ///     byName_, ControlFlowIndex display maps) are rebuilt on load.
-  static constexpr uint32_t kFormatVersion = 6;
+  /// v7: channel/data-flow tracking — ChannelIndex sites (with refs and
+  ///     per-TU contributor lists, same shape as CallGraph edges) serialized
+  ///     alongside graph/cfIndex. Not interner-backed (ChannelIndex has no
+  ///     StringInterner by design — see ChannelIndex.h); records are plain
+  ///     length-prefixed strings.
+  static constexpr uint32_t kFormatVersion = 7;
 
-  /// Serialize graph + cfIndex + meta to `path` (atomically, via a temp file
-  /// and rename). Returns false on I/O failure.
+  /// Serialize graph + cfIndex + channels + meta to `path` (atomically, via
+  /// a temp file and rename). `channels` defaults to empty so callers that
+  /// don't use --channel-types-json (or the --isolate-workers worker-shard
+  /// path, which doesn't support channel tracking yet) are unaffected.
+  /// Returns false on I/O failure.
   static bool save(const std::string &path, const CallGraph &graph,
-                   const ControlFlowIndex &cfIndex, const SnapshotMeta &meta);
+                   const ControlFlowIndex &cfIndex, const SnapshotMeta &meta,
+                   const ChannelIndex &channels = ChannelIndex());
 
   /// Load a snapshot. Returns nullopt if the file is missing, has a
   /// different format version, or fails to decode.

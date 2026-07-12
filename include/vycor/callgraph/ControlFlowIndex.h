@@ -17,6 +17,8 @@
 
 #include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ChannelIndex.h"
+#include "vycor/callgraph/ConditionalGuard.h"
 #include "vycor/callgraph/StringInterner.h"
 
 #include <cstdint>
@@ -92,16 +94,8 @@ enum class NoexceptSpec {
   Unknown        // Dependent or unresolved
 };
 
-// ============================================================================
-// Conditional guard context
-// ============================================================================
-
-struct ConditionalGuard {
-  std::string conditionText; // Source text of the condition
-  std::string location;      // file:line:col of the if/assert
-  bool inTrueBranch = true;  // true = if-branch, false = else-branch
-  bool isAssertion = false;  // assert(), DCHECK(), etc.
-};
+// ConditionalGuard now lives in its own header (ConditionalGuard.h) so
+// ChannelIndex can share it without depending on the rest of this file.
 
 // ============================================================================
 // Per-call-site record
@@ -343,6 +337,9 @@ class PchCache;
 // skipped (same filtering as buildCallGraph).
 // threadCount=0 uses hardware_concurrency; threadCount=1 forces serial.
 // pchCache, if non-null, provides compiled PCH binaries for faster parsing.
+// channelCfg/channelsOut are opt-in (see ChannelIndex.h): channel-site
+// matching only runs when channelsOut is non-null, so existing callers that
+// don't pass it pay zero extra traversal cost.
 ControlFlowIndex
 buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
                       const std::vector<std::string> &files,
@@ -351,7 +348,9 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
                       unsigned threadCount = 0,
                       const PchCache *pchCache = nullptr,
                       const std::string &sysroot = "",
-                      const LockTypeConfig &lockCfg = {});
+                      const LockTypeConfig &lockCfg = {},
+                      const ChannelTypeConfig &channelCfg = {},
+                      ChannelIndex *channelsOut = nullptr);
 
 // Index a single TU into an existing ControlFlowIndex (Phase 3).
 // Call cfIndex.removeTU(file) first when re-indexing a changed file.
@@ -362,7 +361,9 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const std::vector<std::string> &collapsePaths = {},
                         const PchCache *pchCache = nullptr,
                         const std::string &sysroot = "",
-                        const LockTypeConfig &lockCfg = {});
+                        const LockTypeConfig &lockCfg = {},
+                        const ChannelTypeConfig &channelCfg = {},
+                        ChannelIndex *channelsOut = nullptr);
 
 // ============================================================================
 // Combined bake — ONE frontend parse per TU
@@ -371,6 +372,7 @@ void indexTUControlFlow(ControlFlowIndex &index,
 struct BakedIndexes {
   CallGraph graph;
   ControlFlowIndex cfIndex;
+  ChannelIndex channels;
 };
 
 // Build both indexes in a single frontend parse per TU: the node/hierarchy
@@ -386,6 +388,8 @@ struct BakedIndexes {
 // When `preTu` is non-null it is called with the TU path immediately before
 // that TU's frontend parse starts (worker mode prints its WORKER-TU stderr
 // marker through this); under a parallel bake it may be called concurrently.
+// channelCfg is opt-in: an empty (default) config means out.channels stays
+// empty and the AST visitor does no channel-matching work at all.
 BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const std::vector<std::string> &files,
                          const std::vector<std::string> &collapsePaths = {},
@@ -395,17 +399,21 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const LockTypeConfig &lockCfg = {},
                          BuildStats *stats = nullptr,
                          std::function<void(const std::string &)> preTu =
-                             nullptr);
+                             nullptr,
+                         const ChannelTypeConfig &channelCfg = {});
 
 // Single-TU variant for incremental reindex (one parse). Call
 // graph.removeTU(file) and cfIndex.removeTU(file) first when re-indexing a
-// changed file.
+// changed file. channelsOut, if non-null, gets channel.removeTU(file) called
+// by the caller first too, for the same reason.
 void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
             const clang::tooling::CompilationDatabase &compDb,
             const std::string &file,
             const std::vector<std::string> &collapsePaths = {},
             const PchCache *pchCache = nullptr,
             const std::string &sysroot = "",
-            const LockTypeConfig &lockCfg = {});
+            const LockTypeConfig &lockCfg = {},
+            const ChannelTypeConfig &channelCfg = {},
+            ChannelIndex *channelsOut = nullptr);
 
 } // namespace vycor

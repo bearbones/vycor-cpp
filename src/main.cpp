@@ -38,12 +38,72 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "vycor/compat/ToolAdjusters.h"
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
+
+// ---------------------------------------------------------------------------
+// --channel-types-json parsing
+// ---------------------------------------------------------------------------
+
+// Parses a JSON array of channel type registrations:
+//   [{"type": "Queue", "produce": ["push"], "consume": ["pop"],
+//     "category": "queue"}, ...]
+// "type" must be the canonical type name WITHOUT the struct/class keyword
+// (see ChannelIndex.h). Returns false (and prints a diagnostic) on any
+// malformed entry; the caller should treat that as a fatal CLI error, same
+// as a bad --rules-json would be for morph.
+static bool parseChannelTypesJson(const std::string &path,
+                                  vycor::ChannelTypeConfig &outCfg) {
+  auto bufOrErr = llvm::MemoryBuffer::getFile(path);
+  if (!bufOrErr) {
+    llvm::errs() << "channel-types-json: cannot read " << path << ": "
+                 << bufOrErr.getError().message() << "\n";
+    return false;
+  }
+  auto jsonOrErr = llvm::json::parse(bufOrErr.get()->getBuffer());
+  if (!jsonOrErr) {
+    llvm::errs() << "channel-types-json: parse error in " << path << ": "
+                 << llvm::toString(jsonOrErr.takeError()) << "\n";
+    return false;
+  }
+  auto *arr = jsonOrErr->getAsArray();
+  if (!arr) {
+    llvm::errs() << "channel-types-json: " << path
+                 << " must contain a top-level JSON array\n";
+    return false;
+  }
+  for (const auto &entry : *arr) {
+    auto *obj = entry.getAsObject();
+    if (!obj) {
+      llvm::errs() << "channel-types-json: each entry must be an object\n";
+      return false;
+    }
+    vycor::ChannelTypeSpec spec;
+    if (auto type = obj->getString("type")) {
+      spec.qualifiedTypeName = type->str();
+    } else {
+      llvm::errs() << "channel-types-json: entry missing required 'type'\n";
+      return false;
+    }
+    if (auto *produce = obj->getArray("produce"))
+      for (const auto &m : *produce)
+        if (auto s = m.getAsString())
+          spec.produceMethods.push_back(s->str());
+    if (auto *consume = obj->getArray("consume"))
+      for (const auto &m : *consume)
+        if (auto s = m.getAsString())
+          spec.consumeMethods.push_back(s->str());
+    if (auto category = obj->getString("category"))
+      spec.category = category->str();
+    outCfg.registeredTypes.push_back(std::move(spec));
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Subcommands
@@ -289,6 +349,15 @@ static llvm::cl::opt<std::string>
         llvm::cl::value_desc("dir"),
         llvm::cl::sub(PrismCmd));
 
+static llvm::cl::opt<std::string>
+    PrismChannelTypesJson("channel-types-json",
+        llvm::cl::desc("JSON file registering channel/queue types to trace "
+                       "producer/consumer call sites for (see "
+                       "ChannelIndex.h for the schema). --mode dump "
+                       "includes channel records when set."),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(PrismCmd));
+
 // ---------------------------------------------------------------------------
 // megascope options
 // ---------------------------------------------------------------------------
@@ -353,6 +422,16 @@ static llvm::cl::list<std::string>
     McpLockTypes("lock-types",
         llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
         llvm::cl::value_desc("qualified-name"),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<std::string>
+    McpChannelTypesJson("channel-types-json",
+        llvm::cl::desc("JSON file registering channel/queue types to trace "
+                       "producer/consumer call sites for (see "
+                       "ChannelIndex.h for the schema). Only populated on a "
+                       "fresh full build — not supported yet with "
+                       "--snapshot warm start or --isolate-workers."),
+        llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
@@ -583,14 +662,49 @@ int main(int argc, const char **argv) {
     vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(PrismLockTypes.begin(),
                                  PrismLockTypes.end());
+    vycor::ChannelTypeConfig channelCfg;
+    if (!PrismChannelTypesJson.empty() &&
+        !parseChannelTypesJson(PrismChannelTypesJson, channelCfg)) {
+      return 1;
+    }
     auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
-                                    PrismThreads, pchPtr, sysroot, lockCfg);
+                                    PrismThreads, pchPtr, sysroot, lockCfg,
+                                    nullptr, nullptr, channelCfg);
     auto graph = std::move(baked.graph);
     auto cfIndex = std::move(baked.cfIndex);
+    auto channels = std::move(baked.channels);
 
     // Dump mode: serialize the full index as JSON.
     if (PrismModeOpt == PrismDump) {
       llvm::outs() << vycor::ControlFlowOracle::dumpIndexToJson(cfIndex);
+      if (!channelCfg.registeredTypes.empty()) {
+        llvm::json::Array sites;
+        for (const auto &s : channels.allSites()) {
+          llvm::json::Array guards;
+          for (const auto &g : s.enclosingGuards) {
+            guards.push_back(llvm::json::Object{
+                {"conditionText", g.conditionText},
+                {"location", g.location},
+                {"inTrueBranch", g.inTrueBranch},
+                {"isAssertion", g.isAssertion}});
+          }
+          sites.push_back(llvm::json::Object{
+              {"channelId", s.channelId},
+              {"channelType", s.channelTypeName},
+              {"category", s.category},
+              {"operation",
+               s.op == vycor::ChannelOperation::Produce ? "produce"
+                                                        : "consume"},
+              {"function", s.siteFunctionDisplay},
+              {"functionUsr", s.siteFunctionUsr},
+              {"callSite", s.callSite},
+              {"guards", std::move(guards)}});
+        }
+        llvm::outs() << llvm::json::Value(llvm::json::Object{
+            {"channelSiteCount", static_cast<int64_t>(sites.size())},
+            {"channelSites", std::move(sites)}})
+                     << "\n";
+      }
       return 0;
     }
 
@@ -763,6 +877,17 @@ int main(int argc, const char **argv) {
 
     vycor::LockTypeConfig lockCfg;
     lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
+    vycor::ChannelTypeConfig channelCfg;
+    if (!McpChannelTypesJson.empty() &&
+        !parseChannelTypesJson(McpChannelTypesJson, channelCfg)) {
+      return 1;
+    }
+    if (!channelCfg.registeredTypes.empty() && McpIsolateWorkers) {
+      llvm::errs()
+          << "megascope: WARNING: --channel-types-json is not yet supported "
+             "with --isolate-workers — channel tracking will be empty "
+             "unless this run does a fresh non-isolated full build\n";
+    }
 
     // ---- worker mode (spawned by an --isolate-workers parent) ------------
     // Bake the batch with the existing in-process pipeline (crash guard
@@ -797,6 +922,7 @@ int main(int argc, const char **argv) {
 
     vycor::CallGraph graph;
     vycor::ControlFlowIndex cfIndex;
+    vycor::ChannelIndex channels;
     bool needFullBuild = true;
 
     // Efficiency stats, dumped to --stats-json once the server is ready.
@@ -827,13 +953,15 @@ int main(int argc, const char **argv) {
         bool configMatch =
             snap->meta.collapsePaths == collapsePaths &&
             snap->meta.lockAllowlist == lockCfg.userAllowlist &&
-            snap->meta.lockBuiltins == lockCfg.useBuiltins;
+            snap->meta.lockBuiltins == lockCfg.useBuiltins &&
+            snap->meta.channelTypes == channelCfg.registeredTypes;
         if (!configMatch) {
           llvm::errs() << "megascope: snapshot build configuration differs "
                           "— full rebuild\n";
         } else {
           graph = std::move(snap->graph);
           cfIndex = std::move(snap->cfIndex);
+          channels = std::move(snap->channels);
           needFullBuild = false;
           snapLoaded = true;
           auto refreshStart = StatsClock::now();
@@ -848,6 +976,7 @@ int main(int argc, const char **argv) {
             if (!current.count(fs.path)) {
               graph.removeTU(fs.path);
               cfIndex.removeTU(fs.path);
+              channels.removeTU(fs.path);
               ++dropped;
             }
           }
@@ -858,9 +987,11 @@ int main(int argc, const char **argv) {
             if (it != baked.end()) {
               graph.removeTU(stamp.path);
               cfIndex.removeTU(stamp.path);
+              channels.removeTU(stamp.path);
             }
             vycor::bakeTU(graph, cfIndex, *compDb, stamp.path,
-                          collapsePaths, pchPtr, sysroot, lockCfg);
+                          collapsePaths, pchPtr, sysroot, lockCfg,
+                          channelCfg, &channels);
             ++refreshed;
           }
           warmRefreshMs = msSince(refreshStart);
@@ -906,11 +1037,16 @@ int main(int argc, const char **argv) {
                                     &buildStats);
       } else {
         baked = vycor::bakeIndexes(*compDb, files, collapsePaths, McpThreads,
-                                   pchPtr, sysroot, lockCfg, &buildStats);
+                                   pchPtr, sysroot, lockCfg, &buildStats,
+                                   nullptr, channelCfg);
       }
       bakeMs = msSince(bakeStart);
       graph = std::move(baked.graph);
       cfIndex = std::move(baked.cfIndex);
+      // Empty when this build went through bakeIsolated (--isolate-workers
+      // doesn't thread channelCfg through the shard/worker protocol yet —
+      // see the warning printed above).
+      channels = std::move(baked.channels);
       llvm::errs() << "megascope: indexes built ("
                    << graph.nodeCount() << " nodes, "
                    << graph.edgeCount() << " edges, "
@@ -924,9 +1060,11 @@ int main(int argc, const char **argv) {
       meta.collapsePaths = collapsePaths;
       meta.lockAllowlist = lockCfg.userAllowlist;
       meta.lockBuiltins = lockCfg.useBuiltins;
+      meta.channelTypes = channelCfg.registeredTypes;
       meta.files = std::move(currentStamps);
       auto snapSaveStart = StatsClock::now();
-      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta)) {
+      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta,
+                                  channels)) {
         snapSaveMs = msSince(snapSaveStart);
         llvm::errs() << "megascope: snapshot saved to " << McpSnapshot << "\n";
       } else {
@@ -1040,9 +1178,10 @@ int main(int argc, const char **argv) {
     buildParams.pchCache = pchPtr;
     buildParams.sysroot = sysroot;
     buildParams.lockCfg = std::move(lockCfg);
+    buildParams.channelCfg = std::move(channelCfg);
 
     vycor::McpServer server(std::move(graph), std::move(cfIndex),
-                                 std::move(entryPoints),
+                                 std::move(channels), std::move(entryPoints),
                                  std::move(buildParams));
     return server.run();
   }

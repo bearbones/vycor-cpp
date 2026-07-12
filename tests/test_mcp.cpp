@@ -417,9 +417,9 @@ TEST_CASE("readRequest parses newline-delimited messages (MCP stdio framing)",
 // Tool registration tests
 // ============================================================================
 
-TEST_CASE("getRegisteredTools returns all 17 tools", "[mcp][tools]") {
+TEST_CASE("getRegisteredTools returns all 21 tools", "[mcp][tools]") {
   auto tools = getRegisteredTools();
-  CHECK(tools.size() == 17);
+  CHECK(tools.size() == 21);
 
   // Verify tool names.
   std::set<std::string> names;
@@ -443,6 +443,10 @@ TEST_CASE("getRegisteredTools returns all 17 tools", "[mcp][tools]") {
   CHECK(names.count("list_concurrency_entry_points") == 1);
   CHECK(names.count("reindex_tu") == 1);
   CHECK(names.count("search_functions") == 1);
+  CHECK(names.count("list_channels") == 1);
+  CHECK(names.count("query_channel") == 1);
+  CHECK(names.count("query_channels_for_function") == 1);
+  CHECK(names.count("explain_ordering") == 1);
 }
 
 // ============================================================================

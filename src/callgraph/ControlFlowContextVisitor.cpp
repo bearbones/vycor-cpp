@@ -115,6 +115,7 @@ void bakeRun(const clang::tooling::CompilationDatabase &compDb,
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <string>
@@ -207,6 +208,10 @@ public:
   void setASTContext(clang::ASTContext *ctx) { ctx_ = ctx; }
   void setCollapseFilter(const CollapseFilter *filter) { collapse_ = filter; }
   void setLockConfig(const LockTypeConfig *cfg) { lockCfg_ = cfg; }
+  void setChannelConfig(const ChannelTypeConfig *cfg, ChannelIndex *index) {
+    channelConfig_ = cfg;
+    channelIndex_ = index;
+  }
 
   // -- Function traversal (push/pop funcStack_) ----------------------------
 
@@ -333,6 +338,9 @@ public:
     if (!isInUserCode(expr->getBeginLoc()))
       return true;
 
+    if (auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr))
+      maybeRecordChannelSite(memberCall, caller);
+
     Ident calleeId;
     if (auto *callee = expr->getDirectCallee()) {
       calleeId = usrs_.identFor(callee);
@@ -406,6 +414,8 @@ private:
   clang::ASTContext *ctx_ = nullptr;
   const CollapseFilter *collapse_ = nullptr;
   const LockTypeConfig *lockCfg_ = nullptr;
+  const ChannelTypeConfig *channelConfig_ = nullptr;
+  ChannelIndex *channelIndex_ = nullptr;
 
   std::vector<clang::FunctionDecl *> funcStack_;
   // Per-scope stack of RAII locals declared inside the current lexical
@@ -549,6 +559,112 @@ private:
            name.find("ASSERT") != std::string::npos;
   }
 
+  // Innermost first: enclosing if/else guards, then in-scope assertions.
+  // Shared by buildContext (CallSiteContext) and maybeRecordChannelSite
+  // (ChannelSite) — both attach the same guard evidence to their call site.
+  std::vector<ConditionalGuard> snapshotGuards() const {
+    std::vector<ConditionalGuard> guards;
+    for (auto it = guardStack_.rbegin(); it != guardStack_.rend(); ++it) {
+      ConditionalGuard guard;
+      guard.conditionText = it->conditionText;
+      guard.location = it->location;
+      guard.inTrueBranch = it->inTrueBranch;
+      guard.isAssertion = it->isAssertion;
+      guards.push_back(std::move(guard));
+    }
+    for (const auto &ag : assertionGuards_) {
+      ConditionalGuard guard;
+      guard.conditionText = ag.conditionText;
+      guard.location = ag.location;
+      guard.inTrueBranch = true;
+      guard.isAssertion = true;
+      guards.push_back(std::move(guard));
+    }
+    return guards;
+  }
+
+  // Resolve a channel call's receiver to the stable FieldDecl/VarDecl
+  // backing it. Local variables and runtime-conditional receivers (e.g. a
+  // pointer chosen via a ternary, or a strategy object picked once and
+  // reused) are not resolved in V1 — the motivating use case (a guard-gated
+  // call site, or two entirely distinct producer functions) doesn't need it;
+  // see the design note in ChannelIndex.h.
+  std::optional<Ident> resolveChannelDecl(clang::Expr *objExpr) const {
+    objExpr = objExpr->IgnoreParenImpCasts();
+    if (auto *me = llvm::dyn_cast<clang::MemberExpr>(objExpr)) {
+      if (auto *field = llvm::dyn_cast<clang::FieldDecl>(me->getMemberDecl()))
+        return usrs_.identFor(field);
+      return std::nullopt;
+    }
+    if (auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(objExpr)) {
+      if (auto *var = llvm::dyn_cast<clang::VarDecl>(dre->getDecl()))
+        return usrs_.identFor(var);
+    }
+    return std::nullopt;
+  }
+
+  // Detect a call to a registered channel type's produce/consume method and
+  // record a ChannelSite. No-op when no ChannelTypeConfig is registered (the
+  // opt-in default), so callers who don't use this feature pay nothing
+  // beyond the isa<> check.
+  void maybeRecordChannelSite(clang::CXXMemberCallExpr *memberCall,
+                              const Ident &caller) {
+    if (!channelConfig_ || !channelIndex_)
+      return;
+    auto *methodDecl = memberCall->getMethodDecl();
+    if (!methodDecl)
+      return;
+    std::string methodName = methodDecl->getNameAsString();
+
+    auto *objExpr = memberCall->getImplicitObjectArgument();
+    if (!objExpr)
+      return;
+    clang::QualType objType = objExpr->IgnoreParenImpCasts()->getType();
+    if (objType->isPointerType())
+      objType = objType->getPointeeType();
+    // SuppressTagKeyword: registered specs name types as "Queue", not
+    // "struct Queue" — getAsString()'s default policy prints the elaborated
+    // tag keyword, which would otherwise force every ChannelTypeSpec author
+    // to know that Clang quirk.
+    clang::PrintingPolicy policy(ctx_ ? ctx_->getLangOpts()
+                                      : clang::LangOptions());
+    policy.SuppressTagKeyword = true;
+    std::string typeName =
+        objType.getCanonicalType().getUnqualifiedType().getAsString(policy);
+
+    for (const auto &spec : channelConfig_->registeredTypes) {
+      if (spec.qualifiedTypeName != typeName)
+        continue;
+      bool isProduce = std::find(spec.produceMethods.begin(),
+                                 spec.produceMethods.end(),
+                                 methodName) != spec.produceMethods.end();
+      bool isConsume =
+          !isProduce &&
+          std::find(spec.consumeMethods.begin(), spec.consumeMethods.end(),
+                    methodName) != spec.consumeMethods.end();
+      if (!isProduce && !isConsume)
+        continue;
+
+      auto channelIdent = resolveChannelDecl(objExpr);
+      if (!channelIdent)
+        return; // unresolvable receiver — see resolveChannelDecl's note
+
+      ChannelSite site;
+      site.channelId = channelIdent->usr;
+      site.channelTypeName = spec.qualifiedTypeName;
+      site.category = spec.category;
+      site.op = isProduce ? ChannelOperation::Produce
+                          : ChannelOperation::Consume;
+      site.siteFunctionUsr = caller.usr;
+      site.siteFunctionDisplay = caller.display;
+      site.callSite = formatLocation(memberCall->getBeginLoc());
+      site.enclosingGuards = snapshotGuards();
+      site.tuPath = tuPath_;
+      channelIndex_->addSite(std::move(site));
+      return;
+    }
+  }
+
   CallSiteContext buildContext(const Ident &caller, const Ident &callee,
                                clang::SourceLocation callLoc) const {
     CallSiteContext ctx;
@@ -570,25 +686,7 @@ private:
       ctx.enclosingTryCatches.push_back(std::move(scope));
     }
 
-    // Snapshot conditional guards (innermost first = reverse of stack).
-    for (auto it = guardStack_.rbegin(); it != guardStack_.rend(); ++it) {
-      ConditionalGuard guard;
-      guard.conditionText = it->conditionText;
-      guard.location = it->location;
-      guard.inTrueBranch = it->inTrueBranch;
-      guard.isAssertion = it->isAssertion;
-      ctx.enclosingGuards.push_back(std::move(guard));
-    }
-
-    // Add any assertion guards seen in the current function scope.
-    for (const auto &ag : assertionGuards_) {
-      ConditionalGuard guard;
-      guard.conditionText = ag.conditionText;
-      guard.location = ag.location;
-      guard.inTrueBranch = true;
-      guard.isAssertion = true;
-      ctx.enclosingGuards.push_back(std::move(guard));
-    }
+    ctx.enclosingGuards = snapshotGuards();
 
     // Extract noexcept spec of the caller.
     if (!funcStack_.empty()) {
@@ -617,10 +715,13 @@ public:
                              clang::SourceManager &sm,
                              const CollapseFilter *collapse,
                              const LockTypeConfig *lockCfg,
+                             const ChannelTypeConfig *channelCfg,
+                             ChannelIndex *channelIndex,
                              const std::string &tuPath)
       : visitor_(index, graph, sm, tuPath) {
     visitor_.setCollapseFilter(collapse);
     visitor_.setLockConfig(lockCfg);
+    visitor_.setChannelConfig(channelCfg, channelIndex);
   }
 
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
@@ -637,14 +738,18 @@ public:
   ControlFlowContextAction(ControlFlowIndex &index, const CallGraph &graph,
                             const CollapseFilter *collapse,
                             const LockTypeConfig *lockCfg,
+                            const ChannelTypeConfig *channelCfg,
+                            ChannelIndex *channelIndex,
                             const std::string &tuPath)
       : index_(index), graph_(graph), collapse_(collapse),
-        lockCfg_(lockCfg), tuPath_(tuPath) {}
+        lockCfg_(lockCfg), channelCfg_(channelCfg),
+        channelIndex_(channelIndex), tuPath_(tuPath) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
     return std::make_unique<ControlFlowContextConsumer>(
-        index_, graph_, ci.getSourceManager(), collapse_, lockCfg_, tuPath_);
+        index_, graph_, ci.getSourceManager(), collapse_, lockCfg_,
+        channelCfg_, channelIndex_, tuPath_);
   }
 
 private:
@@ -652,6 +757,8 @@ private:
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  const ChannelTypeConfig *channelCfg_;
+  ChannelIndex *channelIndex_;
   std::string tuPath_;
 };
 
@@ -661,14 +768,17 @@ public:
   ControlFlowContextFactory(ControlFlowIndex &index, const CallGraph &graph,
                              const CollapseFilter *collapse,
                              const LockTypeConfig *lockCfg,
+                             const ChannelTypeConfig *channelCfg = nullptr,
+                             ChannelIndex *channelIndex = nullptr,
                              const std::string &tuPath = "")
       : index_(index), graph_(graph), collapse_(collapse),
-        lockCfg_(lockCfg), tuPath_(tuPath) {}
+        lockCfg_(lockCfg), channelCfg_(channelCfg),
+        channelIndex_(channelIndex), tuPath_(tuPath) {}
 
   std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<ControlFlowContextAction>(index_, graph_,
-                                                       collapse_, lockCfg_,
-                                                       tuPath_);
+    return std::make_unique<ControlFlowContextAction>(
+        index_, graph_, collapse_, lockCfg_, channelCfg_, channelIndex_,
+        tuPath_);
   }
 
 private:
@@ -676,6 +786,8 @@ private:
   const CallGraph &graph_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  const ChannelTypeConfig *channelCfg_;
+  ChannelIndex *channelIndex_;
   std::string tuPath_;
 };
 
@@ -693,12 +805,15 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
                       unsigned threadCount,
                       const PchCache *pchCache,
                       const std::string &sysroot,
-                      const LockTypeConfig &lockCfg) {
+                      const LockTypeConfig &lockCfg,
+                      const ChannelTypeConfig &channelCfg,
+                      ChannelIndex *channelsOut) {
   ControlFlowIndex index;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
   const LockTypeConfig *lockCfgPtr = &lockCfg;
+  const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
@@ -715,10 +830,11 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
         llvm::hardware_concurrency(threadCount));
 #endif
     for (const auto &file : files) {
-      pool.async([&compDb, &index, &graph, collapsePtr, lockCfgPtr, pchCache,
-                  &sysroot, file]() {
+      pool.async([&compDb, &index, &graph, collapsePtr, lockCfgPtr,
+                  channelCfgPtr, channelsOut, pchCache, &sysroot, file]() {
         ControlFlowContextFactory factory(index, graph, collapsePtr,
-                                          lockCfgPtr, file);
+                                          lockCfgPtr, channelCfgPtr,
+                                          channelsOut, file);
         runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
       });
     }
@@ -726,7 +842,7 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
   } else {
     for (const auto &file : files) {
       ControlFlowContextFactory factory(index, graph, collapsePtr, lockCfgPtr,
-                                        file);
+                                        channelCfgPtr, channelsOut, file);
       runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
     }
   }
@@ -748,17 +864,20 @@ void indexTUControlFlow(ControlFlowIndex &index,
                         const std::vector<std::string> &collapsePaths,
                         const PchCache *pchCache,
                         const std::string &sysroot,
-                        const LockTypeConfig &lockCfg) {
+                        const LockTypeConfig &lockCfg,
+                        const ChannelTypeConfig &channelCfg,
+                        ChannelIndex *channelsOut) {
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
+  const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
   g_cfCrashCount.store(0, std::memory_order_relaxed);
 
   ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg,
-                                    file);
+                                    channelCfgPtr, channelsOut, file);
   runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
 
   std::signal(SIGSEGV, prevSegv);
@@ -783,6 +902,8 @@ public:
                              clang::SourceManager &sm,
                              const CollapseFilter *collapse,
                              const LockTypeConfig *lockCfg,
+                             const ChannelTypeConfig *channelCfg,
+                             ChannelIndex *channelIndex,
                              const std::string &tuPath)
       : indexerVisitor_(graph, sm, tuPath),
         edgeVisitor_(graph, sm, tuPath),
@@ -790,6 +911,7 @@ public:
     edgeVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setLockConfig(lockCfg);
+    cfVisitor_.setChannelConfig(channelCfg, channelIndex);
   }
 
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
@@ -812,14 +934,18 @@ public:
   BakeEdgeAndContextAction(CallGraph &graph, ControlFlowIndex &index,
                            const CollapseFilter *collapse,
                            const LockTypeConfig *lockCfg,
+                           const ChannelTypeConfig *channelCfg,
+                           ChannelIndex *channelIndex,
                            const std::string &tuPath)
       : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
+        channelCfg_(channelCfg), channelIndex_(channelIndex),
         tuPath_(tuPath) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
     return std::make_unique<BakeEdgeAndContextConsumer>(
-        graph_, index_, ci.getSourceManager(), collapse_, lockCfg_, tuPath_);
+        graph_, index_, ci.getSourceManager(), collapse_, lockCfg_,
+        channelCfg_, channelIndex_, tuPath_);
   }
 
 private:
@@ -827,6 +953,8 @@ private:
   ControlFlowIndex &index_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  const ChannelTypeConfig *channelCfg_;
+  ChannelIndex *channelIndex_;
   std::string tuPath_;
 };
 
@@ -835,14 +963,17 @@ public:
   BakeEdgeAndContextFactory(CallGraph &graph, ControlFlowIndex &index,
                             const CollapseFilter *collapse,
                             const LockTypeConfig *lockCfg,
+                            const ChannelTypeConfig *channelCfg,
+                            ChannelIndex *channelIndex,
                             const std::string &tuPath)
       : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
+        channelCfg_(channelCfg), channelIndex_(channelIndex),
         tuPath_(tuPath) {}
 
   std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<BakeEdgeAndContextAction>(graph_, index_,
-                                                      collapse_, lockCfg_,
-                                                      tuPath_);
+    return std::make_unique<BakeEdgeAndContextAction>(
+        graph_, index_, collapse_, lockCfg_, channelCfg_, channelIndex_,
+        tuPath_);
   }
 
 private:
@@ -850,6 +981,8 @@ private:
   ControlFlowIndex &index_;
   const CollapseFilter *collapse_;
   const LockTypeConfig *lockCfg_;
+  const ChannelTypeConfig *channelCfg_;
+  ChannelIndex *channelIndex_;
   std::string tuPath_;
 };
 
@@ -863,11 +996,14 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const std::string &sysroot,
                          const LockTypeConfig &lockCfg,
                          BuildStats *stats,
-                         std::function<void(const std::string &)> preTu) {
+                         std::function<void(const std::string &)> preTu,
+                         const ChannelTypeConfig &channelCfg) {
   BakedIndexes out;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
+  const ChannelTypeConfig *channelCfgPtr =
+      channelCfg.registeredTypes.empty() ? nullptr : &channelCfg;
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
@@ -889,10 +1025,11 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 #endif
 
     for (const auto &file : files) {
-      pool.async([&compDb, &out, collapsePtr, &lockCfg, pchCache, &sysroot,
-                  stats, &preTu, file]() {
+      pool.async([&compDb, &out, collapsePtr, &lockCfg, channelCfgPtr,
+                  pchCache, &sysroot, stats, &preTu, file]() {
         BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
-                                          &lockCfg, file);
+                                          &lockCfg, channelCfgPtr,
+                                          &out.channels, file);
         bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
       });
     }
@@ -900,7 +1037,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   } else {
     for (const auto &file : files) {
       BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
-                                        &lockCfg, file);
+                                        &lockCfg, channelCfgPtr,
+                                        &out.channels, file);
       bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
     }
   }
@@ -934,16 +1072,20 @@ void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
             const std::vector<std::string> &collapsePaths,
             const PchCache *pchCache,
             const std::string &sysroot,
-            const LockTypeConfig &lockCfg) {
+            const LockTypeConfig &lockCfg,
+            const ChannelTypeConfig &channelCfg,
+            ChannelIndex *channelsOut) {
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
+  const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
   auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
   auto prevBus = std::signal(SIGBUS, cfCrashHandler);
 
   BakeEdgeAndContextFactory combinedFactory(graph, cfIndex, collapsePtr,
-                                            &lockCfg, file);
+                                            &lockCfg, channelCfgPtr,
+                                            channelsOut, file);
   runCfToolGuarded(compDb, file, combinedFactory, pchCache, sysroot);
 
   std::signal(SIGSEGV, prevSegv);

@@ -16,6 +16,7 @@
 // test_snapshot.cpp — round-trip tests for SnapshotIO binary persistence.
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/Snapshot.h"
 
@@ -126,9 +127,48 @@ SnapshotMeta makeMeta() {
   meta.collapsePaths = {"Client/Math"};
   meta.lockAllowlist = {"RBX::Arbiter"};
   meta.lockBuiltins = true;
+  meta.channelTypes = {{"Queue", {"push"}, {"pop"}, "queue"}};
   meta.files = {{"/src/a.cpp", 1234567890ull, 2048ull},
                 {"/src/b.cpp", 987654321ull, 4096ull}};
   return meta;
+}
+
+/// A channel site contributed by two TUs (dedup -> refs=2, mirroring
+/// makeGraph's inlineFn) plus one single-TU consumer, so the round-trip
+/// test exercises both the common case and the multi-contributor path.
+ChannelIndex makeChannelIndex() {
+  ChannelIndex ch;
+  ChannelSite produce;
+  produce.channelId = "c:eventQueue_";
+  produce.channelTypeName = "Queue";
+  produce.category = "queue";
+  produce.op = ChannelOperation::Produce;
+  produce.siteFunctionUsr = "fn:Shared::send";
+  produce.siteFunctionDisplay = "Shared::send";
+  produce.callSite = "/src/shared.h:10:5";
+  ConditionalGuard guard;
+  guard.conditionText = "streaming";
+  guard.location = "/src/shared.h:9:3";
+  guard.inTrueBranch = true;
+  guard.isAssertion = false;
+  produce.enclosingGuards.push_back(guard);
+  produce.tuPath = "/src/a.cpp";
+  ch.addSite(produce);
+  produce.tuPath = "/src/b.cpp";
+  ch.addSite(produce); // same key -> refs becomes 2
+
+  ChannelSite consume;
+  consume.channelId = "c:eventQueue_";
+  consume.channelTypeName = "Queue";
+  consume.category = "queue";
+  consume.op = ChannelOperation::Consume;
+  consume.siteFunctionUsr = "fn:Client::drain";
+  consume.siteFunctionDisplay = "Client::drain";
+  consume.callSite = "/src/client.cpp:20:5";
+  consume.tuPath = "/src/b.cpp";
+  ch.addSite(consume);
+
+  return ch;
 }
 
 } // namespace
@@ -150,9 +190,14 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
     CHECK(loaded->meta.collapsePaths == meta.collapsePaths);
     CHECK(loaded->meta.lockAllowlist == meta.lockAllowlist);
     CHECK(loaded->meta.lockBuiltins == meta.lockBuiltins);
+    CHECK(loaded->meta.channelTypes == meta.channelTypes);
     REQUIRE(loaded->meta.files.size() == 2);
     CHECK(loaded->meta.files[0] == meta.files[0]);
     CHECK(loaded->meta.files[1] == meta.files[1]);
+  }
+
+  SECTION("channels defaults empty when save() isn't given a ChannelIndex") {
+    CHECK(loaded->channels.size() == 0);
   }
 
   SECTION("graph counts and node fields") {
@@ -251,6 +296,43 @@ TEST_CASE("snapshot preserves TU provenance for incremental reindex",
   size_t cfRemoved = loaded->cfIndex.removeTU("/src/a.cpp");
   CHECK(cfRemoved == 1);
   CHECK(loaded->cfIndex.size() == 1);
+}
+
+TEST_CASE("snapshot round-trips ChannelIndex with multi-TU refs and guards",
+          "[snapshot][ChannelIndex]") {
+  auto path = tempSnapshotPath("channels");
+  CallGraph g = makeGraph();
+  ControlFlowIndex cf = makeCfIndex();
+  ChannelIndex ch = makeChannelIndex();
+
+  REQUIRE(SnapshotIO::save(path, g, cf, makeMeta(), ch));
+  auto loaded = SnapshotIO::load(path);
+  std::remove(path.c_str());
+  REQUIRE(loaded.has_value());
+
+  CHECK(loaded->channels.size() == 2);
+
+  auto producers = loaded->channels.producersOf("c:eventQueue_");
+  REQUIRE(producers.size() == 1); // refs=2 dedups to one live site
+  CHECK(producers[0].siteFunctionDisplay == "Shared::send");
+  REQUIRE(producers[0].enclosingGuards.size() == 1);
+  CHECK(producers[0].enclosingGuards[0].conditionText == "streaming");
+  CHECK(producers[0].enclosingGuards[0].inTrueBranch);
+
+  auto consumers = loaded->channels.consumersOf("c:eventQueue_");
+  REQUIRE(consumers.size() == 1);
+  CHECK(consumers[0].siteFunctionDisplay == "Client::drain");
+
+  // The refs=2 producer site survives removing just one of its two
+  // contributing TUs...
+  CHECK(loaded->channels.removeTU("/src/a.cpp") == 0);
+  CHECK(loaded->channels.producersOf("c:eventQueue_").size() == 1);
+
+  // ...and is fully removed once the second (and last) TU is dropped, while
+  // the unrelated single-TU consumer on the same TU also drops.
+  CHECK(loaded->channels.removeTU("/src/b.cpp") == 2);
+  CHECK(loaded->channels.producersOf("c:eventQueue_").empty());
+  CHECK(loaded->channels.consumersOf("c:eventQueue_").empty());
 }
 
 TEST_CASE("snapshot drops tombstoned edges on save", "[snapshot]") {

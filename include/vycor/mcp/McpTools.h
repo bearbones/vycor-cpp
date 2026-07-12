@@ -16,6 +16,7 @@
 #pragma once
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
 
@@ -54,6 +55,13 @@ struct McpToolContext {
   const ControlFlowOracle &oracle;
   const ControlFlowIndex &cfIndex;
   const std::vector<std::string> &entryPoints;
+  /// Channel/data-flow index (list_channels, query_channel,
+  /// query_channels_for_function, explain_ordering). Null when the server
+  /// was started without a --channel-types-json config — trailing default
+  /// so every existing positional McpToolContext{...} call site (this repo
+  /// has 30+, mostly in tests) keeps compiling unchanged; channel tool
+  /// handlers must null-check it themselves.
+  const ChannelIndex *channels = nullptr;
   /// Optional whole-graph result cache; null in contexts that do not want
   /// caching (handlers must treat it as best-effort).
   QueryCache *cache = nullptr;

@@ -13,6 +13,7 @@ add_library(vycor_lib
   callgraph/CollapseFilter.cpp
   callgraph/ControlFlowIndex.cpp
   callgraph/ControlFlowContextVisitor.cpp
+  callgraph/ChannelIndex.cpp
   callgraph/ControlFlowOracle.cpp
   callgraph/Snapshot.cpp
   callgraph/WorkerPool.cpp

@@ -16,6 +16,7 @@
 #pragma once
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
 #include "vycor/mcp/McpProtocol.h"
@@ -38,12 +39,17 @@ struct McpBuildParams {
   const PchCache *pchCache = nullptr;
   std::string sysroot;
   LockTypeConfig lockCfg;
+  // Empty (default) means channel/data-flow tracking is off — reindexTU's
+  // bakeTU call then simply doesn't touch channels_, keeping it in whatever
+  // state (possibly empty) the initial build left it in. See
+  // ChannelIndex.h's design note.
+  ChannelTypeConfig channelCfg;
 };
 
 class McpServer {
 public:
   McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
-            std::vector<std::string> entryPoints,
+            ChannelIndex &&channels, std::vector<std::string> entryPoints,
             McpBuildParams buildParams = {});
 
   /// Run the MCP stdio loop. Returns 0 on clean shutdown.
@@ -62,6 +68,7 @@ public:
 private:
   CallGraph graph_;
   ControlFlowIndex cfIndex_;
+  ChannelIndex channels_;
   ControlFlowOracle oracle_;
   std::vector<std::string> entryPoints_;
   McpBuildParams buildParams_;
