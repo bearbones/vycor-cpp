@@ -66,6 +66,7 @@ add_executable(vycor_tests
   test_disambiguation.cpp
   test_control_flow.cpp
   test_concurrency_index.cpp
+  test_channel_index.cpp
   test_mcp.cpp
   test_deep_chains.cpp
   test_snapshot.cpp
