@@ -55,6 +55,14 @@ struct ChannelTypeSpec {
   std::vector<std::string> consumeMethods;
   std::string category; // free-form label surfaced in query results,
                         // e.g. "queue", "map", "channel"
+
+  // Used by SnapshotIO's warm-start config-match check (mirrors how
+  // lockAllowlist/lockBuiltins invalidate a snapshot on mismatch).
+  bool operator==(const ChannelTypeSpec &o) const {
+    return qualifiedTypeName == o.qualifiedTypeName &&
+          produceMethods == o.produceMethods &&
+          consumeMethods == o.consumeMethods && category == o.category;
+  }
 };
 
 struct ChannelTypeConfig {
@@ -144,6 +152,12 @@ public:
   void compact();
 
 private:
+  // Reads/writes sites_/index_/byChannel_/byFunctionUsr_/byFunctionDisplay_/
+  // byTu_ directly (refs and per-TU contributor lists, which the public API
+  // doesn't expose) to serialize/restore snapshot warm-start state exactly
+  // like CallGraph/ControlFlowIndex already do.
+  friend class SnapshotIO;
+
   struct StoredSite {
     ChannelSite site;
     uint32_t refs = 0;

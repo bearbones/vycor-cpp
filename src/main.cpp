@@ -882,13 +882,11 @@ int main(int argc, const char **argv) {
         !parseChannelTypesJson(McpChannelTypesJson, channelCfg)) {
       return 1;
     }
-    if (!channelCfg.registeredTypes.empty() &&
-        (!McpSnapshot.empty() || McpIsolateWorkers)) {
+    if (!channelCfg.registeredTypes.empty() && McpIsolateWorkers) {
       llvm::errs()
           << "megascope: WARNING: --channel-types-json is not yet supported "
-             "with --snapshot warm start or --isolate-workers — channel "
-             "tracking will be empty unless this run does a fresh full "
-             "build\n";
+             "with --isolate-workers — channel tracking will be empty "
+             "unless this run does a fresh non-isolated full build\n";
     }
 
     // ---- worker mode (spawned by an --isolate-workers parent) ------------
@@ -955,13 +953,15 @@ int main(int argc, const char **argv) {
         bool configMatch =
             snap->meta.collapsePaths == collapsePaths &&
             snap->meta.lockAllowlist == lockCfg.userAllowlist &&
-            snap->meta.lockBuiltins == lockCfg.useBuiltins;
+            snap->meta.lockBuiltins == lockCfg.useBuiltins &&
+            snap->meta.channelTypes == channelCfg.registeredTypes;
         if (!configMatch) {
           llvm::errs() << "megascope: snapshot build configuration differs "
                           "— full rebuild\n";
         } else {
           graph = std::move(snap->graph);
           cfIndex = std::move(snap->cfIndex);
+          channels = std::move(snap->channels);
           needFullBuild = false;
           snapLoaded = true;
           auto refreshStart = StatsClock::now();
@@ -976,6 +976,7 @@ int main(int argc, const char **argv) {
             if (!current.count(fs.path)) {
               graph.removeTU(fs.path);
               cfIndex.removeTU(fs.path);
+              channels.removeTU(fs.path);
               ++dropped;
             }
           }
@@ -986,9 +987,11 @@ int main(int argc, const char **argv) {
             if (it != baked.end()) {
               graph.removeTU(stamp.path);
               cfIndex.removeTU(stamp.path);
+              channels.removeTU(stamp.path);
             }
             vycor::bakeTU(graph, cfIndex, *compDb, stamp.path,
-                          collapsePaths, pchPtr, sysroot, lockCfg);
+                          collapsePaths, pchPtr, sysroot, lockCfg,
+                          channelCfg, &channels);
             ++refreshed;
           }
           warmRefreshMs = msSince(refreshStart);
@@ -1057,9 +1060,11 @@ int main(int argc, const char **argv) {
       meta.collapsePaths = collapsePaths;
       meta.lockAllowlist = lockCfg.userAllowlist;
       meta.lockBuiltins = lockCfg.useBuiltins;
+      meta.channelTypes = channelCfg.registeredTypes;
       meta.files = std::move(currentStamps);
       auto snapSaveStart = StatsClock::now();
-      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta)) {
+      if (vycor::SnapshotIO::save(McpSnapshot, graph, cfIndex, meta,
+                                  channels)) {
         snapSaveMs = msSince(snapSaveStart);
         llvm::errs() << "megascope: snapshot saved to " << McpSnapshot << "\n";
       } else {
