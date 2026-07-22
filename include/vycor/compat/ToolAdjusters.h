@@ -20,6 +20,9 @@
 
 #include "clang/Tooling/Tooling.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <algorithm>
 #include <cstdlib>
 #include <string>
@@ -197,6 +200,107 @@ inline clang::tooling::ArgumentsAdjuster getResourceDirAdjuster() {
   };
 }
 
+/// Linux hosts sometimes carry a /usr/lib/gcc/<triple>/<ver> directory for a
+/// GCC major with no matching libstdc++ headers (e.g. libgcc-14-dev installs
+/// /usr/lib/gcc/x86_64-linux-gnu/14 with only crt objects, while
+/// libstdc++-XX-dev headers exist only for 13). Clang selects the
+/// numerically newest candidate GCC installation, so every parse dies with
+/// "fatal error: 'memory' file not found" even though a complete older
+/// toolchain is right there. Returns the newest GCC install dir that HAS
+/// matching libstdc++ headers when (and only when) clang's default pick
+/// would be broken; "" means nothing needs fixing. Probed once per process.
+inline const std::string &detectUsableGccInstallDir() {
+  static const std::string result = []() -> std::string {
+#ifndef __linux__
+    return "";
+#else
+    namespace fs = llvm::sys::fs;
+    namespace path = llvm::sys::path;
+
+    // "14" or "14.2.1" -> {14,2,1}; empty when non-numeric (not a GCC
+    // version directory).
+    auto parseVer = [](llvm::StringRef name) {
+      llvm::SmallVector<int, 4> parts;
+      llvm::SmallVector<llvm::StringRef, 4> pieces;
+      name.split(pieces, '.');
+      for (llvm::StringRef p : pieces) {
+        int v = 0;
+        if (p.empty() || p.getAsInteger(10, v))
+          return llvm::SmallVector<int, 4>{};
+        parts.push_back(v);
+      }
+      return parts;
+    };
+    // Debian/Ubuntu name both the GCC dir and the libstdc++ include dir by
+    // major ("13"); Arch-style layouts use the full version for both.
+    auto hasLibstdcxx = [](llvm::StringRef verName, int major) {
+      return fs::is_directory("/usr/include/c++/" + verName.str()) ||
+             fs::is_directory("/usr/include/c++/" + std::to_string(major));
+    };
+
+    llvm::SmallVector<int, 4> bestVer, bestUsableVer;
+    std::string bestUsableDir;
+    bool bestIsUsable = false;
+
+    std::error_code ec;
+    for (fs::directory_iterator triple("/usr/lib/gcc", ec), tripleEnd;
+         !ec && triple != tripleEnd; triple.increment(ec)) {
+      for (fs::directory_iterator ver(triple->path(), ec), verEnd;
+           !ec && ver != verEnd; ver.increment(ec)) {
+        auto verName = path::filename(ver->path());
+        auto parsed = parseVer(verName);
+        if (parsed.empty() || !fs::is_directory(ver->path()))
+          continue;
+        bool usable = hasLibstdcxx(verName, parsed[0]);
+        if (bestVer.empty() || bestVer < parsed) {
+          bestVer = parsed;
+          bestIsUsable = usable;
+        } else if (bestVer == parsed) {
+          bestIsUsable = bestIsUsable || usable;
+        }
+        if (usable && (bestUsableVer.empty() || bestUsableVer < parsed)) {
+          bestUsableVer = parsed;
+          bestUsableDir = ver->path();
+        }
+      }
+    }
+
+    // Clang's pick (the newest) works, or no complete install exists to
+    // point at instead: stay out of the way.
+    if (bestIsUsable || bestUsableDir.empty())
+      return "";
+    return bestUsableDir;
+#endif
+  }();
+  return result;
+}
+
+/// Inject --gcc-install-dir steering clang away from a headerless GCC dir
+/// (see detectUsableGccInstallDir). No-op unless the host has the mismatch,
+/// and defers to any explicit toolchain/stdlib choice already in the args —
+/// including ones appended via --extra-arg / VYCOR_EXTRA_ARGS, so this
+/// adjuster must run AFTER the extra-args insertion in makeClangTool.
+inline clang::tooling::ArgumentsAdjuster getGccInstallDirAdjuster() {
+  return [](const clang::tooling::CommandLineArguments &args,
+            llvm::StringRef /*filename*/) {
+    const std::string &fix = detectUsableGccInstallDir();
+    if (fix.empty())
+      return args;
+    for (const auto &a : args) {
+      llvm::StringRef arg(a);
+      if (arg.starts_with("--gcc-install-dir") ||
+          arg.starts_with("--gcc-toolchain") ||
+          arg.starts_with("--sysroot") || arg == "-isysroot" ||
+          arg.starts_with("-stdlib") || arg == "-nostdinc" ||
+          arg == "-nostdinc++")
+        return args;
+    }
+    auto result = args;
+    result.push_back("--gcc-install-dir=" + fix);
+    return result;
+  };
+}
+
 /// Argument adjuster that replaces PCH source includes with compiled PCH
 /// binaries from a PchCache. The PCH source `-include <pch_src>` is replaced
 /// with `-include-pch <compiled.pch>`.
@@ -281,6 +385,10 @@ makeClangTool(const clang::tooling::CompilationDatabase &compDb,
     tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
         globalExtraArgs(), clang::tooling::ArgumentInsertPosition::END));
   }
+  // After the extra-args insertion on purpose: an explicit
+  // --gcc-install-dir/--sysroot/-stdlib from the user must be visible to
+  // (and suppress) this adjuster.
+  tool.appendArgumentsAdjuster(getGccInstallDirAdjuster());
   return tool;
 }
 
