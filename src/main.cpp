@@ -180,9 +180,11 @@ static llvm::cl::SubCommand
 // ---------------------------------------------------------------------------
 
 // Extra compiler args appended to every compile command. The escape hatch
-// for host-toolchain mismatches the adjusters cannot fix generically, e.g.
-// --extra-arg=--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13 on hosts
-// whose newest GCC directory has no matching libstdc++ headers.
+// for host-toolchain mismatches the adjusters cannot fix generically.
+// (The headerless-newest-GCC case — --gcc-install-dir on hosts whose
+// newest /usr/lib/gcc directory has no matching libstdc++ headers — is now
+// auto-detected by getGccInstallDirAdjuster; an explicit --extra-arg
+// toolchain flag still overrides it.)
 static llvm::cl::list<std::string>
     ExtraArgs("extra-arg",
         llvm::cl::desc("Additional compiler argument appended to every "
