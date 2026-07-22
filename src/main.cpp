@@ -232,6 +232,24 @@ static llvm::cl::opt<bool>
                                        "position"),
                         llvm::cl::sub(AnnealCmd));
 
+static llvm::cl::opt<unsigned>
+    AnnealThreads("threads",
+        llvm::cl::desc("Number of threads for the per-TU analysis phases "
+                       "(0 = hardware_concurrency, 1 = serial)"),
+        llvm::cl::init(0),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealCheckpointFile("checkpoint",
+        llvm::cl::desc("Journal per-TU progress to this file and resume "
+                       "from it on the next run: a killed run picks up "
+                       "where it left off, and a TU whose parse fatally "
+                       "died twice is skipped instead of re-killing every "
+                       "resume. Source edits invalidate exactly the "
+                       "affected entries."),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(AnnealCmd));
+
 static llvm::cl::opt<std::string>
     AnnealOrgConfig("org-config",
         llvm::cl::desc("Organization config JSON (lock/channel types, "
@@ -622,6 +640,8 @@ int main(int argc, const char **argv) {
     opts.warnSameScore = AnnealWarnSameScore;
     opts.modelConvertibility = AnnealModelConvertibility;
     opts.disabledChecks = orgCfg.disabledAnnealChecks;
+    opts.threadCount = AnnealThreads;
+    opts.checkpointPath = AnnealCheckpointFile;
     auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
 
     // Dead code analysis.

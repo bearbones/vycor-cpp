@@ -77,6 +77,7 @@ void TypeRelationIndex::addBase(const std::string &derived,
                                 const std::string &base) {
   SId derivedId = interner_.intern(derived);
   SId baseId = interner_.intern(base);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   auto &v = bases_[derivedId];
   if (std::find(v.begin(), v.end(), baseId) == v.end())
     v.push_back(baseId);
@@ -86,6 +87,7 @@ void TypeRelationIndex::addCtorEdge(const std::string &toType,
                                     const std::string &fromType) {
   SId toId = interner_.intern(toType);
   SId fromId = interner_.intern(fromType);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   auto &v = ctorEdges_[toId];
   if (std::find(v.begin(), v.end(), fromId) == v.end())
     v.push_back(fromId);
@@ -95,9 +97,24 @@ void TypeRelationIndex::addConvOpEdge(const std::string &fromType,
                                       const std::string &toType) {
   SId fromId = interner_.intern(fromType);
   SId toId = interner_.intern(toType);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   auto &v = convOpEdges_[fromId];
   if (std::find(v.begin(), v.end(), toId) == v.end())
     v.push_back(toId);
+}
+
+void TypeRelationIndex::absorb(const TypeRelationIndex &other) {
+  // `other` is a quiescent shard (its writers are done); route through the
+  // add* methods so dedup and locking apply uniformly.
+  other.forEachBase(
+      [this](const std::string &d, const std::string &b) { addBase(d, b); });
+  other.forEachCtorEdge([this](const std::string &to, const std::string &from) {
+    addCtorEdge(to, from);
+  });
+  other.forEachConvOpEdge(
+      [this](const std::string &from, const std::string &to) {
+        addConvOpEdge(from, to);
+      });
 }
 
 bool TypeRelationIndex::isBaseOrSelf(const std::string &derived,
@@ -183,12 +200,24 @@ bool TypeRelationIndex::isConvertible(const std::string &from,
 
 void GlobalIndex::addFunctionOverload(FunctionOverloadEntry entry) {
   SId key = interner_.intern(entry.qualifiedName);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   overloads_[key].push_back(std::move(entry));
 }
 
 void GlobalIndex::addDeductionGuide(DeductionGuideEntry entry) {
   SId key = interner_.intern(entry.templateName);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   guides_[key].push_back(std::move(entry));
+}
+
+void GlobalIndex::absorb(const GlobalIndex &shard) {
+  shard.forEachOverload(
+      [this](const FunctionOverloadEntry &e) { addFunctionOverload(e); });
+  shard.forEachDeductionGuide(
+      [this](const DeductionGuideEntry &e) { addDeductionGuide(e); });
+  shard.forEachCoverageProperty(
+      [this](const CoveragePropertyEntry &e) { addCoverageProperty(e); });
+  types_.absorb(shard.types_);
 }
 
 std::vector<const FunctionOverloadEntry *>
@@ -235,6 +264,7 @@ size_t GlobalIndex::guideCount() const {
 
 void GlobalIndex::addCoverageProperty(CoveragePropertyEntry entry) {
   SId key = interner_.intern(entry.enclosingClass);
+  std::lock_guard<std::mutex> lock(writeMutex_);
   coverageProps_[key].push_back(std::move(entry));
 }
 

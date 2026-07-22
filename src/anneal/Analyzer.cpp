@@ -14,11 +14,14 @@
 // limitations under the License.
 
 #include "vycor/anneal/Analyzer.h"
+#include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/Indexer.h"
 #include "vycor/anneal/TypeNormalize.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
 #include "vycor/ext/Extensions.h"
+
+#include "llvm/Support/ThreadPool.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
@@ -33,6 +36,9 @@
 #include "llvm/ADT/StringSwitch.h"
 
 #include <cctype>
+#include <memory>
+#include <set>
+#include <unordered_map>
 
 namespace vycor {
 
@@ -660,30 +666,168 @@ void analyzeCoverageProperties(const GlobalIndex &index,
 
 // --- runAnalysis ---
 
+namespace {
+
+// Per-TU worker pool with bakeIndexes' semantics: threadCount 0 = all
+// hardware threads, 1 = serial (also the single-file case).
+template <typename TaskFn>
+void runPerTuTasks(const std::vector<std::string> &tus, unsigned threadCount,
+                   TaskFn task) {
+  bool parallel = threadCount != 1 && tus.size() > 1;
+  if (parallel) {
+#if VYCOR_LLVM_AT_LEAST(19)
+    llvm::DefaultThreadPool pool(llvm::hardware_concurrency(threadCount));
+#else
+    llvm::ThreadPool pool(llvm::hardware_concurrency(threadCount));
+#endif
+    for (const auto &tu : tus)
+      pool.async([&task, tu] { task(tu); });
+    pool.wait();
+  } else {
+    for (const auto &tu : tus)
+      task(tu);
+  }
+}
+
+} // namespace
+
 std::vector<Diagnostic>
 runAnalysis(const clang::tooling::CompilationDatabase &compDb,
             const std::vector<std::string> &sourceFiles,
             const AnalysisOptions &opts) {
-  // Phase 1: Index all translation units.
   GlobalIndex index;
-  {
-    auto tool = vycor::makeClangTool(compDb, sourceFiles);
-    IndexerActionFactory factory(index);
-    tool.run(&factory);
+
+  // Checkpoint journal (opt-in): per-TU progress survives a killed run.
+  std::unique_ptr<AnnealCheckpoint> ckpt;
+  std::vector<FileStamp> stamps;
+  std::unordered_map<std::string, const FileStamp *> stampFor;
+  if (!opts.checkpointPath.empty()) {
+    ckpt = AnnealCheckpoint::open(opts.checkpointPath,
+                                  annealOptionsFingerprint(opts));
+    if (!ckpt) {
+      llvm::errs() << "anneal: WARNING: cannot open checkpoint "
+                   << opts.checkpointPath << " — continuing without one\n";
+    } else {
+      // Stamps are taken before any parsing: a file modified mid-run gets a
+      // stale stamp and is conservatively re-indexed on the next resume
+      // (same policy as megascope snapshots).
+      stamps = SnapshotIO::stampFiles(sourceFiles);
+      for (const auto &s : stamps)
+        stampFor[s.path] = &s;
+    }
   }
 
+  // Phase 1: index all translation units. Journaled TUs with a matching
+  // stamp are replayed without a parse; TUs whose parse fatally died
+  // kMaxAttempts times are skipped as poisoned.
+  std::vector<std::string> toIndex;
+  std::vector<FileStamp> contributing; // drives the phase-2 validity hash
+  std::set<std::string> poisoned;
+  size_t replayed1 = 0;
+  for (const auto &file : sourceFiles) {
+    const FileStamp *st = ckpt ? stampFor[file] : nullptr;
+    if (ckpt && ckpt->replayPhase1(file, *st, index)) {
+      contributing.push_back(*st);
+      ++replayed1;
+      continue;
+    }
+    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseIndex, file, *st) >=
+                    AnnealCheckpoint::kMaxAttempts) {
+      llvm::errs() << "anneal: WARNING: skipping " << file
+                   << " — its phase-1 parse died "
+                   << AnnealCheckpoint::kMaxAttempts
+                   << " time(s) (see checkpoint); delete the checkpoint "
+                      "file to retry it\n";
+      poisoned.insert(file);
+      continue;
+    }
+    if (st)
+      contributing.push_back(*st);
+    toIndex.push_back(file);
+  }
+  runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
+    if (ckpt) {
+      const FileStamp *st = stampFor[file];
+      // The attempt record lands on disk BEFORE the parse: if the parse
+      // takes the process down, the next resume can see it happened.
+      ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, file, *st);
+      GlobalIndex shard;
+      auto tool = vycor::makeClangTool(compDb, {file});
+      IndexerActionFactory factory(shard);
+      tool.run(&factory);
+      ckpt->recordPhase1(file, *st, shard);
+      index.absorb(shard);
+    } else {
+      auto tool = vycor::makeClangTool(compDb, {file});
+      IndexerActionFactory factory(index);
+      tool.run(&factory);
+    }
+  });
+  if (replayed1)
+    llvm::errs() << "anneal: checkpoint: " << replayed1 << " of "
+                 << sourceFiles.size()
+                 << " TU(s) restored without re-parsing (phase 1)\n";
+
   // Phase 1.5: Coverage property analysis (index-only, no AST needed).
+  // Always recomputed — it reads the whole index, which replay rebuilt.
   std::vector<Diagnostic> diagnostics;
   if (opts.enableCoverageDiag)
     analyzeCoverageProperties(index, diagnostics);
 
-  // Phase 2: Analyze each translation unit against the global index.
-  {
-    auto tool = vycor::makeClangTool(compDb, sourceFiles);
-    AnalyzerActionFactory factory(index, diagnostics, opts);
-    tool.run(&factory);
-  }
+  // Phase 2: analyze each TU against the now-complete index. Per-file
+  // slots keep output deterministic (source order) regardless of task
+  // completion order. A phase-2 record is only valid while the WHOLE
+  // contributing file set is unchanged: one edited TU can add overloads
+  // that change another TU's diagnostics.
+  const uint64_t setHash = ckpt ? annealStampSetHash(contributing) : 0;
+  std::vector<std::vector<Diagnostic>> perFile(sourceFiles.size());
+  std::unordered_map<std::string, size_t> slotFor;
+  for (size_t i = 0; i < sourceFiles.size(); ++i)
+    slotFor[sourceFiles[i]] = i;
 
+  std::vector<std::string> toAnalyze;
+  size_t replayed2 = 0;
+  for (const auto &file : sourceFiles) {
+    if (poisoned.count(file))
+      continue; // its phase-2 parse would die the same way
+    const FileStamp *st = ckpt ? stampFor[file] : nullptr;
+    if (ckpt &&
+        ckpt->replayPhase2(file, *st, setHash, perFile[slotFor[file]])) {
+      ++replayed2;
+      continue;
+    }
+    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseAnalyze, file, *st) >=
+                    AnnealCheckpoint::kMaxAttempts) {
+      llvm::errs() << "anneal: WARNING: skipping " << file
+                   << " — its phase-2 parse died "
+                   << AnnealCheckpoint::kMaxAttempts
+                   << " time(s) (see checkpoint); delete the checkpoint "
+                      "file to retry it\n";
+      continue;
+    }
+    toAnalyze.push_back(file);
+  }
+  runPerTuTasks(toAnalyze, opts.threadCount, [&](const std::string &file) {
+    if (ckpt)
+      ckpt->recordAttempt(AnnealCheckpoint::kPhaseAnalyze, file,
+                          *stampFor[file]);
+    std::vector<Diagnostic> local;
+    auto tool = vycor::makeClangTool(compDb, {file});
+    AnalyzerActionFactory factory(index, local, opts);
+    tool.run(&factory);
+    if (ckpt)
+      ckpt->recordPhase2(file, *stampFor[file], setHash, local);
+    perFile[slotFor[file]] = std::move(local);
+  });
+  if (replayed2)
+    llvm::errs() << "anneal: checkpoint: " << replayed2 << " of "
+                 << sourceFiles.size()
+                 << " TU(s) restored without re-parsing (phase 2)\n";
+
+  for (auto &slot : perFile)
+    diagnostics.insert(diagnostics.end(),
+                       std::make_move_iterator(slot.begin()),
+                       std::make_move_iterator(slot.end()));
   return diagnostics;
 }
 

@@ -53,9 +53,23 @@ The codebase is split into four feature areas:
 | `GlobalIndex.h/.cpp` | In-memory database of all function overloads and deduction guides discovered across the project |
 | `Indexer.h/.cpp` | Phase-1 AST visitor: walks every translation unit and populates `GlobalIndex` |
 | `Analyzer.h/.cpp` | Phase-2 AST visitor: compares each TU's resolved names against `GlobalIndex`; emits `Diagnostic` entries for fragile resolutions |
+| `Checkpoint.h/.cpp` | `--checkpoint` journal: append-only per-TU record of phase-1 index contributions and phase-2 diagnostics, so a killed run resumes without re-parsing finished TUs |
 
 The main entry point is `vycor::runAnalysis(compDb, files)` defined in
 `Analyzer.h`. It orchestrates both phases and returns a `vector<Diagnostic>`.
+
+Both phases run per-TU on a worker pool (`AnalysisOptions::threadCount`,
+same 0=hardware/1=serial semantics as `bakeIndexes`; per-file diagnostic
+slots keep output order deterministic). With
+`AnalysisOptions::checkpointPath` set (CLI: `--checkpoint`), per-TU
+progress is journaled and replayed on resume: phase-1 records carry the
+TU's full index contribution (no re-parse on resume), phase-2 records are
+keyed on a hash of the whole contributing file set (any phase-1 change
+invalidates them all — one TU's diagnostics depend on every other TU's
+declarations), stamps are mtime+size (`FileStamp`), an options-fingerprint
+mismatch discards the journal wholesale, and a TU whose parse fatally died
+twice (attempt records, no completion) is skipped as poisoned instead of
+re-killing every resume. See `anneal/Checkpoint.h`.
 
 ### `morph` — AST-Based Transformations
 
@@ -172,7 +186,7 @@ Key semantics:
 objects:
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> --source <files...> [--threads <n>] [--checkpoint <file>] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...] [--org-config <file>]
 vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>] [--org-config <file>]
