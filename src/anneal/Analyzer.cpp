@@ -18,6 +18,7 @@
 #include "vycor/anneal/TypeNormalize.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
+#include "vycor/ext/Extensions.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
@@ -476,10 +477,16 @@ AnalyzerConsumer::AnalyzerConsumer(const GlobalIndex &index,
                                    clang::SourceManager &sm,
                                    std::vector<Diagnostic> &diagnostics,
                                    AnalysisOptions opts)
-    : visitor_(index, sm, diagnostics, std::move(opts)) {}
+    : visitor_(index, sm, diagnostics, opts), index_(index),
+      diagnostics_(diagnostics), opts_(std::move(opts)) {}
 
 void AnalyzerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.TraverseDecl(context.getTranslationUnitDecl());
+  // Organization checks (ext/ registrars) run after the built-in analysis
+  // of the same TU; fresh instances per TU so member state needs no reset.
+  for (auto &check :
+       ExtensionRegistry::instance().createAnnealChecks(opts_.disabledChecks))
+    check->checkTU(context, index_, diagnostics_);
 }
 
 // --- AnalyzerAction ---

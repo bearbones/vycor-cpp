@@ -20,6 +20,8 @@ add_library(vycor_lib
   mcp/McpProtocol.cpp
   mcp/McpServer.cpp
   mcp/McpTools.cpp
+  ext/Extensions.cpp
+  ext/OrgConfig.cpp
 )
 
 target_include_directories(vycor_lib PUBLIC
@@ -74,7 +76,18 @@ if(APPLE)
   endif()
 endif()
 
-add_executable(vycor-cpp main.cpp)
+# Organization extension slot-in (docs/EXTENDING.md): every .cpp directly
+# under <repo>/ext/ is compiled into the executable. Deliberately NOT part
+# of vycor_lib — these files typically contain only static registrars
+# (VYCOR_REGISTER_ANNEAL_CHECK / VYCOR_EXTENSION_SETUP), and the linker
+# drops unreferenced members of a static archive, silently discarding the
+# registration. Objects listed directly on the target are always linked.
+file(GLOB VYCOR_EXT_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/ext/*.cpp")
+if(VYCOR_EXT_SOURCES)
+  message(STATUS "Organization extensions: ${VYCOR_EXT_SOURCES}")
+endif()
+
+add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES})
 target_link_libraries(vycor-cpp PRIVATE vycor_lib)
 
 # Embed the default --clang path for PCH compilation into the executable.

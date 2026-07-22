@@ -136,6 +136,7 @@ struct Diagnostic {
     Coverage_PropertyDivergence,  // siblings diverge on complexity/properties
     DeadCode_Pessimistic,         // function unreachable via proven paths
     DeadCode_Optimistic,          // function reachable only via plausible paths
+    Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
   std::string callLocation;  // file:line:col of the call site
@@ -143,6 +144,7 @@ struct Diagnostic {
   std::string betterDecl;    // what the global index found
   std::string missingHeader; // which header to include
   std::string message;       // human-readable diagnostic
+  std::string checkName;     // for Kind::Custom: AnnealCheck::name()
 };
 
 // Project-wide database of all function overloads and deduction guides.

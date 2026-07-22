@@ -15,6 +15,7 @@
 
 #include "vycor/callgraph/ControlFlowOracle.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/ext/Extensions.h"
 
 #include <algorithm>
 #include <functional>
@@ -549,6 +550,11 @@ static std::string guardToJson(const ConditionalGuard &guard,
   ss << "\"location\": \"" << escapeJson(guard.location) << "\", ";
   ss << "\"inTrueBranch\": " << (guard.inTrueBranch ? "true" : "false") << ", ";
   ss << "\"isAssertion\": " << (guard.isAssertion ? "true" : "false");
+  // Organization guard classifiers (feature flags etc., Extensions.h).
+  if (auto ann = classifyGuard(guard)) {
+    ss << ", \"annotation\": {\"kind\": \"" << escapeJson(ann->kind)
+       << "\", \"name\": \"" << escapeJson(ann->name) << "\"}";
+  }
   ss << "}";
   return ss.str();
 }

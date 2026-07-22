@@ -15,6 +15,7 @@
 
 #include "vycor/mcp/McpTools.h"
 #include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/ext/Extensions.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -30,6 +31,10 @@
 #include <vector>
 
 namespace vycor {
+
+// Defined in the channel-tools section below; also used by
+// query_call_site_context's guard details.
+static llvm::json::Value serializeGuard(const ConditionalGuard &g);
 
 // ============================================================================
 // JSON helper: build an MCP tool result with text content
@@ -1123,6 +1128,13 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   }
   obj["enclosingScopes"] = std::move(scopes);
 
+  // Guard details (innermost first), including any organization annotation
+  // (feature flags etc.) — previously only the count was reported.
+  llvm::json::Array guards;
+  for (auto &g : rawCtx->enclosingGuards)
+    guards.push_back(serializeGuard(g));
+  obj["enclosingGuards"] = std::move(guards);
+
   return makeTextResult(llvm::json::Value(std::move(obj)));
 }
 
@@ -2123,6 +2135,15 @@ static llvm::json::Value serializeGuard(const ConditionalGuard &g) {
   obj["location"] = g.location;
   obj["inTrueBranch"] = g.inTrueBranch;
   obj["isAssertion"] = g.isAssertion;
+  // Organization guard classifiers (feature flags etc., Extensions.h):
+  // e.g. {"kind": "feature-flag", "name": "NewNav"} — with inTrueBranch
+  // this tells a client "reachable only with NewNav on/off".
+  if (auto ann = classifyGuard(g)) {
+    llvm::json::Object annotation;
+    annotation["kind"] = ann->kind;
+    annotation["name"] = ann->name;
+    obj["annotation"] = std::move(annotation);
+  }
   return llvm::json::Value(std::move(obj));
 }
 

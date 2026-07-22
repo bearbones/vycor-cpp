@@ -54,6 +54,15 @@ endif()
 
 message(STATUS "Using Catch2 from ${_catch2_origin}")
 
+# Organization extension slot-in (docs/EXTENDING.md): ext/*.cpp registrars
+# are linked into the test binary too (directly, not via vycor_lib — see
+# src/CMakeLists.txt for why), and orgs can add their own Catch2 tests as
+# ext/tests/*.cpp. NOTE: upstream test_extensions.cpp clears the process-wide
+# ExtensionRegistry in the sections that need isolation.
+file(GLOB VYCOR_EXT_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/ext/*.cpp")
+file(GLOB VYCOR_EXT_TEST_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/ext/tests/*.cpp")
+
 add_executable(vycor_tests
   test_matcher_engine.cpp
   test_rules_parser.cpp
@@ -71,6 +80,9 @@ add_executable(vycor_tests
   test_deep_chains.cpp
   test_snapshot.cpp
   test_worker_pool.cpp
+  test_extensions.cpp
+  ${VYCOR_EXT_SOURCES}
+  ${VYCOR_EXT_TEST_SOURCES}
 )
 
 target_link_libraries(vycor_tests PRIVATE
