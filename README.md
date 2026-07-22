@@ -9,43 +9,55 @@ analysis. It exposes four features as subcommands:
 - **megascope** — start an MCP (Model Context Protocol) server for interactive call graph queries, designed for LLM-assisted code analysis
 
 Designed as a backend for external systems (e.g. a Python script translating
-a custom DSL, or an LLM agent performing security audits via the MCP server).
+a custom DSL, or an LLM agent performing security audits via the MCP server),
+and as a **base for organization forks**: lock types, feature-flag
+conventions, and custom checks slot in without touching upstream code — see
+[Customizing for your organization](#customizing-for-your-organization).
 
 ---
 
-## Features
+## Installing
 
-### anneal — ADL/CTAD Fragility Analysis
+### Homebrew (macOS, recommended)
 
-ADL (Argument-Dependent Lookup) and CTAD (Class Template Argument Deduction)
-can silently resolve to different declarations depending on which headers are
-included in a given translation unit. This is a portability and correctness
-hazard that standard compilers do not diagnose.
+```bash
+brew tap bearbones/vycor-cpp
+brew install vycor-cpp          # newest supported LLVM major
+# or pin a major: brew install vycor-cpp@20
+```
 
-`anneal` runs a two-phase analysis:
+The tap formulas declare `depends_on "llvm@NN"`, so the required LLVM
+runtime libraries are installed and wired up automatically.
 
-1. **Index phase** — walks every translation unit and records all function
-   overloads and deduction guides found in any header, building a
-   project-wide `GlobalIndex`.
-2. **Analysis phase** — re-walks each translation unit, comparing resolved
-   call sites and CTAD usages against the global index. Any overload or
-   deduction guide that exists globally but is invisible in the current TU
-   (because its header is not included) is flagged as a fragile resolution.
+### Release tarballs (Linux and macOS)
 
-Output is a list of diagnostics with source locations and human-readable
-messages indicating which header to include or how to qualify the call.
+Each [GitHub Release](https://github.com/bearbones/vycor-cpp/releases)
+attaches prebuilt binaries as
+`vycor-cpp-vX.Y.Z-<os>-llvmNN.tar.gz` (`linux-x86_64`, `macos-arm64`).
 
-### morph — AST-Based Source Transformations
+The binaries are **not fully self-contained**: they link LLVM dynamically
+and need the matching LLVM runtime present.
 
-`morph` parses matcher expressions from a JSON rules file and runs them
-against source files using Clang's dynamic AST matcher API. It supports
-multi-pass pipelines where each pass can build on the results of the
-previous one.
+```bash
+# Linux: runtime .so only (lighter than the full -dev package), from apt.llvm.org
+sudo apt-get install libllvm21
 
-Rules are specified as JSON objects containing:
-- A matcher expression string (Clang's dynamic AST matcher DSL)
-- A bind ID for the root matched node
-- An action name (resolved to a built-in callback)
+tar xzf vycor-cpp-v0.2.0-linux-x86_64-llvm21.tar.gz
+./bin/vycor-cpp --version
+```
+
+On macOS a raw tarball works too, after `brew install llvm@NN` and (if
+Gatekeeper objects) `xattr -d com.apple.quarantine` on the extracted
+binary — but the tap handles all of that for you.
+
+`vycor-cpp --version` reports the tool version, the embedded LLVM version,
+and the host compiler that built it.
+
+### From source
+
+See [Building](#building) — required if you want an organization fork with
+compiled extensions (`ext/`), a different LLVM major, or an unsupported
+platform.
 
 ---
 
@@ -102,6 +114,9 @@ then 18) by probing well-known install paths, then falls back to the
 cmake -B build -G Ninja -DCMAKE_PREFIX_PATH=/usr/lib/llvm-20
 ```
 
+See `COMPATIBILITY.md` for the support matrix, known API differences
+between LLVM majors, and the release-branch/backport policy.
+
 On macOS with Apple Silicon, AArch64 support is included automatically.
 For Intel-only builds: `-DLLVM_TARGETS_TO_BUILD=X86`.
 
@@ -141,7 +156,17 @@ project's build files:
 
 ## Usage
 
+All subcommands consume a `compile_commands.json` compilation database
+(`--build-path` points at its directory).
+
 ### anneal — Analyze for Fragile ADL/CTAD
+
+ADL (Argument-Dependent Lookup) and CTAD (Class Template Argument
+Deduction) can silently resolve to different declarations depending on
+which headers a translation unit includes — a correctness hazard standard
+compilers do not diagnose. `anneal` indexes all overloads and deduction
+guides across the project (phase 1), then re-walks each TU comparing
+resolved call sites against the global index (phase 2).
 
 ```bash
 ./build/vycor-cpp anneal \
@@ -157,6 +182,10 @@ src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exist
     MathLib::scale(Vector, int). Include Extension.hpp or explicitly qualify the call.
 ```
 
+Optional flags: `--warn-same-score`, `--model-convertibility`,
+`--coverage-diag`, `--dead-code` (with `--entry-point`), and
+`--org-config` (organization checks/config — see below).
+
 ### morph — Apply Transformations
 
 ```bash
@@ -167,8 +196,10 @@ src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exist
   --dry-run
 ```
 
-The `--dry-run` flag collects replacements without writing them to disk,
-which is useful for previewing changes.
+Rules are JSON objects containing a Clang dynamic AST matcher expression,
+a bind ID for the root node, and an action; passes run in sequence, each
+building on the previous. `--dry-run` collects replacements without
+writing them to disk.
 
 ### prism — Query Control Flow and Exception Context
 
@@ -212,13 +243,17 @@ investigations of individual files.
 
 This skips internal edges where both caller and callee are in collapsed
 paths, while preserving boundary edges (calls from non-collapsed code into
-the collapsed region).
+the collapsed region). `--skip-paths` excludes matching TUs entirely.
+
+Other useful flags: `--threads`, `--pch-dir` (PCH reuse), `--lock-types`
+(extra RAII lock types), `--channel-types-json` (queue/bus tracing),
+`--org-config`.
 
 ### megascope — Interactive Call Graph MCP Server
 
-Starts a persistent MCP server that pre-bakes a call graph and control flow
-index from multiple source files, then serves interactive queries via
-JSON-RPC over stdio.
+Starts a persistent MCP server that pre-bakes a unified cross-TU call
+graph and control flow index, then serves interactive queries via JSON-RPC
+over stdio.
 
 ```bash
 ./build/vycor-cpp megascope \
@@ -226,12 +261,20 @@ JSON-RPC over stdio.
   --source file1.cpp --source file2.cpp --source file3.cpp \
   --entry-point "main" \
   --collapse-paths Client/Math \
-  --collapse-paths Client/Core
+  --snapshot /tmp/proj.snap
 ```
 
-**MCP tools exposed**: `lookup_function`, `get_callees`, `get_callers`,
-`find_call_chain`, `query_exception_safety`, `query_call_site_context`,
-`analyze_dead_code`, `get_class_hierarchy`
+**17 MCP tools**: `search_functions`, `lookup_function`, `get_callees`,
+`get_callers`, `find_call_chain`, `query_exception_safety`,
+`query_call_site_context`, `query_raii_scopes_at_callsite`,
+`query_locks_held`, `query_same_lock`, `analyze_dead_code`,
+`get_class_hierarchy`, `list_entry_points`, `graph_summary`,
+`list_callback_sites`, `list_concurrency_entry_points`, `reindex_tu`.
+See `docs/mcp-usage.md`.
+
+Scaling flags: `--snapshot` (warm starts — only changed TUs are
+re-indexed), `--threads`, `--pch-dir`, `--isolate-workers`/`--workers`
+(subprocess baking: a crashing TU costs only that TU), `--stats-json`.
 
 **Key difference from prism**: `megascope` indexes all specified sources
 into a unified cross-TU call graph held in memory. `prism` parses per
@@ -240,69 +283,63 @@ multi-file analysis, always use `megascope`.
 
 ---
 
+## Customizing for your organization
+
+Organizations forking/mirroring this repo can add their own semantics
+without editing upstream files (so upstream merges stay conflict-free):
+
+- **Org config JSON** (`--org-config vycor.org.json`) — declarative:
+  in-house lock types for the RAII/lock queries, channel/queue types,
+  **feature-flag patterns** (regexes over guard conditions; matching
+  guards are annotated with the flag name in prism/MCP output, so "this
+  path only runs with `FFlag::NewNav` on" becomes queryable), collapse
+  paths, and per-check kill switches.
+- **`ext/` slot-in directory** — compiled hooks: custom **anneal checks**
+  (full AST access, registered with `VYCOR_REGISTER_ANNEAL_CHECK`),
+  arbitrary guard classifiers, and code-registered type lists. `ext/*.cpp`
+  is auto-globbed into the build; `ext/tests/*.cpp` into the test binary.
+- **CLI flags** (`--lock-types`, `--channel-types-json`,
+  `--collapse-paths`) — ad-hoc, merged with the above.
+
+Start from `ext/examples/ExampleOrgExtension.cpp` and
+`ext/examples/vycor.org.json`. Full guide: **[docs/EXTENDING.md](docs/EXTENDING.md)**.
+
+---
+
 ## Project Structure
 
 ```
 CMakeLists.txt                  Top-level build configuration
+COMPATIBILITY.md                LLVM support matrix, release/backport policy
 extern/llvm-project/            LLVM/Clang submodule (sparse checkout)
+extern/Catch2/                  Catch2 submodule (tests)
 
 include/vycor/
-  anneal/                       Public headers — ADL/CTAD analysis feature
-    GlobalIndex.h               Project-wide declaration database
-    Indexer.h                   Phase-1 AST visitor (index all declarations)
-    Analyzer.h                  Phase-2 AST visitor (detect fragile resolutions)
-  morph/                       Public headers — transform pipeline feature
-    MatcherEngine.h             Dynamic matcher parsing and execution
-    TransformPipeline.h         Multi-pass transform orchestration
-  callgraph/                    Public headers — call graph and control flow
-    CallGraph.h                 Call graph data structure (nodes, edges, hierarchy)
-    CallGraphBuilder.h          Two-phase AST visitors for graph construction
-    CollapseFilter.h            Path-based edge collapse filtering
-    ControlFlowIndex.h          Per-call-site try/catch and guard context
-    ControlFlowOracle.h         Exception safety and path queries
-  mcp/                          Public headers — MCP server
-    McpServer.h                 JSON-RPC MCP server (holds graph in memory)
-    McpTools.h                  MCP tool implementations
-    McpProtocol.h               JSON-RPC protocol framing
+  anneal/                       ADL/CTAD analysis (GlobalIndex, Indexer,
+                                Analyzer, DeadCodeAnalyzer)
+  morph/                        Transform pipeline (MatcherEngine,
+                                RulesParser, TemplateEngine, TransformPipeline)
+  callgraph/                    Call graph + control flow (CallGraph,
+                                CallGraphBuilder, ControlFlowIndex,
+                                ControlFlowOracle, ChannelIndex, Snapshot,
+                                CollapseFilter, WorkerPool)
+  mcp/                          MCP server (McpServer, McpTools, McpProtocol)
+  ext/                          Organization extension API (Extensions.h,
+                                OrgConfig.h)
+  compat/                       LLVM-version compat, PCH cache, tool adjusters
 
 src/
-  main.cpp                      CLI entry point (anneal / morph / prism / megascope)
-  anneal/                       anneal implementation
-    GlobalIndex.cpp
-    Indexer.cpp
-    Analyzer.cpp
-  morph/                       morph implementation
-    MatcherEngine.cpp
-    TransformPipeline.cpp
-  callgraph/                    callgraph implementation
-    CallGraph.cpp
-    CallGraphBuilder.cpp        Two-phase: index nodes, then build edges
-    CollapseFilter.cpp          Path-component matching for edge collapse
-    ControlFlowIndex.cpp
-    ControlFlowContextVisitor.cpp  Phase 3: try/catch and guard context
-    ControlFlowOracle.cpp
-  mcp/                          megascope implementation
-    McpServer.cpp               JSON-RPC dispatch loop
-    McpProtocol.cpp             stdio framing (newline-delimited + legacy Content-Length)
-    McpTools.cpp                Tool handlers (lookup, callers, callees, etc.)
-  CMakeLists.txt
+  main.cpp                      CLI entry point (anneal/morph/prism/megascope)
+  anneal/ morph/ callgraph/ mcp/ ext/ compat/   Implementations
+
+ext/                            Organization slot-in (fork-owned; globbed
+                                into the build — see ext/README.md)
+  examples/                     Reference extension + org config (not built)
 
 tests/                          Catch2 test suite
-  test_matcher_engine.cpp       Unit tests for MatcherEngine::parse and addRule
-  test_transforms.cpp           Integration test stubs for morph transforms
-  test_adl_ctad.cpp             Unit and integration tests for anneal analysis
-
-examples/
-  adl_fallback/                 ADL fragility example (include-order sensitivity)
-    Core.hpp, Extension.hpp, Logic.hpp
-    order_a.cpp, order_b.cpp
-  ctad_fallback/                CTAD fragility example (deduction guide visibility)
-    Container.hpp, Factory.hpp, Guide.hpp
-    order_a.cpp, order_b.cpp
-  macro_split/                  Boolean macro splitting transform example
-    input.cpp, expected.cpp
-  builder_to_struct/            Builder pattern to struct conversion example
-    input.cpp, expected.cpp
+docs/                           Design notes, MCP usage, EXTENDING.md
+examples/                       ADL/CTAD fragility and transform examples
+scripts/                        Benchmarking and smoke-test scripts
 ```
 
 ---
@@ -323,30 +360,28 @@ Phase 2 — Analyze:
     → for each TU: AnalyzerVisitor(GlobalIndex)
       → VisitCallExpr → check ADL candidates vs global index
       → VisitVarDecl  → check CTAD usages vs global index
+      → then: registered organization AnnealChecks (ext/)
       → emit Diagnostic entries
 ```
 
-### Transform Pipeline (morph)
+### Single-parse bake (prism / megascope)
 
-```
-For each pass:
-  MatcherEngine(pass rules)
-    → parse matcher expressions (Clang dynamic parser)
-    → register callbacks with MatchFinder
-    → ClangTool::run → collect Replacements
-  merge into allReplacements_
-Apply replacements to disk (when not dry-run)
-```
+`bakeIndexes()` runs the declaration/hierarchy index, edge building, and
+control-flow context extraction over **one** frontend parse per TU.
+Cross-TU joins (virtual-dispatch fan-out, function-pointer-through-return)
+are resolved at query time, which also keeps incremental reindexing
+(`reindex_tu`, snapshot warm starts) consistent with full rebuilds.
 
 ### Key Design Patterns
 
 | Pattern | Where used |
 |---|---|
-| RecursiveASTVisitor | IndexerVisitor, AnalyzerVisitor |
+| RecursiveASTVisitor | IndexerVisitor, AnalyzerVisitor, CF context visitors |
 | FrontendActionFactory | IndexerActionFactory, AnalyzerActionFactory |
 | MatchFinder + MatchCallback | MatcherEngine (via CallbackAdapter) |
 | Two-phase index/analyze | runAnalysis() in Analyzer.cpp |
 | Multi-pass pipeline | TransformPipeline::execute() |
+| Registry + static registrars | ExtensionRegistry (ext/ slot-in) |
 
 ---
 
@@ -377,28 +412,6 @@ transform for this pattern is a planned TDD target.
 `input.cpp` uses a builder pattern with chained setters. `expected.cpp` shows
 the equivalent aggregate initialization. Demonstrates a significant reduction
 in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
-
----
-
-## Current Status
-
-| Component | Status |
-|---|---|
-| MatcherEngine (parse + run) | Complete |
-| TransformPipeline (multi-pass) | Complete (apply-to-disk TODO) |
-| GlobalIndex | Complete |
-| Indexer (two-phase phase 1) | Complete |
-| Analyzer (two-phase phase 2) | Complete |
-| anneal CLI subcommand | Complete |
-| morph CLI subcommand | Complete (JSON parsing TODO) |
-| Call graph builder (two-phase) | Complete |
-| Control flow index (phase 3) | Complete |
-| Edge collapse filtering | Complete |
-| prism CLI subcommand | Complete |
-| MCP server (megascope) | Complete |
-| MCP tools (8 tools) | Complete |
-| Test suite (unit) | Complete |
-| Test suite (integration stubs) | Stubs present, impl pending |
 
 ---
 

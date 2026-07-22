@@ -45,6 +45,10 @@ struct AnalysisOptions {
   // plausible candidate for a call. Off by default — the legacy
   // arithmetic-or-exact heuristic is retained when this is disabled.
   bool modelConvertibility = false;
+
+  // Names of registered organization AnnealChecks (ExtensionRegistry) to
+  // skip. Populated from OrgConfig::disabledAnnealChecks by the CLI.
+  std::vector<std::string> disabledChecks;
 };
 
 // AST visitor that performs shadow lookups at ADL call sites and CTAD usages.
@@ -73,7 +77,8 @@ private:
   std::string getFilePath(clang::SourceLocation loc) const;
 };
 
-// ASTConsumer that drives the AnalyzerVisitor.
+// ASTConsumer that drives the AnalyzerVisitor, then any organization
+// AnnealChecks registered with ExtensionRegistry (see vycor/ext/Extensions.h).
 class AnalyzerConsumer : public clang::ASTConsumer {
 public:
   AnalyzerConsumer(const GlobalIndex &index, clang::SourceManager &sm,
@@ -83,6 +88,9 @@ public:
 
 private:
   AnalyzerVisitor visitor_;
+  const GlobalIndex &index_;
+  std::vector<Diagnostic> &diagnostics_;
+  AnalysisOptions opts_;
 };
 
 // FrontendAction that creates an AnalyzerConsumer.

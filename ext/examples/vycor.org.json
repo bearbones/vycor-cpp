@@ -1,0 +1,17 @@
+{
+  "lockTypes": ["myorg::SpinLockGuard", "myorg::SharedStateGuard"],
+  "channelTypes": [
+    {
+      "type": "myorg::EventBus",
+      "produce": ["post", "postDeferred"],
+      "consume": ["drain", "poll"],
+      "category": "bus"
+    }
+  ],
+  "featureFlags": [
+    { "pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1 },
+    { "pattern": "isFeatureEnabled\\(\"([A-Za-z0-9_.-]+)\"\\)", "nameGroup": 1 }
+  ],
+  "collapsePaths": ["ThirdParty/Math", "ThirdParty/Container"],
+  "disabledAnnealChecks": []
+}

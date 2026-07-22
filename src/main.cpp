@@ -19,6 +19,8 @@
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/ext/Extensions.h"
+#include "vycor/ext/OrgConfig.h"
 #include "vycor/morph/RulesParser.h"
 #include "vycor/morph/TransformPipeline.h"
 #include "vycor/callgraph/CollapseFilter.h"
@@ -106,6 +108,54 @@ static bool parseChannelTypesJson(const std::string &path,
 }
 
 // ---------------------------------------------------------------------------
+// --org-config loading and merging (see docs/EXTENDING.md)
+// ---------------------------------------------------------------------------
+
+// Loads --org-config when set and installs its hook-shaped parts (feature
+// flag patterns, lock/channel types) into ExtensionRegistry. Compiled ext/
+// registrars have already run by this point (static init), so after this
+// call the registry holds both sources. Returns false (with a diagnostic)
+// on unreadable/malformed config.
+static bool loadOrgConfigIfSet(const std::string &path,
+                               vycor::OrgConfig &out) {
+  if (path.empty())
+    return true;
+  std::string err;
+  if (!vycor::loadOrgConfigFile(path, out, err) ||
+      !vycor::applyOrgConfig(out, err)) {
+    llvm::errs() << "org-config: " << err << "\n";
+    return false;
+  }
+  return true;
+}
+
+// Merges registry-held lock/channel types (compiled ext/ registrars plus
+// --org-config) into the CLI-built configs, and org collapse paths into
+// collapsePaths. CLI entries keep their position and duplicates are
+// dropped: the merged lists land in snapshot meta (config-match check), so
+// the result must be deterministic and must equal the plain CLI lists when
+// no extensions are registered.
+static void mergeExtensionConfig(const vycor::OrgConfig &orgCfg,
+                                 vycor::LockTypeConfig &lockCfg,
+                                 vycor::ChannelTypeConfig &channelCfg,
+                                 std::vector<std::string> &collapsePaths) {
+  const auto &registry = vycor::ExtensionRegistry::instance();
+  for (const auto &name : registry.lockTypes())
+    if (std::find(lockCfg.userAllowlist.begin(), lockCfg.userAllowlist.end(),
+                  name) == lockCfg.userAllowlist.end())
+      lockCfg.userAllowlist.push_back(name);
+  for (const auto &spec : registry.channelTypes())
+    if (std::find(channelCfg.registeredTypes.begin(),
+                  channelCfg.registeredTypes.end(),
+                  spec) == channelCfg.registeredTypes.end())
+      channelCfg.registeredTypes.push_back(spec);
+  for (const auto &pattern : orgCfg.collapsePaths)
+    if (std::find(collapsePaths.begin(), collapsePaths.end(), pattern) ==
+        collapsePaths.end())
+      collapsePaths.push_back(pattern);
+}
+
+// ---------------------------------------------------------------------------
 // Subcommands
 // ---------------------------------------------------------------------------
 
@@ -179,6 +229,14 @@ static llvm::cl::opt<bool>
                                        "resolved overload on every argument "
                                        "position"),
                         llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealOrgConfig("org-config",
+        llvm::cl::desc("Organization config JSON (lock/channel types, "
+                       "feature-flag patterns, disabled checks — see "
+                       "docs/EXTENDING.md)"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
     AnnealModelConvertibility("model-convertibility",
@@ -358,6 +416,15 @@ static llvm::cl::opt<std::string>
         llvm::cl::value_desc("file"),
         llvm::cl::sub(PrismCmd));
 
+static llvm::cl::opt<std::string>
+    PrismOrgConfig("org-config",
+        llvm::cl::desc("Organization config JSON (lock/channel types, "
+                       "feature-flag patterns, collapse paths — see "
+                       "docs/EXTENDING.md). Merged with the equivalent "
+                       "CLI flags."),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(PrismCmd));
+
 // ---------------------------------------------------------------------------
 // megascope options
 // ---------------------------------------------------------------------------
@@ -431,6 +498,15 @@ static llvm::cl::opt<std::string>
                        "ChannelIndex.h for the schema). Only populated on a "
                        "fresh full build — not supported yet with "
                        "--snapshot warm start or --isolate-workers."),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<std::string>
+    McpOrgConfig("org-config",
+        llvm::cl::desc("Organization config JSON (lock/channel types, "
+                       "feature-flag patterns, collapse paths — see "
+                       "docs/EXTENDING.md). Merged with the equivalent "
+                       "CLI flags."),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
@@ -535,10 +611,15 @@ int main(int argc, const char **argv) {
 
     std::vector<std::string> files(AnnealSourceFiles.begin(),
                                    AnnealSourceFiles.end());
+    vycor::OrgConfig orgCfg;
+    if (!loadOrgConfigIfSet(AnnealOrgConfig, orgCfg))
+      return 1;
+
     vycor::AnalysisOptions opts;
     opts.enableCoverageDiag = AnnealCoverageDiag;
     opts.warnSameScore = AnnealWarnSameScore;
     opts.modelConvertibility = AnnealModelConvertibility;
+    opts.disabledChecks = orgCfg.disabledAnnealChecks;
     auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
 
     // Dead code analysis.
@@ -667,6 +748,10 @@ int main(int argc, const char **argv) {
         !parseChannelTypesJson(PrismChannelTypesJson, channelCfg)) {
       return 1;
     }
+    vycor::OrgConfig orgCfg;
+    if (!loadOrgConfigIfSet(PrismOrgConfig, orgCfg))
+      return 1;
+    mergeExtensionConfig(orgCfg, lockCfg, channelCfg, collapsePaths);
     auto baked = vycor::bakeIndexes(*compDb, files, collapsePaths,
                                     PrismThreads, pchPtr, sysroot, lockCfg,
                                     nullptr, nullptr, channelCfg);
@@ -682,11 +767,16 @@ int main(int argc, const char **argv) {
         for (const auto &s : channels.allSites()) {
           llvm::json::Array guards;
           for (const auto &g : s.enclosingGuards) {
-            guards.push_back(llvm::json::Object{
+            llvm::json::Object guardObj{
                 {"conditionText", g.conditionText},
                 {"location", g.location},
                 {"inTrueBranch", g.inTrueBranch},
-                {"isAssertion", g.isAssertion}});
+                {"isAssertion", g.isAssertion}};
+            // Organization guard classifiers (feature flags etc.).
+            if (auto ann = vycor::classifyGuard(g))
+              guardObj["annotation"] = llvm::json::Object{
+                  {"kind", ann->kind}, {"name", ann->name}};
+            guards.push_back(std::move(guardObj));
           }
           sites.push_back(llvm::json::Object{
               {"channelId", s.channelId},
@@ -882,6 +972,10 @@ int main(int argc, const char **argv) {
         !parseChannelTypesJson(McpChannelTypesJson, channelCfg)) {
       return 1;
     }
+    vycor::OrgConfig orgCfg;
+    if (!loadOrgConfigIfSet(McpOrgConfig, orgCfg))
+      return 1;
+    mergeExtensionConfig(orgCfg, lockCfg, channelCfg, collapsePaths);
     if (!channelCfg.registeredTypes.empty() && McpIsolateWorkers) {
       llvm::errs()
           << "megascope: WARNING: --channel-types-json is not yet supported "

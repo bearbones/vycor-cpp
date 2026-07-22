@@ -131,6 +131,39 @@ with resolved strings. Path-walking tools (`find_call_chain`,
 `query_locks_held`, `query_same_lock`) accept `max_fan_in` to skip
 high-fan-in hubs and report them in the response.
 
+### `ext` — Organization Extension Points
+
+**Headers:** `include/vycor/ext/`
+**Sources:** `src/ext/` (core), top-level `ext/` (fork-owned slot-in)
+
+| File | Purpose |
+|---|---|
+| `Extensions.h/.cpp` | `ExtensionRegistry` (process-wide): custom `AnnealCheck`s, lock/channel type registration, guard classifiers (feature flags). Macros `VYCOR_REGISTER_ANNEAL_CHECK` / `VYCOR_EXTENSION_SETUP` |
+| `OrgConfig.h/.cpp` | `--org-config` JSON: declarative lock/channel types, feature-flag patterns, collapse paths, disabled checks |
+
+The scheme exists so organization forks never edit upstream files (clean
+merges): declarative config goes in an org JSON passed as `--org-config`;
+compiled hooks go in top-level `ext/*.cpp`, which CMake globs **directly
+into the `vycor-cpp` and `vycor_tests` executables** (NOT `vycor_lib` —
+static-init registrars in an archive would be dropped by the linker).
+`ext/tests/*.cpp` is globbed into `vycor_tests`. `ext/examples/` is not
+built. Full guide: `docs/EXTENDING.md`.
+
+Key semantics:
+- Custom anneal checks run per TU **after** the built-in `AnalyzerVisitor`
+  (in `AnalyzerConsumer::HandleTranslationUnit`); one fresh instance per
+  TU; emit `Diagnostic::Custom` with `checkName`.
+- Registry lock/channel types are merged into the CLI-built
+  `LockTypeConfig`/`ChannelTypeConfig` in `main.cpp`
+  (`mergeExtensionConfig`, CLI-first order, deduped) — so they participate
+  in snapshot config-match/invalidation automatically.
+- Guard classification (feature flags) happens at **query/serialization
+  time** (`classifyGuard` in prism dump, `query_call_site_context`,
+  channel-site listings) — never at index time, so changing patterns does
+  not invalidate snapshots. Annotation shape:
+  `{"annotation": {"kind": "feature-flag", "name": "<flag>"}}` plus the
+  existing `inTrueBranch` for on/off.
+
 ---
 
 ## CLI Entry Point
@@ -139,11 +172,15 @@ high-fan-in hubs and report them in the response.
 objects:
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...>
+vycor-cpp anneal     --build-path <dir> --source <files...> [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...]
-vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>]
+vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...] [--org-config <file>]
+vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>] [--org-config <file>]
 ```
+
+`--org-config` (anneal/prism/megascope) loads the organization config JSON
+(see `include/vycor/ext/OrgConfig.h` and `docs/EXTENDING.md`); its
+lock/channel types and collapse paths merge with the equivalent CLI flags.
 
 Each subcommand has its own scoped options (declared with `llvm::cl::sub(...)`).
 To add a new subcommand, follow the pattern in `main.cpp`:
@@ -197,8 +234,10 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
-- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, and `mcp/*.cpp`.
-- Builds `vycor-cpp` executable from `main.cpp`.
+- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `mcp/*.cpp`, and `ext/*.cpp`.
+- Builds `vycor-cpp` executable from `main.cpp` plus a `CONFIGURE_DEPENDS`
+  glob of top-level `ext/*.cpp` (organization slot-in — attached to the
+  executable, not the archive, so static registrars survive linking).
 - Links against: `clangTooling`, `clangDynamicASTMatchers`, `clangASTMatchers`,
   `clangAST`, `clangBasic`, `clangFrontend`, `clangSema`, `clangSerialization`,
   `clangRewrite`, `clangToolingCore`, `LLVMSupport`.
