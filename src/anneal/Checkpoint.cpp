@@ -15,6 +15,7 @@
 
 #include "vycor/anneal/Checkpoint.h"
 
+#include "vycor/Version.h"
 #include "vycor/ext/Extensions.h"
 
 #include "llvm/Support/FileSystem.h"
@@ -163,7 +164,13 @@ std::vector<std::pair<std::string, std::string>> readStringPairs(Reader &r) {
 // ---------------------------------------------------------------------------
 
 uint64_t annealOptionsFingerprint(const AnalysisOptions &opts) {
-  std::string canon = "v1|ws=";
+  // The tool version is part of the identity: record payloads carry raw
+  // Diagnostic::Kind values (and entry field layouts) that are only
+  // meaningful to the binary revision that wrote them. A checkpoint is a
+  // kill-recovery artifact, not a long-term cache — cross-version reuse
+  // isn't worth the mislabeled-replay risk.
+  std::string canon = VYCOR_VERSION_STRING;
+  canon += "|v1|ws=";
   canon += opts.warnSameScore ? '1' : '0';
   canon += "|mc=";
   canon += opts.modelConvertibility ? '1' : '0';
