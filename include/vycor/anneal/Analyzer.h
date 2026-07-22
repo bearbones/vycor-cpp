@@ -49,6 +49,18 @@ struct AnalysisOptions {
   // Names of registered organization AnnealChecks (ExtensionRegistry) to
   // skip. Populated from OrgConfig::disabledAnnealChecks by the CLI.
   std::vector<std::string> disabledChecks;
+
+  // Worker-pool size for the per-TU phases, with bakeIndexes' semantics:
+  // 0 = all hardware threads, 1 = serial. Defaults to serial so library
+  // callers see no behaviour change; the CLI passes its --threads value
+  // (default 0).
+  unsigned threadCount = 1;
+
+  // When non-empty, per-TU progress is journaled to this file and replayed
+  // on the next run (see anneal/Checkpoint.h): a run killed partway
+  // resumes where it left off, and TUs whose parse fatally died twice are
+  // skipped with a warning instead of re-killing every resume.
+  std::string checkpointPath;
 };
 
 // AST visitor that performs shadow lookups at ADL call sites and CTAD usages.

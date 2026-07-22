@@ -186,6 +186,20 @@ Optional flags: `--warn-same-score`, `--model-convertibility`,
 `--coverage-diag`, `--dead-code` (with `--entry-point`), and
 `--org-config` (organization checks/config — see below).
 
+Both analysis phases run per-TU on a worker pool (`--threads`, same
+semantics as prism/megascope). For long runs, `--checkpoint <file>`
+journals per-TU progress: a run killed partway (OOM, Ctrl-C, CI timeout)
+resumes where it left off instead of restarting, source edits invalidate
+exactly the affected entries, and a TU whose parse fatally died twice is
+skipped with a warning instead of re-killing every resume.
+
+```bash
+./build/vycor-cpp anneal \
+  --build-path /path/to/compile_commands_dir \
+  --source file1.cpp file2.cpp \
+  --threads 0 --checkpoint /tmp/anneal.vycj
+```
+
 ### morph — Apply Transformations
 
 ```bash

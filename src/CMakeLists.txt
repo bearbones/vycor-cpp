@@ -2,6 +2,7 @@ add_library(vycor_lib
   anneal/GlobalIndex.cpp
   anneal/Indexer.cpp
   anneal/Analyzer.cpp
+  anneal/Checkpoint.cpp
   anneal/DeadCodeAnalyzer.cpp
   morph/MatcherEngine.cpp
   morph/TemplateEngine.cpp

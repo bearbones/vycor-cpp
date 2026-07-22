@@ -17,6 +17,7 @@
 
 #include "vycor/callgraph/StringInterner.h"
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,6 +93,29 @@ struct TypeRelationIndex {
   void addCtorEdge(const std::string &toType, const std::string &fromType);
   void addConvOpEdge(const std::string &fromType, const std::string &toType);
 
+  // Merge another index's edges into this one (parallel shard merge and
+  // checkpoint replay). Dedup is the same as the add* methods'.
+  void absorb(const TypeRelationIndex &other);
+
+  // Edge enumeration with resolved strings, for checkpoint serialization.
+  // Deterministic per index instance (map iteration order), not across
+  // instances.
+  template <typename Fn> void forEachBase(Fn fn) const {
+    for (const auto &kv : bases_)
+      for (SId base : kv.second)
+        fn(interner_.resolve(kv.first), interner_.resolve(base));
+  }
+  template <typename Fn> void forEachCtorEdge(Fn fn) const {
+    for (const auto &kv : ctorEdges_)
+      for (SId from : kv.second)
+        fn(interner_.resolve(kv.first), interner_.resolve(from));
+  }
+  template <typename Fn> void forEachConvOpEdge(Fn fn) const {
+    for (const auto &kv : convOpEdges_)
+      for (SId to : kv.second)
+        fn(interner_.resolve(kv.first), interner_.resolve(to));
+  }
+
   // Transitive base-class check (cycle-safe). Returns true when
   // `derived == maybeBase` or when `maybeBase` appears anywhere on the
   // chain of base classes reachable from `derived`.
@@ -107,6 +131,12 @@ struct TypeRelationIndex {
 private:
   using SId = StringInterner::Id;
   StringInterner interner_;
+
+  // Guards the edge maps during add*/absorb: the parallel anneal phase 1
+  // writes from several threads. Reads (isBaseOrSelf/isConvertible/forEach*)
+  // don't lock — like CallGraph, the phase barrier guarantees writers have
+  // quiesced before phase 2 reads begin.
+  mutable std::mutex writeMutex_;
 
   // Normalized derived className -> list of direct base class names.
   std::unordered_map<SId, std::vector<SId>> bases_;
@@ -178,9 +208,41 @@ public:
   size_t guideCount() const;
   size_t coverageEntryCount() const;
 
+  // Merge a per-TU shard into this index (parallel phase-1 merge and
+  // checkpoint replay). Entries are appended exactly as if the shard's
+  // add* calls had run against this index directly — including the
+  // duplicate header declarations multiple TUs both see, matching the
+  // historical single-index serial behaviour.
+  void absorb(const GlobalIndex &shard);
+
+  // Entry enumeration for checkpoint serialization. Deterministic per index
+  // instance (map iteration order), not across instances.
+  template <typename Fn> void forEachOverload(Fn fn) const {
+    for (const auto &kv : overloads_)
+      for (const auto &entry : kv.second)
+        fn(entry);
+  }
+  template <typename Fn> void forEachDeductionGuide(Fn fn) const {
+    for (const auto &kv : guides_)
+      for (const auto &entry : kv.second)
+        fn(entry);
+  }
+  template <typename Fn> void forEachCoverageProperty(Fn fn) const {
+    for (const auto &kv : coverageProps_)
+      for (const auto &entry : kv.second)
+        fn(entry);
+  }
+
 private:
   using SId = StringInterner::Id;
   StringInterner interner_;
+
+  // Guards the entry maps during add*/absorb (parallel anneal phase 1
+  // writes from several threads; the interner has its own lock). Reads
+  // don't lock — the phase barrier guarantees writers have quiesced before
+  // phase 1.5/2 reads begin (see TypeRelationIndex::writeMutex_).
+  mutable std::mutex writeMutex_;
+
   std::unordered_map<SId, std::vector<FunctionOverloadEntry>> overloads_;
   std::unordered_map<SId, std::vector<DeductionGuideEntry>> guides_;
   std::unordered_map<SId, std::vector<CoveragePropertyEntry>> coverageProps_;
