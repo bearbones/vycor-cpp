@@ -22,11 +22,25 @@
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Tooling/Tooling.h"
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace vycor {
+
+// Runs one anneal worker over `batch` (the --isolate-workers seam, mirror
+// of callgraph's WorkerRunner): phase is AnnealCheckpoint::kPhaseIndex or
+// kPhaseAnalyze; globalIndexPath is the merged-index handoff file for
+// phase 2 (empty in phase 1); the worker writes its shard to shardPath and
+// its stderr (WORKER-TU markers + diagnostics) to stderrPath. Any nonzero
+// return triggers the crash/bisect protocol.
+using AnnealWorkerRunner = std::function<int(
+    uint8_t phase, const std::string &globalIndexPath,
+    const std::vector<std::string> &batch, const std::string &shardPath,
+    const std::string &stderrPath)>;
 
 // Options controlling the behaviour of the anneal analysis pipeline. Opt-in
 // fields remain false by default so existing callers see no behaviour
@@ -61,6 +75,21 @@ struct AnalysisOptions {
   // resumes where it left off, and TUs whose parse fatally died twice are
   // skipped with a warning instead of re-killing every resume.
   std::string checkpointPath;
+
+  // Subprocess worker isolation (megascope --isolate-workers equivalent):
+  // when set, the per-TU parses run in worker subprocesses dispatched
+  // through this callback under the batching + crash/bisect protocol
+  // (callgraph/WorkerPool.h) instead of on the in-process pool — a TU that
+  // crashes its worker costs only that TU. The CLI installs a
+  // self-spawning runner; tests install in-process fakes. Composes with
+  // checkpointPath: shard results are journaled as they land.
+  AnnealWorkerRunner isolatedRunner;
+
+  // Worker-process count for isolatedRunner dispatch. 0 falls back to
+  // threadCount, and 0 again to hardware concurrency (megascope's
+  // --workers semantics). Workers run their batch single-threaded so the
+  // last WORKER-TU stderr marker is an exact poison identifier.
+  unsigned workerCount = 0;
 };
 
 // AST visitor that performs shadow lookups at ADL call sites and CTAD usages.

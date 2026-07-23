@@ -74,15 +74,16 @@ std::optional<std::string> lastWorkerTuMarker(const std::string &stderrPath) {
 
 } // namespace
 
-BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
-                                    const std::vector<std::string> &files,
-                                    unsigned workers, BuildStats *stats,
-                                    const std::string &shardDir,
-                                    const McpBakeConfig *expected,
-                                    unsigned batchSizeOverride) {
-  BakedIndexes out;
+void dispatchIsolated(
+    const WorkerRunner &runner, const std::vector<std::string> &files,
+    unsigned workers, const std::string &shardDir,
+    const std::function<bool(const std::string &shardPath,
+                             const std::vector<std::string> &batchTus,
+                             double wallMs)> &consumeShard,
+    const std::function<void(const std::string &tu)> &onPoison,
+    unsigned batchSizeOverride) {
   if (files.empty())
-    return out;
+    return;
   if (workers == 0)
     workers = 1;
 
@@ -153,15 +154,8 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
     threads.emplace_back(dispatchLoop);
 
   std::unordered_map<std::string, int> retries;
-  unsigned poisonedCount = 0;
 
-  auto poison = [&](const std::string &tu) {
-    ++poisonedCount;
-    llvm::errs() << "megascope: worker: TU poisoned (crashed worker): " << tu
-                 << "\n";
-    if (stats)
-      stats->addTuStat({tu, 0, 0.0, -1});
-  };
+  const auto &poison = onPoison;
 
   // Re-enqueue the given TUs as one batch, dropping (and poisoning) any TU
   // already re-dispatched kMaxTuRetries times.
@@ -227,26 +221,10 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
     }
 
     if (res.exitCode == 0) {
-      if (auto snap = SnapshotIO::load(res.shardPath)) {
-        if (expected && (snap->meta.collapsePaths != expected->collapsePaths ||
-                         snap->meta.lockAllowlist != expected->lockTypes))
-          llvm::errs() << "megascope: worker: WARNING: shard "
-                       << res.shardPath
-                       << " records a different build configuration\n";
-        out.graph.absorb(snap->graph);
-        out.cfIndex.absorb(snap->cfIndex);
-        if (stats) {
-          // Honest per-TU accounting isn't available across a batch; record
-          // the batch wall divided evenly rather than faking parse times.
-          double per = res.wallMs / static_cast<double>(res.batch.tus.size());
-          for (const auto &tu : res.batch.tus)
-            stats->addTuStat({tu, 0, per, 0});
-        }
-      } else {
-        // Exit 0 but no readable shard (torn write, deleted temp): treat as
-        // a markerless failure so the batch is retried/bisected.
-        llvm::errs() << "megascope: worker: WARNING: worker exited cleanly "
-                        "but shard "
+      // Exit 0 but no consumable shard (torn write, deleted temp): treat
+      // as a markerless failure so the batch is retried/bisected.
+      if (!consumeShard(res.shardPath, res.batch.tus, res.wallMs)) {
+        llvm::errs() << "worker: WARNING: worker exited cleanly but shard "
                      << res.shardPath << " is unreadable — retrying batch\n";
         res.exitCode = -1;
       }
@@ -265,6 +243,46 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
   workCv.notify_all();
   for (auto &t : threads)
     t.join();
+}
+
+BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
+                                    const std::vector<std::string> &files,
+                                    unsigned workers, BuildStats *stats,
+                                    const std::string &shardDir,
+                                    const McpBakeConfig *expected,
+                                    unsigned batchSizeOverride) {
+  BakedIndexes out;
+  unsigned poisonedCount = 0;
+  dispatchIsolated(
+      runner, files, workers, shardDir,
+      [&](const std::string &shardPath,
+          const std::vector<std::string> &batchTus, double wallMs) {
+        auto snap = SnapshotIO::load(shardPath);
+        if (!snap)
+          return false;
+        if (expected && (snap->meta.collapsePaths != expected->collapsePaths ||
+                         snap->meta.lockAllowlist != expected->lockTypes))
+          llvm::errs() << "megascope: worker: WARNING: shard " << shardPath
+                       << " records a different build configuration\n";
+        out.graph.absorb(snap->graph);
+        out.cfIndex.absorb(snap->cfIndex);
+        if (stats) {
+          // Honest per-TU accounting isn't available across a batch; record
+          // the batch wall divided evenly rather than faking parse times.
+          double per = wallMs / static_cast<double>(batchTus.size());
+          for (const auto &tu : batchTus)
+            stats->addTuStat({tu, 0, per, 0});
+        }
+        return true;
+      },
+      [&](const std::string &tu) {
+        ++poisonedCount;
+        llvm::errs() << "megascope: worker: TU poisoned (crashed worker): "
+                     << tu << "\n";
+        if (stats)
+          stats->addTuStat({tu, 0, 0.0, -1});
+      },
+      batchSizeOverride);
 
   if (poisonedCount > 0)
     llvm::errs() << "megascope: " << poisonedCount

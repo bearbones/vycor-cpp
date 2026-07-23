@@ -20,6 +20,7 @@
 #include "vycor/callgraph/Snapshot.h" // FileStamp
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -71,6 +72,23 @@ namespace vycor {
 // a mismatch discards the whole journal.
 uint64_t annealOptionsFingerprint(const AnalysisOptions &opts);
 
+// One TU's complete GlobalIndex contribution in value form — the shared
+// payload shape of checkpoint phase-1 records, worker index shards, and
+// the parent->worker full-index handoff file.
+struct AnnealIndexPayload {
+  std::vector<FunctionOverloadEntry> overloads;
+  std::vector<DeductionGuideEntry> guides;
+  std::vector<CoveragePropertyEntry> coverage;
+  // (derived,base), (toType,fromType), (fromType,toType) — the argument
+  // order of the corresponding TypeRelationIndex::add* methods.
+  std::vector<std::pair<std::string, std::string>> baseEdges;
+  std::vector<std::pair<std::string, std::string>> ctorEdges;
+  std::vector<std::pair<std::string, std::string>> convOpEdges;
+
+  static AnnealIndexPayload capture(const GlobalIndex &shard);
+  void applyTo(GlobalIndex &into) const;
+};
+
 // Hash of a contributing file set (sorted path|mtime|size triples) — the
 // validity key for phase-2 records (see above).
 uint64_t annealStampSetHash(const std::vector<FileStamp> &stamps);
@@ -120,6 +138,8 @@ public:
                      const FileStamp &stamp);
   void recordPhase1(const std::string &tu, const FileStamp &stamp,
                     const GlobalIndex &shard);
+  void recordPhase1(const std::string &tu, const FileStamp &stamp,
+                    const AnnealIndexPayload &payload);
   void recordPhase2(const std::string &tu, const FileStamp &stamp,
                     uint64_t indexSetHash,
                     const std::vector<Diagnostic> &diags);
@@ -129,14 +149,7 @@ private:
 
   struct Phase1Record {
     FileStamp stamp;
-    std::vector<FunctionOverloadEntry> overloads;
-    std::vector<DeductionGuideEntry> guides;
-    std::vector<CoveragePropertyEntry> coverage;
-    // (derived,base), (toType,fromType), (fromType,toType) — the argument
-    // order of the corresponding TypeRelationIndex::add* methods.
-    std::vector<std::pair<std::string, std::string>> baseEdges;
-    std::vector<std::pair<std::string, std::string>> ctorEdges;
-    std::vector<std::pair<std::string, std::string>> convOpEdges;
+    AnnealIndexPayload payload;
   };
   struct Phase2Record {
     FileStamp stamp;
@@ -164,5 +177,39 @@ private:
   // Keyed "phase\0tu".
   std::unordered_map<std::string, AttemptState> attempts_;
 };
+
+// ============================================================================
+// Worker shard files (anneal --isolate-workers)
+//
+// Workers write a complete shard then exit 0; the parent only reads shards
+// of cleanly-exited workers, so unlike the journal these are all-or-nothing
+// files (any decode problem returns false and the dispatcher retries the
+// batch). Per-TU grouping is what lets the parent absorb, order, and — when
+// --checkpoint is also set — journal each TU's result exactly like the
+// in-process path.
+// ============================================================================
+
+// Phase-1 index shard: each entry is (tuPath, that TU's contribution).
+bool writeAnnealIndexShard(
+    const std::string &path,
+    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus);
+bool readAnnealIndexShard(
+    const std::string &path,
+    const std::function<void(const std::string &tu,
+                             const AnnealIndexPayload &payload)> &fn);
+
+// Phase-2 diagnostics shard: each entry is (tuPath, its diagnostics).
+bool writeAnnealDiagShard(
+    const std::string &path,
+    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus);
+bool readAnnealDiagShard(
+    const std::string &path,
+    const std::function<void(const std::string &tu,
+                             std::vector<Diagnostic> diags)> &fn);
+
+// Full merged index, for the parent -> analyze-worker handoff
+// (anneal --analyze-worker --global-index <file>).
+bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index);
+bool readGlobalIndexFile(const std::string &path, GlobalIndex &into);
 
 } // namespace vycor

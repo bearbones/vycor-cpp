@@ -57,6 +57,24 @@ using WorkerRunner = std::function<int(const std::vector<std::string> &batch,
                                        const std::string &shardPath,
                                        const std::string &stderrPath)>;
 
+/// Generic dispatcher core, shared by the megascope bake and the anneal
+/// isolated phases. Batches `files`, keeps <= `workers` runner invocations
+/// in flight, and calls `consumeShard(shardPath, batchTus, wallMs)` on the
+/// calling thread for each batch whose runner exited 0 — return false to
+/// treat the batch as failed anyway (unreadable/torn shard), which
+/// retries it like a markerless crash. The crash/bisect protocol is as
+/// documented on bakeIsolatedWithRunner; `onPoison` is invoked (calling
+/// thread) for each TU the protocol drops. Shard and stderr files are
+/// created inside `shardDir` (which must exist) and removed as consumed.
+void dispatchIsolated(
+    const WorkerRunner &runner, const std::vector<std::string> &files,
+    unsigned workers, const std::string &shardDir,
+    const std::function<bool(const std::string &shardPath,
+                             const std::vector<std::string> &batchTus,
+                             double wallMs)> &consumeShard,
+    const std::function<void(const std::string &tu)> &onPoison,
+    unsigned batchSizeOverride = 0);
+
 /// Dispatcher core: batches `files`, keeps <= `workers` runner invocations
 /// in flight, absorbs each shard into the returned indexes as it lands
 /// (single-threaded, on the calling thread), and applies the crash/bisect

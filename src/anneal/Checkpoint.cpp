@@ -189,6 +189,47 @@ uint64_t annealOptionsFingerprint(const AnalysisOptions &opts) {
   return fnv64(canon.data(), canon.size(), kFnv64Seed);
 }
 
+// ---------------------------------------------------------------------------
+// AnnealIndexPayload
+// ---------------------------------------------------------------------------
+
+AnnealIndexPayload AnnealIndexPayload::capture(const GlobalIndex &shard) {
+  AnnealIndexPayload p;
+  shard.forEachOverload(
+      [&](const FunctionOverloadEntry &e) { p.overloads.push_back(e); });
+  shard.forEachDeductionGuide(
+      [&](const DeductionGuideEntry &e) { p.guides.push_back(e); });
+  shard.forEachCoverageProperty(
+      [&](const CoveragePropertyEntry &e) { p.coverage.push_back(e); });
+  const auto &types = shard.typeRelations();
+  types.forEachBase([&](const std::string &d, const std::string &b) {
+    p.baseEdges.emplace_back(d, b);
+  });
+  types.forEachCtorEdge([&](const std::string &to, const std::string &from) {
+    p.ctorEdges.emplace_back(to, from);
+  });
+  types.forEachConvOpEdge([&](const std::string &from, const std::string &to) {
+    p.convOpEdges.emplace_back(from, to);
+  });
+  return p;
+}
+
+void AnnealIndexPayload::applyTo(GlobalIndex &into) const {
+  for (const auto &e : overloads)
+    into.addFunctionOverload(e);
+  for (const auto &e : guides)
+    into.addDeductionGuide(e);
+  for (const auto &e : coverage)
+    into.addCoverageProperty(e);
+  auto &types = into.mutableTypeRelations();
+  for (const auto &p : baseEdges)
+    types.addBase(p.first, p.second);
+  for (const auto &p : ctorEdges)
+    types.addCtorEdge(p.first, p.second);
+  for (const auto &p : convOpEdges)
+    types.addConvOpEdge(p.first, p.second);
+}
+
 uint64_t annealStampSetHash(const std::vector<FileStamp> &stamps) {
   std::vector<std::string> keys;
   keys.reserve(stamps.size());
@@ -203,6 +244,146 @@ uint64_t annealStampSetHash(const std::vector<FileStamp> &stamps) {
   }
   return h;
 }
+
+// ---------------------------------------------------------------------------
+// Payload wire form (shared by journal records and worker shard files)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+void encodeIndexPayload(std::string &out, const AnnealIndexPayload &p) {
+  putU32(out, static_cast<uint32_t>(p.overloads.size()));
+  for (const auto &e : p.overloads) {
+    putStr(out, e.qualifiedName);
+    putStr(out, e.headerPath);
+    putU32(out, static_cast<uint32_t>(e.paramTypes.size()));
+    for (const auto &t : e.paramTypes)
+      putStr(out, t);
+    putStr(out, e.returnType);
+    putU32(out, e.sourceLine);
+  }
+  putU32(out, static_cast<uint32_t>(p.guides.size()));
+  for (const auto &e : p.guides) {
+    putStr(out, e.templateName);
+    putStr(out, e.headerPath);
+    putU32(out, static_cast<uint32_t>(e.paramTypes.size()));
+    for (const auto &t : e.paramTypes)
+      putStr(out, t);
+    putStr(out, e.deducedType);
+    putU32(out, e.sourceLine);
+  }
+  putU32(out, static_cast<uint32_t>(p.coverage.size()));
+  for (const auto &e : p.coverage) {
+    putStr(out, e.qualifiedName);
+    putStr(out, e.headerPath);
+    putU32(out, e.sourceLine);
+    putStr(out, e.enclosingClass);
+    putU32(out, static_cast<uint32_t>(static_cast<int32_t>(e.gvaLinkage)));
+    uint8_t flags = 0;
+    flags |= e.isInlined ? 0x01 : 0;
+    flags |= e.isConstexpr ? 0x02 : 0;
+    flags |= e.isDefaulted ? 0x04 : 0;
+    flags |= e.isTrivial ? 0x08 : 0;
+    flags |= e.isVirtual ? 0x10 : 0;
+    flags |= e.isStaticMethod ? 0x20 : 0;
+    flags |= e.isImplicitlyInstantiable ? 0x40 : 0;
+    putU8(out, flags);
+    putU32(out, static_cast<uint32_t>(static_cast<int32_t>(e.templatedKind)));
+    putU32(out, static_cast<uint32_t>(static_cast<int32_t>(e.storageClass)));
+    putU32(out, static_cast<uint32_t>(static_cast<int32_t>(e.formalLinkage)));
+    putU32(out, e.bodyStmtCount);
+    putStr(out, e.signature);
+  }
+  putStringPairs(out, p.baseEdges);
+  putStringPairs(out, p.ctorEdges);
+  putStringPairs(out, p.convOpEdges);
+}
+
+bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
+  uint32_t nOv = r.u32();
+  for (uint32_t i = 0; i < nOv && r.ok; ++i) {
+    FunctionOverloadEntry e;
+    e.qualifiedName = r.str();
+    e.headerPath = r.str();
+    uint32_t nP = r.u32();
+    for (uint32_t j = 0; j < nP && r.ok; ++j)
+      e.paramTypes.push_back(r.str());
+    e.returnType = r.str();
+    e.sourceLine = r.u32();
+    p.overloads.push_back(std::move(e));
+  }
+  uint32_t nGd = r.u32();
+  for (uint32_t i = 0; i < nGd && r.ok; ++i) {
+    DeductionGuideEntry e;
+    e.templateName = r.str();
+    e.headerPath = r.str();
+    uint32_t nP = r.u32();
+    for (uint32_t j = 0; j < nP && r.ok; ++j)
+      e.paramTypes.push_back(r.str());
+    e.deducedType = r.str();
+    e.sourceLine = r.u32();
+    p.guides.push_back(std::move(e));
+  }
+  uint32_t nCov = r.u32();
+  for (uint32_t i = 0; i < nCov && r.ok; ++i) {
+    CoveragePropertyEntry e;
+    e.qualifiedName = r.str();
+    e.headerPath = r.str();
+    e.sourceLine = r.u32();
+    e.enclosingClass = r.str();
+    e.gvaLinkage = static_cast<int>(static_cast<int32_t>(r.u32()));
+    uint8_t flags = r.u8();
+    e.isInlined = flags & 0x01;
+    e.isConstexpr = flags & 0x02;
+    e.isDefaulted = flags & 0x04;
+    e.isTrivial = flags & 0x08;
+    e.isVirtual = flags & 0x10;
+    e.isStaticMethod = flags & 0x20;
+    e.isImplicitlyInstantiable = flags & 0x40;
+    e.templatedKind = static_cast<int>(static_cast<int32_t>(r.u32()));
+    e.storageClass = static_cast<int>(static_cast<int32_t>(r.u32()));
+    e.formalLinkage = static_cast<int>(static_cast<int32_t>(r.u32()));
+    e.bodyStmtCount = r.u32();
+    e.signature = r.str();
+    p.coverage.push_back(std::move(e));
+  }
+  p.baseEdges = readStringPairs(r);
+  p.ctorEdges = readStringPairs(r);
+  p.convOpEdges = readStringPairs(r);
+  return r.ok;
+}
+
+void encodeDiagnostics(std::string &out,
+                       const std::vector<Diagnostic> &diags) {
+  putU32(out, static_cast<uint32_t>(diags.size()));
+  for (const auto &d : diags) {
+    putU32(out, static_cast<uint32_t>(d.kind));
+    putStr(out, d.callLocation);
+    putStr(out, d.resolvedDecl);
+    putStr(out, d.betterDecl);
+    putStr(out, d.missingHeader);
+    putStr(out, d.message);
+    putStr(out, d.checkName);
+  }
+}
+
+bool decodeDiagnostics(Reader &r, std::vector<Diagnostic> &out) {
+  uint32_t nDiag = r.u32();
+  for (uint32_t i = 0; i < nDiag && r.ok; ++i) {
+    Diagnostic d;
+    d.kind = static_cast<Diagnostic::Kind>(r.u32());
+    d.callLocation = r.str();
+    d.resolvedDecl = r.str();
+    d.betterDecl = r.str();
+    d.missingHeader = r.str();
+    d.message = r.str();
+    d.checkName = r.str();
+    out.push_back(std::move(d));
+  }
+  return r.ok;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Open / load
@@ -295,57 +476,7 @@ void AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       rec.stamp.path = tu;
       rec.stamp.mtimeNs = r.u64();
       rec.stamp.size = r.u64();
-      uint32_t nOv = r.u32();
-      for (uint32_t i = 0; i < nOv && r.ok; ++i) {
-        FunctionOverloadEntry e;
-        e.qualifiedName = r.str();
-        e.headerPath = r.str();
-        uint32_t nP = r.u32();
-        for (uint32_t j = 0; j < nP && r.ok; ++j)
-          e.paramTypes.push_back(r.str());
-        e.returnType = r.str();
-        e.sourceLine = r.u32();
-        rec.overloads.push_back(std::move(e));
-      }
-      uint32_t nGd = r.u32();
-      for (uint32_t i = 0; i < nGd && r.ok; ++i) {
-        DeductionGuideEntry e;
-        e.templateName = r.str();
-        e.headerPath = r.str();
-        uint32_t nP = r.u32();
-        for (uint32_t j = 0; j < nP && r.ok; ++j)
-          e.paramTypes.push_back(r.str());
-        e.deducedType = r.str();
-        e.sourceLine = r.u32();
-        rec.guides.push_back(std::move(e));
-      }
-      uint32_t nCov = r.u32();
-      for (uint32_t i = 0; i < nCov && r.ok; ++i) {
-        CoveragePropertyEntry e;
-        e.qualifiedName = r.str();
-        e.headerPath = r.str();
-        e.sourceLine = r.u32();
-        e.enclosingClass = r.str();
-        e.gvaLinkage = static_cast<int>(static_cast<int32_t>(r.u32()));
-        uint8_t flags = r.u8();
-        e.isInlined = flags & 0x01;
-        e.isConstexpr = flags & 0x02;
-        e.isDefaulted = flags & 0x04;
-        e.isTrivial = flags & 0x08;
-        e.isVirtual = flags & 0x10;
-        e.isStaticMethod = flags & 0x20;
-        e.isImplicitlyInstantiable = flags & 0x40;
-        e.templatedKind = static_cast<int>(static_cast<int32_t>(r.u32()));
-        e.storageClass = static_cast<int>(static_cast<int32_t>(r.u32()));
-        e.formalLinkage = static_cast<int>(static_cast<int32_t>(r.u32()));
-        e.bodyStmtCount = r.u32();
-        e.signature = r.str();
-        rec.coverage.push_back(std::move(e));
-      }
-      rec.baseEdges = readStringPairs(r);
-      rec.ctorEdges = readStringPairs(r);
-      rec.convOpEdges = readStringPairs(r);
-      if (!r.ok)
+      if (!decodeIndexPayload(r, rec.payload))
         break;
       // Completion clears the attempt counter for this TU/phase.
       attempts_.erase(attemptKey(kPhaseIndex, tu));
@@ -359,19 +490,7 @@ void AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       rec.stamp.mtimeNs = r.u64();
       rec.stamp.size = r.u64();
       rec.indexSetHash = r.u64();
-      uint32_t nDiag = r.u32();
-      for (uint32_t i = 0; i < nDiag && r.ok; ++i) {
-        Diagnostic d;
-        d.kind = static_cast<Diagnostic::Kind>(r.u32());
-        d.callLocation = r.str();
-        d.resolvedDecl = r.str();
-        d.betterDecl = r.str();
-        d.missingHeader = r.str();
-        d.message = r.str();
-        d.checkName = r.str();
-        rec.diagnostics.push_back(std::move(d));
-      }
-      if (!r.ok)
+      if (!decodeDiagnostics(r, rec.diagnostics))
         break;
       attempts_.erase(attemptKey(kPhaseAnalyze, tu));
       phase2_[tu] = std::move(rec);
@@ -411,19 +530,7 @@ bool AnnealCheckpoint::replayPhase1(const std::string &tu,
   }
   // Replay outside the lock: the loaded maps are append-only per run and
   // this record can't be evicted.
-  for (const auto &e : rec->overloads)
-    into.addFunctionOverload(e);
-  for (const auto &e : rec->guides)
-    into.addDeductionGuide(e);
-  for (const auto &e : rec->coverage)
-    into.addCoverageProperty(e);
-  auto &types = into.mutableTypeRelations();
-  for (const auto &p : rec->baseEdges)
-    types.addBase(p.first, p.second);
-  for (const auto &p : rec->ctorEdges)
-    types.addCtorEdge(p.first, p.second);
-  for (const auto &p : rec->convOpEdges)
-    types.addConvOpEdge(p.first, p.second);
+  rec->payload.applyTo(into);
   return true;
 }
 
@@ -483,87 +590,16 @@ void AnnealCheckpoint::recordAttempt(uint8_t phase, const std::string &tu,
 void AnnealCheckpoint::recordPhase1(const std::string &tu,
                                     const FileStamp &stamp,
                                     const GlobalIndex &shard) {
+  recordPhase1(tu, stamp, AnnealIndexPayload::capture(shard));
+}
+
+void AnnealCheckpoint::recordPhase1(const std::string &tu,
+                                    const FileStamp &stamp,
+                                    const AnnealIndexPayload &contribution) {
   std::string payload;
   putStr(payload, tu);
   putStamp(payload, stamp);
-
-  std::string entries;
-  uint32_t count = 0;
-  shard.forEachOverload([&](const FunctionOverloadEntry &e) {
-    putStr(entries, e.qualifiedName);
-    putStr(entries, e.headerPath);
-    putU32(entries, static_cast<uint32_t>(e.paramTypes.size()));
-    for (const auto &p : e.paramTypes)
-      putStr(entries, p);
-    putStr(entries, e.returnType);
-    putU32(entries, e.sourceLine);
-    ++count;
-  });
-  putU32(payload, count);
-  payload.append(entries);
-
-  entries.clear();
-  count = 0;
-  shard.forEachDeductionGuide([&](const DeductionGuideEntry &e) {
-    putStr(entries, e.templateName);
-    putStr(entries, e.headerPath);
-    putU32(entries, static_cast<uint32_t>(e.paramTypes.size()));
-    for (const auto &p : e.paramTypes)
-      putStr(entries, p);
-    putStr(entries, e.deducedType);
-    putU32(entries, e.sourceLine);
-    ++count;
-  });
-  putU32(payload, count);
-  payload.append(entries);
-
-  entries.clear();
-  count = 0;
-  shard.forEachCoverageProperty([&](const CoveragePropertyEntry &e) {
-    putStr(entries, e.qualifiedName);
-    putStr(entries, e.headerPath);
-    putU32(entries, e.sourceLine);
-    putStr(entries, e.enclosingClass);
-    putU32(entries, static_cast<uint32_t>(static_cast<int32_t>(e.gvaLinkage)));
-    uint8_t flags = 0;
-    flags |= e.isInlined ? 0x01 : 0;
-    flags |= e.isConstexpr ? 0x02 : 0;
-    flags |= e.isDefaulted ? 0x04 : 0;
-    flags |= e.isTrivial ? 0x08 : 0;
-    flags |= e.isVirtual ? 0x10 : 0;
-    flags |= e.isStaticMethod ? 0x20 : 0;
-    flags |= e.isImplicitlyInstantiable ? 0x40 : 0;
-    putU8(entries, flags);
-    putU32(entries,
-           static_cast<uint32_t>(static_cast<int32_t>(e.templatedKind)));
-    putU32(entries,
-           static_cast<uint32_t>(static_cast<int32_t>(e.storageClass)));
-    putU32(entries,
-           static_cast<uint32_t>(static_cast<int32_t>(e.formalLinkage)));
-    putU32(entries, e.bodyStmtCount);
-    putStr(entries, e.signature);
-    ++count;
-  });
-  putU32(payload, count);
-  payload.append(entries);
-
-  std::vector<std::pair<std::string, std::string>> pairs;
-  const auto &types = shard.typeRelations();
-  types.forEachBase([&](const std::string &d, const std::string &b) {
-    pairs.emplace_back(d, b);
-  });
-  putStringPairs(payload, pairs);
-  pairs.clear();
-  types.forEachCtorEdge([&](const std::string &to, const std::string &from) {
-    pairs.emplace_back(to, from);
-  });
-  putStringPairs(payload, pairs);
-  pairs.clear();
-  types.forEachConvOpEdge([&](const std::string &from, const std::string &to) {
-    pairs.emplace_back(from, to);
-  });
-  putStringPairs(payload, pairs);
-
+  encodeIndexPayload(payload, contribution);
   appendRecord(kKindPhase1, payload);
 
   // Mirror the load-time semantics for this process's own appends, so a
@@ -580,20 +616,155 @@ void AnnealCheckpoint::recordPhase2(const std::string &tu,
   putStr(payload, tu);
   putStamp(payload, stamp);
   putU64(payload, indexSetHash);
-  putU32(payload, static_cast<uint32_t>(diags.size()));
-  for (const auto &d : diags) {
-    putU32(payload, static_cast<uint32_t>(d.kind));
-    putStr(payload, d.callLocation);
-    putStr(payload, d.resolvedDecl);
-    putStr(payload, d.betterDecl);
-    putStr(payload, d.missingHeader);
-    putStr(payload, d.message);
-    putStr(payload, d.checkName);
-  }
+  encodeDiagnostics(payload, diags);
   appendRecord(kKindPhase2, payload);
 
   std::lock_guard<std::mutex> lock(mutex_);
   attempts_.erase(attemptKey(kPhaseAnalyze, tu));
+}
+
+// ---------------------------------------------------------------------------
+// Worker shard files
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Shard/handoff file framing: magic, u32 version, u32 entry count, then per
+// entry: str tu, u32 payloadLen, payload, u32 fnv32(payload). All-or-nothing
+// on read (workers write complete files then exit 0).
+constexpr uint32_t kShardVersion = 1;
+
+bool writeShardFile(const std::string &path, const char magic[4],
+                    const std::vector<std::pair<std::string, std::string>>
+                        &tuPayloads) {
+  std::error_code ec;
+  llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_None);
+  if (ec)
+    return false;
+  std::string buf;
+  buf.append(magic, 4);
+  putU32(buf, kShardVersion);
+  putU32(buf, static_cast<uint32_t>(tuPayloads.size()));
+  for (const auto &[tu, payload] : tuPayloads) {
+    putStr(buf, tu);
+    putU32(buf, static_cast<uint32_t>(payload.size()));
+    buf.append(payload);
+    putU32(buf, fnv32(payload.data(), payload.size()));
+  }
+  out << buf;
+  out.flush();
+  return !out.has_error();
+}
+
+bool readShardFile(
+    const std::string &path, const char magic[4],
+    const std::function<bool(const std::string &tu, Reader &r)> &fn) {
+  auto bufOrErr = llvm::MemoryBuffer::getFile(path);
+  if (!bufOrErr)
+    return false;
+  const auto &buf = *bufOrErr.get();
+  Reader stream{buf.getBufferStart(), buf.getBufferSize()};
+  if (!stream.need(8) || std::memcmp(buf.getBufferStart(), magic, 4) != 0)
+    return false;
+  stream.pos = 4;
+  if (stream.u32() != kShardVersion)
+    return false;
+  uint32_t count = stream.u32();
+  for (uint32_t i = 0; i < count; ++i) {
+    std::string tu = stream.str();
+    uint32_t len = stream.u32();
+    if (!stream.need(len + 4))
+      return false;
+    const char *payload = stream.data + stream.pos;
+    stream.pos += len;
+    if (stream.u32() != fnv32(payload, len))
+      return false;
+    Reader r{payload, len};
+    if (!fn(tu, r))
+      return false;
+  }
+  return stream.ok;
+}
+
+constexpr char kIndexShardMagic[4] = {'V', 'Y', 'A', 'I'};
+constexpr char kDiagShardMagic[4] = {'V', 'Y', 'A', 'D'};
+constexpr char kGlobalIndexMagic[4] = {'V', 'Y', 'G', 'I'};
+
+} // namespace
+
+bool writeAnnealIndexShard(
+    const std::string &path,
+    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus) {
+  std::vector<std::pair<std::string, std::string>> encoded;
+  encoded.reserve(tus.size());
+  for (const auto &[tu, payload] : tus) {
+    std::string bytes;
+    encodeIndexPayload(bytes, payload);
+    encoded.emplace_back(tu, std::move(bytes));
+  }
+  return writeShardFile(path, kIndexShardMagic, encoded);
+}
+
+bool readAnnealIndexShard(
+    const std::string &path,
+    const std::function<void(const std::string &tu,
+                             const AnnealIndexPayload &payload)> &fn) {
+  return readShardFile(path, kIndexShardMagic,
+                       [&](const std::string &tu, Reader &r) {
+                         AnnealIndexPayload payload;
+                         if (!decodeIndexPayload(r, payload))
+                           return false;
+                         fn(tu, payload);
+                         return true;
+                       });
+}
+
+bool writeAnnealDiagShard(
+    const std::string &path,
+    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus) {
+  std::vector<std::pair<std::string, std::string>> encoded;
+  encoded.reserve(tus.size());
+  for (const auto &[tu, diags] : tus) {
+    std::string bytes;
+    encodeDiagnostics(bytes, diags);
+    encoded.emplace_back(tu, std::move(bytes));
+  }
+  return writeShardFile(path, kDiagShardMagic, encoded);
+}
+
+bool readAnnealDiagShard(
+    const std::string &path,
+    const std::function<void(const std::string &tu,
+                             std::vector<Diagnostic> diags)> &fn) {
+  return readShardFile(path, kDiagShardMagic,
+                       [&](const std::string &tu, Reader &r) {
+                         std::vector<Diagnostic> diags;
+                         if (!decodeDiagnostics(r, diags))
+                           return false;
+                         fn(tu, std::move(diags));
+                         return true;
+                       });
+}
+
+bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index) {
+  return writeShardFile(
+      path, kGlobalIndexMagic,
+      {{std::string("<merged>"), [&] {
+          std::string bytes;
+          encodeIndexPayload(bytes, AnnealIndexPayload::capture(index));
+          return bytes;
+        }()}});
+}
+
+bool readGlobalIndexFile(const std::string &path, GlobalIndex &into) {
+  return readShardFile(path, kGlobalIndexMagic,
+                       [&](const std::string &, Reader &r) {
+                         AnnealIndexPayload payload;
+                         if (!decodeIndexPayload(r, payload))
+                           return false;
+                         payload.applyTo(into);
+                         return true;
+                       });
 }
 
 } // namespace vycor
