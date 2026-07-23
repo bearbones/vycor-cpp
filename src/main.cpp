@@ -14,7 +14,9 @@
 // limitations under the License.
 
 #include "vycor/anneal/Analyzer.h"
+#include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/anneal/Indexer.h"
 #include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
@@ -34,10 +36,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -237,6 +241,52 @@ static llvm::cl::opt<unsigned>
         llvm::cl::desc("Number of threads for the per-TU analysis phases "
                        "(0 = hardware_concurrency, 1 = serial)"),
         llvm::cl::init(0),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    AnnealIsolateWorkers("isolate-workers",
+        llvm::cl::desc("Run the per-TU parses in worker subprocesses (a "
+                       "crashing TU costs only that TU; composes with "
+                       "--checkpoint)"),
+        llvm::cl::init(false),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<unsigned>
+    AnnealWorkers("workers",
+        llvm::cl::desc("Number of worker processes for --isolate-workers "
+                       "(0 = the --threads value)"),
+        llvm::cl::init(0),
+        llvm::cl::sub(AnnealCmd));
+
+// Worker-mode plumbing (spawned by the --isolate-workers parent; not part
+// of the user-facing surface). Mirrors megascope's --bake-worker.
+static llvm::cl::opt<bool>
+    AnnealIndexWorker("index-worker",
+        llvm::cl::desc("Internal: index the --source list and write an "
+                       "anneal index shard instead of analyzing"),
+        llvm::cl::Hidden,
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    AnnealAnalyzeWorker("analyze-worker",
+        llvm::cl::desc("Internal: analyze the --source list against "
+                       "--global-index and write a diagnostics shard"),
+        llvm::cl::Hidden,
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealWorkerOut("worker-out",
+        llvm::cl::desc("Internal: shard output path for worker modes"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::Hidden,
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealGlobalIndexIn("global-index",
+        llvm::cl::desc("Internal: merged-index handoff file for "
+                       "--analyze-worker"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::Hidden,
         llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<std::string>
@@ -642,6 +692,123 @@ int main(int argc, const char **argv) {
     opts.disabledChecks = orgCfg.disabledAnnealChecks;
     opts.threadCount = AnnealThreads;
     opts.checkpointPath = AnnealCheckpointFile;
+
+    // ---- worker modes (spawned by an --isolate-workers parent) -----------
+    // Single-threaded over the batch so the last WORKER-TU stderr marker is
+    // an exact poison identifier; write the shard, exit. Mirrors
+    // megascope's --bake-worker.
+    if (AnnealIndexWorker || AnnealAnalyzeWorker) {
+      if (AnnealWorkerOut.empty()) {
+        llvm::errs() << "anneal: worker mode requires --worker-out\n";
+        return 1;
+      }
+      if (AnnealIndexWorker) {
+        std::vector<std::pair<std::string, vycor::AnnealIndexPayload>> shards;
+        shards.reserve(files.size());
+        for (const auto &file : files) {
+          llvm::errs() << "WORKER-TU " << file << "\n";
+          vycor::GlobalIndex shard;
+          auto tool = vycor::makeClangTool(*compDb, {file});
+          vycor::IndexerActionFactory factory(shard);
+          tool.run(&factory);
+          shards.emplace_back(file, vycor::AnnealIndexPayload::capture(shard));
+        }
+        if (!vycor::writeAnnealIndexShard(AnnealWorkerOut, shards)) {
+          llvm::errs() << "anneal: worker: cannot write shard to "
+                       << AnnealWorkerOut << "\n";
+          return 1;
+        }
+      } else {
+        vycor::GlobalIndex indexIn;
+        if (AnnealGlobalIndexIn.empty() ||
+            !vycor::readGlobalIndexFile(AnnealGlobalIndexIn, indexIn)) {
+          llvm::errs() << "anneal: worker: --analyze-worker requires a "
+                          "readable --global-index\n";
+          return 1;
+        }
+        std::vector<std::pair<std::string, std::vector<vycor::Diagnostic>>>
+            perTu;
+        perTu.reserve(files.size());
+        for (const auto &file : files) {
+          llvm::errs() << "WORKER-TU " << file << "\n";
+          std::vector<vycor::Diagnostic> local;
+          auto tool = vycor::makeClangTool(*compDb, {file});
+          vycor::AnalyzerActionFactory factory(indexIn, local, opts);
+          tool.run(&factory);
+          perTu.emplace_back(file, std::move(local));
+        }
+        if (!vycor::writeAnnealDiagShard(AnnealWorkerOut, perTu)) {
+          llvm::errs() << "anneal: worker: cannot write shard to "
+                       << AnnealWorkerOut << "\n";
+          return 1;
+        }
+      }
+      return 0;
+    }
+
+    // ---- parent-side worker isolation ------------------------------------
+    if (AnnealIsolateWorkers) {
+      static int selfExeAnchor; // address anchors getMainExecutable
+      std::string selfExe =
+          llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
+      opts.workerCount =
+          AnnealWorkers ? AnnealWorkers.getValue() : AnnealThreads.getValue();
+      opts.isolatedRunner = [selfExe](uint8_t phase,
+                                      const std::string &globalIndexPath,
+                                      const std::vector<std::string> &batch,
+                                      const std::string &shardPath,
+                                      const std::string &stderrPath) -> int {
+        std::vector<std::string> workerArgv;
+        workerArgv.reserve(14 + 2 * batch.size());
+        workerArgv.push_back(selfExe);
+        workerArgv.push_back("anneal");
+        workerArgv.push_back(phase == vycor::AnnealCheckpoint::kPhaseIndex
+                                 ? "--index-worker"
+                                 : "--analyze-worker");
+        workerArgv.push_back("--worker-out");
+        workerArgv.push_back(shardPath);
+        workerArgv.push_back("--build-path");
+        workerArgv.push_back(AnnealBuildPath);
+        if (!globalIndexPath.empty()) {
+          workerArgv.push_back("--global-index");
+          workerArgv.push_back(globalIndexPath);
+        }
+        if (AnnealWarnSameScore)
+          workerArgv.push_back("--warn-same-score");
+        if (AnnealModelConvertibility)
+          workerArgv.push_back("--model-convertibility");
+        if (!AnnealOrgConfig.empty()) {
+          workerArgv.push_back("--org-config");
+          workerArgv.push_back(AnnealOrgConfig);
+        }
+        for (const auto &a : vycor::globalExtraArgs())
+          workerArgv.push_back("--extra-arg=" + a);
+        for (const auto &f : batch) {
+          workerArgv.push_back("--source");
+          workerArgv.push_back(f);
+        }
+
+        std::vector<llvm::StringRef> args(workerArgv.begin(),
+                                          workerArgv.end());
+        // stdin from the null device; stdout joins the stderr log (same
+        // rationale as megascope's runner: keep worker output off the
+        // parent's stdout).
+        std::optional<llvm::StringRef> redirects[3] = {
+            llvm::StringRef(""), llvm::StringRef(stderrPath),
+            llvm::StringRef(stderrPath)};
+        std::string errMsg;
+        bool execFailed = false;
+        int rc = llvm::sys::ExecuteAndWait(selfExe, args, /*Env=*/std::nullopt,
+                                           redirects, /*SecondsToWait=*/0,
+                                           /*MemoryLimit=*/0, &errMsg,
+                                           &execFailed);
+        if (execFailed)
+          llvm::errs() << "anneal: worker: failed to spawn " << selfExe
+                       << ": " << errMsg << "\n";
+        return rc;
+      };
+    }
+
     auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
 
     // Dead code analysis.

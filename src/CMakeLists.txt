@@ -55,7 +55,12 @@ if(LLVM_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET)
   if(_VYCOR_RESOURCE_DIR)
-    target_compile_definitions(vycor_lib PRIVATE
+    # PUBLIC, not PRIVATE: getResourceDirAdjuster() is an inline function in
+    # ToolAdjusters.h whose body is #ifdef'd on this macro. Any consumer TU
+    # (main.cpp, a test) compiled without it emits a no-op weak definition
+    # that can win symbol resolution over the lib's real one — silently
+    # dropping -resource-dir injection binary-wide (ODR).
+    target_compile_definitions(vycor_lib PUBLIC
       "VYCOR_CLANG_RESOURCE_DIR=\"${_VYCOR_RESOURCE_DIR}\"")
   endif()
 endif()
@@ -72,7 +77,9 @@ if(APPLE)
     ERROR_QUIET)
   if(_VYCOR_DEFAULT_SYSROOT)
     message(STATUS "Default macOS sysroot: ${_VYCOR_DEFAULT_SYSROOT}")
-    target_compile_definitions(vycor_lib PRIVATE
+    # PUBLIC for the same ODR reason as VYCOR_CLANG_RESOURCE_DIR above
+    # (getSysrootAdjuster's fallback is #ifdef'd on this macro).
+    target_compile_definitions(vycor_lib PUBLIC
       "VYCOR_DEFAULT_SYSROOT=\"${_VYCOR_DEFAULT_SYSROOT}\"")
   endif()
 endif()

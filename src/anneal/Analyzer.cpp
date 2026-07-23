@@ -17,10 +17,14 @@
 #include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/Indexer.h"
 #include "vycor/anneal/TypeNormalize.h"
+#include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
 #include "vycor/ext/Extensions.h"
 
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/ThreadPool.h"
 
 #include "clang/AST/ASTContext.h"
@@ -38,6 +42,7 @@
 #include <cctype>
 #include <memory>
 #include <set>
+#include <thread>
 #include <unordered_map>
 
 namespace vycor {
@@ -717,6 +722,28 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
   }
 
+  // Worker isolation setup: one shard directory serves both dispatched
+  // phases and the phase-2 index handoff file. If it can't be created,
+  // fall back to the in-process pool (correctness never depends on
+  // isolation).
+  bool isolate = static_cast<bool>(opts.isolatedRunner);
+  unsigned workers = opts.workerCount ? opts.workerCount : opts.threadCount;
+  if (workers == 0)
+    workers = std::thread::hardware_concurrency();
+  llvm::SmallString<128> shardDir;
+  if (isolate) {
+    llvm::SmallString<128> tmpBase;
+    llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmpBase);
+    llvm::sys::path::append(tmpBase, "vycor-anneal-workers");
+    if (auto ec = llvm::sys::fs::createUniqueDirectory(tmpBase, shardDir)) {
+      llvm::errs() << "anneal: WARNING: cannot create worker shard "
+                      "directory under "
+                   << tmpBase << ": " << ec.message()
+                   << " — running in-process instead\n";
+      isolate = false;
+    }
+  }
+
   // Phase 1: index all translation units. Journaled TUs with a matching
   // stamp are replayed without a parse; TUs whose parse fatally died
   // kMaxAttempts times are skipped as poisoned.
@@ -741,28 +768,64 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
       poisoned.insert(file);
       continue;
     }
-    if (st)
-      contributing.push_back(*st);
     toIndex.push_back(file);
   }
-  runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
-    if (ckpt) {
-      const FileStamp *st = stampFor[file];
-      // The attempt record lands on disk BEFORE the parse: if the parse
-      // takes the process down, the next resume can see it happened.
-      ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, file, *st);
-      GlobalIndex shard;
-      auto tool = vycor::makeClangTool(compDb, {file});
-      IndexerActionFactory factory(shard);
-      tool.run(&factory);
-      ckpt->recordPhase1(file, *st, shard);
-      index.absorb(shard);
-    } else {
-      auto tool = vycor::makeClangTool(compDb, {file});
-      IndexerActionFactory factory(index);
-      tool.run(&factory);
-    }
-  });
+  if (isolate) {
+    // Parses run in worker subprocesses; a crashing TU costs only itself
+    // (bisect protocol), so no attempt records are needed — a parent kill
+    // simply re-dispatches whatever batches hadn't landed. Shard results
+    // are journaled per TU exactly like the in-process path.
+    dispatchIsolated(
+        [&](const std::vector<std::string> &batch,
+            const std::string &shardPath, const std::string &stderrPath) {
+          return opts.isolatedRunner(AnnealCheckpoint::kPhaseIndex, "", batch,
+                                     shardPath, stderrPath);
+        },
+        toIndex, workers, std::string(shardDir),
+        [&](const std::string &shardPath, const std::vector<std::string> &,
+            double) {
+          return readAnnealIndexShard(
+              shardPath,
+              [&](const std::string &tu, const AnnealIndexPayload &payload) {
+                if (ckpt) {
+                  auto it = stampFor.find(tu);
+                  if (it != stampFor.end())
+                    ckpt->recordPhase1(tu, *it->second, payload);
+                }
+                payload.applyTo(index);
+              });
+        },
+        [&](const std::string &tu) {
+          llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
+                       << tu << "\n";
+          poisoned.insert(tu);
+        });
+  } else {
+    runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
+      if (ckpt) {
+        const FileStamp *st = stampFor[file];
+        // The attempt record lands on disk BEFORE the parse: if the parse
+        // takes the process down, the next resume can see it happened.
+        ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, file, *st);
+        GlobalIndex shard;
+        auto tool = vycor::makeClangTool(compDb, {file});
+        IndexerActionFactory factory(shard);
+        tool.run(&factory);
+        ckpt->recordPhase1(file, *st, shard);
+        index.absorb(shard);
+      } else {
+        auto tool = vycor::makeClangTool(compDb, {file});
+        IndexerActionFactory factory(index);
+        tool.run(&factory);
+      }
+    });
+  }
+  // TUs indexed this run (not poisoned along the way) join the phase-2
+  // validity set alongside the replayed ones.
+  if (ckpt)
+    for (const auto &file : toIndex)
+      if (!poisoned.count(file))
+        contributing.push_back(*stampFor[file]);
   if (replayed1)
     llvm::errs() << "anneal: checkpoint: " << replayed1 << " of "
                  << sourceFiles.size()
@@ -807,22 +870,64 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
     toAnalyze.push_back(file);
   }
-  runPerTuTasks(toAnalyze, opts.threadCount, [&](const std::string &file) {
-    if (ckpt)
-      ckpt->recordAttempt(AnnealCheckpoint::kPhaseAnalyze, file,
-                          *stampFor[file]);
-    std::vector<Diagnostic> local;
-    auto tool = vycor::makeClangTool(compDb, {file});
-    AnalyzerActionFactory factory(index, local, opts);
-    tool.run(&factory);
-    if (ckpt)
-      ckpt->recordPhase2(file, *stampFor[file], setHash, local);
-    perFile[slotFor[file]] = std::move(local);
-  });
+  if (isolate) {
+    // Hand the merged index to the analyze workers through a file in the
+    // shard directory. If it can't be written, degrade to in-process.
+    llvm::SmallString<160> indexPath(shardDir);
+    llvm::sys::path::append(indexPath, "global-index.bin");
+    if (!writeGlobalIndexFile(std::string(indexPath), index)) {
+      llvm::errs() << "anneal: WARNING: cannot write merged index to "
+                   << indexPath << " — running phase 2 in-process instead\n";
+      isolate = false;
+    } else {
+      dispatchIsolated(
+          [&](const std::vector<std::string> &batch,
+              const std::string &shardPath, const std::string &stderrPath) {
+            return opts.isolatedRunner(AnnealCheckpoint::kPhaseAnalyze,
+                                       std::string(indexPath), batch,
+                                       shardPath, stderrPath);
+          },
+          toAnalyze, workers, std::string(shardDir),
+          [&](const std::string &shardPath, const std::vector<std::string> &,
+              double) {
+            return readAnnealDiagShard(
+                shardPath,
+                [&](const std::string &tu, std::vector<Diagnostic> diags) {
+                  auto slot = slotFor.find(tu);
+                  if (slot == slotFor.end())
+                    return; // not ours (malformed shard) — drop
+                  if (ckpt)
+                    ckpt->recordPhase2(tu, *stampFor[tu], setHash, diags);
+                  perFile[slot->second] = std::move(diags);
+                });
+          },
+          [&](const std::string &tu) {
+            llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
+                         << tu << "\n";
+          });
+    }
+  }
+  if (!isolate) {
+    runPerTuTasks(toAnalyze, opts.threadCount, [&](const std::string &file) {
+      if (ckpt)
+        ckpt->recordAttempt(AnnealCheckpoint::kPhaseAnalyze, file,
+                            *stampFor[file]);
+      std::vector<Diagnostic> local;
+      auto tool = vycor::makeClangTool(compDb, {file});
+      AnalyzerActionFactory factory(index, local, opts);
+      tool.run(&factory);
+      if (ckpt)
+        ckpt->recordPhase2(file, *stampFor[file], setHash, local);
+      perFile[slotFor[file]] = std::move(local);
+    });
+  }
   if (replayed2)
     llvm::errs() << "anneal: checkpoint: " << replayed2 << " of "
                  << sourceFiles.size()
                  << " TU(s) restored without re-parsing (phase 2)\n";
+
+  if (!shardDir.empty())
+    llvm::sys::fs::remove_directories(shardDir);
 
   for (auto &slot : perFile)
     diagnostics.insert(diagnostics.end(),

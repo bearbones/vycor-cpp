@@ -192,6 +192,9 @@ journals per-TU progress: a run killed partway (OOM, Ctrl-C, CI timeout)
 resumes where it left off instead of restarting, source edits invalidate
 exactly the affected entries, and a TU whose parse fatally died twice is
 skipped with a warning instead of re-killing every resume.
+`--isolate-workers` (with `--workers N`) additionally runs the parses in
+subprocess workers, megascope-style: a TU that crashes its worker costs
+only that TU, and the parent survives. All three flags compose.
 
 ```bash
 ./build/vycor-cpp anneal \

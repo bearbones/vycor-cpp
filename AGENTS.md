@@ -71,6 +71,17 @@ mismatch discards the journal wholesale, and a TU whose parse fatally died
 twice (attempt records, no completion) is skipped as poisoned instead of
 re-killing every resume. See `anneal/Checkpoint.h`.
 
+`--isolate-workers [--workers N]` runs the per-TU parses in subprocess
+workers (megascope's model): the parent spawns `anneal --index-worker` /
+`--analyze-worker` batches through the generic `dispatchIsolated`
+dispatcher (`callgraph/WorkerPool.h` — batching, WORKER-TU poison markers,
+crash/bisect, shared with the megascope bake), phase-1 workers write
+per-TU index shards, and phase-2 workers read the merged index from a
+handoff file (`--global-index`) and write diagnostics shards. Composes
+with `--checkpoint`: shard results are journaled per TU as they land.
+`AnalysisOptions::isolatedRunner` is the test seam (in-process fake
+workers, no spawning).
+
 ### `morph` — AST-Based Transformations
 
 **Headers:** `include/vycor/morph/`
@@ -186,7 +197,7 @@ Key semantics:
 objects:
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--threads <n>] [--checkpoint <file>] [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> --source <files...> [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...] [--org-config <file>]
 vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>] [--org-config <file>]
