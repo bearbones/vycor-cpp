@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/anneal/Analyzer.h"
+#include "vycor/anneal/CheckSet.h"
 #include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/DeadCodeAnalyzer.h"
 #include "vycor/anneal/Indexer.h"
@@ -217,6 +218,23 @@ static llvm::cl::opt<bool>
     AnnealCoverageDiag("coverage-diag",
                        llvm::cl::desc("Enable coverage instrumentation diagnostics"),
                        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealChecks("checks",
+        llvm::cl::desc("Comma-separated check specification applied after "
+                       "any .vycor-anneal.json: names enable, -names "
+                       "disable, group names (e.g. all, noisy, "
+                       "compute-heavy) expand. See docs/checks/README.md."),
+        llvm::cl::value_desc("spec"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealChecksConfig("checks-config",
+        llvm::cl::desc("Explicit checks-config file (default: search for "
+                       ".vycor-anneal.json from the working directory "
+                       "upward)"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
     AnnealOdrDiag("odr-diag",
@@ -694,12 +712,73 @@ int main(int argc, const char **argv) {
     if (!loadOrgConfigIfSet(AnnealOrgConfig, orgCfg))
       return 1;
 
+    // ---- named-check selection (--checks / .vycor-anneal.json) -----------
+    // Sources in order, later winning: discovered/explicit config file,
+    // --checks, then the legacy toggle flags as appended enables.
+    std::set<std::string> enabledChecks = vycor::defaultCheckSet();
+    {
+      std::vector<std::string> spec;
+      std::string cfgPath = !AnnealChecksConfig.empty()
+                                ? std::string(AnnealChecksConfig)
+                                : vycor::findChecksConfig(".");
+      if (!cfgPath.empty()) {
+        auto buf = llvm::MemoryBuffer::getFile(cfgPath);
+        if (!buf) {
+          llvm::errs() << "anneal: checks-config: cannot read " << cfgPath
+                       << ": " << buf.getError().message() << "\n";
+          return 1;
+        }
+        std::string err;
+        if (!vycor::parseChecksConfigJson(
+                std::string((*buf)->getBuffer()), spec, err)) {
+          llvm::errs() << "anneal: checks-config: " << cfgPath << ": " << err
+                       << "\n";
+          return 1;
+        }
+      }
+      std::string cli = AnnealChecks;
+      size_t pos = 0;
+      while (pos != std::string::npos && pos < cli.size()) {
+        size_t comma = cli.find(',', pos);
+        std::string entry = cli.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        while (!entry.empty() && entry.front() == ' ')
+          entry.erase(entry.begin());
+        while (!entry.empty() && entry.back() == ' ')
+          entry.pop_back();
+        if (!entry.empty())
+          spec.push_back(entry);
+        pos = comma == std::string::npos ? std::string::npos : comma + 1;
+      }
+      if (AnnealCoverageDiag)
+        spec.push_back("coverage-properties");
+      if (AnnealOdrDiag)
+        spec.push_back("odr-violations");
+      if (AnnealDeadCode)
+        spec.push_back("dead-code");
+      std::string err;
+      if (!vycor::resolveCheckSpec(spec, enabledChecks, err)) {
+        llvm::errs() << "anneal: checks: " << err << "\n";
+        return 1;
+      }
+    }
+
     vycor::AnalysisOptions opts;
-    opts.enableCoverageDiag = AnnealCoverageDiag;
-    opts.enableOdrDiag = AnnealOdrDiag;
+    opts.enableAdlDiag = enabledChecks.count("adl-visibility") > 0;
+    opts.enableCtadDiag = enabledChecks.count("ctad-visibility") > 0;
+    opts.enableSpecializationDiag =
+        enabledChecks.count("specialization-visibility") > 0;
+    opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
+    opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
     opts.warnSameScore = AnnealWarnSameScore;
     opts.modelConvertibility = AnnealModelConvertibility;
+    // Organization checks not in the enabled set are disabled, on top of
+    // the org config's own disable list.
     opts.disabledChecks = orgCfg.disabledAnnealChecks;
+    for (const auto &name :
+         vycor::ExtensionRegistry::instance().allCheckNames())
+      if (!enabledChecks.count(name))
+        opts.disabledChecks.push_back(name);
     opts.threadCount = AnnealThreads;
     opts.checkpointPath = AnnealCheckpointFile;
 
@@ -763,7 +842,12 @@ int main(int argc, const char **argv) {
           llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
       opts.workerCount =
           AnnealWorkers ? AnnealWorkers.getValue() : AnnealThreads.getValue();
-      opts.isolatedRunner = [selfExe](uint8_t phase,
+      // Fully-resolved check set for workers: "-all" first so worker-side
+      // defaults and any discovered config file are overridden.
+      std::string workerChecks = "-all";
+      for (const auto &name : enabledChecks)
+        workerChecks += "," + name;
+      opts.isolatedRunner = [selfExe, workerChecks](uint8_t phase,
                                       const std::string &globalIndexPath,
                                       const std::vector<std::string> &batch,
                                       const std::string &shardPath,
@@ -787,8 +871,7 @@ int main(int argc, const char **argv) {
           workerArgv.push_back("--warn-same-score");
         if (AnnealModelConvertibility)
           workerArgv.push_back("--model-convertibility");
-        if (AnnealOdrDiag) // phase-1 workers must collect OdrEntries
-          workerArgv.push_back("--odr-diag");
+        workerArgv.push_back("--checks=" + workerChecks);
         if (!AnnealOrgConfig.empty()) {
           workerArgv.push_back("--org-config");
           workerArgv.push_back(AnnealOrgConfig);
@@ -824,7 +907,7 @@ int main(int argc, const char **argv) {
     auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
 
     // Dead code analysis.
-    if (AnnealDeadCode) {
+    if (enabledChecks.count("dead-code")) {
       auto graph = vycor::buildCallGraph(*compDb, files);
 
       std::vector<std::string> entryPoints(AnnealEntryPoints.begin(),

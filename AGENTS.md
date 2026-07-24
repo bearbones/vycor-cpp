@@ -211,7 +211,7 @@ Key semantics:
 objects:
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--odr-diag] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> --source <files...> [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...] [--org-config <file>]
 vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>] [--org-config <file>]
@@ -220,6 +220,20 @@ vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name
 `--org-config` (anneal/prism/megascope) loads the organization config JSON
 (see `include/vycor/ext/OrgConfig.h` and `docs/EXTENDING.md`); its
 lock/channel types and collapse paths merge with the equivalent CLI flags.
+
+**Named checks (anneal):** every analysis is a named check with a page
+under `docs/checks/` (see `docs/checks/README.md` for the list, groups,
+and defaults). Selection sources in order (later wins): a
+`.vycor-anneal.json` found walking up from the working directory (or
+`--checks-config <file>`), the `--checks=<spec>` flag (clang-tidy style:
+`all,-noisy`, `-name` disables, groups expand), then the legacy toggles
+(`--odr-diag`, `--coverage-diag`, `--dead-code`) as appended enables. The
+resolver lives in `anneal/CheckSet.h/.cpp`; unknown names are a hard
+error; main.cpp maps the resolved set onto `AnalysisOptions` booleans and
+forwards it to isolated workers as `--checks=-all,<resolved...>`.
+Organization checks (per-TU `AnnealCheck` and merged-index `IndexCheck`,
+`ext/Extensions.h`) join the same namespace via `name()`; org groups via
+`registry.addCheckGroup`.
 
 Each subcommand has its own scoped options (declared with `llvm::cl::sub(...)`).
 To add a new subcommand, follow the pattern in `main.cpp`:

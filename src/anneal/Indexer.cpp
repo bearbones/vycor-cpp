@@ -23,7 +23,31 @@
 #include "clang/AST/ODRHash.h"
 #include "clang/Frontend/CompilerInstance.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 namespace vycor {
+
+std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
+                               const clang::ASTContext &context) {
+  clang::PrintingPolicy policy(context.getLangOpts());
+  policy.SuppressTagKeyword = true;
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  for (unsigned i = 0; i < args.size(); ++i) {
+    if (i)
+      os << ", ";
+    clang::TemplateArgument arg = args[i];
+    // Canonicalize type arguments so both sides of the join print typedefs
+    // and sugar identically.
+    if (arg.getKind() == clang::TemplateArgument::Type) {
+      os << arg.getAsType().getCanonicalType().getAsString(policy);
+      continue;
+    }
+    arg.print(policy, os, /*IncludeType=*/true);
+  }
+  os.flush();
+  return out;
+}
 
 // --- IndexerVisitor ---
 
@@ -170,6 +194,28 @@ bool IndexerVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
   if (decl->isImplicit())
     return true;
   maybeRecordOdrClass(decl);
+
+  // Explicit (full) class template specializations — recorded even when
+  // declaration-only, and BEFORE the definition guards below: the
+  // specialization-visibility check cares that the declaration exists at
+  // all. Partial specializations are patterns, not concrete arguments, and
+  // are out of scope.
+  if (const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl)) {
+    if (spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization &&
+        !llvm::isa<clang::ClassTemplatePartialSpecializationDecl>(spec) &&
+        astContext_ &&
+        !sm_.isInSystemHeader(sm_.getSpellingLoc(spec->getLocation()))) {
+      SpecializationEntry entry;
+      entry.templateName =
+          spec->getSpecializedTemplate()->getQualifiedNameAsString();
+      entry.argsString =
+          formatTemplateArgs(spec->getTemplateArgs(), *astContext_);
+      entry.headerPath = getFilePath(spec->getLocation());
+      entry.line = sm_.getSpellingLineNumber(spec->getLocation());
+      index_.addSpecialization(entry);
+    }
+  }
   if (!decl->hasDefinition())
     return true;
   if (decl->getDefinition() != decl)

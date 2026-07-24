@@ -199,9 +199,20 @@ case and the subtler one-header-whose-body-depends-on-`-D`-flags case:
 Token-identical copies at different paths are not flagged (vendored
 duplicates are benign), so the signal stays clean.
 
-Other optional flags: `--warn-same-score`, `--model-convertibility`,
-`--coverage-diag`, `--dead-code` (with `--entry-point`), and
-`--org-config` (organization checks/config — see below).
+Every anneal analysis is a **named check** with its own documentation
+page — see [docs/checks/README.md](docs/checks/README.md) for the full
+list, defaults, and groups. Select checks clang-tidy-style with
+`--checks=all,-noisy` or a `.vycor-anneal.json` discovered from the
+working directory upward:
+
+```json
+{ "checks": ["all", "-coverage-properties", "-compute-heavy"] }
+```
+
+Other optional flags: `--warn-same-score`, `--model-convertibility`, the
+legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
+`--entry-point`), and `--org-config` (organization checks/config — see
+below).
 
 Both analysis phases run per-TU on a worker pool (`--threads`, same
 semantics as prism/megascope). For long runs, `--checkpoint <file>`

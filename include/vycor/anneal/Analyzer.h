@@ -46,6 +46,20 @@ using AnnealWorkerRunner = std::function<int(
 // fields remain false by default so existing callers see no behaviour
 // change. Passed by const-ref through runAnalysis into the AST visitors.
 struct AnalysisOptions {
+  // The core visibility checks (on by default, matching historical
+  // behaviour; the --checks selection layer in the CLI maps named checks
+  // onto these booleans — see anneal/CheckSet.h).
+  bool enableAdlDiag = true;  // adl-visibility: ADL_* diagnostics
+  bool enableCtadDiag = true; // ctad-visibility: CTAD_Fallback
+
+  // specialization-visibility: a TU implicitly instantiates a primary
+  // template while an explicit specialization exists in a header that TU
+  // does not include — IFNDR ([temp.expl.spec]), silently mixed
+  // instantiations at link time. On by default: it is the same
+  // visibility-fragility family as ADL/CTAD and fires only on a proven
+  // invisible specialization.
+  bool enableSpecializationDiag = true;
+
   // Emit Coverage_* diagnostics from analyzeCoverageProperties.
   bool enableCoverageDiag = false;
 
@@ -108,16 +122,24 @@ public:
 
   bool VisitCallExpr(clang::CallExpr *expr);
   bool VisitVarDecl(clang::VarDecl *decl);
+  bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
+
+  void setASTContext(clang::ASTContext *ctx) { astContext_ = ctx; }
 
 private:
   const GlobalIndex &index_;
   clang::SourceManager &sm_;
   std::vector<Diagnostic> &diagnostics_;
   AnalysisOptions opts_;
+  clang::ASTContext *astContext_ = nullptr;
 
   // Set of header paths included in the current TU (populated lazily).
   mutable bool includedFilesPopulated_ = false;
   mutable std::set<std::string> includedFiles_;
+
+  // (template|args|specHeader) triples already reported this TU — the same
+  // class template is visited once per redeclaration.
+  std::set<std::string> reportedSpecs_;
 
   void populateIncludedFiles() const;
   bool isFileIncluded(const std::string &path) const;

@@ -203,6 +203,8 @@ AnalyzerVisitor::AnalyzerVisitor(const GlobalIndex &index,
       opts_(std::move(opts)) {}
 
 bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
+  if (!opts_.enableAdlDiag)
+    return true;
   // Only analyze calls in the main file (not in included headers).
   if (!sm_.isInMainFile(expr->getBeginLoc()))
     return true;
@@ -377,6 +379,8 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
 }
 
 bool AnalyzerVisitor::VisitVarDecl(clang::VarDecl *decl) {
+  if (!opts_.enableCtadDiag)
+    return true;
   // Only analyze declarations in the main file.
   if (!sm_.isInMainFile(decl->getBeginLoc()))
     return true;
@@ -480,6 +484,64 @@ AnalyzerVisitor::getFilePath(clang::SourceLocation loc) const {
   return "<unknown>";
 }
 
+// --- specialization-visibility ---
+
+// For every class template this TU knows, look at its IMPLICIT
+// instantiations (the TU used the primary) and ask the global index
+// whether an explicit specialization with those exact arguments exists
+// anywhere in the project. If it does and its header is not included
+// here, the program is IFNDR ([temp.expl.spec]): this TU baked the
+// primary's instantiation while other TUs use the specialization, and no
+// compiler or linker will ever say so. (The included-but-declared-late
+// variant is a hard error the compiler already diagnoses in-TU, so only
+// the invisible case is reported.) Enumerating decl->specializations()
+// avoids traversing instantiation bodies — shouldVisitTemplateInstantiations
+// stays off, so the ADL/CTAD visitors see exactly what they saw before.
+bool AnalyzerVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
+  if (!opts_.enableSpecializationDiag || !astContext_)
+    return true;
+
+  auto known = index_.findSpecializations(decl->getQualifiedNameAsString());
+  if (known.empty())
+    return true;
+
+  for (auto *spec : decl->specializations()) {
+    if (spec->getSpecializationKind() != clang::TSK_ImplicitInstantiation)
+      continue;
+    std::string args = formatTemplateArgs(spec->getTemplateArgs(),
+                                          *astContext_);
+    for (const auto *entry : known) {
+      if (entry->argsString != args)
+        continue;
+      populateIncludedFiles();
+      if (isFileIncluded(entry->headerPath))
+        continue; // visible (or the compiler already errored in-TU)
+
+      std::string reportKey =
+          entry->templateName + "|" + args + "|" + entry->headerPath;
+      if (!reportedSpecs_.insert(reportKey).second)
+        continue;
+
+      auto poi = spec->getPointOfInstantiation();
+      Diagnostic diag;
+      diag.kind = Diagnostic::Specialization_Invisible;
+      diag.callLocation = poi.isValid() ? formatLocation(poi)
+                                        : formatLocation(decl->getLocation());
+      diag.missingHeader = entry->headerPath;
+      diag.message =
+          "IFNDR: this TU instantiates the primary template '" +
+          entry->templateName + "<" + args + ">' but an explicit "
+          "specialization exists at " + entry->headerPath + ":" +
+          std::to_string(entry->line) + " and is not visible here. TUs "
+          "will disagree about which definition to use. Include " +
+          entry->headerPath + " before the first use, or declare the "
+          "specialization in the primary template's header.";
+      diagnostics_.push_back(std::move(diag));
+    }
+  }
+  return true;
+}
+
 // --- AnalyzerConsumer ---
 
 AnalyzerConsumer::AnalyzerConsumer(const GlobalIndex &index,
@@ -490,6 +552,7 @@ AnalyzerConsumer::AnalyzerConsumer(const GlobalIndex &index,
       diagnostics_(diagnostics), opts_(std::move(opts)) {}
 
 void AnalyzerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
+  visitor_.setASTContext(&context);
   visitor_.TraverseDecl(context.getTranslationUnitDecl());
   // Organization checks (ext/ registrars) run after the built-in analysis
   // of the same TU; fresh instances per TU so member state needs no reset.
@@ -938,6 +1001,14 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // run (checkpoint replay restores the OdrEntries it reads from).
   if (opts.enableOdrDiag)
     analyzeOdrViolations(index, diagnostics);
+
+  // Phase 1.5c: organization IndexChecks (ext/) — cross-TU invariants over
+  // the merged index. Recomputed every run, so they never touch journal
+  // record content (unlike per-TU AnnealChecks, whose diagnostics land in
+  // phase-2 records).
+  for (auto &check :
+       ExtensionRegistry::instance().createIndexChecks(opts.disabledChecks))
+    check->check(index, diagnostics);
 
   // Phase 2: analyze each TU against the now-complete index. Per-file
   // slots keep output deterministic (source order) regardless of task
