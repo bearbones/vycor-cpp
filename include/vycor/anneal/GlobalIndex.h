@@ -150,6 +150,27 @@ private:
   std::unordered_map<SId, std::vector<SId>> convOpEdges_;
 };
 
+// One ODR-relevant definition site: a vague-linkage entity (inline
+// function, in-class method body, class definition) whose definitions the
+// linker silently merges across TUs WITHOUT comparing content — precisely
+// the ODR-violation class ordinary builds never diagnose (duplicate strong
+// symbols are a linker error; duplicate weak/COMDAT symbols are "pick
+// one"). Collected during phase-1 indexing only when
+// AnalysisOptions::enableOdrDiag is set; analyzeOdrViolations compares
+// sites and hashes across the whole project.
+struct OdrEntry {
+  std::string qualifiedName;
+  // Full function type spelling (params + cv/ref quals) for functions —
+  // distinguishes overloads and const/non-const method pairs. "" for
+  // classes.
+  std::string signature;
+  bool isClass = false;
+  std::string enclosingClass; // methods: qualified parent class, else ""
+  std::string filePath;       // definition site
+  unsigned line = 0;
+  uint64_t odrHash = 0;       // clang::ODRHash over the definition
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -166,6 +187,12 @@ struct Diagnostic {
     Coverage_PropertyDivergence,  // siblings diverge on complexity/properties
     DeadCode_Pessimistic,         // function unreachable via proven paths
     DeadCode_Optimistic,          // function reachable only via plausible paths
+    ODR_DuplicateDefinition,      // one vague-linkage entity, multiple
+                                  // distinct definition sites with differing
+                                  // bodies — the linker keeps one arbitrarily
+    ODR_DivergentDefinition,      // one definition site whose body hashes
+                                  // differently across TUs (preprocessor-
+                                  // dependent definition)
     Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
@@ -203,10 +230,15 @@ public:
   const TypeRelationIndex &typeRelations() const { return types_; }
   TypeRelationIndex &mutableTypeRelations() { return types_; }
 
+  // ODR definition-site tracking (see OdrEntry). Identical entries — the
+  // common case of N TUs including one unchanged header — dedup at insert.
+  void addOdrEntry(const OdrEntry &entry);
+
   // Total counts for testing/debugging.
   size_t overloadCount() const;
   size_t guideCount() const;
   size_t coverageEntryCount() const;
+  size_t odrEntryCount() const;
 
   // Merge a per-TU shard into this index (parallel phase-1 merge and
   // checkpoint replay). Entries are appended exactly as if the shard's
@@ -232,6 +264,10 @@ public:
       for (const auto &entry : kv.second)
         fn(entry);
   }
+  template <typename Fn> void forEachOdrEntry(Fn fn) const {
+    for (const auto &entry : odrEntries_)
+      fn(entry);
+  }
 
 private:
   using SId = StringInterner::Id;
@@ -246,6 +282,11 @@ private:
   std::unordered_map<SId, std::vector<FunctionOverloadEntry>> overloads_;
   std::unordered_map<SId, std::vector<DeductionGuideEntry>> guides_;
   std::unordered_map<SId, std::vector<CoveragePropertyEntry>> coverageProps_;
+  // Plain values, no interning: entry volume is bounded by non-system
+  // vague-linkage definitions and hasn't earned ControlFlowIndex-style
+  // compaction (same call ChannelIndex made).
+  std::vector<OdrEntry> odrEntries_;
+  std::unordered_set<std::string> odrKeys_; // full-identity dedup keys
   TypeRelationIndex types_;
 };
 

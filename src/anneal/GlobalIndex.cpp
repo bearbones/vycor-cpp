@@ -217,8 +217,22 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
       [this](const DeductionGuideEntry &e) { addDeductionGuide(e); });
   shard.forEachCoverageProperty(
       [this](const CoveragePropertyEntry &e) { addCoverageProperty(e); });
+  shard.forEachOdrEntry([this](const OdrEntry &e) { addOdrEntry(e); });
   types_.absorb(shard.types_);
 }
+
+void GlobalIndex::addOdrEntry(const OdrEntry &entry) {
+  std::string key = entry.qualifiedName + "|" + entry.signature +
+                    (entry.isClass ? "|c|" : "|f|") + entry.filePath + "|" +
+                    std::to_string(entry.line) + "|" +
+                    std::to_string(entry.odrHash);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  if (!odrKeys_.insert(std::move(key)).second)
+    return;
+  odrEntries_.push_back(entry);
+}
+
+size_t GlobalIndex::odrEntryCount() const { return odrEntries_.size(); }
 
 std::vector<const FunctionOverloadEntry *>
 GlobalIndex::findOverloads(const std::string &qualifiedName) const {

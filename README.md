@@ -182,7 +182,24 @@ src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exist
     MathLib::scale(Vector, int). Include Extension.hpp or explicitly qualify the call.
 ```
 
-Optional flags: `--warn-same-score`, `--model-convertibility`,
+**ODR violation detection** (`--odr-diag`): linkers reject duplicate
+*strong* symbols, but mismatched *vague-linkage* definitions — inline
+functions, in-class method bodies, class definitions — are silently
+merged, with the linker keeping one arbitrary copy. `anneal` hashes every
+such definition during indexing (`clang::ODRHash`) and compares across
+the whole project, catching both the two-headers-define-the-same-thing
+case and the subtler one-header-whose-body-depends-on-`-D`-flags case:
+
+```
+./limits.hpp:2: ODR violation: 'limits' at ./limits.hpp:2 compiles to 2 different
+    definitions across TUs — its body depends on preprocessor state that differs
+    between compile commands. Every TU must see an identical definition.
+```
+
+Token-identical copies at different paths are not flagged (vendored
+duplicates are benign), so the signal stays clean.
+
+Other optional flags: `--warn-same-score`, `--model-convertibility`,
 `--coverage-diag`, `--dead-code` (with `--entry-point`), and
 `--org-config` (organization checks/config — see below).
 

@@ -71,6 +71,20 @@ mismatch discards the journal wholesale, and a TU whose parse fatally died
 twice (attempt records, no completion) is skipped as poisoned instead of
 re-killing every resume. See `anneal/Checkpoint.h`.
 
+`--odr-diag` adds cross-TU ODR violation detection: phase 1 records a
+`clang::ODRHash` per vague-linkage definition (inline functions, in-class
+method bodies, class definitions — external linkage, non-template,
+non-system-header), and an index-only pass compares sites project-wide.
+`ODR_DivergentDefinition` = one site whose body hashes differently across
+TUs (preprocessor-dependent definition); `ODR_DuplicateDefinition` = the
+same entity defined at multiple sites with differing content.
+Token-identical copies at different sites are deliberately not flagged
+(benign vendoring), and method-level echoes of an already-flagged class
+are suppressed. This is the ODR class ordinary builds cannot see: linkers
+error on duplicate strong symbols but silently keep one arbitrary copy of
+mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
+and worker shards (journal/shard format v2).
+
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `anneal --index-worker` /
 `--analyze-worker` batches through the generic `dispatchIsolated`
@@ -197,7 +211,7 @@ Key semantics:
 objects:
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> --source <files...> [--odr-diag] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp prism    --build-path <dir> --source <files...> --mode <dump|query> [--collapse-paths <pattern>...] [--org-config <file>]
 vycor-cpp megascope  --build-path <dir> --source <files...> [--entry-point <name>...] [--collapse-paths <pattern>...] [--snapshot <file>] [--org-config <file>]

@@ -49,6 +49,13 @@ struct AnalysisOptions {
   // Emit Coverage_* diagnostics from analyzeCoverageProperties.
   bool enableCoverageDiag = false;
 
+  // Collect ODR definition-site hashes during phase 1 and emit ODR_*
+  // diagnostics from analyzeOdrViolations: vague-linkage entities (inline
+  // functions, in-class method bodies, class definitions) whose
+  // definitions differ across sites or across TUs — the ODR-violation
+  // class linkers silently merge instead of diagnosing.
+  bool enableOdrDiag = false;
+
   // Emit ADL_SameScore diagnostics when an invisible candidate ties the
   // resolved overload on every argument position. Off by default because
   // it's a noisier signal than the Pareto-dominance cases.
@@ -166,6 +173,20 @@ private:
 // Emits diagnostics for GVA linkage mismatches, discardable ODR, etc.
 void analyzeCoverageProperties(const GlobalIndex &index,
                                std::vector<Diagnostic> &diagnostics);
+
+// Compare ODR definition sites across the whole project (index-only, like
+// analyzeCoverageProperties — no AST needed). Emits:
+//  - ODR_DivergentDefinition: one definition site whose body hashes
+//    differently across TUs (the definition depends on preprocessor state
+//    that differs between compile commands);
+//  - ODR_DuplicateDefinition: the same entity defined at multiple distinct
+//    sites with differing content (two headers each define it — the linker
+//    will keep one arbitrarily). Token-identical copies at different sites
+//    are deliberately NOT flagged (vendored duplicates are benign and
+//    common); method-level duplicates inside an already-flagged class are
+//    suppressed as noise.
+void analyzeOdrViolations(const GlobalIndex &index,
+                          std::vector<Diagnostic> &diagnostics);
 
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are

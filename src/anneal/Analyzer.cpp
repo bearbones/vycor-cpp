@@ -40,6 +40,7 @@
 #include "llvm/ADT/StringSwitch.h"
 
 #include <cctype>
+#include <map>
 #include <memory>
 #include <set>
 #include <thread>
@@ -666,6 +667,106 @@ void analyzeCoverageProperties(const GlobalIndex &index,
   }
 }
 
+// --- ODR analysis ---
+
+void analyzeOdrViolations(const GlobalIndex &index,
+                          std::vector<Diagnostic> &diagnostics) {
+  using Site = std::pair<std::string, unsigned>; // (file, line)
+  struct Group {
+    std::string displayName;
+    bool isClass = false;
+    std::string enclosingClass;
+    // Definition sites in first-seen order (deterministic per index), each
+    // with every distinct body hash observed there across TUs.
+    std::vector<std::pair<Site, std::set<uint64_t>>> sites;
+  };
+  // std::map: deterministic diagnostic order regardless of index insertion
+  // order (which varies under the parallel bake).
+  std::map<std::string, Group> groups;
+
+  index.forEachOdrEntry([&](const OdrEntry &e) {
+    auto &group = groups[e.qualifiedName + "|" + e.signature +
+                         (e.isClass ? "|c" : "|f")];
+    group.displayName = e.qualifiedName;
+    group.isClass = e.isClass;
+    if (!e.enclosingClass.empty())
+      group.enclosingClass = e.enclosingClass;
+    Site site{e.filePath, e.line};
+    for (auto &entry : group.sites)
+      if (entry.first == site) {
+        entry.second.insert(e.odrHash);
+        return;
+      }
+    group.sites.push_back({site, {e.odrHash}});
+  });
+
+  auto formatSite = [](const Site &s) {
+    return s.first + ":" + std::to_string(s.second);
+  };
+
+  // Pass 1: classes flagged as duplicates, so pass 2 can suppress the
+  // per-method echoes of the same root cause.
+  std::set<std::string> duplicatedClasses;
+
+  auto analyzeGroup = [&](const Group &group, bool classesOnly) {
+    if (group.isClass != classesOnly)
+      return;
+
+    // Divergent: any single site whose body hashed differently across TUs.
+    for (const auto &[site, hashes] : group.sites) {
+      if (hashes.size() < 2)
+        continue;
+      Diagnostic diag;
+      diag.kind = Diagnostic::ODR_DivergentDefinition;
+      diag.callLocation = formatSite(site);
+      diag.message =
+          "ODR violation: '" + group.displayName + "' at " +
+          formatSite(site) + " compiles to " +
+          std::to_string(hashes.size()) +
+          " different definitions across TUs — its body depends on "
+          "preprocessor state that differs between compile commands. Every "
+          "TU must see an identical definition.";
+      diagnostics.push_back(std::move(diag));
+      return; // the root cause; don't also report it as a duplicate
+    }
+
+    if (group.sites.size() < 2)
+      return;
+    // Multiple sites: benign when token-identical everywhere (vendored
+    // copies hash identically), a real hazard when content differs.
+    std::set<uint64_t> allHashes;
+    for (const auto &[site, hashes] : group.sites)
+      allHashes.insert(hashes.begin(), hashes.end());
+    if (allHashes.size() < 2)
+      return;
+    if (!group.isClass && duplicatedClasses.count(group.enclosingClass))
+      return; // the class-level diagnostic already covers its methods
+
+    std::string sitesText;
+    for (const auto &[site, hashes] : group.sites) {
+      if (!sitesText.empty())
+        sitesText += ", ";
+      sitesText += formatSite(site);
+    }
+    Diagnostic diag;
+    diag.kind = Diagnostic::ODR_DuplicateDefinition;
+    diag.callLocation = formatSite(group.sites.front().first);
+    diag.message = "ODR violation: '" + group.displayName + "' has " +
+                   std::to_string(group.sites.size()) +
+                   " definitions with differing bodies (" + sitesText +
+                   "). TUs including different ones link silently, and the "
+                   "linker keeps one arbitrarily — unify or rename.";
+    diagnostics.push_back(std::move(diag));
+    if (group.isClass)
+      duplicatedClasses.insert(group.displayName);
+  };
+
+  for (const auto &kv : groups)
+    analyzeGroup(kv.second, /*classesOnly=*/true);
+  for (const auto &kv : groups)
+    analyzeGroup(kv.second, /*classesOnly=*/false);
+}
+
 // --- runAnalysis ---
 
 namespace {
@@ -806,13 +907,13 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, file, *st);
         GlobalIndex shard;
         auto tool = vycor::makeClangTool(compDb, {file});
-        IndexerActionFactory factory(shard);
+        IndexerActionFactory factory(shard, opts.enableOdrDiag);
         tool.run(&factory);
         ckpt->recordPhase1(file, *st, shard);
         index.absorb(shard);
       } else {
         auto tool = vycor::makeClangTool(compDb, {file});
-        IndexerActionFactory factory(index);
+        IndexerActionFactory factory(index, opts.enableOdrDiag);
         tool.run(&factory);
       }
     });
@@ -833,6 +934,10 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   std::vector<Diagnostic> diagnostics;
   if (opts.enableCoverageDiag)
     analyzeCoverageProperties(index, diagnostics);
+  // Phase 1.5b: ODR analysis — index-only, like coverage; recomputed every
+  // run (checkpoint replay restores the OdrEntries it reads from).
+  if (opts.enableOdrDiag)
+    analyzeOdrViolations(index, diagnostics);
 
   // Phase 2: analyze each TU against the now-complete index. Per-file
   // slots keep output deterministic (source order) regardless of task

@@ -219,6 +219,15 @@ static llvm::cl::opt<bool>
                        llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
+    AnnealOdrDiag("odr-diag",
+        llvm::cl::desc("Detect ODR violations among vague-linkage "
+                       "definitions (inline functions, in-class method "
+                       "bodies, class definitions) across TUs — the class "
+                       "of mismatch linkers merge silently instead of "
+                       "diagnosing"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
     AnnealDeadCode("dead-code",
                    llvm::cl::desc("Enable dead code analysis via call graph"),
                    llvm::cl::sub(AnnealCmd));
@@ -687,6 +696,7 @@ int main(int argc, const char **argv) {
 
     vycor::AnalysisOptions opts;
     opts.enableCoverageDiag = AnnealCoverageDiag;
+    opts.enableOdrDiag = AnnealOdrDiag;
     opts.warnSameScore = AnnealWarnSameScore;
     opts.modelConvertibility = AnnealModelConvertibility;
     opts.disabledChecks = orgCfg.disabledAnnealChecks;
@@ -709,7 +719,7 @@ int main(int argc, const char **argv) {
           llvm::errs() << "WORKER-TU " << file << "\n";
           vycor::GlobalIndex shard;
           auto tool = vycor::makeClangTool(*compDb, {file});
-          vycor::IndexerActionFactory factory(shard);
+          vycor::IndexerActionFactory factory(shard, opts.enableOdrDiag);
           tool.run(&factory);
           shards.emplace_back(file, vycor::AnnealIndexPayload::capture(shard));
         }
@@ -777,6 +787,8 @@ int main(int argc, const char **argv) {
           workerArgv.push_back("--warn-same-score");
         if (AnnealModelConvertibility)
           workerArgv.push_back("--model-convertibility");
+        if (AnnealOdrDiag) // phase-1 workers must collect OdrEntries
+          workerArgv.push_back("--odr-diag");
         if (!AnnealOrgConfig.empty()) {
           workerArgv.push_back("--org-config");
           workerArgv.push_back(AnnealOrgConfig);

@@ -30,7 +30,11 @@ namespace vycor {
 // into a GlobalIndex.
 class IndexerVisitor : public clang::RecursiveASTVisitor<IndexerVisitor> {
 public:
-  IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm);
+  // collectOdr enables ODR definition-site hashing (OdrEntry) during the
+  // walk; off by default so the extra per-definition ODRHash cost is only
+  // paid when --odr-diag asks for it.
+  IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm,
+                 bool collectOdr = false);
 
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
   bool VisitCXXDeductionGuideDecl(clang::CXXDeductionGuideDecl *decl);
@@ -45,15 +49,19 @@ private:
   GlobalIndex &index_;
   clang::SourceManager &sm_;
   clang::ASTContext *astContext_ = nullptr;
+  bool collectOdr_ = false;
 
   std::string getFilePath(clang::SourceLocation loc) const;
   unsigned countStmts(const clang::Stmt *s, unsigned limit = 100) const;
+  void maybeRecordOdrFunction(clang::FunctionDecl *decl);
+  void maybeRecordOdrClass(clang::CXXRecordDecl *decl);
 };
 
 // ASTConsumer that drives the IndexerVisitor.
 class IndexerConsumer : public clang::ASTConsumer {
 public:
-  IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm);
+  IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
+                  bool collectOdr = false);
   void HandleTranslationUnit(clang::ASTContext &context) override;
 
 private:
@@ -63,22 +71,25 @@ private:
 // FrontendAction that creates an IndexerConsumer.
 class IndexerAction : public clang::ASTFrontendAction {
 public:
-  explicit IndexerAction(GlobalIndex &index);
+  explicit IndexerAction(GlobalIndex &index, bool collectOdr = false);
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef file) override;
 
 private:
   GlobalIndex &index_;
+  bool collectOdr_ = false;
 };
 
 // Factory for creating IndexerActions, for use with ClangTool.
 class IndexerActionFactory : public clang::tooling::FrontendActionFactory {
 public:
-  explicit IndexerActionFactory(GlobalIndex &index);
+  explicit IndexerActionFactory(GlobalIndex &index,
+                                bool collectOdr = false);
   std::unique_ptr<clang::FrontendAction> create() override;
 
 private:
   GlobalIndex &index_;
+  bool collectOdr_ = false;
 };
 
 } // namespace vycor
