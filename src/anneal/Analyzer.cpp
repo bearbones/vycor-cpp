@@ -830,6 +830,64 @@ void analyzeOdrViolations(const GlobalIndex &index,
     analyzeGroup(kv.second, /*classesOnly=*/false);
 }
 
+// --- default-argument divergence ---
+
+void analyzeDefaultArgDivergence(const GlobalIndex &index,
+                                 std::vector<Diagnostic> &diagnostics) {
+  struct Site {
+    std::string file;
+    unsigned line;
+    std::string text;
+  };
+  struct Group {
+    std::string displayName;
+    std::string paramName;
+    std::vector<Site> sites; // first-seen order
+  };
+  // std::map for deterministic output regardless of parallel-absorb order.
+  std::map<std::string, Group> groups;
+  index.forEachDefaultArg([&](const DefaultArgEntry &e) {
+    auto &group = groups[e.qualifiedName + "|" + e.signature + "|" +
+                         std::to_string(e.paramIndex)];
+    group.displayName = e.qualifiedName;
+    if (!e.paramName.empty())
+      group.paramName = e.paramName;
+    for (const auto &site : group.sites)
+      if (site.file == e.filePath && site.line == e.line &&
+          site.text == e.defaultText)
+        return;
+    group.sites.push_back({e.filePath, e.line, e.defaultText});
+  });
+
+  for (const auto &[key, group] : groups) {
+    std::set<std::string> texts;
+    for (const auto &site : group.sites)
+      texts.insert(site.text);
+    if (texts.size() < 2)
+      continue;
+
+    std::string sitesText;
+    for (const auto &site : group.sites) {
+      if (!sitesText.empty())
+        sitesText += ", ";
+      sitesText += "'" + site.text + "' at " + site.file + ":" +
+                   std::to_string(site.line);
+    }
+    Diagnostic diag;
+    diag.kind = Diagnostic::DefaultArg_Divergent;
+    diag.callLocation =
+        group.sites.front().file + ":" + std::to_string(group.sites.front().line);
+    diag.message =
+        "Default-argument divergence: parameter" +
+        (group.paramName.empty() ? std::string()
+                                 : " '" + group.paramName + "'") +
+        " of '" + group.displayName + "' has conflicting defaults (" +
+        sitesText + "). Each TU silently calls with whichever value its "
+        "includes provided — keep the default in exactly one declaration.";
+    diagnostics.push_back(std::move(diag));
+  }
+}
+
 // --- runAnalysis ---
 
 namespace {
@@ -1001,6 +1059,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // run (checkpoint replay restores the OdrEntries it reads from).
   if (opts.enableOdrDiag)
     analyzeOdrViolations(index, diagnostics);
+  if (opts.enableDefaultArgDiag)
+    analyzeDefaultArgDivergence(index, diagnostics);
 
   // Phase 1.5c: organization IndexChecks (ext/) — cross-TU invariants over
   // the merged index. Recomputed every run, so they never touch journal

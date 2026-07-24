@@ -187,6 +187,23 @@ struct SpecializationEntry {
   unsigned line = 0;
 };
 
+// One written-out default argument on one function declaration site.
+// Default arguments live on DECLARATIONS, and different headers can
+// legally carry different ones for the same function — each TU silently
+// calls with whatever value its includes provided. Only defaults actually
+// written at the site are recorded (redeclarations inheriting a default
+// from an earlier declaration in the same TU are skipped), so a
+// cross-site conflict means two headers genuinely disagree.
+struct DefaultArgEntry {
+  std::string qualifiedName;
+  std::string signature; // full function type spelling (overload identity)
+  unsigned paramIndex = 0;
+  std::string paramName;
+  std::string defaultText; // source spelling of the default expression
+  std::string filePath;
+  unsigned line = 0;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -212,6 +229,9 @@ struct Diagnostic {
     Specialization_Invisible,     // TU instantiates a primary template while
                                   // an explicit specialization exists in a
                                   // header this TU does not include (IFNDR)
+    DefaultArg_Divergent,         // declaration sites disagree on a
+                                  // parameter's default argument — each TU
+                                  // silently calls with a different value
     Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
@@ -256,6 +276,10 @@ public:
   // Explicit class template specializations (see SpecializationEntry).
   // Identical entries dedup at insert.
   void addSpecialization(const SpecializationEntry &entry);
+
+  // Default-argument declaration sites (see DefaultArgEntry). Identical
+  // entries dedup at insert.
+  void addDefaultArg(const DefaultArgEntry &entry);
   std::vector<const SpecializationEntry *>
   findSpecializations(const std::string &templateName) const;
 
@@ -265,6 +289,7 @@ public:
   size_t coverageEntryCount() const;
   size_t odrEntryCount() const;
   size_t specializationCount() const;
+  size_t defaultArgCount() const;
 
   // Merge a per-TU shard into this index (parallel phase-1 merge and
   // checkpoint replay). Entries are appended exactly as if the shard's
@@ -299,6 +324,10 @@ public:
       for (const auto &entry : kv.second)
         fn(entry);
   }
+  template <typename Fn> void forEachDefaultArg(Fn fn) const {
+    for (const auto &entry : defaultArgs_)
+      fn(entry);
+  }
 
 private:
   using SId = StringInterner::Id;
@@ -319,6 +348,8 @@ private:
   std::vector<OdrEntry> odrEntries_;
   std::unordered_set<std::string> odrKeys_; // full-identity dedup keys
   std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;
+  std::vector<DefaultArgEntry> defaultArgs_;
+  std::unordered_set<std::string> defaultArgKeys_;
   TypeRelationIndex types_;
 };
 

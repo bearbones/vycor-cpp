@@ -22,6 +22,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ODRHash.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Lex/Lexer.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -50,6 +51,12 @@ std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
 }
 
 // --- IndexerVisitor ---
+
+// Record default arguments actually WRITTEN at this declaration site.
+// hasInheritedDefaultArg filters redeclarations that merely inherit a
+// default from an earlier declaration in the same TU, so each entry is a
+// site that spelled the default out — the unit the divergence analysis
+// compares. Always collected: scanning parameters costs nothing.
 
 IndexerVisitor::IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm,
                                bool collectOdr)
@@ -127,6 +134,44 @@ void IndexerVisitor::maybeRecordOdrClass(clang::CXXRecordDecl *decl) {
   index_.addOdrEntry(entry);
 }
 
+void IndexerVisitor::maybeRecordDefaultArgs(clang::FunctionDecl *decl) {
+  if (!astContext_)
+    return;
+  if (!decl->isExternallyVisible())
+    return;
+  if (decl->isDependentContext() || decl->getDescribedFunctionTemplate())
+    return;
+  if (decl->getTemplateSpecializationKind() ==
+      clang::TSK_ImplicitInstantiation)
+    return;
+  auto declLoc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(declLoc))
+    return;
+
+  for (unsigned i = 0; i < decl->getNumParams(); ++i) {
+    const clang::ParmVarDecl *param = decl->getParamDecl(i);
+    if (!param->hasDefaultArg() || param->hasInheritedDefaultArg() ||
+        param->hasUninstantiatedDefaultArg())
+      continue;
+    auto range = clang::CharSourceRange::getTokenRange(
+        param->getDefaultArgRange());
+    llvm::StringRef text = clang::Lexer::getSourceText(
+        range, sm_, astContext_->getLangOpts());
+    if (text.empty())
+      continue; // macro-mangled or invalid range: nothing comparable
+
+    DefaultArgEntry entry;
+    entry.qualifiedName = decl->getQualifiedNameAsString();
+    entry.signature = decl->getType().getAsString();
+    entry.paramIndex = i;
+    entry.paramName = param->getNameAsString();
+    entry.defaultText = text.trim().str();
+    entry.filePath = getFilePath(decl->getLocation());
+    entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+    index_.addDefaultArg(entry);
+  }
+}
+
 bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // Skip implicit declarations (compiler-generated).
   if (decl->isImplicit())
@@ -144,6 +189,7 @@ bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // ODR hashing wants the DEFINITION, which is frequently a redeclaration
   // — record before the first-declaration-only skip below.
   maybeRecordOdrFunction(decl);
+  maybeRecordDefaultArgs(decl);
 
   // Only index definitions or the first declaration to avoid duplicates
   // from multiple includes. We prefer to index every unique declaration

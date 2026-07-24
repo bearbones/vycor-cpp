@@ -6,6 +6,9 @@ property: they compare information **across translation units**, which is
 exactly what single-TU tools (clang-tidy, compiler warnings) structurally
 cannot do.
 
+Run `vycor-cpp anneal --list-checks` for the live table (organization
+checks included).
+
 ## Selecting checks
 
 Three sources, applied in order (later entries win):
@@ -52,6 +55,7 @@ initial seeding and may evolve. Organizations can define their own groups
 | [adl-visibility](adl-visibility.md) | on | — | Fragile ADL resolutions: an invisible overload would win or tie |
 | [ctad-visibility](ctad-visibility.md) | on | — | CTAD deducing differently because a deduction guide is not included |
 | [specialization-visibility](specialization-visibility.md) | on | — | TU instantiates a primary template whose explicit specialization exists elsewhere (IFNDR) |
+| [default-arg-divergence](default-arg-divergence.md) | on | — | Declaration sites that disagree on a parameter's default argument |
 | [odr-violations](odr-violations.md) | off | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
 | [coverage-properties](coverage-properties.md) | off | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
 | [dead-code](dead-code.md) | off | compute-heavy | Functions unreachable from the entry points via the call graph |

@@ -81,6 +81,7 @@ struct AnnealIndexPayload {
   std::vector<CoveragePropertyEntry> coverage;
   std::vector<OdrEntry> odrEntries; // populated when enableOdrDiag
   std::vector<SpecializationEntry> specializations;
+  std::vector<DefaultArgEntry> defaultArgs;
   // (derived,base), (toType,fromType), (fromType,toType) — the argument
   // order of the corresponding TypeRelationIndex::add* methods.
   std::vector<std::pair<std::string, std::string>> baseEdges;
