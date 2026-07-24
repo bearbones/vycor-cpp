@@ -48,9 +48,11 @@ b.cpp:2: Static initialization order fiasco: 'gb' (b.cpp:2) is dynamically
   top-to-bottom and guaranteed.
 - **Function-local statics**: lazily initialized on first pass — the
   standard fix, not a hazard.
-- Dependencies routed **through function calls** (`int g = makeG();` where
-  `makeG` reads another global). Direct references only in this version;
-  the transitive form is future work on the call graph.
+- Dependencies through **virtual or function-pointer dispatch**: the
+  check follows direct calls transitively (`int g = makeG();` where
+  `makeG` — or anything it calls, up to depth 16 — reads another TU's
+  dynamic global is flagged, with the chain in the message), but the
+  name-level call summaries it walks don't resolve indirect dispatch.
 
 ## Remediation
 

@@ -114,6 +114,13 @@ public:
   void addChannelTypes(std::vector<ChannelTypeSpec> specs);
   void addGuardClassifier(GuardClassifier classifier);
 
+  // Qualified function names the static-init-hazards check must treat as
+  // loader-hostile in ADDITION to its built-in dlopen/thread set — an
+  // organization's "never during static initialization" bank (JNI attach
+  // helpers, lock-taking loggers, service registries...). Also settable
+  // declaratively via the org config's "staticInitHazards" key.
+  void addStaticInitHazards(std::vector<std::string> qualifiedNames);
+
   // Register (or extend) a named check group usable in --checks
   // specifications, e.g. addCheckGroup("myorg-strict", {"no-legacy-alloc",
   // "ipc-struct-parity"}). The built-in groups ("all", "noisy",
@@ -147,6 +154,9 @@ public:
   }
 
   const std::vector<std::string> &lockTypes() const { return lockTypes_; }
+  const std::vector<std::string> &staticInitHazards() const {
+    return staticInitHazards_;
+  }
   const std::vector<ChannelTypeSpec> &channelTypes() const {
     return channelTypes_;
   }
@@ -164,6 +174,7 @@ private:
   std::vector<AnnealCheckFactory> checkFactories_;
   std::vector<IndexCheckFactory> indexCheckFactories_;
   std::vector<std::string> lockTypes_;
+  std::vector<std::string> staticInitHazards_;
   std::vector<ChannelTypeSpec> channelTypes_;
   std::vector<GuardClassifier> classifiers_;
   std::unordered_map<std::string, std::vector<std::string>> checkGroups_;

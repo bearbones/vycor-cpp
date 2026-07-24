@@ -62,7 +62,8 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
   // silently configuring nothing.
   static const char *knownKeys[] = {"lockTypes", "channelTypes",
                                     "featureFlags", "collapsePaths",
-                                    "disabledAnnealChecks"};
+                                    "disabledAnnealChecks",
+                                    "staticInitHazards"};
   for (const auto &kv : *root) {
     bool known = false;
     for (const char *k : knownKeys)
@@ -70,12 +71,14 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
     if (!known) {
       error = "unknown key '" + kv.first.str() +
               "' (expected one of: lockTypes, channelTypes, featureFlags, "
-              "collapsePaths, disabledAnnealChecks)";
+              "collapsePaths, disabledAnnealChecks, staticInitHazards)";
       return false;
     }
   }
 
-  if (!parseStringArray(*root, "lockTypes", out.lockTypes, error) ||
+  if (!parseStringArray(*root, "staticInitHazards", out.staticInitHazards,
+                        error) ||
+      !parseStringArray(*root, "lockTypes", out.lockTypes, error) ||
       !parseStringArray(*root, "collapsePaths", out.collapsePaths, error) ||
       !parseStringArray(*root, "disabledAnnealChecks",
                         out.disabledAnnealChecks, error))
@@ -164,6 +167,7 @@ bool loadOrgConfigFile(const std::string &path, OrgConfig &out,
 bool applyOrgConfig(const OrgConfig &cfg, std::string &error) {
   auto &registry = ExtensionRegistry::instance();
   registry.addLockTypes(cfg.lockTypes);
+  registry.addStaticInitHazards(cfg.staticInitHazards);
   registry.addChannelTypes(cfg.channelTypes);
   for (const auto &flag : cfg.featureFlags) {
     if (!registry.addFeatureFlagPattern(flag.pattern, flag.nameGroup)) {

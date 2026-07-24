@@ -898,7 +898,8 @@ void analyzeStaticInitOrder(const GlobalIndex &index,
   // Deterministic order: collect and sort by (file, line, name).
   std::vector<const StaticInitEntry *> entries;
   index.forEachStaticInit([&](const StaticInitEntry &e) {
-    if (e.dynamicInit && !e.isConstructorFn && !e.referencedGlobals.empty())
+    if (e.dynamicInit && !e.isConstructorFn &&
+        (!e.referencedGlobals.empty() || !e.calledFunctions.empty()))
       entries.push_back(&e);
   });
   std::sort(entries.begin(), entries.end(),
@@ -907,14 +908,15 @@ void analyzeStaticInitOrder(const GlobalIndex &index,
                      std::tie(b->filePath, b->line, b->qualifiedName);
             });
 
+  constexpr unsigned kMaxDepth = 16;
   for (const auto *entry : entries) {
-    for (const auto &ref : entry->referencedGlobals) {
-      const StaticInitEntry *target = index.findStaticInit(ref);
-      if (!target || !target->dynamicInit || target->isConstructorFn)
-        continue; // unknown, or constant/zero-initialized before all
-                  // dynamic init: safe
-      if (target->filePath == entry->filePath)
-        continue; // same TU: top-to-bottom order is guaranteed
+    // One diagnostic per (variable, target), shortest chain first: direct
+    // references, then a BFS through the name-level call summaries.
+    std::set<std::string> reportedTargets;
+    auto report = [&](const StaticInitEntry *target,
+                      const std::string &chain) {
+      if (!reportedTargets.insert(target->qualifiedName).second)
+        return;
       Diagnostic diag;
       diag.kind = Diagnostic::StaticInit_OrderDependency;
       diag.callLocation =
@@ -924,25 +926,147 @@ void analyzeStaticInitOrder(const GlobalIndex &index,
           "' (" + entry->filePath + ":" + std::to_string(entry->line) +
           ") is dynamically initialized from '" + target->qualifiedName +
           "' (" + target->filePath + ":" + std::to_string(target->line) +
-          "), which is itself dynamically initialized in a different TU. "
+          ")" + (chain.empty() ? std::string() : " via " + chain) +
+          ", which is itself dynamically initialized in a different TU. "
           "Cross-TU initialization order is unspecified — the reader may "
           "observe its zero/constant-initialized state. Use a "
           "construct-on-first-use function-local static, or make the "
           "dependency constinit/constexpr.";
       diagnostics.push_back(std::move(diag));
+    };
+    auto resolveTarget =
+        [&](const std::string &ref) -> const StaticInitEntry * {
+      const StaticInitEntry *target = index.findStaticInit(ref);
+      if (!target || !target->dynamicInit || target->isConstructorFn)
+        return nullptr; // unknown, or constant/zero-initialized before all
+                        // dynamic init: safe
+      if (target->filePath == entry->filePath)
+        return nullptr; // same TU: top-to-bottom order is guaranteed
+      return target;
+    };
+
+    for (const auto &ref : entry->referencedGlobals)
+      if (const auto *target = resolveTarget(ref))
+        report(target, "");
+
+    // Transitive: the initializer's called functions, then their callees,
+    // reading a cross-TU dynamic global. Name-level (overload sets
+    // conflated); virtual and function-pointer dispatch not followed.
+    std::map<std::string, std::string> parent;
+    std::deque<std::pair<std::string, unsigned>> queue;
+    for (const auto &seed : entry->calledFunctions)
+      if (parent.emplace(seed, "").second)
+        queue.push_back({seed, 0});
+    while (!queue.empty()) {
+      auto [name, depth] = queue.front();
+      queue.pop_front();
+      const FunctionSummaryEntry *summary = index.findFunctionSummary(name);
+      if (!summary)
+        continue;
+      for (const auto &ref : summary->referencedGlobals) {
+        if (const auto *target = resolveTarget(ref)) {
+          std::string chain = name;
+          for (std::string cur = parent[name]; !cur.empty();
+               cur = parent[cur])
+            chain = cur + " -> " + chain;
+          report(target, chain);
+        }
+      }
+      if (depth + 1 >= kMaxDepth)
+        continue;
+      for (const auto &callee : summary->calledFunctions)
+        if (parent.emplace(callee, name).second)
+          queue.push_back({callee, depth + 1});
     }
+  }
+}
+
+void analyzeExceptionEscape(const GlobalIndex &index,
+                            std::vector<Diagnostic> &diagnostics) {
+  constexpr unsigned kMaxDepth = 16;
+
+  std::vector<const FunctionSummaryEntry *> roots;
+  index.forEachFunctionSummary([&](const FunctionSummaryEntry &e) {
+    if (e.isNoexcept)
+      roots.push_back(&e);
+  });
+  std::sort(roots.begin(), roots.end(),
+            [](const FunctionSummaryEntry *a, const FunctionSummaryEntry *b) {
+              return std::tie(a->filePath, a->line, a->qualifiedName) <
+                     std::tie(b->filePath, b->line, b->qualifiedName);
+            });
+
+  for (const auto *root : roots) {
+    std::string hit;
+    std::string chain;
+    if (root->hasUncaughtThrow) {
+      hit = root->qualifiedName;
+      chain = root->qualifiedName + " (throw in its own body)";
+    } else {
+      std::map<std::string, std::string> parent;
+      std::deque<std::pair<std::string, unsigned>> queue;
+      for (const auto &seed : root->unguardedCalls)
+        if (parent.emplace(seed, "").second)
+          queue.push_back({seed, 0});
+      while (hit.empty() && !queue.empty()) {
+        auto [name, depth] = queue.front();
+        queue.pop_front();
+        const FunctionSummaryEntry *summary =
+            index.findFunctionSummary(name);
+        if (!summary)
+          continue;
+        if (summary->hasUncaughtThrow) {
+          hit = name;
+          chain = name;
+          for (std::string cur = parent[name]; !cur.empty();
+               cur = parent[cur])
+            chain = cur + " -> " + chain;
+          break;
+        }
+        if (depth + 1 >= kMaxDepth)
+          continue;
+        // Propagate only through UNGUARDED calls: a callee invoked inside
+        // a try is conservatively treated as handled there. A noexcept
+        // callee is a hard boundary (it would terminate in ITS frame and
+        // gets its own diagnostic as a root).
+        if (summary->isNoexcept)
+          continue;
+        for (const auto &callee : summary->unguardedCalls)
+          if (parent.emplace(callee, name).second)
+            queue.push_back({callee, depth + 1});
+      }
+    }
+    if (hit.empty())
+      continue;
+
+    Diagnostic diag;
+    diag.kind = Diagnostic::Exception_Escape;
+    diag.callLocation = root->filePath + ":" + std::to_string(root->line);
+    diag.message =
+        "Exception escape: noexcept function '" + root->qualifiedName +
+        "' (" + root->filePath + ":" + std::to_string(root->line) +
+        ") can reach a throw in '" + hit + "' (" + chain +
+        ") with no intervening handler — an escaping exception calls "
+        "std::terminate. Catch it inside, or drop the noexcept.";
+    diagnostics.push_back(std::move(diag));
   }
 }
 
 void analyzeStaticInitHazards(const GlobalIndex &index,
                               const CallGraph &graph,
                               std::vector<Diagnostic> &diagnostics) {
-  static const std::set<std::string> kHazards = {
+  std::set<std::string> hazards = {
       "dlopen",         "dlsym",
       "dlclose",        "dladdr",
       "pthread_create", "pthread_join",
       "std::thread::thread", "std::thread::join",
       "std::async",     "std::call_once"};
+  // Organization additions (ext/ registrars or the org config's
+  // staticInitHazards list): a bank of "never during static init"
+  // functions — JNI helpers, logging that locks, your own registries.
+  for (const auto &name :
+       ExtensionRegistry::instance().staticInitHazards())
+    hazards.insert(name);
   constexpr unsigned kMaxDepth = 25;
 
   std::vector<const StaticInitEntry *> roots;
@@ -968,7 +1092,7 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
     for (const auto &seed : seeds) {
       if (!parent.emplace(seed, "").second)
         continue;
-      if (kHazards.count(seed)) {
+      if (hazards.count(seed)) {
         hit = seed;
         break;
       }
@@ -982,7 +1106,7 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
       for (const auto &edge : graph.calleesOf(name)) {
         if (!parent.emplace(edge.calleeName, name).second)
           continue;
-        if (kHazards.count(edge.calleeName)) {
+        if (hazards.count(edge.calleeName)) {
           hit = edge.calleeName;
           break;
         }
@@ -1154,13 +1278,17 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, file, *st);
         GlobalIndex shard;
         auto tool = vycor::makeClangTool(compDb, {file});
-        IndexerActionFactory factory(shard, opts.enableOdrDiag);
+        IndexerActionFactory factory(shard, opts.enableOdrDiag,
+                                     opts.enableStaticInitOrderDiag ||
+                                         opts.enableExceptionEscapeDiag);
         tool.run(&factory);
         ckpt->recordPhase1(file, *st, shard);
         index.absorb(shard);
       } else {
         auto tool = vycor::makeClangTool(compDb, {file});
-        IndexerActionFactory factory(index, opts.enableOdrDiag);
+        IndexerActionFactory factory(index, opts.enableOdrDiag,
+                                     opts.enableStaticInitOrderDiag ||
+                                         opts.enableExceptionEscapeDiag);
         tool.run(&factory);
       }
     });
@@ -1189,6 +1317,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     analyzeDefaultArgDivergence(index, diagnostics);
   if (opts.enableStaticInitOrderDiag)
     analyzeStaticInitOrder(index, diagnostics);
+  if (opts.enableExceptionEscapeDiag)
+    analyzeExceptionEscape(index, diagnostics);
 
   // Phase 1.5c: organization IndexChecks (ext/) — cross-TU invariants over
   // the merged index. Recomputed every run, so they never touch journal

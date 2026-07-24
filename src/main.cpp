@@ -819,6 +819,8 @@ int main(int argc, const char **argv) {
         enabledChecks.count("default-arg-divergence") > 0;
     opts.enableStaticInitOrderDiag =
         enabledChecks.count("static-init-order") > 0;
+    opts.enableExceptionEscapeDiag =
+        enabledChecks.count("exception-escape") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
     opts.warnSameScore = AnnealWarnSameScore;
@@ -849,7 +851,9 @@ int main(int argc, const char **argv) {
           llvm::errs() << "WORKER-TU " << file << "\n";
           vycor::GlobalIndex shard;
           auto tool = vycor::makeClangTool(*compDb, {file});
-          vycor::IndexerActionFactory factory(shard, opts.enableOdrDiag);
+          vycor::IndexerActionFactory factory(
+            shard, opts.enableOdrDiag,
+            opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag);
           tool.run(&factory);
           shards.emplace_back(file, vycor::AnnealIndexPayload::capture(shard));
         }

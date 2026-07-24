@@ -56,6 +56,13 @@ loudly — see `include/vycor/ext/OrgConfig.h`):
 }
 ```
 
+### `staticInitHazards`
+
+Qualified function names the [static-init-hazards](checks/static-init-hazards.md)
+check treats as loader-hostile in addition to its built-in
+dlopen/thread set — your "never during static initialization" bank.
+Also registrable in code: `registry.addStaticInitHazards({...})`.
+
 ### `lockTypes`
 
 Qualified type names treated as locks (`RaiiKind::Lock`) by the RAII/lock

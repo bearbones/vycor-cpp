@@ -62,6 +62,24 @@ Grouped **compute-heavy**: it builds the full cross-TU call graph (shared
 with `dead-code` when both are enabled). One diagnostic per root, showing
 the shortest hazard chain.
 
+## Extending the hazard list
+
+Organizations can add their own "never during static init" functions —
+JNI attach helpers, lock-taking loggers, service registries — to the
+built-in dlopen/thread set, either declaratively in the org config:
+
+```json
+{ "staticInitHazards": ["myorg::JniEnv::attach", "myorg::Registry::get"] }
+```
+
+or in code from `ext/`:
+
+```cpp
+VYCOR_EXTENSION_SETUP(MyOrgHazards) {
+  registry.addStaticInitHazards({"myorg::JniEnv::attach"});
+}
+```
+
 ## Limitations
 
 - Hazards inside **prebuilt** libraries (a vendored `.a`/`.so` whose
@@ -71,8 +89,6 @@ the shortest hazard chain.
 - Function pointers and virtual dispatch follow the call graph's
   Plausible-edge semantics; a hazard reached only through an unresolvable
   pointer may be missed.
-- The hazard list is fixed in this version; making it org-extensible (a
-  bank of "never during static init" functions) is a natural follow-up.
 
 ## Remediation
 

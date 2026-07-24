@@ -57,6 +57,11 @@ const std::vector<CheckInfo> &builtinAnnealChecks() {
        "(loader-lock deadlock risk)",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"exception-escape",
+       "noexcept functions that can transitively reach an uncaught throw "
+       "across TUs",
+       /*defaultOn=*/false,
+       {"noisy"}},
       {"odr-violations",
        "Vague-linkage definitions that differ across sites or TUs",
        /*defaultOn=*/false,

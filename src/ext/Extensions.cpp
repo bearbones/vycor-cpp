@@ -64,6 +64,14 @@ void ExtensionRegistry::addGuardClassifier(GuardClassifier classifier) {
   classifiers_.push_back(std::move(classifier));
 }
 
+void ExtensionRegistry::addStaticInitHazards(
+    std::vector<std::string> qualifiedNames) {
+  for (auto &name : qualifiedNames)
+    if (std::find(staticInitHazards_.begin(), staticInitHazards_.end(),
+                  name) == staticInitHazards_.end())
+      staticInitHazards_.push_back(std::move(name));
+}
+
 bool ExtensionRegistry::addFeatureFlagPattern(const std::string &pattern,
                                               unsigned nameGroup) {
   auto regex = std::make_shared<llvm::Regex>(pattern);
@@ -138,6 +146,7 @@ void ExtensionRegistry::clear() {
   checkFactories_.clear();
   indexCheckFactories_.clear();
   lockTypes_.clear();
+  staticInitHazards_.clear();
   channelTypes_.clear();
   classifiers_.clear();
   checkGroups_.clear();

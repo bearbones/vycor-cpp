@@ -86,6 +86,7 @@ add_executable(vycor_tests
   test_anneal_specialization.cpp
   test_anneal_default_args.cpp
   test_anneal_static_init.cpp
+  test_anneal_exception_escape.cpp
   test_check_set.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
