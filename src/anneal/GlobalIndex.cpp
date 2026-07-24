@@ -220,8 +220,23 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
   shard.forEachOdrEntry([this](const OdrEntry &e) { addOdrEntry(e); });
   shard.forEachSpecialization(
       [this](const SpecializationEntry &e) { addSpecialization(e); });
+  shard.forEachDefaultArg(
+      [this](const DefaultArgEntry &e) { addDefaultArg(e); });
   types_.absorb(shard.types_);
 }
+
+void GlobalIndex::addDefaultArg(const DefaultArgEntry &entry) {
+  std::string key = entry.qualifiedName + "|" + entry.signature + "|" +
+                    std::to_string(entry.paramIndex) + "|" +
+                    entry.defaultText + "|" + entry.filePath + "|" +
+                    std::to_string(entry.line);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  if (!defaultArgKeys_.insert(std::move(key)).second)
+    return;
+  defaultArgs_.push_back(entry);
+}
+
+size_t GlobalIndex::defaultArgCount() const { return defaultArgs_.size(); }
 
 void GlobalIndex::addSpecialization(const SpecializationEntry &entry) {
   SId key = interner_.intern(entry.templateName);

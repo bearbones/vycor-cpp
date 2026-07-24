@@ -60,6 +60,12 @@ struct AnalysisOptions {
   // invisible specialization.
   bool enableSpecializationDiag = true;
 
+  // default-arg-divergence: declaration sites that disagree on a
+  // parameter's default argument (each TU silently calls with whichever
+  // value its includes provided). On by default: it fires only on an
+  // actual cross-site conflict, which is near-certainly a bug.
+  bool enableDefaultArgDiag = true;
+
   // Emit Coverage_* diagnostics from analyzeCoverageProperties.
   bool enableCoverageDiag = false;
 
@@ -209,6 +215,16 @@ void analyzeCoverageProperties(const GlobalIndex &index,
 //    suppressed as noise.
 void analyzeOdrViolations(const GlobalIndex &index,
                           std::vector<Diagnostic> &diagnostics);
+
+// Compare written-out default arguments across declaration sites
+// (index-only, phase 1.5). Emits DefaultArg_Divergent when two sites
+// spell DIFFERENT defaults for the same parameter of the same function.
+// A site that omits a default where another writes one is NOT flagged
+// (the omitting side fails to compile short calls — a visible failure —
+// and the header-declares/cpp-adds-for-internal-use pattern is common
+// and legal).
+void analyzeDefaultArgDivergence(const GlobalIndex &index,
+                                 std::vector<Diagnostic> &diagnostics);
 
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are

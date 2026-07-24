@@ -33,7 +33,8 @@ namespace {
 // version or fingerprint mismatch discards the journal (it is a cache).
 constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // v2: AnnealIndexPayload gained odrEntries. v3: specializations.
-constexpr uint32_t kVersion = 3;
+// v4: defaultArgs.
+constexpr uint32_t kVersion = 4;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -186,6 +187,8 @@ uint64_t annealOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.enableCtadDiag ? '1' : '0';
   canon += "|spec=";
   canon += opts.enableSpecializationDiag ? '1' : '0';
+  canon += "|defarg=";
+  canon += opts.enableDefaultArgDiag ? '1' : '0';
   // Organization checks change phase-2 record content; the enabled set
   // (registered minus disabled) is part of the identity.
   std::vector<std::string> names;
@@ -216,6 +219,8 @@ AnnealIndexPayload AnnealIndexPayload::capture(const GlobalIndex &shard) {
   shard.forEachOdrEntry([&](const OdrEntry &e) { p.odrEntries.push_back(e); });
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
+  shard.forEachDefaultArg(
+      [&](const DefaultArgEntry &e) { p.defaultArgs.push_back(e); });
   const auto &types = shard.typeRelations();
   types.forEachBase([&](const std::string &d, const std::string &b) {
     p.baseEdges.emplace_back(d, b);
@@ -240,6 +245,8 @@ void AnnealIndexPayload::applyTo(GlobalIndex &into) const {
     into.addOdrEntry(e);
   for (const auto &e : specializations)
     into.addSpecialization(e);
+  for (const auto &e : defaultArgs)
+    into.addDefaultArg(e);
   auto &types = into.mutableTypeRelations();
   for (const auto &p : baseEdges)
     types.addBase(p.first, p.second);
@@ -333,6 +340,16 @@ void encodeIndexPayload(std::string &out, const AnnealIndexPayload &p) {
     putStr(out, e.headerPath);
     putU32(out, e.line);
   }
+  putU32(out, static_cast<uint32_t>(p.defaultArgs.size()));
+  for (const auto &e : p.defaultArgs) {
+    putStr(out, e.qualifiedName);
+    putStr(out, e.signature);
+    putU32(out, e.paramIndex);
+    putStr(out, e.paramName);
+    putStr(out, e.defaultText);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+  }
 }
 
 bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
@@ -406,6 +423,18 @@ bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
     e.headerPath = r.str();
     e.line = r.u32();
     p.specializations.push_back(std::move(e));
+  }
+  uint32_t nDef = r.u32();
+  for (uint32_t i = 0; i < nDef && r.ok; ++i) {
+    DefaultArgEntry e;
+    e.qualifiedName = r.str();
+    e.signature = r.str();
+    e.paramIndex = r.u32();
+    e.paramName = r.str();
+    e.defaultText = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    p.defaultArgs.push_back(std::move(e));
   }
   return r.ok;
 }
@@ -690,7 +719,8 @@ namespace {
 // entry: str tu, u32 payloadLen, payload, u32 fnv32(payload). All-or-nothing
 // on read (workers write complete files then exit 0).
 // v2: index payloads gained odrEntries. v3: specializations.
-constexpr uint32_t kShardVersion = 3;
+// v4: defaultArgs.
+constexpr uint32_t kShardVersion = 4;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

@@ -63,6 +63,7 @@ private:
   unsigned countStmts(const clang::Stmt *s, unsigned limit = 100) const;
   void maybeRecordOdrFunction(clang::FunctionDecl *decl);
   void maybeRecordOdrClass(clang::CXXRecordDecl *decl);
+  void maybeRecordDefaultArgs(clang::FunctionDecl *decl);
 };
 
 // ASTConsumer that drives the IndexerVisitor.

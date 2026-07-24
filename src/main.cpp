@@ -42,6 +42,7 @@
 #include <thread>
 #include <unordered_map>
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
@@ -211,13 +212,21 @@ static llvm::cl::list<std::string>
     AnnealSourceFiles("source",
                       llvm::cl::desc("Source files to analyze"),
                       llvm::cl::value_desc("file"),
-                      llvm::cl::OneOrMore,
+                      // Required-ness enforced manually in main(): parse-time
+                      // OneOrMore would break --list-checks.
+                      llvm::cl::ZeroOrMore,
                       llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
     AnnealCoverageDiag("coverage-diag",
                        llvm::cl::desc("Enable coverage instrumentation diagnostics"),
                        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    AnnealListChecks("list-checks",
+        llvm::cl::desc("Print every known check (built-in and organization) "
+                       "with defaults, groups, and summaries, then exit"),
+        llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<std::string>
     AnnealChecks("checks",
@@ -688,6 +697,44 @@ int main(int argc, const char **argv) {
 
   // ---- anneal ---------------------------------------------------------------
   if (AnnealCmd) {
+    if (AnnealListChecks) {
+      // Org registrations (ext/ static init + --org-config) participate.
+      vycor::OrgConfig listOrgCfg;
+      if (!loadOrgConfigIfSet(AnnealOrgConfig, listOrgCfg))
+        return 1;
+      auto defaults = vycor::defaultCheckSet();
+      llvm::outs() << "anneal checks (docs/checks/<name>.md):\n";
+      for (const auto &check : vycor::builtinAnnealChecks()) {
+        llvm::outs() << llvm::format("  %-28s %-4s", check.name.c_str(),
+                                     defaults.count(check.name) ? "on"
+                                                                : "off");
+        if (!check.groups.empty()) {
+          llvm::outs() << "[";
+          for (size_t i = 0; i < check.groups.size(); ++i)
+            llvm::outs() << (i ? "," : "") << check.groups[i];
+          llvm::outs() << "] ";
+        }
+        llvm::outs() << check.summary << "\n";
+      }
+      auto orgNames = vycor::ExtensionRegistry::instance().allCheckNames();
+      if (!orgNames.empty()) {
+        llvm::outs() << "organization checks (default on):\n";
+        for (const auto &name : orgNames)
+          llvm::outs() << "  " << name << "\n";
+      }
+      llvm::outs() << "groups: all";
+      std::set<std::string> groupNames;
+      for (const auto &check : vycor::builtinAnnealChecks())
+        for (const auto &group : check.groups)
+          groupNames.insert(group);
+      for (const auto &kv :
+           vycor::ExtensionRegistry::instance().checkGroups())
+        groupNames.insert(kv.first);
+      for (const auto &group : groupNames)
+        llvm::outs() << ", " << group;
+      llvm::outs() << "\n";
+      return 0;
+    }
     if (AnnealBuildPath.empty()) {
       llvm::errs() << "anneal: --build-path is required\n";
       return 1;
@@ -768,6 +815,8 @@ int main(int argc, const char **argv) {
     opts.enableCtadDiag = enabledChecks.count("ctad-visibility") > 0;
     opts.enableSpecializationDiag =
         enabledChecks.count("specialization-visibility") > 0;
+    opts.enableDefaultArgDiag =
+        enabledChecks.count("default-arg-divergence") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
     opts.warnSameScore = AnnealWarnSameScore;
