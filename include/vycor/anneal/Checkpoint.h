@@ -80,6 +80,7 @@ struct AnnealIndexPayload {
   std::vector<DeductionGuideEntry> guides;
   std::vector<CoveragePropertyEntry> coverage;
   std::vector<OdrEntry> odrEntries; // populated when enableOdrDiag
+  std::vector<SpecializationEntry> specializations;
   // (derived,base), (toType,fromType), (fromType,toType) — the argument
   // order of the corresponding TypeRelationIndex::add* methods.
   std::vector<std::pair<std::string, std::string>> baseEdges;

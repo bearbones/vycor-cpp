@@ -22,6 +22,7 @@
 #include "clang/Tooling/Tooling.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -273,4 +274,60 @@ TEST_CASE("applyOrgConfig reports invalid feature-flag regex",
       R"({"featureFlags": [{"pattern": "(unclosed"}]})", cfg, error));
   CHECK_FALSE(vycor::applyOrgConfig(cfg, error));
   CHECK(error.find("regex") != std::string::npos);
+}
+
+namespace {
+
+// Cross-TU org check: flags any indexed overload of "myorg::legacyAlloc"
+// from the MERGED index — the IndexCheck counterpart of the per-TU
+// ForbiddenFunctionCheck above.
+class LegacyAllocIndexCheck : public vycor::IndexCheck {
+public:
+  std::string name() const override { return "no-legacy-alloc-index"; }
+  void check(const vycor::GlobalIndex &index,
+             std::vector<vycor::Diagnostic> &out) override {
+    for (const auto *entry : index.findOverloads("myorg::legacyAlloc")) {
+      vycor::Diagnostic diag;
+      diag.kind = vycor::Diagnostic::Custom;
+      diag.checkName = name();
+      diag.message = "legacyAlloc declared in " + entry->headerPath;
+      out.push_back(std::move(diag));
+    }
+  }
+};
+
+} // namespace
+
+TEST_CASE("Registered IndexCheck runs over the merged index and honors "
+          "disabledChecks",
+          "[Extensions]") {
+  RegistryReset reset;
+  vycor::ExtensionRegistry::instance().addIndexCheck(
+      [] { return std::make_unique<LegacyAllocIndexCheck>(); });
+
+  // runAnalysis over in-memory-free scratch: hand-populate an index and
+  // invoke the phase-1.5 path indirectly via runAnalysis would need files;
+  // exercise the registry contract directly instead.
+  vycor::GlobalIndex index;
+  vycor::FunctionOverloadEntry fn;
+  fn.qualifiedName = "myorg::legacyAlloc";
+  fn.headerPath = "legacy.hpp";
+  index.addFunctionOverload(fn);
+
+  auto checks = vycor::ExtensionRegistry::instance().createIndexChecks();
+  REQUIRE(checks.size() == 1);
+  std::vector<vycor::Diagnostic> diags;
+  checks[0]->check(index, diags);
+  REQUIRE(diags.size() == 1);
+  CHECK(diags[0].checkName == "no-legacy-alloc-index");
+
+  // disabledChecks filters by name, same as AnnealChecks.
+  CHECK(vycor::ExtensionRegistry::instance()
+            .createIndexChecks({"no-legacy-alloc-index"})
+            .empty());
+
+  // And the registry reports both kinds of check names for --checks.
+  auto names = vycor::ExtensionRegistry::instance().allCheckNames();
+  CHECK(std::find(names.begin(), names.end(), "no-legacy-alloc-index") !=
+        names.end());
 }

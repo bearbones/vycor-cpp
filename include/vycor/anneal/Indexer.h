@@ -26,6 +26,14 @@
 
 namespace vycor {
 
+// Canonical, comma-joined spelling of a template argument list. One
+// definition shared by the indexer (recording explicit specializations)
+// and the analyzer (matching a TU's implicit instantiations against
+// them): both sides MUST print identically or the specialization-
+// visibility check can't join them.
+std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
+                               const clang::ASTContext &context);
+
 // AST visitor that collects function overloads and deduction guides
 // into a GlobalIndex.
 class IndexerVisitor : public clang::RecursiveASTVisitor<IndexerVisitor> {

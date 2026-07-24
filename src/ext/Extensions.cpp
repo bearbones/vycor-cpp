@@ -34,6 +34,18 @@ void ExtensionRegistry::addAnnealCheck(AnnealCheckFactory factory) {
   checkFactories_.push_back(std::move(factory));
 }
 
+void ExtensionRegistry::addIndexCheck(IndexCheckFactory factory) {
+  indexCheckFactories_.push_back(std::move(factory));
+}
+
+void ExtensionRegistry::addCheckGroup(const std::string &group,
+                                      std::vector<std::string> checkNames) {
+  auto &members = checkGroups_[group];
+  for (auto &name : checkNames)
+    if (std::find(members.begin(), members.end(), name) == members.end())
+      members.push_back(std::move(name));
+}
+
 void ExtensionRegistry::addLockTypes(std::vector<std::string> qualifiedNames) {
   for (auto &name : qualifiedNames)
     if (std::find(lockTypes_.begin(), lockTypes_.end(), name) ==
@@ -88,6 +100,32 @@ std::vector<std::unique_ptr<AnnealCheck>> ExtensionRegistry::createAnnealChecks(
   return checks;
 }
 
+std::vector<std::unique_ptr<IndexCheck>> ExtensionRegistry::createIndexChecks(
+    const std::vector<std::string> &disabled) const {
+  std::vector<std::unique_ptr<IndexCheck>> checks;
+  for (const auto &factory : indexCheckFactories_) {
+    auto check = factory();
+    if (!check)
+      continue;
+    if (std::find(disabled.begin(), disabled.end(), check->name()) !=
+        disabled.end())
+      continue;
+    checks.push_back(std::move(check));
+  }
+  return checks;
+}
+
+std::vector<std::string> ExtensionRegistry::allCheckNames() const {
+  std::vector<std::string> names;
+  for (const auto &factory : checkFactories_)
+    if (auto check = factory())
+      names.push_back(check->name());
+  for (const auto &factory : indexCheckFactories_)
+    if (auto check = factory())
+      names.push_back(check->name());
+  return names;
+}
+
 std::optional<GuardAnnotation>
 ExtensionRegistry::classify(const ConditionalGuard &g) const {
   for (const auto &classifier : classifiers_)
@@ -98,9 +136,11 @@ ExtensionRegistry::classify(const ConditionalGuard &g) const {
 
 void ExtensionRegistry::clear() {
   checkFactories_.clear();
+  indexCheckFactories_.clear();
   lockTypes_.clear();
   channelTypes_.clear();
   classifiers_.clear();
+  checkGroups_.clear();
 }
 
 std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g) {

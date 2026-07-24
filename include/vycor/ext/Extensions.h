@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace clang {
@@ -61,6 +62,28 @@ public:
 
 using AnnealCheckFactory = std::function<std::unique_ptr<AnnealCheck>()>;
 
+// An organization check over the MERGED cross-TU GlobalIndex (phase 1.5,
+// like the built-in coverage/ODR analyses): sees every TU's declarations
+// at once, unlike AnnealCheck which runs per TU with AST access. The
+// natural home for "must agree across TUs" invariants — e.g. "every IPC
+// message struct is defined identically in client and server trees", or
+// project-specific specialization/registration completeness rules.
+// Diagnostics are recomputed each run from the (replayable) index, so
+// IndexChecks never affect checkpoint record content.
+class IndexCheck {
+public:
+  virtual ~IndexCheck() = default;
+
+  // Stable identifier (short-kebab-case) — selectable/disable-able through
+  // the same --checks configuration as built-in checks.
+  virtual std::string name() const = 0;
+
+  virtual void check(const GlobalIndex &index,
+                     std::vector<Diagnostic> &out) = 0;
+};
+
+using IndexCheckFactory = std::function<std::unique_ptr<IndexCheck>()>;
+
 // Result of classifying a ConditionalGuard: e.g. {"feature-flag", "NewNav"}
 // for a guard whose condition matched a registered feature-flag pattern.
 // Surfaced as an "annotation" object on guard records in prism dump JSON
@@ -86,9 +109,18 @@ public:
 
   // ---- registration --------------------------------------------------------
   void addAnnealCheck(AnnealCheckFactory factory);
+  void addIndexCheck(IndexCheckFactory factory);
   void addLockTypes(std::vector<std::string> qualifiedNames);
   void addChannelTypes(std::vector<ChannelTypeSpec> specs);
   void addGuardClassifier(GuardClassifier classifier);
+
+  // Register (or extend) a named check group usable in --checks
+  // specifications, e.g. addCheckGroup("myorg-strict", {"no-legacy-alloc",
+  // "ipc-struct-parity"}). The built-in groups ("all", "noisy",
+  // "compute-heavy", ...) live in anneal/CheckSet.cpp; org groups may
+  // reference built-in and org check names alike.
+  void addCheckGroup(const std::string &group,
+                     std::vector<std::string> checkNames);
 
   // Convenience wrapper over addGuardClassifier: an ERE applied (searching,
   // not anchored) to ConditionalGuard::conditionText. On match the guard is
@@ -102,6 +134,17 @@ public:
   // Fresh check instances, skipping any whose name() is in `disabled`.
   std::vector<std::unique_ptr<AnnealCheck>>
   createAnnealChecks(const std::vector<std::string> &disabled = {}) const;
+  std::vector<std::unique_ptr<IndexCheck>>
+  createIndexChecks(const std::vector<std::string> &disabled = {}) const;
+
+  // Names of every registered organization check (both kinds), for the
+  // --checks resolver.
+  std::vector<std::string> allCheckNames() const;
+
+  const std::unordered_map<std::string, std::vector<std::string>> &
+  checkGroups() const {
+    return checkGroups_;
+  }
 
   const std::vector<std::string> &lockTypes() const { return lockTypes_; }
   const std::vector<ChannelTypeSpec> &channelTypes() const {
@@ -119,9 +162,11 @@ private:
   ExtensionRegistry() = default;
 
   std::vector<AnnealCheckFactory> checkFactories_;
+  std::vector<IndexCheckFactory> indexCheckFactories_;
   std::vector<std::string> lockTypes_;
   std::vector<ChannelTypeSpec> channelTypes_;
   std::vector<GuardClassifier> classifiers_;
+  std::unordered_map<std::string, std::vector<std::string>> checkGroups_;
 };
 
 // Shorthand for ExtensionRegistry::instance().classify(g), used at the
@@ -136,6 +181,17 @@ std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g);
   namespace {                                                                  \
   const bool vycorAnnealCheckRegistrar_##CheckClass = [] {                     \
     ::vycor::ExtensionRegistry::instance().addAnnealCheck(                     \
+        [] { return std::make_unique<CheckClass>(); });                        \
+    return true;                                                               \
+  }();                                                                         \
+  }
+
+// Registers an IndexCheck subclass (default-constructible) — the merged
+// cross-TU counterpart of VYCOR_REGISTER_ANNEAL_CHECK.
+#define VYCOR_REGISTER_INDEX_CHECK(CheckClass)                                 \
+  namespace {                                                                  \
+  const bool vycorIndexCheckRegistrar_##CheckClass = [] {                      \
+    ::vycor::ExtensionRegistry::instance().addIndexCheck(                      \
         [] { return std::make_unique<CheckClass>(); });                        \
     return true;                                                               \
   }();                                                                         \

@@ -155,6 +155,39 @@ Semantics:
 - `name()` is the stable ID used by `disabledAnnealChecks`; keep it
   kebab-case and don't rename casually.
 
+### Cross-TU checks over the merged index
+
+When the invariant is "must agree across TUs" rather than "walk one TU's
+AST", implement `vycor::IndexCheck` instead: it runs once, after phase 1,
+against the merged project-wide `GlobalIndex` (the same vantage point as
+the built-in ODR and coverage analyses):
+
+```cpp
+class IpcStructParity : public vycor::IndexCheck {
+public:
+  std::string name() const override { return "ipc-struct-parity"; }
+  void check(const vycor::GlobalIndex &index,
+             std::vector<vycor::Diagnostic> &out) override {
+    // e.g. compare OdrEntry hashes of client/ vs server/ definitions,
+    // or verify every registered message type has a serializer overload.
+  }
+};
+
+VYCOR_REGISTER_INDEX_CHECK(IpcStructParity)
+```
+
+Both check kinds participate in the `--checks` selection by their
+`name()` (default enabled), and both should ship a documentation page at
+`docs/checks/<name>.md` in your fork — same convention as the built-in
+checks (docs/checks/README.md). Orgs can also define selection groups:
+
+```cpp
+VYCOR_EXTENSION_SETUP(MyOrgGroups) {
+  registry.addCheckGroup("myorg-strict",
+                         {"ipc-struct-parity", "odr-violations"});
+}
+```
+
 ### Lock types, channel types, feature flags — in code
 
 For hooks that are code-level policy rather than per-repo config, register

@@ -218,7 +218,40 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
   shard.forEachCoverageProperty(
       [this](const CoveragePropertyEntry &e) { addCoverageProperty(e); });
   shard.forEachOdrEntry([this](const OdrEntry &e) { addOdrEntry(e); });
+  shard.forEachSpecialization(
+      [this](const SpecializationEntry &e) { addSpecialization(e); });
   types_.absorb(shard.types_);
+}
+
+void GlobalIndex::addSpecialization(const SpecializationEntry &entry) {
+  SId key = interner_.intern(entry.templateName);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  auto &v = specializations_[key];
+  for (const auto &existing : v)
+    if (existing.argsString == entry.argsString &&
+        existing.headerPath == entry.headerPath && existing.line == entry.line)
+      return;
+  v.push_back(entry);
+}
+
+std::vector<const SpecializationEntry *>
+GlobalIndex::findSpecializations(const std::string &templateName) const {
+  std::vector<const SpecializationEntry *> result;
+  auto id = interner_.find(templateName);
+  if (!id)
+    return result;
+  auto it = specializations_.find(*id);
+  if (it != specializations_.end())
+    for (const auto &entry : it->second)
+      result.push_back(&entry);
+  return result;
+}
+
+size_t GlobalIndex::specializationCount() const {
+  size_t count = 0;
+  for (const auto &kv : specializations_)
+    count += kv.second.size();
+  return count;
 }
 
 void GlobalIndex::addOdrEntry(const OdrEntry &entry) {

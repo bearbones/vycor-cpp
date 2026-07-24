@@ -171,6 +171,22 @@ struct OdrEntry {
   uint64_t odrHash = 0;       // clang::ODRHash over the definition
 };
 
+// One explicit (full) class template specialization discovered during
+// indexing. Backs the specialization-visibility check: a TU that
+// implicitly instantiates the primary template while an explicit
+// specialization exists elsewhere in the program — invisible to that TU —
+// is ill-formed, no diagnostic required ([temp.expl.spec]): some TUs use
+// the primary's instantiation and some the specialization, and neither
+// the compiler (single-TU view) nor the linker (both symbols are vague
+// linkage) will ever complain. Always collected — explicit
+// specializations are rare enough that indexing them costs nothing.
+struct SpecializationEntry {
+  std::string templateName; // qualified primary template name, e.g. "std::hash"
+  std::string argsString;   // canonical comma-joined template arguments
+  std::string headerPath;   // where the specialization is declared
+  unsigned line = 0;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -193,6 +209,9 @@ struct Diagnostic {
     ODR_DivergentDefinition,      // one definition site whose body hashes
                                   // differently across TUs (preprocessor-
                                   // dependent definition)
+    Specialization_Invisible,     // TU instantiates a primary template while
+                                  // an explicit specialization exists in a
+                                  // header this TU does not include (IFNDR)
     Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
@@ -234,11 +253,18 @@ public:
   // common case of N TUs including one unchanged header — dedup at insert.
   void addOdrEntry(const OdrEntry &entry);
 
+  // Explicit class template specializations (see SpecializationEntry).
+  // Identical entries dedup at insert.
+  void addSpecialization(const SpecializationEntry &entry);
+  std::vector<const SpecializationEntry *>
+  findSpecializations(const std::string &templateName) const;
+
   // Total counts for testing/debugging.
   size_t overloadCount() const;
   size_t guideCount() const;
   size_t coverageEntryCount() const;
   size_t odrEntryCount() const;
+  size_t specializationCount() const;
 
   // Merge a per-TU shard into this index (parallel phase-1 merge and
   // checkpoint replay). Entries are appended exactly as if the shard's
@@ -268,6 +294,11 @@ public:
     for (const auto &entry : odrEntries_)
       fn(entry);
   }
+  template <typename Fn> void forEachSpecialization(Fn fn) const {
+    for (const auto &kv : specializations_)
+      for (const auto &entry : kv.second)
+        fn(entry);
+  }
 
 private:
   using SId = StringInterner::Id;
@@ -287,6 +318,7 @@ private:
   // compaction (same call ChannelIndex made).
   std::vector<OdrEntry> odrEntries_;
   std::unordered_set<std::string> odrKeys_; // full-identity dedup keys
+  std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;
   TypeRelationIndex types_;
 };
 

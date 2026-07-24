@@ -83,6 +83,8 @@ add_executable(vycor_tests
   test_extensions.cpp
   test_anneal_checkpoint.cpp
   test_anneal_odr.cpp
+  test_anneal_specialization.cpp
+  test_check_set.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
 )
