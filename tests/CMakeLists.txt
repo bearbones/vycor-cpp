@@ -91,6 +91,8 @@ target_link_libraries(vycor_tests PRIVATE
   Catch2::Catch2WithMain
 )
 
+target_compile_options(vycor_tests PRIVATE ${VYCOR_WARNING_FLAGS})
+
 target_compile_definitions(vycor_tests PRIVATE
   PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )

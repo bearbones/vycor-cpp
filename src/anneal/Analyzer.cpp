@@ -387,9 +387,6 @@ bool AnalyzerVisitor::VisitVarDecl(clang::VarDecl *decl) {
 
   auto type = decl->getType();
 
-  // Look for template specialization types that resulted from CTAD.
-  const clang::TemplateSpecializationType *tst = nullptr;
-
   // Check the desugared type for a template specialization.
   if (auto *recordType = type->getAs<clang::RecordType>()) {
     if (auto *ctsd = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(

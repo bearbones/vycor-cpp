@@ -30,6 +30,8 @@ target_include_directories(vycor_lib PUBLIC
   ${CMAKE_BINARY_DIR}/generated
 )
 
+target_compile_options(vycor_lib PRIVATE ${VYCOR_WARNING_FLAGS})
+
 target_link_libraries(vycor_lib PUBLIC
   clangTooling
   clangDynamicASTMatchers
@@ -97,6 +99,7 @@ endif()
 
 add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES})
 target_link_libraries(vycor-cpp PRIVATE vycor_lib)
+target_compile_options(vycor-cpp PRIVATE ${VYCOR_WARNING_FLAGS})
 
 # Embed the default --clang path for PCH compilation into the executable.
 target_compile_definitions(vycor-cpp PRIVATE

@@ -44,6 +44,7 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DVYCOR_WERROR=ON \
             -DCMAKE_PREFIX_PATH=/usr/lib/llvm-${{ matrix.llvm-version }}
 
       - name: Build
