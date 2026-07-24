@@ -1,5 +1,6 @@
 {
   "lockTypes": ["myorg::SpinLockGuard", "myorg::SharedStateGuard"],
+  "staticInitHazards": ["myorg::JniEnv::attach"],
   "channelTypes": [
     {
       "type": "myorg::EventBus",

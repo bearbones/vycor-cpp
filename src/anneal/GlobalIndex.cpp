@@ -224,7 +224,45 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
       [this](const DefaultArgEntry &e) { addDefaultArg(e); });
   shard.forEachStaticInit(
       [this](const StaticInitEntry &e) { addStaticInit(e); });
+  shard.forEachFunctionSummary(
+      [this](const FunctionSummaryEntry &e) { addFunctionSummary(e); });
   types_.absorb(shard.types_);
+}
+
+void GlobalIndex::addFunctionSummary(const FunctionSummaryEntry &entry) {
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  auto it = functionSummaryByName_.find(entry.qualifiedName);
+  if (it == functionSummaryByName_.end()) {
+    functionSummaries_.push_back(entry);
+    functionSummaryByName_.emplace(entry.qualifiedName,
+                                   functionSummaries_.size() - 1);
+    return;
+  }
+  auto &existing = functionSummaries_[it->second];
+  existing.isNoexcept = existing.isNoexcept || entry.isNoexcept;
+  existing.hasUncaughtThrow =
+      existing.hasUncaughtThrow || entry.hasUncaughtThrow;
+  auto merge = [](std::vector<std::string> &into,
+                  const std::vector<std::string> &from) {
+    for (const auto &name : from)
+      if (std::find(into.begin(), into.end(), name) == into.end())
+        into.push_back(name);
+  };
+  merge(existing.calledFunctions, entry.calledFunctions);
+  merge(existing.unguardedCalls, entry.unguardedCalls);
+  merge(existing.referencedGlobals, entry.referencedGlobals);
+}
+
+const FunctionSummaryEntry *
+GlobalIndex::findFunctionSummary(const std::string &name) const {
+  auto it = functionSummaryByName_.find(name);
+  if (it == functionSummaryByName_.end())
+    return nullptr;
+  return &functionSummaries_[it->second];
+}
+
+size_t GlobalIndex::functionSummaryCount() const {
+  return functionSummaries_.size();
 }
 
 void GlobalIndex::addStaticInit(const StaticInitEntry &entry) {

@@ -40,6 +40,7 @@ struct FeatureFlagPattern {
 //     "channelTypes": [{"type": "myorg::EventBus", "produce": ["post"],
 //                       "consume": ["drain"], "category": "bus"}],
 //     "featureFlags": [{"pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1}],
+//     "staticInitHazards": ["myorg::JniEnv::attach"],
 //     "collapsePaths": ["ThirdParty/Math"],
 //     "disabledAnnealChecks": ["some-ext-check"]
 //   }
@@ -50,6 +51,8 @@ struct FeatureFlagPattern {
 // ext/ checks by name.
 struct OrgConfig {
   std::vector<std::string> lockTypes;
+  // Extra loader-hostile functions for static-init-hazards.
+  std::vector<std::string> staticInitHazards;
   std::vector<ChannelTypeSpec> channelTypes;
   std::vector<FeatureFlagPattern> featureFlags;
   std::vector<std::string> collapsePaths;

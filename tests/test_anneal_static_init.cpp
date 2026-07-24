@@ -21,6 +21,7 @@
 #include "vycor/anneal/GlobalIndex.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/ext/Extensions.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
@@ -249,4 +250,82 @@ TEST_CASE("Static-init entries dedup and survive absorb",
   REQUIRE(found);
   CHECK(found->referencedGlobals == std::vector<std::string>{"other"});
   CHECK(found->calledFunctions == std::vector<std::string>{"make"});
+}
+
+TEST_CASE("Transitive SIOF: initializer reaching a cross-TU global through "
+          "function calls is flagged with the chain",
+          "[AnnealStaticInit]") {
+  // gBase (base.cpp) is dynamic; reader.cpp's readBase() returns it;
+  // derived.cpp initializes gDerived = readBase() — no direct reference,
+  // but the summary walk finds base.cpp's global two hops away.
+  struct Fixture {
+    std::string dir = "anneal_sinit_trans_fixture";
+    std::string absDir;
+    Fixture() {
+      REQUIRE(!llvm::sys::fs::create_directory(dir));
+      llvm::SmallString<256> abs;
+      REQUIRE(!llvm::sys::fs::real_path(dir, abs));
+      absDir = std::string(abs.str());
+      write("api.hpp", "#pragma once\nextern int gBase;\nint compute();\n"
+                       "int readBase();\n");
+      write("base.cpp", "#include \"api.hpp\"\nint compute() { return 9; }\n"
+                        "int gBase = compute();\n");
+      write("reader.cpp",
+            "#include \"api.hpp\"\nint readBase() { return gBase * 2; }\n");
+      write("derived.cpp",
+            "#include \"api.hpp\"\nint gDerived = readBase();\n");
+    }
+    ~Fixture() {
+      for (const char *f : {"api.hpp", "base.cpp", "reader.cpp",
+                            "derived.cpp"})
+        std::remove((dir + "/" + f).c_str());
+      llvm::sys::fs::remove(dir);
+    }
+    void write(const std::string &name, const std::string &content) const {
+      std::ofstream out(dir + "/" + name,
+                        std::ios::binary | std::ios::trunc);
+      REQUIRE(out.good());
+      out << content;
+    }
+  } fx;
+
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  std::vector<std::string> files = {fx.absDir + "/base.cpp",
+                                    fx.absDir + "/reader.cpp",
+                                    fx.absDir + "/derived.cpp"};
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  auto diags = ofKind(runAnalysis(compDb, files, opts),
+                      Diagnostic::StaticInit_OrderDependency);
+
+  REQUIRE(diags.size() == 1);
+  CHECK(diags[0].message.find("'gDerived'") != std::string::npos);
+  CHECK(diags[0].message.find("'gBase'") != std::string::npos);
+  CHECK(diags[0].message.find("via readBase") != std::string::npos);
+}
+
+TEST_CASE("Org-registered hazard functions extend static-init-hazards",
+          "[AnnealStaticInit]") {
+  struct RegistryReset {
+    RegistryReset() { ExtensionRegistry::instance().clear(); }
+    ~RegistryReset() { ExtensionRegistry::instance().clear(); }
+  } reset;
+  ExtensionRegistry::instance().addStaticInitHazards(
+      {"myorg::JniEnv::attach"});
+
+  GlobalIndex index;
+  StaticInitEntry root;
+  root.qualifiedName = "gBridge";
+  root.filePath = "bridge.cpp";
+  root.line = 4;
+  root.dynamicInit = true;
+  root.calledFunctions = {"myorg::JniEnv::attach"};
+  index.addStaticInit(root);
+
+  CallGraph graph; // hazard is a direct seed: no edges needed
+  std::vector<Diagnostic> diags;
+  analyzeStaticInitHazards(index, graph, diags);
+  REQUIRE(diags.size() == 1);
+  CHECK(diags[0].kind == Diagnostic::StaticInit_Hazard);
+  CHECK(diags[0].message.find("myorg::JniEnv::attach") != std::string::npos);
 }

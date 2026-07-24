@@ -62,8 +62,9 @@ std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
 // compares. Always collected: scanning parameters costs nothing.
 
 IndexerVisitor::IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm,
-                               bool collectOdr)
-    : index_(index), sm_(sm), collectOdr_(collectOdr) {}
+                               bool collectOdr, bool collectSummaries)
+    : index_(index), sm_(sm), collectOdr_(collectOdr),
+      collectSummaries_(collectSummaries) {}
 
 // ODR definition-site hashing (--odr-diag). Only vague-linkage entities are
 // interesting: their definitions are legal in many TUs and the linker
@@ -177,14 +178,17 @@ void IndexerVisitor::maybeRecordDefaultArgs(clang::FunctionDecl *decl) {
 
 namespace {
 
-// Collects what a global initializer expression touches: directly
-// referenced static-storage globals (static-init-order's dependency
-// edges) and directly called functions/constructors (static-init-hazards'
-// BFS seeds into the call graph).
-class InitExprCollector
-    : public clang::RecursiveASTVisitor<InitExprCollector> {
+// Collects what a body (or initializer expression) touches: directly
+// referenced static-storage globals, directly called
+// functions/constructors (split into all vs. not-inside-a-try), and
+// whether a throw occurs outside every try. Serves the static-init
+// checks' seeds and the exception-escape summaries in one walk.
+class BodyCollector : public clang::RecursiveASTVisitor<BodyCollector> {
 public:
-  explicit InitExprCollector(StaticInitEntry &entry) : entry_(entry) {}
+  std::vector<std::string> referencedGlobals;
+  std::vector<std::string> calledFunctions;
+  std::vector<std::string> unguardedCalls;
+  bool hasUncaughtThrow = false;
 
   bool VisitDeclRefExpr(clang::DeclRefExpr *ref) {
     const auto *var = llvm::dyn_cast<clang::VarDecl>(ref->getDecl());
@@ -192,28 +196,57 @@ public:
       return true;
     if (!var->isExternallyVisible())
       return true; // internal linkage: same-TU by definition, ordered
-    add(entry_.referencedGlobals, var->getQualifiedNameAsString());
+    add(referencedGlobals, var->getQualifiedNameAsString());
     return true;
   }
 
   bool VisitCallExpr(clang::CallExpr *call) {
     if (const auto *callee = call->getDirectCallee())
-      add(entry_.calledFunctions, callee->getQualifiedNameAsString());
+      recordCall(callee->getQualifiedNameAsString());
     return true;
   }
 
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *construct) {
     if (const auto *ctor = construct->getConstructor())
-      add(entry_.calledFunctions, ctor->getQualifiedNameAsString());
+      recordCall(ctor->getQualifiedNameAsString());
     return true;
   }
 
+  bool VisitCXXThrowExpr(clang::CXXThrowExpr *) {
+    // A throw lexically inside a try is conservatively treated as locally
+    // handled (matching handler types is out of scope) — precision over
+    // recall.
+    if (tryDepth_ == 0)
+      hasUncaughtThrow = true;
+    return true;
+  }
+
+  // Traverse the try block at increased guard depth; handlers at the
+  // outer depth (a rethrow from a handler escapes unless an OUTER try
+  // catches it).
+  bool TraverseCXXTryStmt(clang::CXXTryStmt *stmt) {
+    ++tryDepth_;
+    TraverseStmt(stmt->getTryBlock());
+    --tryDepth_;
+    for (unsigned i = 0; i < stmt->getNumHandlers(); ++i)
+      TraverseStmt(stmt->getHandler(i));
+    return true;
+  }
+
+  // noexcept(expr) is unevaluated: nothing in it runs.
+  bool TraverseCXXNoexceptExpr(clang::CXXNoexceptExpr *) { return true; }
+
 private:
+  void recordCall(std::string name) {
+    add(calledFunctions, name);
+    if (tryDepth_ == 0)
+      add(unguardedCalls, std::move(name));
+  }
   static void add(std::vector<std::string> &into, std::string name) {
     if (std::find(into.begin(), into.end(), name) == into.end())
       into.push_back(std::move(name));
   }
-  StaticInitEntry &entry_;
+  unsigned tryDepth_ = 0;
 };
 
 } // namespace
@@ -235,6 +268,45 @@ void IndexerVisitor::maybeRecordConstructorFn(clang::FunctionDecl *decl) {
   entry.dynamicInit = true;
   entry.isConstructorFn = true;
   index_.addStaticInit(entry);
+}
+
+// Per-function call summary (transitive static-init-order and
+// exception-escape). Rides the same parse; gated because the payload cost
+// is real on large trees.
+void IndexerVisitor::maybeRecordFunctionSummary(clang::FunctionDecl *decl) {
+  if (!collectSummaries_)
+    return;
+  if (!decl->isThisDeclarationADefinition() || !decl->hasBody())
+    return;
+  if (decl->isDependentContext() || decl->getDescribedFunctionTemplate())
+    return;
+  if (decl->getTemplateSpecializationKind() ==
+      clang::TSK_ImplicitInstantiation)
+    return;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc))
+    return;
+
+  FunctionSummaryEntry entry;
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+  if (const auto *proto = decl->getType()->getAs<clang::FunctionProtoType>())
+    entry.isNoexcept = proto->canThrow() == clang::CT_Cannot;
+
+  BodyCollector collector;
+  collector.TraverseStmt(decl->getBody());
+  entry.hasUncaughtThrow = collector.hasUncaughtThrow;
+  entry.calledFunctions = std::move(collector.calledFunctions);
+  entry.unguardedCalls = std::move(collector.unguardedCalls);
+  entry.referencedGlobals = std::move(collector.referencedGlobals);
+
+  // Nothing to say -> no entry (a noexcept leaf with no calls and no
+  // throws can never produce a diagnostic).
+  if (!entry.hasUncaughtThrow && entry.calledFunctions.empty() &&
+      entry.referencedGlobals.empty())
+    return;
+  index_.addFunctionSummary(entry);
 }
 
 bool IndexerVisitor::VisitVarDecl(clang::VarDecl *decl) {
@@ -268,8 +340,10 @@ bool IndexerVisitor::VisitVarDecl(clang::VarDecl *decl) {
       !decl->getInit()->isConstantInitializer(
           *astContext_, decl->getType()->isReferenceType());
   if (entry.dynamicInit) {
-    InitExprCollector collector(entry);
+    BodyCollector collector;
     collector.TraverseStmt(decl->getInit());
+    entry.referencedGlobals = std::move(collector.referencedGlobals);
+    entry.calledFunctions = std::move(collector.calledFunctions);
   }
   index_.addStaticInit(entry);
   return true;
@@ -294,6 +368,7 @@ bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   maybeRecordOdrFunction(decl);
   maybeRecordDefaultArgs(decl);
   maybeRecordConstructorFn(decl);
+  maybeRecordFunctionSummary(decl);
 
   // Only index definitions or the first declaration to avoid duplicates
   // from multiple includes. We prefer to index every unique declaration
@@ -526,8 +601,8 @@ std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
 // --- IndexerConsumer ---
 
 IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
-                                 bool collectOdr)
-    : visitor_(index, sm, collectOdr) {}
+                                 bool collectOdr, bool collectSummaries)
+    : visitor_(index, sm, collectOdr, collectSummaries) {}
 
 void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
@@ -536,24 +611,29 @@ void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
 
 // --- IndexerAction ---
 
-IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr)
-    : index_(index), collectOdr_(collectOdr) {}
+IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr,
+                             bool collectSummaries)
+    : index_(index), collectOdr_(collectOdr),
+      collectSummaries_(collectSummaries) {}
 
 std::unique_ptr<clang::ASTConsumer>
 IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
                                  llvm::StringRef /*file*/) {
   return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager(),
-                                           collectOdr_);
+                                           collectOdr_, collectSummaries_);
 }
 
 // --- IndexerActionFactory ---
 
 IndexerActionFactory::IndexerActionFactory(GlobalIndex &index,
-                                           bool collectOdr)
-    : index_(index), collectOdr_(collectOdr) {}
+                                           bool collectOdr,
+                                           bool collectSummaries)
+    : index_(index), collectOdr_(collectOdr),
+      collectSummaries_(collectSummaries) {}
 
 std::unique_ptr<clang::FrontendAction> IndexerActionFactory::create() {
-  return std::make_unique<IndexerAction>(index_, collectOdr_);
+  return std::make_unique<IndexerAction>(index_, collectOdr_,
+                                         collectSummaries_);
 }
 
 } // namespace vycor

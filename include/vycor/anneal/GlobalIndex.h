@@ -229,6 +229,27 @@ struct StaticInitEntry {
   std::vector<std::string> calledFunctions;
 };
 
+// Name-level per-function call summary, collected during the anneal parse
+// itself (no second frontend pass — this is what lets the transitive
+// static-init-order and exception-escape analyses stay out of the
+// compute-heavy group). Merged by qualified name across TUs, which
+// deliberately conflates overload sets: the consumers over-approximate,
+// and their docs say so. Only functions with something to say (a call, a
+// global reference, or an uncaught throw) get an entry.
+struct FunctionSummaryEntry {
+  std::string qualifiedName;
+  std::string filePath; // first definition site seen
+  unsigned line = 0;
+  bool isNoexcept = false;       // cannot throw per its exception spec
+  bool hasUncaughtThrow = false; // a throw not inside any try in the body
+  std::vector<std::string> calledFunctions; // all direct calls
+  // Direct calls NOT lexically inside a try block — the ones an exception
+  // would escape through.
+  std::vector<std::string> unguardedCalls;
+  // Externally-visible static-storage globals the body references.
+  std::vector<std::string> referencedGlobals;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -263,6 +284,8 @@ struct Diagnostic {
     StaticInit_Hazard,            // a static initializer transitively
                                   // reaches dlopen/dlsym/thread create-join
                                   // — deadlock risk under the loader lock
+    Exception_Escape,             // a noexcept function can transitively
+                                  // reach an uncaught throw (std::terminate)
     Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
@@ -315,6 +338,12 @@ public:
   // Static-initialization roots (see StaticInitEntry). Identical entries
   // (same name + site) dedup at insert.
   void addStaticInit(const StaticInitEntry &entry);
+
+  // Function call summaries (see FunctionSummaryEntry). Entries with the
+  // same qualified name MERGE: lists union, flags OR, first site wins.
+  void addFunctionSummary(const FunctionSummaryEntry &entry);
+  const FunctionSummaryEntry *
+  findFunctionSummary(const std::string &name) const;
   // Entry for a given variable name, or nullptr (static-init-order resolves
   // referenced globals through this).
   const StaticInitEntry *findStaticInit(const std::string &name) const;
@@ -329,6 +358,7 @@ public:
   size_t specializationCount() const;
   size_t defaultArgCount() const;
   size_t staticInitCount() const;
+  size_t functionSummaryCount() const;
 
   // Merge a per-TU shard into this index (parallel phase-1 merge and
   // checkpoint replay). Entries are appended exactly as if the shard's
@@ -371,6 +401,10 @@ public:
     for (const auto &entry : staticInits_)
       fn(entry);
   }
+  template <typename Fn> void forEachFunctionSummary(Fn fn) const {
+    for (const auto &entry : functionSummaries_)
+      fn(entry);
+  }
 
 private:
   using SId = StringInterner::Id;
@@ -398,6 +432,8 @@ private:
   std::vector<StaticInitEntry> staticInits_;
   std::unordered_map<std::string, size_t> staticInitByName_;
   std::unordered_set<std::string> staticInitKeys_;
+  std::vector<FunctionSummaryEntry> functionSummaries_;
+  std::unordered_map<std::string, size_t> functionSummaryByName_;
   TypeRelationIndex types_;
 };
 

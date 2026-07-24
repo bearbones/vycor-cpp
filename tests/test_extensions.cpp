@@ -184,6 +184,7 @@ TEST_CASE("Custom GuardClassifier wins in registration order",
 TEST_CASE("OrgConfig parses all sections", "[Extensions][OrgConfig]") {
   const char *json = R"json({
     "lockTypes": ["myorg::SpinLock"],
+    "staticInitHazards": ["myorg::JniEnv::attach"],
     "channelTypes": [{"type": "myorg::EventBus", "produce": ["post"],
                       "consume": ["drain"], "category": "bus"}],
     "featureFlags": [{"pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1}],
@@ -195,6 +196,8 @@ TEST_CASE("OrgConfig parses all sections", "[Extensions][OrgConfig]") {
   std::string error;
   REQUIRE(vycor::parseOrgConfigJson(json, cfg, error));
   CHECK(cfg.lockTypes == std::vector<std::string>{"myorg::SpinLock"});
+  CHECK(cfg.staticInitHazards ==
+        std::vector<std::string>{"myorg::JniEnv::attach"});
   REQUIRE(cfg.channelTypes.size() == 1);
   CHECK(cfg.channelTypes[0].qualifiedTypeName == "myorg::EventBus");
   CHECK(cfg.channelTypes[0].produceMethods ==

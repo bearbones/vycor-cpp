@@ -74,6 +74,12 @@ struct AnalysisOptions {
   // actual cross-site conflict, which is near-certainly a bug.
   bool enableDefaultArgDiag = true;
 
+  // exception-escape: noexcept functions that can transitively reach an
+  // uncaught throw across TUs (std::terminate). Off by default: the
+  // name-level call summaries it walks conflate overload sets and skip
+  // virtual/function-pointer dispatch, so treat findings as leads.
+  bool enableExceptionEscapeDiag = false;
+
   // Emit Coverage_* diagnostics from analyzeCoverageProperties.
   bool enableCoverageDiag = false;
 
@@ -240,6 +246,14 @@ void analyzeDefaultArgDivergence(const GlobalIndex &index,
 // unspecified, so the reader may observe the zero/constant-initialized
 // state. Constant/constinit targets are safe and not flagged.
 void analyzeStaticInitOrder(const GlobalIndex &index,
+                            std::vector<Diagnostic> &diagnostics);
+
+// exception-escape (index-only, phase 1.5): BFS from every noexcept
+// function through the name-level call summaries' UNGUARDED calls (calls
+// inside a try are conservatively treated as handled) to a function whose
+// body throws outside every try. clang-tidy's bugprone-exception-escape
+// goes blind one call deep at the TU boundary; the summaries cross it.
+void analyzeExceptionEscape(const GlobalIndex &index,
                             std::vector<Diagnostic> &diagnostics);
 
 // static-init-hazards: walk the call graph from every static-init root
