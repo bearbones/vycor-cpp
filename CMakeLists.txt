@@ -113,6 +113,27 @@ if(NOT LLVM_ENABLE_RTTI)
   endif()
 endif()
 
+# Warnings for this project's own sources (applied per-target in
+# src/CMakeLists.txt and tests/CMakeLists.txt — never to extern/
+# submodules). VYCOR_WERROR promotes them to errors; default OFF so a new
+# warning in a future compiler release doesn't break downstream users'
+# builds, but CI turns it ON — warnings fail the merge gate, not the user.
+option(VYCOR_WERROR "Treat compiler warnings as errors (CI default)" OFF)
+if(MSVC)
+  set(VYCOR_WARNING_FLAGS /W4)
+  if(VYCOR_WERROR)
+    list(APPEND VYCOR_WARNING_FLAGS /WX)
+  endif()
+else()
+  # -Wno-missing-field-initializers: aggregate init that relies on default
+  # member initializers for trailing fields ({caller, callee, kind} on
+  # CallGraphEdge etc.) is idiomatic here, not an accident.
+  set(VYCOR_WARNING_FLAGS -Wall -Wextra -Wno-missing-field-initializers)
+  if(VYCOR_WERROR)
+    list(APPEND VYCOR_WARNING_FLAGS -Werror)
+  endif()
+endif()
+
 add_subdirectory(src)
 
 option(VYCOR_BUILD_TESTS "Build tests (requires network for Catch2)" ON)

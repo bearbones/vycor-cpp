@@ -36,28 +36,6 @@ struct RequiredEdge {
   Confidence confidence;
 };
 
-EdgeKind parseKind(const std::string &s) {
-  if (s == "DirectCall") return EdgeKind::DirectCall;
-  if (s == "VirtualDispatch") return EdgeKind::VirtualDispatch;
-  if (s == "FunctionPointer") return EdgeKind::FunctionPointer;
-  if (s == "ConstructorCall") return EdgeKind::ConstructorCall;
-  if (s == "DestructorCall") return EdgeKind::DestructorCall;
-  if (s == "OperatorCall") return EdgeKind::OperatorCall;
-  if (s == "TemplateInstantiation") return EdgeKind::TemplateInstantiation;
-  if (s == "LambdaCall") return EdgeKind::LambdaCall;
-  if (s == "ThreadEntry") return EdgeKind::ThreadEntry;
-  FAIL("unknown edge kind: " << s);
-  return EdgeKind::DirectCall;
-}
-
-Confidence parseConf(const std::string &s) {
-  if (s == "Proven") return Confidence::Proven;
-  if (s == "Plausible") return Confidence::Plausible;
-  if (s == "Unknown") return Confidence::Unknown;
-  FAIL("unknown confidence: " << s);
-  return Confidence::Unknown;
-}
-
 bool graphHasEdge(const CallGraph &g, const RequiredEdge &e) {
   auto outs = g.calleesOf(e.from);
   for (const auto &edge : outs) {

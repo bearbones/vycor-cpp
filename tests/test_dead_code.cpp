@@ -352,43 +352,6 @@ TEST_CASE("CallGraphBuilder tracks function pointer indirection",
 // Integration tests using example files
 // ============================================================================
 
-// Simple JSON key-value extractor (no external JSON library needed).
-// Extracts string values for keys inside "functions" -> funcName -> key.
-static std::string extractJsonValue(const std::string &json,
-                                    const std::string &funcName,
-                                    const std::string &key) {
-  // Find the function entry.
-  auto funcPos = json.find("\"" + funcName + "\"");
-  if (funcPos == std::string::npos)
-    return "";
-
-  // Find the key within the function entry's object.
-  auto braceStart = json.find('{', funcPos);
-  if (braceStart == std::string::npos)
-    return "";
-  auto braceEnd = json.find('}', braceStart);
-  if (braceEnd == std::string::npos)
-    return "";
-
-  std::string block = json.substr(braceStart, braceEnd - braceStart + 1);
-  auto keyPos = block.find("\"" + key + "\"");
-  if (keyPos == std::string::npos)
-    return "";
-
-  auto colonPos = block.find(':', keyPos);
-  if (colonPos == std::string::npos)
-    return "";
-
-  auto valStart = block.find('"', colonPos + 1);
-  if (valStart == std::string::npos)
-    return "";
-  auto valEnd = block.find('"', valStart + 1);
-  if (valEnd == std::string::npos)
-    return "";
-
-  return block.substr(valStart + 1, valEnd - valStart - 1);
-}
-
 TEST_CASE("Dead code analysis on example project",
           "[dead_code][integration][example]") {
   const std::string base =

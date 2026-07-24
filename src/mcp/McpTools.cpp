@@ -96,6 +96,11 @@ static const char *edgeKindToString(EdgeKind k) {
     return "LambdaCall";
   case EdgeKind::ThreadEntry:
     return "ThreadEntry";
+  case EdgeKind::FunctionPointerReturn:
+    // Raw deferred edges are joined at query time and never materialized
+    // into results (CallGraph.h) — labeled honestly in case a future raw
+    // dump path reaches here.
+    return "FunctionPointerReturn";
   }
   return "Unknown";
 }
@@ -1681,15 +1686,6 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
 // ============================================================================
 // Tool 7: analyze_dead_code
 // ============================================================================
-
-static const char *livenessToStr(Liveness l) {
-  switch (l) {
-  case Liveness::Alive: return "alive";
-  case Liveness::OptimisticallyAlive: return "optimistically_alive";
-  case Liveness::Dead: return "dead";
-  }
-  return "unknown";
-}
 
 static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
                                                const McpToolContext &ctx) {

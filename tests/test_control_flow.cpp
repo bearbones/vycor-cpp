@@ -343,27 +343,6 @@ TEST_CASE("Oracle handles always-caught and never-caught cases",
 // Integration tests: visitor + in-memory compilation
 // ============================================================================
 
-// Helper: build a CallGraph and ControlFlowIndex from in-memory source code.
-static std::pair<CallGraph, ControlFlowIndex>
-buildFromCode(const std::string &code) {
-  CallGraph graph;
-  CallGraphBuilderFactory graphFactory(graph);
-  clang::tooling::runToolOnCodeWithArgs(graphFactory.create(), code,
-                                        {"-std=c++17"}, "test_input.cpp");
-
-  ControlFlowIndex cfIndex;
-  // We need to build the control flow index using the same code.
-  // buildControlFlowIndex requires a CompilationDatabase, but for in-memory
-  // tests we need a simpler approach. We'll use the fact that the
-  // ControlFlowContextVisitor is in a .cpp file with no public header,
-  // so we test it end-to-end via buildControlFlowIndex with a fixed DB,
-  // or we test the integration via the Oracle with hand-crafted data.
-  //
-  // For true integration, we test the full pipeline via the example files.
-  // For unit tests, we use hand-crafted CallGraph + ControlFlowIndex.
-  return {std::move(graph), std::move(cfIndex)};
-}
-
 TEST_CASE("CallGraph integration for exception context scenarios",
           "[prism][integration]") {
   // This test verifies the call graph structure for code with try/catch,
