@@ -31,6 +31,8 @@
 
 namespace vycor {
 
+class CallGraph;
+
 // Runs one anneal worker over `batch` (the --isolate-workers seam, mirror
 // of callgraph's WorkerRunner): phase is AnnealCheckpoint::kPhaseIndex or
 // kPhaseAnalyze; globalIndexPath is the merged-index handoff file for
@@ -59,6 +61,12 @@ struct AnalysisOptions {
   // visibility-fragility family as ADL/CTAD and fires only on a proven
   // invisible specialization.
   bool enableSpecializationDiag = true;
+
+  // static-init-order: a dynamic initializer directly reading another
+  // TU's dynamically-initialized global (the classic static initialization
+  // order fiasco, proven cross-TU rather than pattern-guessed). On by
+  // default: index-only and fires only on a proven cross-TU edge.
+  bool enableStaticInitOrderDiag = true;
 
   // default-arg-divergence: declaration sites that disagree on a
   // parameter's default argument (each TU silently calls with whichever
@@ -226,13 +234,40 @@ void analyzeOdrViolations(const GlobalIndex &index,
 void analyzeDefaultArgDivergence(const GlobalIndex &index,
                                  std::vector<Diagnostic> &diagnostics);
 
+// Static initialization order fiasco, cross-TU-proven (index-only, phase
+// 1.5): a dynamic initializer directly references a global that is itself
+// dynamically initialized in a DIFFERENT file — order between TUs is
+// unspecified, so the reader may observe the zero/constant-initialized
+// state. Constant/constinit targets are safe and not flagged.
+void analyzeStaticInitOrder(const GlobalIndex &index,
+                            std::vector<Diagnostic> &diagnostics);
+
+// static-init-hazards: walk the call graph from every static-init root
+// (dynamic initializers via their directly-called functions; ELF
+// constructor functions directly) looking for loader-hostile work:
+// dlopen/dlsym/dlclose/dladdr, pthread_create/join, std::thread
+// construction/join, std::async, std::call_once. Initializers run under
+// the dynamic linker's global lock when the library is loaded via
+// dlopen/System.loadLibrary, and whether a resulting deadlock fires can
+// depend on link order. Requires a built CallGraph (the CLI builds one
+// when the check is enabled, like dead-code); runAnalysis's optional
+// indexOut parameter supplies the index.
+void analyzeStaticInitHazards(const GlobalIndex &index,
+                              const CallGraph &graph,
+                              std::vector<Diagnostic> &diagnostics);
+
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are
 // emitted and whether the convertibility model is consulted.
+// When indexOut is non-null it is used as THE index (phase 1 populates
+// it, later phases read it), letting the caller keep the merged index
+// alive for post-analysis passes that need more context than phase 1.5
+// has — the CLI hands it to analyzeStaticInitHazards together with a call
+// graph. Pass a fresh GlobalIndex.
 std::vector<Diagnostic>
 runAnalysis(const clang::tooling::CompilationDatabase &compDb,
             const std::vector<std::string> &sourceFiles,
-            const AnalysisOptions &opts);
+            const AnalysisOptions &opts, GlobalIndex *indexOut = nullptr);
 
 // Legacy bool-shape overload preserved for callers that only want to toggle
 // the coverage diagnostics. Delegates to the AnalysisOptions variant.

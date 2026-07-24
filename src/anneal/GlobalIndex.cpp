@@ -222,8 +222,30 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
       [this](const SpecializationEntry &e) { addSpecialization(e); });
   shard.forEachDefaultArg(
       [this](const DefaultArgEntry &e) { addDefaultArg(e); });
+  shard.forEachStaticInit(
+      [this](const StaticInitEntry &e) { addStaticInit(e); });
   types_.absorb(shard.types_);
 }
+
+void GlobalIndex::addStaticInit(const StaticInitEntry &entry) {
+  std::string key = entry.qualifiedName + "|" + entry.filePath + "|" +
+                    std::to_string(entry.line);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  if (!staticInitKeys_.insert(std::move(key)).second)
+    return;
+  staticInits_.push_back(entry);
+  staticInitByName_.emplace(entry.qualifiedName, staticInits_.size() - 1);
+}
+
+const StaticInitEntry *
+GlobalIndex::findStaticInit(const std::string &name) const {
+  auto it = staticInitByName_.find(name);
+  if (it == staticInitByName_.end())
+    return nullptr;
+  return &staticInits_[it->second];
+}
+
+size_t GlobalIndex::staticInitCount() const { return staticInits_.size(); }
 
 void GlobalIndex::addDefaultArg(const DefaultArgEntry &entry) {
   std::string key = entry.qualifiedName + "|" + entry.signature + "|" +

@@ -45,6 +45,7 @@ public:
                  bool collectOdr = false);
 
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
+  bool VisitVarDecl(clang::VarDecl *decl);
   bool VisitCXXDeductionGuideDecl(clang::CXXDeductionGuideDecl *decl);
   bool VisitCXXMethodDecl(clang::CXXMethodDecl *decl);
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl);
@@ -64,6 +65,7 @@ private:
   void maybeRecordOdrFunction(clang::FunctionDecl *decl);
   void maybeRecordOdrClass(clang::CXXRecordDecl *decl);
   void maybeRecordDefaultArgs(clang::FunctionDecl *decl);
+  void maybeRecordConstructorFn(clang::FunctionDecl *decl);
 };
 
 // ASTConsumer that drives the IndexerVisitor.
