@@ -20,14 +20,88 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ODRHash.h"
 #include "clang/Frontend/CompilerInstance.h"
 
 namespace vycor {
 
 // --- IndexerVisitor ---
 
-IndexerVisitor::IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm)
-    : index_(index), sm_(sm) {}
+IndexerVisitor::IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm,
+                               bool collectOdr)
+    : index_(index), sm_(sm), collectOdr_(collectOdr) {}
+
+// ODR definition-site hashing (--odr-diag). Only vague-linkage entities are
+// interesting: their definitions are legal in many TUs and the linker
+// merges them WITHOUT comparing content, so a mismatch is silent — exactly
+// what ordinary builds can't diagnose (duplicate strong symbols already
+// fail the link). Internal-linkage entities are per-TU by design and
+// exempt; templates and implicit instantiations are out of scope for now;
+// system headers are skipped for cost and noise.
+void IndexerVisitor::maybeRecordOdrFunction(clang::FunctionDecl *decl) {
+  if (!collectOdr_)
+    return;
+  if (!decl->isThisDeclarationADefinition() || !decl->hasBody())
+    return;
+  if (!decl->isInlined()) // non-inline: one definition, linker enforces
+    return;
+  if (!decl->isExternallyVisible())
+    return;
+  if (decl->isDependentContext() || decl->getDescribedFunctionTemplate())
+    return;
+  if (decl->getTemplateSpecializationKind() ==
+      clang::TSK_ImplicitInstantiation)
+    return;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc))
+    return;
+
+  clang::ODRHash hash;
+  hash.AddFunctionDecl(decl);
+
+  OdrEntry entry;
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  // Full function type spelling: distinguishes overloads and const/ref
+  // qualified method pairs in one string.
+  entry.signature = decl->getType().getAsString();
+  entry.isClass = false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl))
+    entry.enclosingClass = method->getParent()->getQualifiedNameAsString();
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+  entry.odrHash = hash.CalculateHash();
+  index_.addOdrEntry(entry);
+}
+
+void IndexerVisitor::maybeRecordOdrClass(clang::CXXRecordDecl *decl) {
+  if (!collectOdr_)
+    return;
+  if (!decl->isCompleteDefinition() || decl->isLambda() ||
+      !decl->getIdentifier())
+    return;
+  if (!decl->isExternallyVisible())
+    return;
+  if (decl->isDependentType() || decl->getDescribedClassTemplate())
+    return;
+  if (const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl))
+    if (spec->getSpecializationKind() == clang::TSK_ImplicitInstantiation)
+      return;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc))
+    return;
+
+  clang::ODRHash hash;
+  hash.AddCXXRecordDecl(decl);
+
+  OdrEntry entry;
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  entry.isClass = true;
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+  entry.odrHash = hash.CalculateHash();
+  index_.addOdrEntry(entry);
+}
 
 bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // Skip implicit declarations (compiler-generated).
@@ -42,6 +116,10 @@ bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // Template specializations are fine.
   if (decl->getDescribedFunctionTemplate())
     return true;
+
+  // ODR hashing wants the DEFINITION, which is frequently a redeclaration
+  // — record before the first-declaration-only skip below.
+  maybeRecordOdrFunction(decl);
 
   // Only index definitions or the first declaration to avoid duplicates
   // from multiple includes. We prefer to index every unique declaration
@@ -91,6 +169,7 @@ bool IndexerVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
   // declarations and implicit decls have no base list to walk.
   if (decl->isImplicit())
     return true;
+  maybeRecordOdrClass(decl);
   if (!decl->hasDefinition())
     return true;
   if (decl->getDefinition() != decl)
@@ -250,8 +329,9 @@ std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
 
 // --- IndexerConsumer ---
 
-IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm)
-    : visitor_(index, sm) {}
+IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
+                                 bool collectOdr)
+    : visitor_(index, sm, collectOdr) {}
 
 void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
@@ -260,21 +340,24 @@ void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
 
 // --- IndexerAction ---
 
-IndexerAction::IndexerAction(GlobalIndex &index) : index_(index) {}
+IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr)
+    : index_(index), collectOdr_(collectOdr) {}
 
 std::unique_ptr<clang::ASTConsumer>
 IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
                                  llvm::StringRef /*file*/) {
-  return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager());
+  return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager(),
+                                           collectOdr_);
 }
 
 // --- IndexerActionFactory ---
 
-IndexerActionFactory::IndexerActionFactory(GlobalIndex &index)
-    : index_(index) {}
+IndexerActionFactory::IndexerActionFactory(GlobalIndex &index,
+                                           bool collectOdr)
+    : index_(index), collectOdr_(collectOdr) {}
 
 std::unique_ptr<clang::FrontendAction> IndexerActionFactory::create() {
-  return std::make_unique<IndexerAction>(index_);
+  return std::make_unique<IndexerAction>(index_, collectOdr_);
 }
 
 } // namespace vycor
