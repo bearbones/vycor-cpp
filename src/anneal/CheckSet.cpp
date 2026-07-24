@@ -47,6 +47,16 @@ const std::vector<CheckInfo> &builtinAnnealChecks() {
        "Declaration sites that disagree on a parameter's default argument",
        /*defaultOn=*/true,
        {}},
+      {"static-init-order",
+       "Dynamic initializers reading another TU's dynamically-initialized "
+       "global (SIOF)",
+       /*defaultOn=*/true,
+       {}},
+      {"static-init-hazards",
+       "Static initializers reaching dlopen/dlsym or thread create/join "
+       "(loader-lock deadlock risk)",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
       {"odr-violations",
        "Vague-linkage definitions that differ across sites or TUs",
        /*defaultOn=*/false,

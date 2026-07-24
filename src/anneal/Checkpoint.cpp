@@ -33,8 +33,8 @@ namespace {
 // version or fingerprint mismatch discards the journal (it is a cache).
 constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // v2: AnnealIndexPayload gained odrEntries. v3: specializations.
-// v4: defaultArgs.
-constexpr uint32_t kVersion = 4;
+// v4: defaultArgs. v5: staticInits.
+constexpr uint32_t kVersion = 5;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -189,6 +189,8 @@ uint64_t annealOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.enableSpecializationDiag ? '1' : '0';
   canon += "|defarg=";
   canon += opts.enableDefaultArgDiag ? '1' : '0';
+  canon += "|sinit=";
+  canon += opts.enableStaticInitOrderDiag ? '1' : '0';
   // Organization checks change phase-2 record content; the enabled set
   // (registered minus disabled) is part of the identity.
   std::vector<std::string> names;
@@ -221,6 +223,8 @@ AnnealIndexPayload AnnealIndexPayload::capture(const GlobalIndex &shard) {
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
   shard.forEachDefaultArg(
       [&](const DefaultArgEntry &e) { p.defaultArgs.push_back(e); });
+  shard.forEachStaticInit(
+      [&](const StaticInitEntry &e) { p.staticInits.push_back(e); });
   const auto &types = shard.typeRelations();
   types.forEachBase([&](const std::string &d, const std::string &b) {
     p.baseEdges.emplace_back(d, b);
@@ -247,6 +251,8 @@ void AnnealIndexPayload::applyTo(GlobalIndex &into) const {
     into.addSpecialization(e);
   for (const auto &e : defaultArgs)
     into.addDefaultArg(e);
+  for (const auto &e : staticInits)
+    into.addStaticInit(e);
   auto &types = into.mutableTypeRelations();
   for (const auto &p : baseEdges)
     types.addBase(p.first, p.second);
@@ -350,6 +356,22 @@ void encodeIndexPayload(std::string &out, const AnnealIndexPayload &p) {
     putStr(out, e.filePath);
     putU32(out, e.line);
   }
+  putU32(out, static_cast<uint32_t>(p.staticInits.size()));
+  for (const auto &e : p.staticInits) {
+    putStr(out, e.qualifiedName);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+    uint8_t flags = 0;
+    flags |= e.dynamicInit ? 0x01 : 0;
+    flags |= e.isConstructorFn ? 0x02 : 0;
+    putU8(out, flags);
+    putU32(out, static_cast<uint32_t>(e.referencedGlobals.size()));
+    for (const auto &g : e.referencedGlobals)
+      putStr(out, g);
+    putU32(out, static_cast<uint32_t>(e.calledFunctions.size()));
+    for (const auto &f : e.calledFunctions)
+      putStr(out, f);
+  }
 }
 
 bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
@@ -435,6 +457,23 @@ bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
     e.filePath = r.str();
     e.line = r.u32();
     p.defaultArgs.push_back(std::move(e));
+  }
+  uint32_t nInit = r.u32();
+  for (uint32_t i = 0; i < nInit && r.ok; ++i) {
+    StaticInitEntry e;
+    e.qualifiedName = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    uint8_t flags = r.u8();
+    e.dynamicInit = flags & 0x01;
+    e.isConstructorFn = flags & 0x02;
+    uint32_t nRef = r.u32();
+    for (uint32_t j = 0; j < nRef && r.ok; ++j)
+      e.referencedGlobals.push_back(r.str());
+    uint32_t nCall = r.u32();
+    for (uint32_t j = 0; j < nCall && r.ok; ++j)
+      e.calledFunctions.push_back(r.str());
+    p.staticInits.push_back(std::move(e));
   }
   return r.ok;
 }
@@ -719,8 +758,8 @@ namespace {
 // entry: str tu, u32 payloadLen, payload, u32 fnv32(payload). All-or-nothing
 // on read (workers write complete files then exit 0).
 // v2: index payloads gained odrEntries. v3: specializations.
-// v4: defaultArgs.
-constexpr uint32_t kShardVersion = 4;
+// v4: defaultArgs. v5: staticInits.
+constexpr uint32_t kShardVersion = 5;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

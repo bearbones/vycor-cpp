@@ -56,6 +56,8 @@ initial seeding and may evolve. Organizations can define their own groups
 | [ctad-visibility](ctad-visibility.md) | on | — | CTAD deducing differently because a deduction guide is not included |
 | [specialization-visibility](specialization-visibility.md) | on | — | TU instantiates a primary template whose explicit specialization exists elsewhere (IFNDR) |
 | [default-arg-divergence](default-arg-divergence.md) | on | — | Declaration sites that disagree on a parameter's default argument |
+| [static-init-order](static-init-order.md) | on | — | Dynamic initializers reading another TU's dynamically-initialized global (SIOF) |
+| [static-init-hazards](static-init-hazards.md) | off | compute-heavy | Static initializers reaching dlopen/dlsym or thread create/join (loader-lock deadlock risk) |
 | [odr-violations](odr-violations.md) | off | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
 | [coverage-properties](coverage-properties.md) | off | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
 | [dead-code](dead-code.md) | off | compute-heavy | Functions unreachable from the entry points via the call graph |

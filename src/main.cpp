@@ -817,6 +817,8 @@ int main(int argc, const char **argv) {
         enabledChecks.count("specialization-visibility") > 0;
     opts.enableDefaultArgDiag =
         enabledChecks.count("default-arg-divergence") > 0;
+    opts.enableStaticInitOrderDiag =
+        enabledChecks.count("static-init-order") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
     opts.warnSameScore = AnnealWarnSameScore;
@@ -953,25 +955,35 @@ int main(int argc, const char **argv) {
       };
     }
 
-    auto diagnostics = vycor::runAnalysis(*compDb, files, opts);
+    // Keep the merged index alive for graph-backed post passes.
+    vycor::GlobalIndex mergedIndex;
+    auto diagnostics = vycor::runAnalysis(*compDb, files, opts, &mergedIndex);
 
-    // Dead code analysis.
-    if (enabledChecks.count("dead-code")) {
+    // Graph-backed checks (dead-code, static-init-hazards) share one call
+    // graph build.
+    const bool wantDeadCode = enabledChecks.count("dead-code") > 0;
+    const bool wantInitHazards =
+        enabledChecks.count("static-init-hazards") > 0;
+    if (wantDeadCode || wantInitHazards) {
       auto graph = vycor::buildCallGraph(*compDb, files);
 
-      std::vector<std::string> entryPoints(AnnealEntryPoints.begin(),
-                                           AnnealEntryPoints.end());
-      if (entryPoints.empty())
-        entryPoints.push_back("main");
+      if (wantDeadCode) {
+        std::vector<std::string> entryPoints(AnnealEntryPoints.begin(),
+                                             AnnealEntryPoints.end());
+        if (entryPoints.empty())
+          entryPoints.push_back("main");
 
-      vycor::DeadCodeAnalyzer analyzer(graph, entryPoints);
-      analyzer.analyzePessimistic();
-      analyzer.analyzeOptimistic();
+        vycor::DeadCodeAnalyzer analyzer(graph, entryPoints);
+        analyzer.analyzePessimistic();
+        analyzer.analyzeOptimistic();
 
-      auto deadDiags = analyzer.getDiagnostics();
-      for (const auto &diag : deadDiags) {
-        diagnostics.push_back(diag);
+        auto deadDiags = analyzer.getDiagnostics();
+        for (const auto &diag : deadDiags) {
+          diagnostics.push_back(diag);
+        }
       }
+      if (wantInitHazards)
+        vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
     }
 
     if (diagnostics.empty()) {

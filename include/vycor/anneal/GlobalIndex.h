@@ -204,6 +204,31 @@ struct DefaultArgEntry {
   unsigned line = 0;
 };
 
+// One static-initialization root: a static-storage-duration variable
+// definition, or an __attribute__((constructor)) function. Dynamic
+// initializers run before main() — and, when the library is loaded with
+// dlopen (Android System.loadLibrary, plugins), UNDER the dynamic
+// linker's global lock, in an order that follows link order. Two checks
+// consume these: static-init-order (cross-TU initialization-order
+// dependencies) and static-init-hazards (initializers that transitively
+// reach the dynamic linker or thread create/join). Function-local statics
+// are excluded by construction: they initialize lazily and are safe.
+struct StaticInitEntry {
+  std::string qualifiedName;
+  std::string filePath; // definition site
+  unsigned line = 0;
+  bool dynamicInit = false;    // initializer runs at load time
+  bool isConstructorFn = false; // __attribute__((constructor)) function
+  // Externally-visible static-storage globals the initializer expression
+  // references directly (static-init-order's dependency edges).
+  std::vector<std::string> referencedGlobals;
+  // Functions/constructors the initializer expression calls directly —
+  // BFS seeds for static-init-hazards' walk over the call graph (global
+  // initializer expressions have no enclosing function, so the graph
+  // itself has no edges out of them).
+  std::vector<std::string> calledFunctions;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -232,6 +257,12 @@ struct Diagnostic {
     DefaultArg_Divergent,         // declaration sites disagree on a
                                   // parameter's default argument — each TU
                                   // silently calls with a different value
+    StaticInit_OrderDependency,   // a dynamic initializer reads another
+                                  // TU's dynamically-initialized global —
+                                  // cross-TU init order is unspecified
+    StaticInit_Hazard,            // a static initializer transitively
+                                  // reaches dlopen/dlsym/thread create-join
+                                  // — deadlock risk under the loader lock
     Custom,                       // organization ext/ check (see checkName)
   };
   Kind kind;
@@ -280,6 +311,13 @@ public:
   // Default-argument declaration sites (see DefaultArgEntry). Identical
   // entries dedup at insert.
   void addDefaultArg(const DefaultArgEntry &entry);
+
+  // Static-initialization roots (see StaticInitEntry). Identical entries
+  // (same name + site) dedup at insert.
+  void addStaticInit(const StaticInitEntry &entry);
+  // Entry for a given variable name, or nullptr (static-init-order resolves
+  // referenced globals through this).
+  const StaticInitEntry *findStaticInit(const std::string &name) const;
   std::vector<const SpecializationEntry *>
   findSpecializations(const std::string &templateName) const;
 
@@ -290,6 +328,7 @@ public:
   size_t odrEntryCount() const;
   size_t specializationCount() const;
   size_t defaultArgCount() const;
+  size_t staticInitCount() const;
 
   // Merge a per-TU shard into this index (parallel phase-1 merge and
   // checkpoint replay). Entries are appended exactly as if the shard's
@@ -328,6 +367,10 @@ public:
     for (const auto &entry : defaultArgs_)
       fn(entry);
   }
+  template <typename Fn> void forEachStaticInit(Fn fn) const {
+    for (const auto &entry : staticInits_)
+      fn(entry);
+  }
 
 private:
   using SId = StringInterner::Id;
@@ -350,6 +393,11 @@ private:
   std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;
   std::vector<DefaultArgEntry> defaultArgs_;
   std::unordered_set<std::string> defaultArgKeys_;
+  // deque-free by-name lookup: indices into staticInits_ (stable; the
+  // vector only grows).
+  std::vector<StaticInitEntry> staticInits_;
+  std::unordered_map<std::string, size_t> staticInitByName_;
+  std::unordered_set<std::string> staticInitKeys_;
   TypeRelationIndex types_;
 };
 

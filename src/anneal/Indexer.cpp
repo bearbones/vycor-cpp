@@ -20,9 +20,12 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/ODRHash.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+
+#include <algorithm>
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -172,6 +175,106 @@ void IndexerVisitor::maybeRecordDefaultArgs(clang::FunctionDecl *decl) {
   }
 }
 
+namespace {
+
+// Collects what a global initializer expression touches: directly
+// referenced static-storage globals (static-init-order's dependency
+// edges) and directly called functions/constructors (static-init-hazards'
+// BFS seeds into the call graph).
+class InitExprCollector
+    : public clang::RecursiveASTVisitor<InitExprCollector> {
+public:
+  explicit InitExprCollector(StaticInitEntry &entry) : entry_(entry) {}
+
+  bool VisitDeclRefExpr(clang::DeclRefExpr *ref) {
+    const auto *var = llvm::dyn_cast<clang::VarDecl>(ref->getDecl());
+    if (!var || !var->hasGlobalStorage() || var->isStaticLocal())
+      return true;
+    if (!var->isExternallyVisible())
+      return true; // internal linkage: same-TU by definition, ordered
+    add(entry_.referencedGlobals, var->getQualifiedNameAsString());
+    return true;
+  }
+
+  bool VisitCallExpr(clang::CallExpr *call) {
+    if (const auto *callee = call->getDirectCallee())
+      add(entry_.calledFunctions, callee->getQualifiedNameAsString());
+    return true;
+  }
+
+  bool VisitCXXConstructExpr(clang::CXXConstructExpr *construct) {
+    if (const auto *ctor = construct->getConstructor())
+      add(entry_.calledFunctions, ctor->getQualifiedNameAsString());
+    return true;
+  }
+
+private:
+  static void add(std::vector<std::string> &into, std::string name) {
+    if (std::find(into.begin(), into.end(), name) == into.end())
+      into.push_back(std::move(name));
+  }
+  StaticInitEntry &entry_;
+};
+
+} // namespace
+
+// __attribute__((constructor)) functions ARE static initializers (ELF
+// .init_array entries): record them as hazard-walk roots. The call graph
+// already has their outgoing edges, so no seed collection is needed.
+void IndexerVisitor::maybeRecordConstructorFn(clang::FunctionDecl *decl) {
+  if (!decl->hasAttr<clang::ConstructorAttr>() ||
+      !decl->isThisDeclarationADefinition())
+    return;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc))
+    return;
+  StaticInitEntry entry;
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+  entry.dynamicInit = true;
+  entry.isConstructorFn = true;
+  index_.addStaticInit(entry);
+}
+
+bool IndexerVisitor::VisitVarDecl(clang::VarDecl *decl) {
+  // Static-storage-duration variable DEFINITIONS at namespace/class scope.
+  // Function-local statics initialize lazily on first pass — safe, and
+  // deliberately excluded. Parameters and locals have no global storage.
+  if (llvm::isa<clang::ParmVarDecl>(decl) || !decl->hasGlobalStorage() ||
+      decl->isStaticLocal())
+    return true;
+  if (decl->isThisDeclarationADefinition() != clang::VarDecl::Definition ||
+      !decl->hasInit())
+    return true;
+  if (decl->getType()->isDependentType() || decl->getDescribedVarTemplate())
+    return true;
+  if (decl->getTemplateSpecializationKind() ==
+      clang::TSK_ImplicitInstantiation)
+    return true;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc) || !astContext_)
+    return true;
+
+  StaticInitEntry entry;
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(decl->getLocation());
+  // constexpr/constinit and constant initializers run in the static phase
+  // (compile-time image), before ALL dynamic initialization: safe as
+  // dependency targets, never hazard roots.
+  entry.dynamicInit =
+      !decl->isConstexpr() && !decl->hasAttr<clang::ConstInitAttr>() &&
+      !decl->getInit()->isConstantInitializer(
+          *astContext_, decl->getType()->isReferenceType());
+  if (entry.dynamicInit) {
+    InitExprCollector collector(entry);
+    collector.TraverseStmt(decl->getInit());
+  }
+  index_.addStaticInit(entry);
+  return true;
+}
+
 bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // Skip implicit declarations (compiler-generated).
   if (decl->isImplicit())
@@ -190,6 +293,7 @@ bool IndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // — record before the first-declaration-only skip below.
   maybeRecordOdrFunction(decl);
   maybeRecordDefaultArgs(decl);
+  maybeRecordConstructorFn(decl);
 
   // Only index definitions or the first declaration to avoid duplicates
   // from multiple includes. We prefer to index every unique declaration

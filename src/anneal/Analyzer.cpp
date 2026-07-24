@@ -17,6 +17,7 @@
 #include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/Indexer.h"
 #include "vycor/anneal/TypeNormalize.h"
+#include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -40,7 +41,9 @@
 #include "llvm/ADT/StringSwitch.h"
 
 #include <cctype>
+#include <deque>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <set>
 #include <thread>
@@ -888,6 +891,128 @@ void analyzeDefaultArgDivergence(const GlobalIndex &index,
   }
 }
 
+// --- static initialization checks ---
+
+void analyzeStaticInitOrder(const GlobalIndex &index,
+                            std::vector<Diagnostic> &diagnostics) {
+  // Deterministic order: collect and sort by (file, line, name).
+  std::vector<const StaticInitEntry *> entries;
+  index.forEachStaticInit([&](const StaticInitEntry &e) {
+    if (e.dynamicInit && !e.isConstructorFn && !e.referencedGlobals.empty())
+      entries.push_back(&e);
+  });
+  std::sort(entries.begin(), entries.end(),
+            [](const StaticInitEntry *a, const StaticInitEntry *b) {
+              return std::tie(a->filePath, a->line, a->qualifiedName) <
+                     std::tie(b->filePath, b->line, b->qualifiedName);
+            });
+
+  for (const auto *entry : entries) {
+    for (const auto &ref : entry->referencedGlobals) {
+      const StaticInitEntry *target = index.findStaticInit(ref);
+      if (!target || !target->dynamicInit || target->isConstructorFn)
+        continue; // unknown, or constant/zero-initialized before all
+                  // dynamic init: safe
+      if (target->filePath == entry->filePath)
+        continue; // same TU: top-to-bottom order is guaranteed
+      Diagnostic diag;
+      diag.kind = Diagnostic::StaticInit_OrderDependency;
+      diag.callLocation =
+          entry->filePath + ":" + std::to_string(entry->line);
+      diag.message =
+          "Static initialization order fiasco: '" + entry->qualifiedName +
+          "' (" + entry->filePath + ":" + std::to_string(entry->line) +
+          ") is dynamically initialized from '" + target->qualifiedName +
+          "' (" + target->filePath + ":" + std::to_string(target->line) +
+          "), which is itself dynamically initialized in a different TU. "
+          "Cross-TU initialization order is unspecified — the reader may "
+          "observe its zero/constant-initialized state. Use a "
+          "construct-on-first-use function-local static, or make the "
+          "dependency constinit/constexpr.";
+      diagnostics.push_back(std::move(diag));
+    }
+  }
+}
+
+void analyzeStaticInitHazards(const GlobalIndex &index,
+                              const CallGraph &graph,
+                              std::vector<Diagnostic> &diagnostics) {
+  static const std::set<std::string> kHazards = {
+      "dlopen",         "dlsym",
+      "dlclose",        "dladdr",
+      "pthread_create", "pthread_join",
+      "std::thread::thread", "std::thread::join",
+      "std::async",     "std::call_once"};
+  constexpr unsigned kMaxDepth = 25;
+
+  std::vector<const StaticInitEntry *> roots;
+  index.forEachStaticInit([&](const StaticInitEntry &e) {
+    if (e.dynamicInit && (e.isConstructorFn || !e.calledFunctions.empty()))
+      roots.push_back(&e);
+  });
+  std::sort(roots.begin(), roots.end(),
+            [](const StaticInitEntry *a, const StaticInitEntry *b) {
+              return std::tie(a->filePath, a->line, a->qualifiedName) <
+                     std::tie(b->filePath, b->line, b->qualifiedName);
+            });
+
+  for (const auto *root : roots) {
+    std::vector<std::string> seeds =
+        root->isConstructorFn ? std::vector<std::string>{root->qualifiedName}
+                              : root->calledFunctions;
+    // BFS with parent tracking; one diagnostic per root (the first — i.e.
+    // shortest — hazard chain is the actionable one).
+    std::map<std::string, std::string> parent;
+    std::deque<std::pair<std::string, unsigned>> queue;
+    std::string hit;
+    for (const auto &seed : seeds) {
+      if (!parent.emplace(seed, "").second)
+        continue;
+      if (kHazards.count(seed)) {
+        hit = seed;
+        break;
+      }
+      queue.push_back({seed, 0});
+    }
+    while (hit.empty() && !queue.empty()) {
+      auto [name, depth] = queue.front();
+      queue.pop_front();
+      if (depth >= kMaxDepth)
+        continue;
+      for (const auto &edge : graph.calleesOf(name)) {
+        if (!parent.emplace(edge.calleeName, name).second)
+          continue;
+        if (kHazards.count(edge.calleeName)) {
+          hit = edge.calleeName;
+          break;
+        }
+        queue.push_back({edge.calleeName, depth + 1});
+      }
+    }
+    if (hit.empty())
+      continue;
+
+    std::string chain = hit;
+    for (std::string cur = parent[hit]; !cur.empty(); cur = parent[cur])
+      chain = cur + " -> " + chain;
+    Diagnostic diag;
+    diag.kind = Diagnostic::StaticInit_Hazard;
+    diag.callLocation = root->filePath + ":" + std::to_string(root->line);
+    diag.message =
+        std::string("Static-init hazard: ") +
+        (root->isConstructorFn ? "constructor function '"
+                               : "the dynamic initializer of '") +
+        root->qualifiedName + "' (" + root->filePath + ":" +
+        std::to_string(root->line) + ") reaches '" + hit + "' (" + chain +
+        "). Static initializers run under the dynamic linker's global lock "
+        "when this library is loaded via dlopen/System.loadLibrary; "
+        "re-entering the loader or creating-and-waiting-on threads there "
+        "can deadlock, and whether it fires depends on link order. Defer "
+        "this work to an explicit init call or a function-local static.";
+    diagnostics.push_back(std::move(diag));
+  }
+}
+
 // --- runAnalysis ---
 
 namespace {
@@ -918,8 +1043,9 @@ void runPerTuTasks(const std::vector<std::string> &tus, unsigned threadCount,
 std::vector<Diagnostic>
 runAnalysis(const clang::tooling::CompilationDatabase &compDb,
             const std::vector<std::string> &sourceFiles,
-            const AnalysisOptions &opts) {
-  GlobalIndex index;
+            const AnalysisOptions &opts, GlobalIndex *indexOut) {
+  GlobalIndex localIndex;
+  GlobalIndex &index = indexOut ? *indexOut : localIndex;
 
   // Checkpoint journal (opt-in): per-TU progress survives a killed run.
   std::unique_ptr<AnnealCheckpoint> ckpt;
@@ -1061,6 +1187,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     analyzeOdrViolations(index, diagnostics);
   if (opts.enableDefaultArgDiag)
     analyzeDefaultArgDivergence(index, diagnostics);
+  if (opts.enableStaticInitOrderDiag)
+    analyzeStaticInitOrder(index, diagnostics);
 
   // Phase 1.5c: organization IndexChecks (ext/) — cross-TU invariants over
   // the merged index. Recomputed every run, so they never touch journal
