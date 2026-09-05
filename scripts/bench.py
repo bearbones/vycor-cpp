@@ -238,6 +238,101 @@ def run_query_benchmark(client: McpClient, reps: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CLI (one-shot) benchmark — docs/megascope-cli-review.md §4.3
+# ---------------------------------------------------------------------------
+
+SECTION_RE = re.compile(r"(\w+) (?:skipped|([\d.]+) ms)/(\d+) KiB")
+LOADED_RE = re.compile(r"in ([\d.]+) ms:")
+
+
+def cli_argv(tool: str, args: dict) -> list[str]:
+    """Tool arguments as the schema-derived flags the CLI accepts."""
+    out = [tool.replace("_", "-")]
+    for k, v in args.items():
+        flag = "--" + k.replace("_", "-")
+        if isinstance(v, bool):
+            out.append(flag if v else f"{flag}=false")
+        elif isinstance(v, list):
+            for x in v:
+                out += [flag, str(x)]
+        else:
+            out += [flag, str(v)]
+    return out
+
+
+def cli_call(binary: Path, index: Path, tool: str,
+             args: dict) -> tuple[dict, float, dict]:
+    """One `megascope <tool> -v` process. Returns (payload, wall_ms,
+    load) where load is {"total_ms", "sections": {name: {ms|skipped,
+    kib}}} parsed from the -v line."""
+    cmd = [str(binary), "megascope", *cli_argv(tool, args),
+           "--index", str(index), "-v"]
+    t0 = time.perf_counter()
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    wall_ms = (time.perf_counter() - t0) * 1000.0
+    if p.returncode not in (0, 1):
+        raise RuntimeError(
+            f"{' '.join(cmd)} exited {p.returncode}: {p.stderr.strip()}")
+    load: dict = {"sections": {}}
+    for line in p.stderr.splitlines():
+        if not line.startswith("megascope: loaded"):
+            continue
+        m = LOADED_RE.search(line)
+        if m:
+            load["total_ms"] = float(m.group(1))
+        for name, ms, kib in SECTION_RE.findall(line):
+            load["sections"][name] = (
+                {"skipped": True, "kib": int(kib)} if ms == ""
+                else {"ms": float(ms), "kib": int(kib)})
+    payload = json.loads(p.stdout) if p.stdout.strip() else {}
+    return payload, wall_ms, load
+
+
+def run_cli_benchmark(binary: Path, index: Path, reps: int,
+                      target: str | None) -> dict:
+    """Wall time of one-shot query processes (what an agent pays per
+    call), with the index load split out per section."""
+    if target is None:
+        res, _, _ = cli_call(binary, index, "search_functions",
+                             {"query": "run", "limit": 20})
+        names = [m.get("qualifiedName") for m in res.get("matches", [])]
+        target = next((n for n in names if n), "main")
+    queries = {
+        "graph_summary": ("graph_summary", {}),
+        "search_functions": ("search_functions", {"query": "run",
+                                                  "limit": 50}),
+        "lookup_function": ("lookup_function", {"name": target}),
+        "get_callers_hub": ("get_callers", {"name": target}),
+        "get_callees_hub": ("get_callees", {"name": target}),
+        "find_call_chain": ("find_call_chain",
+                            {"from": "main", "to": target,
+                             "max_depth": 10, "max_paths": 5}),
+        "list_entry_points": ("list_entry_points", {}),
+        "query_exception_safety": ("query_exception_safety",
+                                   {"function": target}),
+        "analyze_dead_code": ("analyze_dead_code", {}),
+    }
+    out: dict = {"_target": target}
+    for label, (tool, args) in queries.items():
+        n = max(1, reps // 3) if tool == "analyze_dead_code" else reps
+        walls, loads, last = [], [], {}
+        for _ in range(n):
+            _, wall, last = cli_call(binary, index, tool, args)
+            walls.append(wall)
+            if "total_ms" in last:
+                loads.append(last["total_ms"])
+        out[label] = {
+            "min_ms": min(walls),
+            "median_ms": statistics.median(walls),
+            "max_ms": max(walls),
+            "reps": n,
+            "load_median_ms": statistics.median(loads) if loads else None,
+            "sections": last.get("sections", {}),
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -314,6 +409,26 @@ def summarize(report: dict) -> str:
             lines.append(
                 f"  (hub target: {tgt.get('name')} with "
                 f"{tgt.get('callers')} callers)")
+    c = report.get("cli", {})
+    if c:
+        lines.append("")
+        lines.append(f"cli one-shot latency (target {c.get('_target')}; "
+                     "wall = process + load + query, ms):")
+        for name, t in c.items():
+            if name.startswith("_"):
+                continue
+            load = t.get("load_median_ms")
+            load_s = f"  load {load:8.1f}" if load is not None else ""
+            lines.append(f"  {name:24s} median {t['median_ms']:8.1f}"
+                         f"  min {t['min_ms']:8.1f}  max {t['max_ms']:8.1f}"
+                         f"{load_s}  (n={t['reps']})")
+            if report.get("_sections") and t.get("sections"):
+                parts = []
+                for sec, d in t["sections"].items():
+                    parts.append(f"{sec} skipped/{d['kib']}KiB"
+                                 if d.get("skipped") else
+                                 f"{sec} {d['ms']:.1f}ms/{d['kib']}KiB")
+                lines.append("      sections: " + ", ".join(parts))
     return "\n".join(lines)
 
 
@@ -383,6 +498,13 @@ def main() -> int:
                     help="also measure reindex_tu latency for this TU "
                          "(pick a small TU so removal cost is visible "
                          "against the parse)")
+    ap.add_argument("--cli", action="store_true",
+                    help="also measure one-shot CLI query latency "
+                         "(process start + index load + query; implies "
+                         "--snapshot, the CLI reads the saved index)")
+    ap.add_argument("--sections", action="store_true",
+                    help="with --cli, print the per-section index load "
+                         "split each verb reports under -v")
     ap.add_argument("--query-reps", type=int, default=9)
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
     args = ap.parse_args()
@@ -393,6 +515,8 @@ def main() -> int:
 
     if not args.binary or not args.build_path:
         ap.error("--binary and --build-path are required (or use --compare)")
+    if args.cli:
+        args.snapshot = True
 
     files = select_sources(args.build_path, args.source_re, args.max_tus)
     if not files:
@@ -457,9 +581,19 @@ def main() -> int:
             report["warm_stats"] = json.loads(warm_stats.read_text())
             print(f"[bench] warm ready in {warm_ready_s:.2f}s",
                   file=sys.stderr)
+
+        # ---- one-shot CLI queries against the saved index --------------
+        if args.cli and snap_path and snap_path.exists():
+            print("[bench] cli benchmark...", file=sys.stderr)
+            target = (report.get("queries", {}).get("_target") or {}).get(
+                "name")
+            report["cli"] = run_cli_benchmark(
+                args.binary, snap_path, args.query_reps, target)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
+    if args.sections:
+        report["_sections"] = True
     out_path = args.out / f"{args.label}.json"
     out_path.write_text(json.dumps(report, indent=2))
     print(f"[bench] report: {out_path}", file=sys.stderr)

@@ -1,0 +1,3 @@
+# megascope dump --build-path {build} --source-re deep_chains/stage5_sink\.cpp$ --threads 1 -> exit 0
+{"_summary":{}}
+{"callSite":"{fixture}/stage5_sink.cpp:17:10","calleeName":"Registry::invoke","calleeUsr":"c:@S@Registry@F@invoke#I#1","callerName":"stage5_sink","callerNoexcept":"none","callerUsr":"c:@F@stage5_sink#&$@S@Registry#I#","enclosingGuards":[],"enclosingTryCatches":[],"insideCatchBlock":false,"kind":"call_site","liveRaiiLocals":[],"tu":"{fixture}/stage5_sink.cpp"}

@@ -498,6 +498,17 @@ json document through `llvm::json::OStream`) via the new
 and the `prism` subcommand, its hand-built JSON, `toJson`, and
 `dumpIndexToJson` are gone (`vycor-cpp prism` prints the megascope
 equivalents and exits 2).
+Item 9 landed last: `scripts/cli-golden.py` runs the built binary over
+`examples/deep_chains/` (an `index` then 30 queries covering every verb,
+the ndjson/tsv/json shapes, `batch`, ephemeral mode, and each exit code)
+and compares exit codes plus sorted, path- and USR-normalized output
+lines against `examples/deep_chains/cli-golden/`; it is the `cli_golden`
+ctest and refreshes with `--update`. Each tool's `--help` ends with
+worked examples, the README carries jq recipes, docs/mcp-usage.md's
+walkthrough is shell, `scripts/bench.py --cli [--sections]` measures the
+one-shot latency with the per-section load split (4.3), and
+`graph_summary`'s top-N lists break count ties by name so the answer no
+longer depends on hash-map order.
 
 Items 1–5 make the CLI real and can land in one or two PRs. Item 6 is the
 one performance change the CLI model actually needs, and it is gated on a

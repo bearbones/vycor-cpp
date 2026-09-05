@@ -164,19 +164,38 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
     return true;
   };
 
-  llvm::json::Array optimistic;
-  // Collect filtered dead entries first so we can paginate.
-  std::vector<llvm::json::Value> deadAll;
+  // Both lists come out of an unordered map; order them by location so
+  // offset/limit pages are stable across processes and the output is
+  // deterministic.
+  struct Entry {
+    llvm::StringRef file;
+    unsigned line;
+    const std::string *name;
+    const CallGraphNode *node;
+  };
+  auto byLocation = [](const Entry &a, const Entry &b) {
+    if (a.file != b.file)
+      return a.file < b.file;
+    if (a.line != b.line)
+      return a.line < b.line;
+    return *a.name < *b.name;
+  };
+  auto toJson = [](const Entry &e) {
+    llvm::json::Object entry;
+    entry["name"] = *e.name;
+    if (e.node) {
+      entry["file"] = e.node->file;
+      entry["line"] = static_cast<int64_t>(e.node->line);
+      entry["usr"] = e.node->usr;
+    }
+    return llvm::json::Value(std::move(entry));
+  };
+
+  std::vector<Entry> optimisticAll, deadAll;
   for (auto &kv : results) {
     auto *node = ctx.graph.findNode(kv.first);
-    llvm::json::Object entry;
-    entry["name"] = kv.first;
-    if (node) {
-      entry["file"] = node->file;
-      entry["line"] = static_cast<int64_t>(node->line);
-      entry["usr"] = node->usr;
-    }
-
+    Entry e{node ? llvm::StringRef(node->file) : llvm::StringRef(),
+            node ? node->line : 0u, &kv.first, node};
     switch (kv.second) {
     case Liveness::Alive:
       ++aliveCount;
@@ -184,21 +203,27 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
     case Liveness::OptimisticallyAlive:
       ++optimisticCount;
       if (passesFilter(node, kv.first))
-        optimistic.push_back(llvm::json::Value(std::move(entry)));
+        optimisticAll.push_back(e);
       break;
     case Liveness::Dead:
       if (passesFilter(node, kv.first))
-        deadAll.push_back(llvm::json::Value(std::move(entry)));
+        deadAll.push_back(e);
       break;
     }
   }
+  std::sort(optimisticAll.begin(), optimisticAll.end(), byLocation);
+  std::sort(deadAll.begin(), deadAll.end(), byLocation);
+
+  llvm::json::Array optimistic;
+  for (const Entry &e : optimisticAll)
+    optimistic.push_back(toJson(e));
 
   const int64_t totalDead = static_cast<int64_t>(deadAll.size());
   const int64_t start = std::min(offset, totalDead);
   const int64_t end = std::min(start + limit, totalDead);
   llvm::json::Array dead;
   for (int64_t i = start; i < end; ++i)
-    dead.push_back(std::move(deadAll[i]));
+    dead.push_back(toJson(deadAll[i]));
 
   llvm::json::Object obj;
   obj["totalFunctions"] = static_cast<int64_t>(results.size());

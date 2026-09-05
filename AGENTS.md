@@ -416,7 +416,22 @@ cd build && ctest --output-on-failure
 
 # Run a specific test tag
 cd build && ctest -R "GlobalIndex" --output-on-failure
+
+# End-to-end CLI output contract (also a ctest: `ctest -R cli_golden`):
+# the built binary over examples/deep_chains vs examples/deep_chains/cli-golden/.
+scripts/cli-golden.py --binary build/src/vycor-cpp
+scripts/cli-golden.py --binary build/src/vycor-cpp --update   # accept an intended change
 ```
+
+`scripts/cli-golden.py` compares each query's exit code and its stdout
+as a sorted multiset of normalized lines (fixture and scratch paths
+become placeholders, standard-library USRs are masked, records naming a
+system-header location are dropped), so the goldens hold across hosts
+and standard-library versions. Any change to a tool's payload, a verb's
+flags, the ndjson/tsv shapes, or the exit codes shows up there; refresh
+the goldens in the same PR. `scripts/bench.py --cli [--sections]`
+measures the one-shot query latency the CLI model pays per call
+(process start + index load + query), with the per-section load split.
 
 Run tests from the project root, or ensure `PROJECT_SOURCE_DIR` is set
 correctly (the CMake build sets it automatically via a compile definition).

@@ -1,0 +1,15 @@
+# megascope get-callers --name stage5_sink --pretty -> exit 0
+      "callSite": "{fixture}/stage4_dispatch.cpp:24:10",
+      "calleeName": "stage5_sink",
+      "callerName": "stage4_dispatch",
+      "confidence": "Proven",
+      "kind": "DirectCall"
+    {
+    }
+  "callerCount": 1,
+  "callers": [
+  "function": "stage5_sink",
+  "usr": "c:@F@stage5_sink#&$@S@Registry#I#"
+  ],
+{
+}

@@ -110,3 +110,17 @@ target_compile_definitions(vycor_tests PRIVATE
 
 include(Catch)
 catch_discover_tests(vycor_tests)
+
+# End-to-end CLI output contract: the built binary over examples/deep_chains
+# against examples/deep_chains/cli-golden/ (scripts/cli-golden.py; refresh
+# with --update after an intentional output change).
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME cli_golden
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/cli-golden.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(cli_golden PROPERTIES LABELS "cli;golden")
+else()
+  message(STATUS "python3 not found: the cli_golden test is not registered")
+endif()

@@ -1,0 +1,3 @@
+# megascope query-throw-propagation --function stage5_sink --exception-type std::exception --format ndjson -> exit 0
+{"_summary":{"exceptionType":"std::exception","function":"stage5_sink","protection":"never_caught","summary":"c:@F@stage5_sink#&$@S@Registry#I# throwing std::exception is NOT caught on any of the 1 path(s) from entry points.","usr":"c:@F@stage5_sink#&$@S@Registry#I#"}}
+{"callChain":["main","Pipeline::run","stage1_ingest","stage2_parse","stage3_transform","stage4_dispatch","c:@F@stage5_sink#&$@S@Registry#I#"],"guardsOnPath":[],"isCaught":false,"tryCatchesOnPath":[]}

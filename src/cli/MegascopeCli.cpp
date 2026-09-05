@@ -251,6 +251,51 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
   return args;
 }
 
+// Worked examples per tool for --help. Agents read --help, not docs/
+// (docs/megascope-cli-review.md §4.3); tools absent here get none.
+static const std::unordered_map<std::string, std::vector<const char *>>
+    kToolExamples = {
+        {"search_functions",
+         {"megascope search-functions --query Replicator --limit 20",
+          "megascope search-functions --query Replicator --format tsv | "
+          "cut -f2-"}},
+        {"lookup_function", {"megascope lookup-function --name Foo::bar"}},
+        {"get_callers",
+         {"megascope get-callers --name Foo::bar",
+          "megascope get-callers --name Foo::bar --format ndjson | "
+          "jq -r 'select(.callerName) | .callerName' | sort -u"}},
+        {"get_callees",
+         {"megascope get-callees --name Foo::bar --format tsv",
+          "megascope get-callees --usr 'c:@N@ns@F@f#' --min-confidence "
+          "Proven"}},
+        {"find_call_chain",
+         {"megascope find-call-chain --from main --to Foo::bar --max-depth 8",
+          "megascope find-call-chain --from main --to Foo::bar --format "
+          "ndjson | jq -r 'select(type==\"array\") | [.[0].from] + map(.to) "
+          "| join(\" -> \")'"}},
+        {"query_exception_safety",
+         {"megascope query-exception-safety --function Foo::bar "
+          "--exception-type std::exception --entry-point main"}},
+        {"query_call_site_context",
+         {"megascope query-call-site-context --call-site "
+          "/abs/src/foo.cpp:12:3"}},
+        {"query_throw_propagation",
+         {"megascope query-throw-propagation --function Foo::bar "
+          "--exception-type std::runtime_error --format ndjson"}},
+        {"query_all_path_contexts",
+         {"megascope query-all-path-contexts --function Foo::bar "
+          "--max-paths 10 --format ndjson"}},
+        {"query_nearest_catches",
+         {"megascope query-nearest-catches --function Foo::bar"}},
+        {"analyze_dead_code",
+         {"megascope analyze-dead-code --format ndjson"}},
+        {"graph_summary", {"megascope graph-summary --pretty"}},
+        {"list_entry_points",
+         {"megascope list-entry-points --format tsv"}},
+        {"get_class_hierarchy",
+         {"megascope get-class-hierarchy --class-name Base"}},
+    };
+
 void printToolHelp(const ToolEntry &tool, llvm::raw_ostream &os) {
   os << "Usage: vycor-cpp megascope " << hyphenated(tool.name)
      << " [--index <file>] [flags]\n\n";
@@ -272,12 +317,24 @@ void printToolHelp(const ToolEntry &tool, llvm::raw_ostream &os) {
     if (!f.description.empty())
       wrapText(f.description, 78, "      ", os);
   }
+  auto ex = kToolExamples.find(tool.name);
+  if (ex != kToolExamples.end()) {
+    os << "\nExamples:\n";
+    for (const char *line : ex->second)
+      os << "  vycor-cpp " << line << "\n";
+  }
   os << "\nCommon flags:\n"
         "  --index <file>        Index file. Default: $VYCOR_INDEX, then\n"
         "                        <build-path>/.vycor/megascope.vycs, then\n"
         "                        ./.vycor/megascope.vycs\n"
         "  --build-path <dir>    Build directory the default index path is\n"
-        "                        derived from\n"
+        "                        derived from; with --source, where its\n"
+        "                        compile_commands.json lives\n"
+        "  --source <file>       Bake this TU in memory and answer from that\n"
+        "                        instead of reading an index (repeatable;\n"
+        "                        also --source-list, --source-re, and the\n"
+        "                        index verb's --skip-paths, --collapse-paths,\n"
+        "                        --threads, --org-config)\n"
         "  --entry-point <name>  Default entry point set for tools that take\n"
         "                        one (repeatable; default: main)\n"
         "  --args <json>         JSON object of arguments; explicit flags\n"

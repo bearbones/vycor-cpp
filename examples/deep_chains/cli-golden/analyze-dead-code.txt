@@ -1,0 +1,18 @@
+# megascope analyze-dead-code --format ndjson -> exit 0
+{"_summary":{"optimisticallyAlive":[{"file":"{fixture}/callbacks.hpp","line":16,"name":"cbs::logAfter","usr":"c:@N@cbs@F@logAfter#I#"},{"file":"{fixture}/callbacks.hpp","line":17,"name":"cbs::defaultHasher","usr":"c:@N@cbs@F@defaultHasher#I#"},{"file":"{fixture}/callbacks.hpp","line":19,"name":"cbs::normalizePayload","usr":"c:@N@cbs@F@normalizePayload#I#"},{"file":"{fixture}/callbacks.hpp","line":20,"name":"cbs::finalFormat","usr":"c:@N@cbs@F@finalFormat#I#"},{"file":"{fixture}/callbacks.hpp","line":21,"name":"cbs::startupHook","usr":"c:@N@cbs@F@startupHook#I#"},{"file":"{fixture}/callbacks.hpp","line":22,"name":"cbs::asyncCompleted","usr":"c:@N@cbs@F@asyncCompleted#I#"},{"file":"{fixture}/plugins.hpp","line":28,"name":"PluginAlpha::handle","usr":"c:@S@PluginAlpha@F@handle#I#1"},{"file":"{fixture}/plugins.hpp","line":34,"name":"PluginBeta::handle","usr":"c:@S@PluginBeta@F@handle#I#1"},{"file":"{fixture}/plugins.hpp","line":40,"name":"PluginGamma::handle","usr":"c:@S@PluginGamma@F@handle#I#1"}]}}
+{"file":"{fixture}/callbacks.hpp","line":15,"name":"cbs::auditBefore","usr":"c:@N@cbs@F@auditBefore#I#"}
+{"file":"{fixture}/callbacks.hpp","line":18,"name":"cbs::alternateHasher","usr":"c:@N@cbs@F@alternateHasher#I#"}
+{"file":"{fixture}/main.cpp","line":62,"name":"lambda#{fixture}/main.cpp:62:16#runChainC","usr":"vycor-lambda:lambda#{fixture}/main.cpp:62:16#runChainC"}
+{"file":"{fixture}/plugins.hpp","line":21,"name":"Plugin::~Plugin","usr":"c:@S@Plugin@F@~Plugin#"}
+{"file":"{fixture}/plugins.hpp","line":22,"name":"Plugin::handle","usr":"c:@S@Plugin@F@handle#I#1"}
+{"file":"{fixture}/plugins.hpp","line":23,"name":"Plugin::describe","usr":"c:@S@Plugin@F@describe#1"}
+{"file":"{fixture}/plugins.hpp","line":29,"name":"PluginAlpha::describe","usr":"c:@S@PluginAlpha@F@describe#1"}
+{"file":"{fixture}/plugins.hpp","line":41,"name":"PluginGamma::describe","usr":"c:@S@PluginGamma@F@describe#1"}
+{"file":"{fixture}/scheduler.hpp","line":34,"name":"selectAsyncHandler","usr":"c:@F@selectAsyncHandler#I#"}
+{"file":"{fixture}/tokenizer.hpp","line":17,"name":"Tokenizer::tokenize","usr":"c:@S@Tokenizer@F@tokenize#I#1"}
+{"file":"{fixture}/tokenizer.hpp","line":27,"name":"TextTokenizer::tokenize","usr":"c:@S@TextTokenizer@F@tokenize#I#1"}
+{"file":"{fixture}/workers.hpp","line":17,"name":"Worker::execute","usr":"c:@S@Worker@F@execute#I#1"}
+{"file":"{fixture}/workers.hpp","line":18,"name":"Worker::tag","usr":"c:@S@Worker@F@tag#1"}
+{"file":"{fixture}/workers.hpp","line":29,"name":"DiskWorker::execute","usr":"c:@S@DiskWorker@F@execute#I#1"}
+{"file":"{fixture}/workers.hpp","line":30,"name":"DiskWorker::tag","usr":"c:@S@DiskWorker@F@tag#1"}
+{"file":"{fixture}/workers.hpp","line":35,"name":"diskFsyncRange","usr":"c:@F@diskFsyncRange#I#"}

@@ -357,14 +357,19 @@ rather than guessing qualified names from memory.
 
 Start from a known function deep in the call tree and walk upward:
 
-```python
+```bash
 # Find what calls handleServerSecurityMessageV2
-r = call(proc, 1, "get_callers",
-         {"name": "RBX::Network::ClientReplicator::handleServerSecurityMessageV2"})
+vycor-cpp megascope get-callers \
+  --name RBX::Network::ClientReplicator::handleServerSecurityMessageV2 \
+  --format ndjson | jq -r 'select(.callerName) | .callerName' | sort -u
 # get_callers is one level deep (there is no max_depth); repeat on each
 # unique callerName to walk upward. A caller with zero callers of its own
-# is a real entry point.
+# (exit code 1) is a real entry point.
 ```
+
+Over MCP the same call is `call(proc, 1, "get_callers", {"name": ...})`;
+every step below maps the same way (tool name with underscores, arguments
+as a JSON object).
 
 Identical edges from multiple TUs are deduplicated server-side; distinct
 call sites for the same caller still appear as separate entries (that is
@@ -372,18 +377,20 @@ real information, not duplication).
 
 ### Step 3 — Check exception safety with real entry points
 
-```python
-r = call(proc, 2, "query_exception_safety", {
-    "function": "RBX::Network::deserializeUnsignedVarint",
-    "exception_type": "std::exception",
-    "entry_points": ["RBX::Network::Replicator::readItem",
-                     "RBX::Network::ServerReplicator::readItem"]
-})
-print(r["protection"])   # never_caught / sometimes_caught / always_caught
-print(r["summary"])
-for path in r["paths"][:5]:
-    print("CAUGHT" if path["isCaught"] else "UNCAUGHT",
-          " -> ".join(path["callChain"]))
+```bash
+vycor-cpp megascope query-exception-safety \
+  --function RBX::Network::deserializeUnsignedVarint \
+  --exception-type std::exception \
+  --entry-points RBX::Network::Replicator::readItem \
+  --entry-points RBX::Network::ServerReplicator::readItem \
+  | jq -r '.protection, .summary'   # never_caught / sometimes_caught / always_caught
+
+# The same question with every path spelled out (scopes, guards, where
+# the throw would be caught):
+vycor-cpp megascope query-throw-propagation \
+  --function RBX::Network::deserializeUnsignedVarint \
+  --exception-type std::exception --format ndjson \
+  | jq -r 'select(.callChain) | (if .isCaught then "CAUGHT  " else "UNCAUGHT" end) + " " + (.callChain | join(" -> "))'
 ```
 
 `protection: never_caught` means every path from the entry points to the
@@ -396,45 +403,38 @@ When `query_exception_safety` surfaces an uncaught path, drill into
 individual call sites to see whether they have `noexcept`, guards, or
 try/catch blocks:
 
-```python
-# Get callers of the target
-callers = call(proc, 3, "get_callers",
-               {"name": "RBX::Network::SecurityChannel::sendCounter"})
+```bash
+# Each call site of the target, with its context
+vycor-cpp megascope get-callers \
+  --name RBX::Network::SecurityChannel::sendCounter --format ndjson \
+  | jq -r 'select(.callSite) | .callSite' | sort -u | while read -r site; do
+    vycor-cpp megascope query-call-site-context --call-site "$site" \
+      | jq -c '{caller, isUnderTryCatch, wouldTerminateIfThrows, guards: [.enclosingGuards[].conditionText]}'
+  done
 
-# Check each unique call site
-seen = set()
-for edge in callers["callers"]:
-    if edge["callerName"] in seen: continue
-    seen.add(edge["callerName"])
-    ctx = call(proc, 4, "query_call_site_context",
-               {"call_site": edge["callSite"]})
-    print(edge["callerName"],
-          "protected:", ctx.get("isUnderTryCatch"),
-          "noexcept:", ctx.get("callerNoexcept"),
-          "guards:", [g["conditionText"] for g in ctx.get("enclosingGuards",[])][:2])
+# Or every unprotected call site in the index at once:
+vycor-cpp megascope dump \
+  | jq -c 'select(.kind=="call_site" and .enclosingTryCatches==[] and (.calleeName|test("sendCounter")))'
 ```
 
-**Note:** `query_call_site_context` silently returns an empty result for
-unknown sites (no `isError`). If `caller` and `callee` are both empty
-strings in the response, the site was not indexed — the TU that contains
-it may not have been included.
+**Note:** an unindexed site is an error payload (`{"error": "Call site
+not indexed: ..."}`, exit code 1): the TU that contains it may not have
+been included, or the path spelling differs from the compilation
+database's.
 
 ### Step 5 — Trace specific paths with `find_call_chain`
 
-```python
-r = call(proc, 5, "find_call_chain", {
-    "from": "RBX::Network::Replicator::readItem",
-    "to":   "RBX::Network::deserializeUnsignedVarint",
-    "max_depth": 8
-})
-if r["found"]:
-    for hop in r["hops"]:
-        print(f"  [{hop['kind']}] {hop['from']} -> {hop['to']}  @{hop['callSite']}")
+```bash
+vycor-cpp megascope find-call-chain \
+  --from RBX::Network::Replicator::readItem \
+  --to RBX::Network::deserializeUnsignedVarint \
+  --max-depth 8 --format ndjson \
+  | jq -r 'select(type=="array") | map("[\(.kind)] \(.from) -> \(.to) @\(.callSite)") | join("\n  ")'
 ```
 
-`max_depth` counts edges (not nodes). If the chain is longer than
-`max_depth`, `found: false` is returned with no partial result — increase
-`max_depth` if you suspect a longer path.
+`max_depth` counts edges (not nodes). If every chain is longer than
+`max_depth`, the result is empty (exit code 1) with no partial result —
+increase `max_depth` if you suspect a longer path.
 
 ---
 

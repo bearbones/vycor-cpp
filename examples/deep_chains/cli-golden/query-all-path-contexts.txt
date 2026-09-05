@@ -1,0 +1,3 @@
+# megascope query-all-path-contexts --function stage5_sink --max-paths 5 --format ndjson -> exit 0
+{"_summary":{"function":"stage5_sink","usr":"c:@F@stage5_sink#&$@S@Registry#I#"}}
+{"callChain":["main","Pipeline::run","stage1_ingest","stage2_parse","stage3_transform","stage4_dispatch","c:@F@stage5_sink#&$@S@Registry#I#"],"guardsOnPath":[],"isCaught":false,"tryCatchesOnPath":[]}
