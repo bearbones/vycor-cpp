@@ -371,6 +371,17 @@ public:
     guard.conditionText = getSourceText(stmt->getCond());
     guard.location = formatLocation(stmt->getIfLoc());
 
+    // The init statement, the condition variable, and the condition run
+    // unguarded: calls there get the enclosing context, not the guard.
+    // (They used to be skipped entirely, leaving `if (f())` without a
+    // call-site context.)
+    if (stmt->getInit())
+      TraverseStmt(stmt->getInit());
+    if (auto *condVar = stmt->getConditionVariableDeclStmt())
+      TraverseStmt(condVar);
+    if (stmt->getCond())
+      TraverseStmt(stmt->getCond());
+
     // Traverse the then-branch with guard context.
     guard.inTrueBranch = true;
     guardStack_.push_back(guard);

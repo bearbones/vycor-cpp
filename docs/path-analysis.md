@@ -144,8 +144,13 @@ target outward, in propagation order:
 
 A call inside a handler body is not protected by that handler's try (the
 index pops the try scope before traversing handler bodies; it used to
-list the try as enclosing). `tryCatchesOnPath` / `guardsOnPath` still
-list every scope and guard on every hop, matched or not.
+list the try as enclosing). A call in an `if` condition, its init
+statement, or its condition variable now has a context (the visitor
+used to skip all three, so `if (f())` had no call-site context at all
+and, on the LLVM testbed, most real paths ended `unknown`); it is not
+under the `if`'s guard, since the condition runs before the branch is
+chosen. `tryCatchesOnPath` / `guardsOnPath` still list every scope and
+guard on every hop, matched or not.
 
 **Verdicts** (`protection`):
 
@@ -190,7 +195,8 @@ common result contract; these are the fields it consumes.
 | `query_nearest_catches` | `maxDepth`, per catch `hops` and `callSite`, `max_depth` arg, the search facts | catches on later edges into a shared caller are no longer missed |
 | `find_call_chain` | per hop `fromName` / `toName`, the search facts; `skippedHubs` entries gain `usr` | `from` / `to` stay USR strings |
 | `query_locks_held` / `query_same_lock` | the search facts (`same_lock` combines both searches: stops OR-ed, `complete` / `exhaustive` AND-ed, hubs unioned); `skippedHubs` entries gain `usr` | `max_depth` counts frames above the target (was nodes: one frame fewer); `truncated` = the path cap cut the walk (unchanged meaning); lock contexts join on the exact edge, not the first context at the site; a lock inside a recursive cycle is observed (`SimpleEdges`, as before) |
-| `query_call_site_context` and every handler record | `rethrows` on each handler | |
+| `query_call_site_context` and every handler record | `rethrows` on each handler | calls in `if` conditions are indexed (they were not) |
+| `query_locks_held` / `query_same_lock` entry points | | display names resolve (the old walk interned entry names as if they were USRs, so a name that was not also a USR matched nothing and the answer was an empty path list) |
 
 `examples/deep_chains/cli-golden/` records the new shapes.
 

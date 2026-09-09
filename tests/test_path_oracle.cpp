@@ -369,6 +369,33 @@ int main() { try { other(); } catch (...) { target(); } }
   CHECK(r.paths[0].tryCatchesOnPath.empty());
 }
 
+TEST_CASE("calls in an if condition, init, or condition variable have a "
+          "context and are not under the guard",
+          "[paths][oracle]") {
+  auto b = bake({R"cpp(
+bool target() { throw 1; }
+int main() {
+  if (target()) return 1;
+  try { if (auto ok = target()) return 2; } catch (...) {}
+  if (bool r = target(); r) return 3;
+  return 0;
+}
+)cpp"});
+  ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
+  auto r = oracle.queryThrowPropagation("target", "int", {"main"});
+  REQUIRE(r.paths.size() == 3);
+  CHECK(r.unknownCount == 0);
+  CHECK(r.caughtCount == 1);
+  CHECK(r.uncaughtCount == 2);
+  CHECK(r.protection == Protection::SometimesCaught);
+  CHECK(r.verdictExhaustive);
+  for (const auto &p : r.paths) {
+    INFO(p.hops[0].callSite);
+    // The condition is evaluated before the branch is taken.
+    CHECK(p.guardsOnPath.empty());
+  }
+}
+
 TEST_CASE("thread and async boundaries separate the callee from the "
           "caller's stack",
           "[paths][oracle]") {
