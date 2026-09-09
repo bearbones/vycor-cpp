@@ -50,6 +50,7 @@ ControlFlowIndex::scopeSetKey(const std::vector<TryCatchScope> &scopes) {
     for (const auto &h : scope.handlers) {
       keyStr(key, h.caughtType);
       key.push_back(h.isCatchAll ? 1 : 0);
+      key.push_back(h.rethrows ? 1 : 0);
       keyStr(key, h.location);
       keyStr(key, h.bodySummary);
     }
@@ -327,6 +328,37 @@ ControlFlowIndex::contextAtSite(const std::string &callSite,
   return std::nullopt;
 }
 
+std::optional<CallSiteContext>
+ControlFlowIndex::contextForEdge(const std::string &callSite,
+                                 const std::string &callerUsr,
+                                 const std::string &calleeUsr) const {
+  auto contexts = contextsAtSite(callSite);
+  std::vector<CallSiteContext> mine;
+  for (auto &ctx : contexts) {
+    if (ctx.callerUsr == callerUsr || ctx.callerName == callerUsr)
+      mine.push_back(std::move(ctx));
+  }
+  if (mine.empty())
+    return std::nullopt;
+  // Deterministic choice: prefer the hop's callee, then the smallest
+  // callee usr, then the TU that recorded the context (two TUs can see
+  // one header call site under different macro state), then the caller
+  // spelling. Never insertion order.
+  std::stable_sort(mine.begin(), mine.end(),
+                   [&](const CallSiteContext &a, const CallSiteContext &b) {
+                     const bool am = a.calleeUsr == calleeUsr;
+                     const bool bm = b.calleeUsr == calleeUsr;
+                     if (am != bm)
+                       return am;
+                     if (a.calleeUsr != b.calleeUsr)
+                       return a.calleeUsr < b.calleeUsr;
+                     if (a.tuPath != b.tuPath)
+                       return a.tuPath < b.tuPath;
+                     return a.callerName < b.callerName;
+                   });
+  return std::move(mine.front());
+}
+
 std::vector<CallSiteContext>
 ControlFlowIndex::contextsAtSite(const std::string &callSite) const {
   std::vector<CallSiteContext> result;
@@ -354,6 +386,17 @@ ControlFlowIndex::contextsForCallee(const std::string &calleeName) const {
       result.push_back(materialize(contexts_[idx]));
   }
   return result;
+}
+
+std::optional<NoexceptSpec>
+ControlFlowIndex::callerNoexceptOf(const std::string &caller) const {
+  const auto *indices = indicesFor(byCaller_, byCallerDisplay_, caller);
+  if (!indices)
+    return std::nullopt;
+  for (size_t idx : *indices)
+    if (contexts_[idx].live)
+      return contexts_[idx].callerNoexcept;
+  return std::nullopt;
 }
 
 std::vector<CallSiteContext>

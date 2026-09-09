@@ -181,12 +181,49 @@ llvm::json::Value serializeTryCatchScope(const TryCatchScope &scope) {
     llvm::json::Object ho;
     ho["caughtType"] = h.caughtType;
     ho["isCatchAll"] = h.isCatchAll;
+    ho["rethrows"] = h.rethrows;
     ho["location"] = h.location;
     ho["body"] = h.bodySummary;
     handlers.push_back(llvm::json::Value(std::move(ho)));
   }
   s["handlers"] = std::move(handlers);
   return llvm::json::Value(std::move(s));
+}
+
+llvm::json::Value serializePathHop(const PathHop &hop) {
+  llvm::json::Object h;
+  h["from"] = hop.caller;
+  h["to"] = hop.callee;
+  h["fromUsr"] = hop.callerUsr;
+  h["toUsr"] = hop.calleeUsr;
+  h["callSite"] = hop.callSite;
+  h["kind"] = edgeKindToString(hop.kind);
+  h["confidence"] = confidenceToString(hop.confidence);
+  if (hop.execContext != ExecutionContext::Synchronous)
+    h["executionContext"] = executionContextToString(hop.execContext);
+  return llvm::json::Value(std::move(h));
+}
+
+void attachSearchFacts(llvm::json::Object &obj, unsigned stops,
+                       bool complete, bool exhaustive,
+                       const std::vector<SkippedHub> &skippedHubs) {
+  obj["complete"] = complete;
+  obj["exhaustive"] = exhaustive;
+  llvm::json::Array reasons;
+  for (const auto &name : stopReasonNames(stops))
+    reasons.push_back(name);
+  obj["stopReasons"] = std::move(reasons);
+  if (!skippedHubs.empty()) {
+    llvm::json::Array hubs;
+    for (const auto &hub : skippedHubs) {
+      llvm::json::Object h;
+      h["name"] = hub.name;
+      h["usr"] = hub.usr;
+      h["inDegree"] = static_cast<int64_t>(hub.inDegree);
+      hubs.push_back(llvm::json::Value(std::move(h)));
+    }
+    obj["skippedHubs"] = std::move(hubs);
+  }
 }
 
 const char *noexceptSpecToString(NoexceptSpec spec) {

@@ -298,16 +298,39 @@ public:
 
     // Traverse the try body — calls here see the enclosing try scope.
     TraverseStmt(stmt->getTryBlock());
+    tryScopeStack_.pop_back();
 
-    // Traverse each catch handler body.
+    // A handler body runs after its try block has been unwound: an
+    // exception thrown (or rethrown) inside it is caught only by the
+    // scopes ENCLOSING this try, never by this try's own handlers. So the
+    // handler bodies are traversed with the scope popped; insideCatchBlock
+    // marks the contexts they produce. The flag is restored, not cleared,
+    // so a try nested inside a handler keeps the outer handler's marking.
+    const bool wasInsideCatch = insideCatchBlock_;
     for (unsigned i = 0; i < stmt->getNumHandlers(); ++i) {
       insideCatchBlock_ = true;
       TraverseStmt(stmt->getHandler(i)->getHandlerBlock());
-      insideCatchBlock_ = false;
     }
-
-    tryScopeStack_.pop_back();
+    insideCatchBlock_ = wasInsideCatch;
     return true; // Skip base traversal — we manually traversed children.
+  }
+
+  // Whether a statement subtree contains a bare `throw;`. Conservative: a
+  // rethrow anywhere in the handler (a nested try, a branch, a lambda
+  // defined there) counts, because the question the oracle asks is
+  // whether the caught exception MAY continue outward.
+  static bool containsRethrow(const clang::Stmt *stmt) {
+    if (!stmt)
+      return false;
+    if (const auto *throwExpr = llvm::dyn_cast<clang::CXXThrowExpr>(stmt)) {
+      if (!throwExpr->getSubExpr())
+        return true;
+    }
+    for (const clang::Stmt *child : stmt->children()) {
+      if (containsRethrow(child))
+        return true;
+    }
+    return false;
   }
 
   // -- Compound-statement scopes (push/pop scopeStack_) --------------------
@@ -347,6 +370,17 @@ public:
     GuardEntry guard;
     guard.conditionText = getSourceText(stmt->getCond());
     guard.location = formatLocation(stmt->getIfLoc());
+
+    // The init statement, the condition variable, and the condition run
+    // unguarded: calls there get the enclosing context, not the guard.
+    // (They used to be skipped entirely, leaving `if (f())` without a
+    // call-site context.)
+    if (stmt->getInit())
+      TraverseStmt(stmt->getInit());
+    if (auto *condVar = stmt->getConditionVariableDeclStmt())
+      TraverseStmt(condVar);
+    if (stmt->getCond())
+      TraverseStmt(stmt->getCond());
 
     // Traverse the then-branch with guard context.
     guard.inTrueBranch = true;
@@ -518,6 +552,7 @@ private:
     }
     info.location = formatLocation(catchStmt->getCatchLoc());
     info.bodySummary = extractHandlerBodySummary(catchStmt);
+    info.rethrows = containsRethrow(catchStmt->getHandlerBlock());
     return info;
   }
 

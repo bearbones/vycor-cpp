@@ -123,7 +123,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
 | `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes and conditional guards |
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
-| `ControlFlowOracle.h/.cpp` | Query engine: exception safety, path analysis, call site context |
+| `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
+| `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -188,7 +189,8 @@ indexes are deliberately leaked at exit. They also decode only the
 sections the tool declares (`ToolEntry::needs`, set in
 `query/Registry.cpp`): the snapshot is sectioned (format v8; v9 adds the
 per-TU dependency tables to the meta, v10 the bake provenance and the
-per-TU input fingerprints and parse outcomes: header with
+per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
+catch handler: header with
 `IndexSummary` counts and a `{kind, offset, length}` table for meta /
 graph / control flow / channels), so a graph-only tool never decodes the
 call-site contexts, `info` reads the meta section alone, and
@@ -265,8 +267,10 @@ Identical edges registered by multiple TUs (header-inlined code) are
 an edge when its last contributing TU is removed. Edge records store
 interned string IDs internally; public queries materialize `CallGraphEdge`
 with resolved strings. Path-walking tools (`find_call_chain`,
-`query_locks_held`, `query_same_lock`) accept `max_fan_in` to skip
-high-fan-in hubs and report them in the response.
+`query_locks_held`, `query_same_lock`, and the exception path tools)
+share one traversal (`callgraph/PathSearch.h`), accept `max_paths` /
+`max_depth` (edges) / `max_fan_in`, and report `stopReasons`,
+`complete`, `exhaustive`, and `skippedHubs` (`docs/path-analysis.md`).
 
 ### `ext` — Organization Extension Points
 

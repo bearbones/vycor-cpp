@@ -198,7 +198,11 @@ public:
   ///     input fingerprint and the parse outcome (SnapshotMeta::
   ///     provenance/fingerprints/outcomes), so a compile-command change
   ///     or a failed parse is refreshed on warm start instead of cached.
-  static constexpr uint32_t kFormatVersion = 10;
+  /// v11: catch handlers record whether their body rethrows
+  ///     (CatchHandlerInfo::rethrows), and calls inside a handler body no
+  ///     longer list the try whose handler they are in as protecting them
+  ///     (the exception oracle's propagation order depends on both).
+  static constexpr uint32_t kFormatVersion = 11;
   /// Bytes before the first section: magic(4) + version(4) + summary(32) +
   /// table count(4) + 4 entries of kind(1) + offset(8) + length(8).
   static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 17;

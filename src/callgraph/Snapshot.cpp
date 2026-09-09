@@ -433,6 +433,7 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
         for (const auto &h : scope.handlers) {
           putLenStr(data, h.caughtType);
           putU8(data, h.isCatchAll ? 1 : 0);
+          putU8(data, h.rethrows ? 1 : 0);
           putLenStr(data, h.location);
           putLenStr(data, h.bodySummary);
         }
@@ -886,6 +887,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
             CatchHandlerInfo info;
             info.caughtType = r.lenStr();
             info.isCatchAll = r.u8() != 0;
+            info.rethrows = r.u8() != 0;
             info.location = r.lenStr();
             info.bodySummary = r.lenStr();
             scope.handlers.push_back(std::move(info));
