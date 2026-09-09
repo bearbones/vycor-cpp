@@ -267,11 +267,11 @@ int main() { viaBase(); viaStd(); viaRuntime(); viaOrder(); }
   CHECK(r.protection == Protection::SometimesCaught);
   CHECK(pathVia(r, "viaBase").outcome == PathOutcome::Caught);
   CHECK(pathVia(r, "viaStd").outcome == PathOutcome::Caught);
-  const auto &rt = pathVia(r, "viaRuntime");
+  const auto rt = pathVia(r, "viaRuntime");
   CHECK(rt.outcome == PathOutcome::Uncaught);
   // The non-matching scope is still reported as being on the path.
   CHECK(rt.tryCatchesOnPath.size() == 1);
-  const auto &order = pathVia(r, "viaOrder");
+  const auto order = pathVia(r, "viaOrder");
   CHECK(order.outcome == PathOutcome::Caught);
   CHECK(order.caughtBy == "...");
 
@@ -301,14 +301,14 @@ int main() { outer(); mid(); }
   auto r = oracle.queryThrowPropagation("target", "int", {"main"});
   CHECK(r.protection == Protection::SometimesCaught);
   REQUIRE(r.paths.size() == 2);
-  const auto &viaOuter = pathVia(r, "outer");
+  const auto viaOuter = pathVia(r, "outer");
   CHECK(viaOuter.outcome == PathOutcome::Caught);
   CHECK(viaOuter.callChain ==
         std::vector<std::string>{"main", "outer", "mid", "target"});
   REQUIRE(viaOuter.rethrownAt.size() == 1);
   CHECK(lineCol(viaOuter.rethrownAt[0]) == "3:32");
   CHECK(lineCol(viaOuter.caughtAt) == "4:16");
-  const auto &direct = pathVia(r, "mid");
+  const auto direct = pathVia(r, "mid");
   CHECK(direct.outcome == PathOutcome::Uncaught);
   REQUIRE(direct.rethrownAt.size() == 1);
   // The rethrowing scope is on the path but does not count as protection.
@@ -331,7 +331,7 @@ int main() { barrier(); guarded(); }
     CHECK(r.protection == Protection::SometimesCaught);
     CHECK(r.terminatesCount == 1);
     CHECK(r.caughtCount == 1);
-    const auto &term = pathVia(r, "barrier");
+    const auto term = pathVia(r, "barrier");
     CHECK(term.outcome == PathOutcome::Terminates);
     CHECK(term.stopAt == "barrier");
     CHECK_FALSE(term.isCaught);
