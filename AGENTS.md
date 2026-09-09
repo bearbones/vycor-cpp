@@ -187,7 +187,8 @@ testbed), the graph asserts on any later mutation, and the loaded
 indexes are deliberately leaked at exit. They also decode only the
 sections the tool declares (`ToolEntry::needs`, set in
 `query/Registry.cpp`): the snapshot is sectioned (format v8; v9 adds the
-per-TU dependency tables to the meta: header with
+per-TU dependency tables to the meta, v10 the bake provenance and the
+per-TU input fingerprints and parse outcomes: header with
 `IndexSummary` counts and a `{kind, offset, length}` table for meta /
 graph / control flow / channels), so a graph-only tool never decodes the
 call-site contexts, `info` reads the meta section alone, and
@@ -210,18 +211,33 @@ compilation database when there is no index yet (`--source-re .`
 re-selects the whole database). Paths are canonicalized (absolute,
 dots removed) before dedupe and filtering.
 
-Warm start: a TU is dirty when its own stamp changed or any file its
-parse opened did — the bake records each TU's opened files with the
-frontend's own stat (`BakedIndexes::deps`, `SnapshotMeta::deps`/`tuDeps`,
-v9) and `SnapshotIO::dirtyTUs` compares them. The dirty set goes through
-the same parallel bake as a cold build (`bakeIndexes`, or `bakeIsolated`
-under `--isolate-workers`) and is merged with the shard `absorb`; past
-half the selection the cold bake runs instead. `--force` rebuilds
-regardless of stamps. `index`/`serve` first load the meta section only
-(selection + dirty check); an `index` with nothing to refresh reports the
-header counts and never decodes the graph, otherwise the full mutable
-load follows and the drop + dirty set is removed in one `removeTUs` call
-per index (one scrub per affected adjacency vector for the whole set).
+Warm start (`docs/index-provenance.md`): a TU is dirty when its own
+stamp changed, its effective-input fingerprint differs, any file its
+parse opened changed, or its last parse did not end `Indexed`. The bake
+records each TU's opened files with the frontend's own stat
+(`BakedIndexes::deps`, `SnapshotMeta::deps`/`tuDeps`, v9), its outcome
+(`BakedIndexes::outcomes`, `SnapshotMeta::outcomes`, v10), and main.cpp
+records the fingerprint (`callgraph/InputFingerprint.h`: the bake
+environment — analyzer/toolchain identity, extra args, sysroot, PCH
+dir, GCC install — plus every compile command of the file, verbatim and
+in order; `SnapshotMeta::fingerprints`/`provenance`, v10);
+`SnapshotIO::dirtyTUs` compares all of it and reports why
+(`DirtyReport`). Files touched during the bake are recorded with an
+unknown stamp (`markUnstableStamps`) and re-checked once. The dirty
+set goes through the same parallel bake as a cold build (`bakeIndexes`,
+or `bakeIsolated` under `--isolate-workers`) and is merged with the
+shard `absorb`; past half the selection *changed* (retries excluded)
+the cold bake runs instead, and an environment mismatch rebuilds
+outright. Failed TUs are retried alongside any refresh that rewrites
+the index, or on `--retry-failed`; a refresh that would otherwise touch
+nothing leaves them as recorded. `--force` rebuilds regardless.
+`index`/`serve` first load the meta section only (selection + dirty
+check); an `index` with nothing to refresh reports the header counts
+and never decodes the graph, otherwise the full mutable load follows
+and the drop + dirty set is removed in one `removeTUs` call per index
+(one scrub per affected adjacency vector for the whole set).
+`scripts/warm-refresh-check.py` (ctest `warm_refresh`) checks that every
+kind of refresh equals a clean rebuild, in-process and isolated.
 
 ### `mcp` — MCP Server (adapter)
 
@@ -296,7 +312,7 @@ equivalents and exits 2):
 ```
 vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers]
+vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin

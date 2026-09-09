@@ -65,13 +65,24 @@ megascope: re-indexing 4 TU(s), 4 for changed headers...
 megascope: warm start from /path/to/build/.vycor/megascope.vycs (4 TU(s) re-indexed, 0 dropped, ...)
 ```
 
-When nothing is dirty, `index` reads only the meta section and exits
+A TU is dirty when its source, any file its parse opened, or its
+effective compile inputs (compile command, working directory, extra
+args, sysroot, PCH, toolchain) changed since it was indexed. When
+nothing is dirty, `index` reads only the meta section and exits
 without decoding the graph (0.03 s on a 938-TU index). When more than
-half of the selection is dirty it runs the cold bake instead; `--force`
+half of the selection changed it runs the cold bake instead; `--force`
 rebuilds regardless. The index is rebuilt from scratch when `--collapse-paths`,
 `--lock-types`, or the channel-type registrations differ from the run
-that produced it, when the format version changes, or when the file fails
-to decode. Deleting it is always safe.
+that produced it, when the bake environment differs, when the format
+version changes, or when the file fails to decode. Deleting it is
+always safe.
+
+Every TU's parse outcome is recorded (`megascope info` reports
+`coverage`, `info --files` the per-TU `status`): a TU whose parse
+failed is never cached as healthy. Failed TUs are re-parsed alongside
+any refresh that rewrites the index, or on `--retry-failed`; a refresh
+that would otherwise touch nothing leaves them as recorded and stays
+meta-only. See `docs/index-provenance.md`.
 
 ### 4. Query it
 

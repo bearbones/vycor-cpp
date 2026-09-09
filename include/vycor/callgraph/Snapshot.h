@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/FileStamp.h"
+#include "vycor/callgraph/TuOutcome.h"
 
 #include <cstdint>
 #include <optional>
@@ -43,6 +44,34 @@ namespace vycor {
 // full build. Snapshots are a cache, never a source of truth.
 // ============================================================================
 
+/// Facts about the run that produced an index, recorded once per bake
+/// and read back without decoding any index section. The environment
+/// fingerprint is folded into every TU fingerprint (InputFingerprint.h);
+/// it is kept here so `info` can say why a warm start rebuilt everything.
+struct IndexProvenance {
+  std::string analyzer;    // analyzerIdentity()
+  std::string toolchain;   // toolchainIdentity()
+  std::string environment; // environmentFingerprint(...)
+  uint64_t bakeStartNs = 0; // wall clock at the start of the writing bake
+
+  bool operator==(const IndexProvenance &o) const {
+    return analyzer == o.analyzer && toolchain == o.toolchain &&
+           environment == o.environment && bakeStartNs == o.bakeStartNs;
+  }
+};
+
+/// What the index covers of what was asked for: the producer-side facts a
+/// result envelope can cite. `requested` is the selected TU set; the rest
+/// partition it by TuStatus (failed = crashed + poisoned + skipped).
+struct IndexCoverage {
+  uint64_t requested = 0;
+  uint64_t indexed = 0;
+  uint64_t partial = 0;
+  uint64_t failed = 0;
+
+  bool complete() const { return requested == indexed; }
+};
+
 struct SnapshotMeta {
   // Build configuration the snapshot was produced with. Any mismatch with
   // the current invocation invalidates the snapshot wholesale, because these
@@ -54,7 +83,8 @@ struct SnapshotMeta {
   // invalidates the snapshot for the same reason lockAllowlist does.
   std::vector<ChannelTypeSpec> channelTypes;
 
-  // Stamps of every TU baked into the snapshot.
+  // Stamps of every TU the bake was asked for (the requested scope),
+  // whether or not its parse succeeded — see `outcomes`.
   std::vector<FileStamp> files;
   // v9: every file the frontend opened while parsing those TUs (headers,
   // .inc/.def, PCH inputs), deduplicated and stamped as the frontend saw
@@ -66,7 +96,18 @@ struct SnapshotMeta {
   // v8: the bake's --entry-point list, so query verbs and serve default
   // to the same roots the index was built for (empty = "main").
   std::vector<std::string> entryPoints;
+  // v10: per TU (parallel to `files`) the effective-input fingerprint the
+  // TU was baked under (InputFingerprint.h) and how its parse ended. A
+  // TU is also dirty on warm start when its fingerprint differs from the
+  // one computed now, or when its outcome is anything but Indexed.
+  std::vector<std::string> fingerprints;
+  std::vector<TuOutcome> outcomes;
+  IndexProvenance provenance;
 };
+
+/// Coverage counts over meta.files/outcomes. A TU without a recorded
+/// outcome (a meta written by an older bake path) counts as skipped.
+IndexCoverage coverageOf(const SnapshotMeta &meta);
 
 /// Counts recorded in the v8 header so `info` and graph_summary can
 /// describe an index without decoding it.
@@ -153,7 +194,11 @@ public:
   ///     meta carries the bake's entry points.
   /// v9: meta records each TU's dependencies (SnapshotMeta::deps/tuDeps)
   ///     so a header edit dirties its includers on warm start.
-  static constexpr uint32_t kFormatVersion = 9;
+  /// v10: meta records the bake provenance and, per TU, the effective-
+  ///     input fingerprint and the parse outcome (SnapshotMeta::
+  ///     provenance/fingerprints/outcomes), so a compile-command change
+  ///     or a failed parse is refreshed on warm start instead of cached.
+  static constexpr uint32_t kFormatVersion = 10;
   /// Bytes before the first section: magic(4) + version(4) + summary(32) +
   /// table count(4) + 4 entries of kind(1) + offset(8) + length(8).
   static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 17;
@@ -182,17 +227,50 @@ public:
   static std::vector<FileStamp>
   stampFiles(const std::vector<std::string> &files);
 
+  /// Why a selected TU is dirty on warm start, first reason that applies
+  /// in this order.
+  enum class DirtyReason : uint8_t {
+    Clean = 0,
+    Stamp,  // not recorded, own stamp changed, or recorded stamp unknown
+    Inputs, // recorded fingerprint differs from the current
+    Deps,   // a file its parse opened changed
+    Retry,  // its last parse did not end Indexed
+  };
+
+  /// The reasons behind a dirtyTUs answer: per TU (parallel to `current`)
+  /// and counted, beyond the own-stamp reason. Retry is the one reason
+  /// the caller may decline (main.cpp: a refresh that would otherwise
+  /// touch nothing leaves failed TUs as recorded unless --retry-failed).
+  struct DirtyReport {
+    size_t viaInputs = 0; // DirtyReason::Inputs
+    size_t viaDeps = 0;   // DirtyReason::Deps
+    size_t retried = 0;   // DirtyReason::Retry
+    std::vector<DirtyReason> reasons;
+  };
+
   /// Which of `current` (stamps of the selected TUs, taken before the
   /// parse) must be re-indexed against `meta`: not recorded, own stamp
-  /// changed, or any recorded dependency changed. Dependency stamps are
-  /// compared at whole-second mtime resolution (what the frontend
-  /// records); a dependency that no longer exists counts as changed.
-  /// Returns one flag per entry of `current`; `viaDeps`, if given, counts
-  /// the TUs whose own stamp still matches and are dirty only through a
-  /// dependency.
-  static std::vector<bool> dirtyTUs(const SnapshotMeta &meta,
-                                    const std::vector<FileStamp> &current,
-                                    size_t *viaDeps = nullptr);
+  /// changed, recorded effective-input fingerprint different from the
+  /// entry of `fingerprints` (parallel to `current`; null skips the
+  /// check), any recorded dependency changed, or the last outcome not
+  /// Indexed. Dependency stamps are compared at whole-second mtime
+  /// resolution (what the frontend records); a dependency that no longer
+  /// exists counts as changed, and so does a stamp recorded as unstable
+  /// (markUnstableStamps). Returns one flag per entry of `current`.
+  static std::vector<bool>
+  dirtyTUs(const SnapshotMeta &meta, const std::vector<FileStamp> &current,
+           const std::vector<std::string> *fingerprints = nullptr,
+           DirtyReport *report = nullptr);
+
+  /// Stamps cannot prove content: a file modified again in the same
+  /// second as its recorded mtime, at the same size, looks unchanged to
+  /// the whole-second dependency stamp (and to the TU stamp on a
+  /// filesystem with coarse mtimes). The window is only open for files
+  /// whose mtime is not older than the bake that stamped them, so those
+  /// stamps (TU and dependency alike) are recorded with mtime 0, which
+  /// never matches: the TU is re-indexed once on the next warm start and
+  /// stamped for good then. Returns how many stamps were marked.
+  static size_t markUnstableStamps(SnapshotMeta &meta, uint64_t bakeStartNs);
 
   /// meta.deps/tuDeps expanded to per-TU stamp lists, keyed by TU path.
   static TuDependencies dependenciesOf(const SnapshotMeta &meta);
@@ -204,6 +282,16 @@ public:
   /// version is still dirtied.
   static void recordDependencies(SnapshotMeta &meta,
                                  const TuDependencies &deps);
+
+  /// meta.outcomes keyed by TU path (a TU without a recorded outcome is
+  /// absent).
+  static TuOutcomes outcomesOf(const SnapshotMeta &meta);
+
+  /// Replace meta.outcomes from `outcomes` for the TUs in meta.files. A
+  /// requested TU with no outcome at all is recorded as Skipped ("no
+  /// outcome recorded"): a parse that never reported back must not pass
+  /// for a healthy cached TU.
+  static void recordOutcomes(SnapshotMeta &meta, const TuOutcomes &outcomes);
 };
 
 } // namespace vycor

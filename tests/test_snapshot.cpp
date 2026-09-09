@@ -578,7 +578,11 @@ TEST_CASE("dependency stamps dirty the TUs that opened a changed header",
   SnapshotIO::recordDependencies(meta, deps);
 
   auto dirtyNow = [&](std::vector<std::string> tus, size_t &via) {
-    return SnapshotIO::dirtyTUs(meta, SnapshotIO::stampFiles(tus), &via);
+    SnapshotIO::DirtyReport why;
+    auto dirty =
+        SnapshotIO::dirtyTUs(meta, SnapshotIO::stampFiles(tus), nullptr, &why);
+    via = why.viaDeps;
+    return dirty;
   };
   size_t via = 99;
 
@@ -647,6 +651,219 @@ TEST_CASE("dependency stamps dirty the TUs that opened a changed header",
     CHECK(loaded->meta.tuDeps == meta.tuDeps);
     CHECK(SnapshotIO::dependenciesOf(loaded->meta) ==
           SnapshotIO::dependenciesOf(meta));
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+
+TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
+          "[snapshot]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-prov", dir));
+  const std::string base = std::string(dir) + "/";
+  auto a = writeText(base + "a.cpp", "int a();\n");
+  auto b = writeText(base + "b.cpp", "int b();\n");
+  auto shared = writeText(base + "shared.h", "// shared\n");
+  // Files written just now sit inside the unstable-stamp window; the
+  // tests below want stable stamps, so age them by a minute.
+  const uint64_t kNs = 1000000000ull;
+  auto ageStamp = [&](FileStamp fs) {
+    fs.mtimeNs -= 60 * kNs;
+    return fs;
+  };
+
+  SnapshotMeta meta;
+  meta.files = SnapshotIO::stampFiles({a, b});
+  meta.fingerprints = {"fp-a", "fp-b"};
+  TuDependencies deps;
+  deps[a] = {parsedStamp(shared)};
+  deps[b] = {parsedStamp(shared)};
+  SnapshotIO::recordDependencies(meta, deps);
+  TuOutcomes outcomes;
+  outcomes[a] = {TuStatus::Indexed, ""};
+  outcomes[b] = {TuStatus::Indexed, ""};
+  SnapshotIO::recordOutcomes(meta, outcomes);
+  meta.provenance = {"vycor-cpp test", "LLVM test", "env-1", 12345};
+
+  auto current = SnapshotIO::stampFiles({a, b});
+  std::vector<std::string> fps = {"fp-a", "fp-b"};
+  SnapshotIO::DirtyReport why;
+
+  SECTION("nothing changed: nothing dirty, nothing counted") {
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{false, false});
+    CHECK(why.viaInputs == 0);
+    CHECK(why.viaDeps == 0);
+    CHECK(why.retried == 0);
+    using R = SnapshotIO::DirtyReason;
+    CHECK(why.reasons == std::vector<R>{R::Clean, R::Clean});
+  }
+
+  SECTION("a changed fingerprint dirties only that TU") {
+    fps[1] = "fp-b-with-DNEW_TARGET";
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{false, true});
+    CHECK(why.viaInputs == 1);
+    CHECK(why.viaDeps == 0);
+    using R = SnapshotIO::DirtyReason;
+    CHECK(why.reasons == std::vector<R>{R::Clean, R::Inputs});
+  }
+
+  SECTION("no fingerprints given: inputs are not checked") {
+    fps[1] = "other";
+    CHECK(SnapshotIO::dirtyTUs(meta, current, nullptr, &why) ==
+          std::vector<bool>{false, false});
+  }
+
+  SECTION("a meta without recorded fingerprints is dirty through inputs") {
+    meta.fingerprints.clear();
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{true, true});
+    CHECK(why.viaInputs == 2);
+  }
+
+  SECTION("a non-Indexed outcome is retried") {
+    outcomes[a] = {TuStatus::Partial, "parse errors"};
+    outcomes[b] = {TuStatus::Poisoned, "worker crashed"};
+    SnapshotIO::recordOutcomes(meta, outcomes);
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{true, true});
+    CHECK(why.retried == 2);
+    CHECK(why.viaInputs == 0);
+    CHECK(why.viaDeps == 0);
+  }
+
+  SECTION("a requested TU with no outcome is recorded Skipped and retried") {
+    outcomes.erase(b);
+    SnapshotIO::recordOutcomes(meta, outcomes);
+    REQUIRE(meta.outcomes.size() == 2);
+    CHECK(meta.outcomes[1] ==
+          TuOutcome{TuStatus::Skipped, "no outcome recorded"});
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{false, true});
+    CHECK(why.retried == 1);
+    auto back = SnapshotIO::outcomesOf(meta);
+    REQUIRE(back.size() == 2);
+    CHECK(back[a].status == TuStatus::Indexed);
+    CHECK(back[b].status == TuStatus::Skipped);
+  }
+
+  SECTION("each TU is counted once, inputs before deps before retry") {
+    writeText(shared, "// shared, edited\n");
+    fps[0] = "fp-a2";
+    outcomes[b] = {TuStatus::Crashed, "signal 11"};
+    SnapshotIO::recordOutcomes(meta, outcomes);
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{true, true});
+    CHECK(why.viaInputs == 1); // a: fingerprint wins
+    CHECK(why.viaDeps == 1);   // b: the header wins over the outcome
+    CHECK(why.retried == 0);
+    using R = SnapshotIO::DirtyReason;
+    CHECK(why.reasons == std::vector<R>{R::Inputs, R::Deps});
+    writeText(b, "int b(); // edited\n");
+    outcomes[a] = {TuStatus::Partial, "parse errors"};
+    SnapshotIO::recordOutcomes(meta, outcomes);
+    fps[0] = meta.fingerprints[0];
+    writeText(shared, "// shared\n");
+    CHECK(SnapshotIO::dirtyTUs(meta, SnapshotIO::stampFiles({a, b}), &fps,
+                               &why) == std::vector<bool>{true, true});
+    CHECK(why.reasons == std::vector<R>{R::Retry, R::Stamp});
+    CHECK(why.retried == 1);
+  }
+
+  SECTION("coverage partitions the requested scope by outcome") {
+    auto c = coverageOf(meta);
+    CHECK(c.requested == 2);
+    CHECK(c.indexed == 2);
+    CHECK(c.complete());
+    outcomes[a] = {TuStatus::Partial, "parse errors"};
+    outcomes[b] = {TuStatus::Skipped, "no compile command"};
+    SnapshotIO::recordOutcomes(meta, outcomes);
+    c = coverageOf(meta);
+    CHECK(c.indexed == 0);
+    CHECK(c.partial == 1);
+    CHECK(c.failed == 1);
+    CHECK(!c.complete());
+    meta.outcomes.clear(); // an older bake path: nothing recorded
+    CHECK(coverageOf(meta).failed == 2);
+  }
+
+  SECTION("status names are the payload spellings") {
+    CHECK(std::string(tuStatusName(TuStatus::Indexed)) == "indexed");
+    CHECK(std::string(tuStatusName(TuStatus::Partial)) == "partial");
+    CHECK(std::string(tuStatusName(TuStatus::Crashed)) == "crashed");
+    CHECK(std::string(tuStatusName(TuStatus::Poisoned)) == "poisoned");
+    CHECK(std::string(tuStatusName(TuStatus::Skipped)) == "skipped");
+  }
+
+  SECTION("unstable stamps: files touched since the bake started are "
+          "recorded as unknown and dirty exactly once") {
+    // Pretend the bake started a minute ago: the current stamps (files
+    // written seconds ago) are all younger than that.
+    const uint64_t bakeStart = current[0].mtimeNs - 60 * kNs;
+    CHECK(SnapshotIO::markUnstableStamps(meta, bakeStart) == 3); // a, b, shared
+    CHECK(meta.files[0].mtimeNs == 0);
+    CHECK(meta.files[0].size != 0);
+    CHECK(meta.deps[0].mtimeNs == 0);
+    CHECK(SnapshotIO::dirtyTUs(meta, current, &fps, &why) ==
+          std::vector<bool>{true, true});
+    // Marking is idempotent and a bake that started later marks nothing.
+    CHECK(SnapshotIO::markUnstableStamps(meta, bakeStart) == 0);
+    SnapshotMeta later;
+    later.files = {ageStamp(current[0])};
+    later.deps = {ageStamp(parsedStamp(shared))};
+    CHECK(SnapshotIO::markUnstableStamps(later, current[0].mtimeNs + kNs) ==
+          0);
+    // The window is whole seconds: a bake starting in the same second as
+    // the file's mtime still marks it.
+    SnapshotMeta same;
+    same.files = {current[0]};
+    CHECK(SnapshotIO::markUnstableStamps(
+              same, current[0].mtimeNs - current[0].mtimeNs % kNs + 1) == 1);
+  }
+
+  SECTION("v10 fields survive a save/load; info needs the meta alone") {
+    std::string path = base + "snap.vycs";
+    REQUIRE(SnapshotIO::save(path, CallGraph(), ControlFlowIndex(), meta));
+    auto loaded = SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, 0);
+    REQUIRE(loaded);
+    CHECK(loaded->loaded == 0);
+    CHECK(loaded->meta.fingerprints == meta.fingerprints);
+    CHECK(loaded->meta.outcomes == meta.outcomes);
+    CHECK(loaded->meta.provenance == meta.provenance);
+    CHECK(SnapshotIO::dirtyTUs(loaded->meta, current, &fps, &why) ==
+          std::vector<bool>{false, false});
+  }
+
+  SECTION("a meta saved without fingerprints or outcomes loads as unknown "
+          "inputs and Skipped outcomes") {
+    SnapshotMeta bare;
+    bare.files = meta.files;
+    std::string path = base + "bare.vycs";
+    REQUIRE(SnapshotIO::save(path, CallGraph(), ControlFlowIndex(), bare));
+    auto loaded = SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, 0);
+    REQUIRE(loaded);
+    REQUIRE(loaded->meta.fingerprints == std::vector<std::string>{"", ""});
+    REQUIRE(loaded->meta.outcomes.size() == 2);
+    CHECK(loaded->meta.outcomes[0].status == TuStatus::Skipped);
+    CHECK(SnapshotIO::dirtyTUs(loaded->meta, current, &fps, &why) ==
+          std::vector<bool>{true, true});
+    CHECK(why.viaInputs == 2);
+  }
+
+  SECTION("an outcome byte outside the enum is corruption") {
+    std::string path = base + "corrupt.vycs";
+    REQUIRE(SnapshotIO::save(path, CallGraph(), ControlFlowIndex(), meta));
+    std::ifstream in(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    in.close();
+    // The first TU's outcome byte follows its fingerprint "fp-a".
+    auto pos = bytes.find("fp-a");
+    REQUIRE(pos != std::string::npos);
+    bytes[pos + 4] = 9;
+    std::ofstream(path, std::ios::binary) << bytes;
+    CHECK(!SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, 0));
   }
 
   llvm::sys::fs::remove_directories(dir);

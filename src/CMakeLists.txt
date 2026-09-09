@@ -17,6 +17,7 @@ add_library(vycor_lib
   callgraph/ControlFlowContextVisitor.cpp
   callgraph/ChannelIndex.cpp
   callgraph/ControlFlowOracle.cpp
+  callgraph/InputFingerprint.cpp
   callgraph/Snapshot.cpp
   callgraph/WorkerPool.cpp
   mcp/McpProtocol.cpp

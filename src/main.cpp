@@ -26,6 +26,7 @@
 #include "vycor/morph/RulesParser.h"
 #include "vycor/morph/TransformPipeline.h"
 #include "vycor/callgraph/CollapseFilter.h"
+#include "vycor/callgraph/InputFingerprint.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/cli/BakeConfig.h"
@@ -431,6 +432,15 @@ static llvm::cl::opt<bool>
         llvm::cl::desc("Rebuild the index from scratch instead of "
                        "refreshing the TUs whose sources or headers "
                        "changed"),
+        llvm::cl::init(false),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<bool>
+    McpRetryFailed("retry-failed",
+        llvm::cl::desc("Re-parse the TUs whose last parse failed even "
+                       "when nothing else changed (by default they are "
+                       "retried only alongside a refresh that rewrites "
+                       "the index anyway)"),
         llvm::cl::init(false),
         llvm::cl::sub(MegascopeCmd));
 
@@ -1057,6 +1067,7 @@ int main(int argc, const char **argv) {
       // (bakeIsolatedWithRunner) and re-stamps the TUs itself.
       meta.files = vycor::SnapshotIO::stampFiles(files);
       vycor::SnapshotIO::recordDependencies(meta, baked.deps);
+      vycor::SnapshotIO::recordOutcomes(meta, baked.outcomes);
       if (!vycor::SnapshotIO::save(McpWorkerOut, baked.graph, baked.cfIndex,
                                    meta, baked.channels)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
@@ -1085,13 +1096,33 @@ int main(int argc, const char **argv) {
     // the graph.
     bool graphSkipped = false;
     size_t warmRefreshed = 0, warmDropped = 0, warmViaDeps = 0;
+    size_t warmViaInputs = 0, warmRetried = 0, unstableStamps = 0;
+    // What the saved (or kept) index covers of the selection.
+    vycor::IndexCoverage coverage;
 
     // Stamps are taken before any parsing: a file modified mid-build gets a
     // stale stamp and is conservatively re-indexed on the next warm start.
     // Dependency stamps (the files each parse opened) come from the
-    // frontend itself and are recorded in the meta at save time.
+    // frontend itself and are recorded in the meta at save time. The bake
+    // start is the reference for the unstable-stamp window
+    // (SnapshotIO::markUnstableStamps).
+    const uint64_t bakeStartNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
     auto currentStamps = vycor::SnapshotIO::stampFiles(files);
     vycor::TuDependencies deps;
+    // Effective inputs, taken with the stamps: the environment once, each
+    // TU's compile commands on top (InputFingerprint.h). A TU whose
+    // recorded fingerprint differs is dirty like an edited one.
+    const auto bakeEnv = vycor::BakeEnvironment::current(sysroot, McpPchDir);
+    const std::string envFingerprint = vycor::environmentFingerprint(bakeEnv);
+    auto fingerprintStart = StatsClock::now();
+    auto currentFingerprints =
+        vycor::fingerprintTUs(*compDb, files, envFingerprint);
+    const double fingerprintMs = msSince(fingerprintStart);
+    // Every requested TU's outcome, from this bake or kept from the index.
+    vycor::TuOutcomes outcomes;
 
     // One bake for the cold build and the warm refresh alike: the
     // in-process parallel pipeline, or subprocess workers under
@@ -1131,21 +1162,61 @@ int main(int argc, const char **argv) {
         std::unordered_set<std::string> recorded;
         for (const auto &fs : snap->meta.files)
           recorded.insert(fs.path);
-        // Dirty = own stamp changed, or any file its parse opened did
-        // (header dependency stamps). Past half the selection the cold
-        // bake wins: it skips the mutable load and the per-TU removals.
-        size_t dirtyViaDeps = 0;
+        // Dirty = own stamp changed, any file its parse opened did
+        // (header dependency stamps), its compile inputs did
+        // (fingerprint), or its last parse did not end Indexed (retry).
+        // Past half the selection *changed* the cold bake wins: it skips
+        // the mutable load and the per-TU removals. Retries do not count
+        // toward that: a project whose broken TUs outnumber its healthy
+        // ones should re-parse the broken ones, not everything.
+        vycor::SnapshotIO::DirtyReport dirtyWhy;
         auto dirtyFlags = vycor::SnapshotIO::dirtyTUs(
-            snap->meta, currentStamps, &dirtyViaDeps);
+            snap->meta, currentStamps, &currentFingerprints, &dirtyWhy);
         size_t dirty = static_cast<size_t>(
             std::count(dirtyFlags.begin(), dirtyFlags.end(), true));
+        const size_t changed = dirty - dirtyWhy.retried;
+        size_t dropped = 0;
+        {
+          std::unordered_set<std::string> selected(files.begin(),
+                                                   files.end());
+          for (const auto &fs : snap->meta.files)
+            if (!selected.count(fs.path))
+              ++dropped;
+        }
+        // Retrying a failed TU costs the full mutable load and save
+        // (seconds on a large index), so a refresh that would otherwise
+        // touch nothing leaves failed TUs as recorded; they ride along
+        // with any refresh that rewrites the index anyway (a changed or
+        // dropped TU), or --retry-failed/--force.
+        if (changed == 0 && dropped == 0 && dirtyWhy.retried > 0 &&
+            !McpRetryFailed && !McpForce) {
+          for (size_t i = 0; i < dirtyFlags.size(); ++i)
+            if (dirtyWhy.reasons[i] ==
+                vycor::SnapshotIO::DirtyReason::Retry)
+              dirtyFlags[i] = false;
+          llvm::errs() << "megascope: " << dirtyWhy.retried
+                       << " TU(s) whose last parse failed are left as "
+                          "recorded (pass --retry-failed to re-parse "
+                          "them)\n";
+          dirty = 0;
+          dirtyWhy.retried = 0;
+        }
         if (McpForce) {
           llvm::errs() << "megascope: --force — full rebuild\n";
         } else if (!configMatch) {
           llvm::errs() << "megascope: snapshot build configuration differs "
                           "— full rebuild\n";
-        } else if (dirty * 2 > files.size()) {
-          llvm::errs() << "megascope: " << dirty << " of " << files.size()
+        } else if (snap->meta.provenance.environment != envFingerprint) {
+          // Every TU is dirty through its fingerprint; say why.
+          llvm::errs() << "megascope: bake environment differs (index: "
+                       << snap->meta.provenance.analyzer << ", "
+                       << snap->meta.provenance.toolchain << "; now: "
+                       << vycor::analyzerIdentity() << ", "
+                       << vycor::toolchainIdentity()
+                       << "; or the extra args / sysroot / PCH / GCC "
+                          "installation changed) — full rebuild\n";
+        } else if (changed * 2 > files.size()) {
+          llvm::errs() << "megascope: " << changed << " of " << files.size()
                        << " selected TUs are new or changed — full "
                           "rebuild instead of a warm refresh\n";
         } else {
@@ -1188,6 +1259,7 @@ int main(int argc, const char **argv) {
               cfIndex = std::move(full->cfIndex);
               channels = std::move(full->channels);
               deps = vycor::SnapshotIO::dependenciesOf(snap->meta);
+              outcomes = vycor::SnapshotIO::outcomesOf(snap->meta);
               auto refreshStart = StatsClock::now();
 
               // One batched removal: each hub's adjacency vector is
@@ -1200,18 +1272,25 @@ int main(int argc, const char **argv) {
               graph.removeTUs(toRemove);
               cfIndex.removeTUs(toRemove);
               channels.removeTUs(toRemove);
-              for (const auto &path : toDrop)
+              for (const auto &path : toDrop) {
                 deps.erase(path);
-              for (const auto &path : toBake)
+                outcomes.erase(path);
+              }
+              for (const auto &path : toBake) {
                 deps.erase(path);
+                outcomes.erase(path);
+              }
               warmRemoveMs = msSince(refreshStart);
               if (!toBake.empty()) {
                 // The dirty set takes the same parallel (or isolated)
                 // bake as a cold build and is merged with the
                 // worker-shard absorb.
                 llvm::errs() << "megascope: re-indexing " << toBake.size()
-                             << " TU(s), " << dirtyViaDeps
-                             << " for changed headers...\n";
+                             << " TU(s): " << dirtyWhy.viaDeps
+                             << " for changed headers, " << dirtyWhy.viaInputs
+                             << " for changed compile inputs, "
+                             << dirtyWhy.retried
+                             << " retried after a failed parse...\n";
                 auto bakeStart = StatsClock::now();
                 auto fresh = runBake(toBake);
                 warmBakeMs = msSince(bakeStart);
@@ -1221,11 +1300,15 @@ int main(int argc, const char **argv) {
                 channels.absorb(fresh.channels);
                 for (auto &kv : fresh.deps)
                   deps[kv.first] = std::move(kv.second);
+                for (auto &kv : fresh.outcomes)
+                  outcomes[kv.first] = std::move(kv.second);
                 warmAbsorbMs = msSince(absorbStart);
               }
               warmRefreshMs = msSince(refreshStart);
               warmRefreshed = toBake.size();
-              warmViaDeps = dirtyViaDeps;
+              warmViaDeps = dirtyWhy.viaDeps;
+              warmViaInputs = dirtyWhy.viaInputs;
+              warmRetried = dirtyWhy.retried;
               warmDropped = toDrop.size();
               indexesChanged = !toBake.empty() || !toDrop.empty();
               llvm::errs() << "megascope: warm start from " << indexPath
@@ -1258,6 +1341,7 @@ int main(int argc, const char **argv) {
       cfIndex = std::move(baked.cfIndex);
       channels = std::move(baked.channels);
       deps = std::move(baked.deps);
+      outcomes = std::move(baked.outcomes);
       llvm::errs() << "megascope: indexes built ("
                    << graph.nodeCount() << " nodes, "
                    << graph.edgeCount() << " edges, "
@@ -1278,6 +1362,8 @@ int main(int argc, const char **argv) {
     bool saveFailed = false;
     if (!indexPath.empty() && !indexesChanged) {
       llvm::errs() << "megascope: index unchanged — skipping re-save\n";
+      // Nothing was dirty, so every kept outcome is Indexed.
+      coverage = vycor::coverageOf(snap->meta);
     } else if (!indexPath.empty()) {
       vycor::SnapshotMeta meta;
       meta.collapsePaths = collapsePaths;
@@ -1285,8 +1371,23 @@ int main(int argc, const char **argv) {
       meta.lockBuiltins = lockCfg.useBuiltins;
       meta.channelTypes = channelCfg.registeredTypes;
       meta.files = std::move(currentStamps);
+      meta.fingerprints = std::move(currentFingerprints);
       vycor::SnapshotIO::recordDependencies(meta, deps);
+      vycor::SnapshotIO::recordOutcomes(meta, outcomes);
       meta.entryPoints.assign(McpEntryPoints.begin(), McpEntryPoints.end());
+      meta.provenance.analyzer = vycor::analyzerIdentity();
+      meta.provenance.toolchain = vycor::toolchainIdentity();
+      meta.provenance.environment = envFingerprint;
+      meta.provenance.bakeStartNs = bakeStartNs;
+      unstableStamps =
+          vycor::SnapshotIO::markUnstableStamps(meta, bakeStartNs);
+      coverage = vycor::coverageOf(meta);
+      if (!coverage.complete())
+        llvm::errs() << "megascope: WARNING: " << coverage.indexed << " of "
+                     << coverage.requested << " TU(s) indexed cleanly ("
+                     << coverage.partial << " partial, " << coverage.failed
+                     << " failed); the rest are retried on the next warm "
+                        "start\n";
       auto snapSaveStart = StatsClock::now();
       if (vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
                                   channels)) {
@@ -1317,6 +1418,10 @@ int main(int argc, const char **argv) {
       snap["warm_refresh_ms"] = warmRefreshMs;
       snap["refreshed_tus"] = static_cast<int64_t>(warmRefreshed);
       snap["refreshed_for_headers"] = static_cast<int64_t>(warmViaDeps);
+      snap["refreshed_for_inputs"] = static_cast<int64_t>(warmViaInputs);
+      snap["retried"] = static_cast<int64_t>(warmRetried);
+      snap["fingerprint_ms"] = fingerprintMs;
+      snap["unstable_stamps"] = static_cast<int64_t>(unstableStamps);
       snap["dropped_tus"] = static_cast<int64_t>(warmDropped);
       snap["warm_remove_ms"] = warmRemoveMs;
       snap["warm_bake_ms"] = warmBakeMs;
@@ -1324,6 +1429,12 @@ int main(int argc, const char **argv) {
       snap["graph_skipped"] = graphSkipped;
       snap["load_sections"] = loadSectionsJson(snapLoadStats);
       root["snapshot"] = std::move(snap);
+      llvm::json::Object cov;
+      cov["requested"] = static_cast<int64_t>(coverage.requested);
+      cov["indexed"] = static_cast<int64_t>(coverage.indexed);
+      cov["partial"] = static_cast<int64_t>(coverage.partial);
+      cov["failed"] = static_cast<int64_t>(coverage.failed);
+      root["coverage"] = std::move(cov);
 
       llvm::json::Object g;
       g["nodes"] = static_cast<int64_t>(liveNodes);
@@ -1411,7 +1522,12 @@ int main(int argc, const char **argv) {
       summary["files"] = static_cast<int64_t>(files.size());
       summary["refreshed"] = static_cast<int64_t>(warmRefreshed);
       summary["refreshed_for_headers"] = static_cast<int64_t>(warmViaDeps);
+      summary["refreshed_for_inputs"] = static_cast<int64_t>(warmViaInputs);
+      summary["retried"] = static_cast<int64_t>(warmRetried);
       summary["dropped"] = static_cast<int64_t>(warmDropped);
+      summary["indexed"] = static_cast<int64_t>(coverage.indexed);
+      summary["partial"] = static_cast<int64_t>(coverage.partial);
+      summary["failed"] = static_cast<int64_t>(coverage.failed);
       summary["nodes"] = static_cast<int64_t>(liveNodes);
       summary["edges"] = static_cast<int64_t>(liveEdges);
       summary["call_sites"] = static_cast<int64_t>(liveCallSites);

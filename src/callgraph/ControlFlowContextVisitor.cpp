@@ -57,12 +57,15 @@ int runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                      const std::string &file,
                      clang::tooling::FrontendActionFactory &factory,
                      const vycor::PchCache *pchCache,
-                     const std::string &sysroot = "") {
+                     const std::string &sysroot = "",
+                     int *crashSignal = nullptr) {
   tl_cfGuardActive = 1;
   int sig = sigsetjmp(tl_cfJumpBuf, 1);
   if (sig != 0) {
     llvm::errs() << "CRASH (signal " << sig << ") in CF index for " << file
                  << " — skipping\n";
+    if (crashSignal)
+      *crashSignal = sig;
     return -1;
   }
   auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
@@ -77,21 +80,52 @@ int runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 // so a silent stderr scroll-past is not enough.
 std::atomic<unsigned> g_cfParseErrorCount{0};
 
+// Sink for per-TU outcomes across a parallel bake (BakedIndexes::outcomes).
+struct OutcomeSink {
+  vycor::TuOutcomes *outcomes = nullptr;
+  std::mutex mutex;
+};
+
+// ClangTool::run's status: 0 clean, 1 the parse reported errors (the AST
+// was still walked, so the TU's facts are partial), 2 a file had no
+// compile command; -1 is the crash guard's.
+vycor::TuOutcome outcomeFor(int status, int crashSignal) {
+  switch (status) {
+  case 0:
+    return {vycor::TuStatus::Indexed, ""};
+  case 1:
+    return {vycor::TuStatus::Partial, "parse errors"};
+  case 2:
+    return {vycor::TuStatus::Skipped, "no compile command"};
+  default:
+    return {vycor::TuStatus::Crashed,
+            "signal " + std::to_string(crashSignal)};
+  }
+}
+
 // Run one guarded parse, timing it and recording the outcome. `stats` may
 // be null (timing skipped); the parse-error counter always advances.
 // `preTu`, when set, fires before the parse (worker-mode WORKER-TU marker).
+// `outcomeSink`, when set, receives the TU's TuOutcome.
 void bakeRun(const clang::tooling::CompilationDatabase &compDb,
              const std::string &file,
              clang::tooling::FrontendActionFactory &factory,
              const vycor::PchCache *pchCache, const std::string &sysroot,
              int phase, vycor::BuildStats *stats,
-             const std::function<void(const std::string &)> &preTu) {
+             const std::function<void(const std::string &)> &preTu,
+             OutcomeSink *outcomeSink = nullptr) {
   if (preTu)
     preTu(file);
   auto t0 = std::chrono::steady_clock::now();
-  int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+  int crashSignal = 0;
+  int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot,
+                                &crashSignal);
   if (status == 1)
     g_cfParseErrorCount.fetch_add(1, std::memory_order_relaxed);
+  if (outcomeSink && outcomeSink->outcomes) {
+    std::lock_guard<std::mutex> lock(outcomeSink->mutex);
+    (*outcomeSink->outcomes)[file] = outcomeFor(status, crashSignal);
+  }
   if (stats) {
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0)
@@ -1075,6 +1109,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   auto bakeStart = std::chrono::steady_clock::now();
   DependencySink depSink;
   depSink.deps = &out.deps;
+  OutcomeSink outcomeSink;
+  outcomeSink.outcomes = &out.outcomes;
 
   // Single pass: all three visitor phases share one frontend parse per TU
   // (no phase barrier — edge building has no cross-TU reads).
@@ -1087,11 +1123,13 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 
     for (const auto &file : files) {
       pool.async([&compDb, &out, collapsePtr, &lockCfg, channelCfgPtr,
-                  pchCache, &sysroot, stats, &preTu, &depSink, file]() {
+                  pchCache, &sysroot, stats, &preTu, &depSink, &outcomeSink,
+                  file]() {
         BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                           &lockCfg, channelCfgPtr,
                                           &out.channels, file, &depSink);
-        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
+        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu,
+                &outcomeSink);
       });
     }
     pool.wait();
@@ -1100,7 +1138,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
       BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
                                         &lockCfg, channelCfgPtr,
                                         &out.channels, file, &depSink);
-      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu);
+      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu,
+              &outcomeSink);
     }
   }
   if (stats)

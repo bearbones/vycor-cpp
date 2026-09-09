@@ -772,13 +772,42 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   cfg["channel_types"] = std::move(channelTypes);
   o["config"] = std::move(cfg);
 
+  // Provenance and coverage (docs/index-provenance.md): how the index was
+  // produced and how much of the requested scope it holds. Both come from
+  // the meta section alone.
+  llvm::json::Object prov;
+  prov["analyzer"] = snap.meta.provenance.analyzer;
+  prov["toolchain"] = snap.meta.provenance.toolchain;
+  prov["environment"] = snap.meta.provenance.environment;
+  prov["bake_start_ns"] =
+      static_cast<int64_t>(snap.meta.provenance.bakeStartNs);
+  o["provenance"] = std::move(prov);
+  const IndexCoverage cov = coverageOf(snap.meta);
+  llvm::json::Object coverage;
+  coverage["requested"] = static_cast<int64_t>(cov.requested);
+  coverage["indexed"] = static_cast<int64_t>(cov.indexed);
+  coverage["partial"] = static_cast<int64_t>(cov.partial);
+  coverage["failed"] = static_cast<int64_t>(cov.failed);
+  coverage["complete"] = cov.complete();
+  o["coverage"] = std::move(coverage);
+
   if (common.files) {
     llvm::json::Array files;
-    for (const auto &fs : snap.meta.files) {
+    for (size_t i = 0; i < snap.meta.files.size(); ++i) {
+      const auto &fs = snap.meta.files[i];
       llvm::json::Object f;
       f["path"] = fs.path;
       f["mtime_ns"] = static_cast<int64_t>(fs.mtimeNs);
       f["size"] = static_cast<int64_t>(fs.size);
+      const TuOutcome outcome = i < snap.meta.outcomes.size()
+                                    ? snap.meta.outcomes[i]
+                                    : TuOutcome{};
+      f["status"] = tuStatusName(outcome.status);
+      if (!outcome.detail.empty())
+        f["detail"] = outcome.detail;
+      f["fingerprint"] = i < snap.meta.fingerprints.size()
+                             ? snap.meta.fingerprints[i]
+                             : std::string();
       files.push_back(llvm::json::Value(std::move(f)));
     }
     o["files"] = std::move(files);
@@ -936,6 +965,16 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
   snap->meta.collapsePaths = collapsePaths;
+  // The in-memory index carries the same coverage facts a saved one
+  // would, and an incomplete bake is said out loud: a query over it
+  // cannot tell that a TU's facts are missing.
+  snap->meta.files = SnapshotIO::stampFiles(*files);
+  SnapshotIO::recordOutcomes(snap->meta, baked.outcomes);
+  const IndexCoverage cov = coverageOf(snap->meta);
+  if (!cov.complete())
+    err << "megascope: WARNING: " << cov.indexed << " of " << cov.requested
+        << " TU(s) indexed cleanly (" << cov.partial << " partial, "
+        << cov.failed << " failed); results may be incomplete\n";
   snap->summary.nodes = snap->graph.nodeCount();
   snap->summary.edges = snap->graph.edgeCount();
   snap->summary.callSites = snap->cfIndex.size();

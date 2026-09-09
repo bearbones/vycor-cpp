@@ -336,9 +336,11 @@ See `docs/mcp-usage.md`.
 Bake flags (`index`/`serve`): `--source`/`--source-list`/`--source-re`/
 `--skip-paths` (TU selection; with none, the TUs recorded in the existing
 index, else the whole compilation database),
-`--index` (warm starts — only TUs whose source or any opened header
-changed are re-indexed, in parallel; `--snapshot` is the old spelling),
-`--force` (rebuild regardless), `--threads`,
+`--index` (warm starts — only TUs whose source, any opened header, or
+compile command changed are re-indexed, in parallel; `--snapshot` is
+the old spelling), `--force` (rebuild regardless), `--retry-failed`
+(re-parse the TUs whose last parse failed even when nothing changed;
+see `docs/index-provenance.md`), `--threads`,
 `--pch-dir`, `--isolate-workers`/`--workers` (subprocess baking: a
 crashing TU costs only that TU), `--stats-json` (bake timings plus the
 per-section index load split), `-v`. Query verbs also take `-v`, which
