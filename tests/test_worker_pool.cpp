@@ -191,14 +191,20 @@ void writeShard(const std::string &shardPath,
     site.tuPath = tu;
     channels.addSite(std::move(site));
   }
-  // A worker records its batch's stamps and dependency lists in the
-  // shard meta; the parent absorbs the lists along with the indexes.
+  // A worker records its batch's stamps, dependency lists, and parse
+  // outcomes in the shard meta; the parent absorbs them with the indexes.
   SnapshotMeta meta;
   meta.files = SnapshotIO::stampFiles(batch);
   TuDependencies deps;
-  for (const auto &tu : batch)
+  TuOutcomes outcomes;
+  for (const auto &tu : batch) {
     deps[tu] = {{"/tu/common.h", 7000000000ull, 42ull}};
+    outcomes[tu] = tu == "/tu/partial.cpp"
+                       ? TuOutcome{TuStatus::Partial, "parse errors"}
+                       : TuOutcome{TuStatus::Indexed, ""};
+  }
   SnapshotIO::recordDependencies(meta, deps);
+  SnapshotIO::recordOutcomes(meta, outcomes);
   REQUIRE(SnapshotIO::save(shardPath, g, cf, meta, channels));
 }
 
@@ -461,6 +467,47 @@ TEST_CASE("the bake records the files each TU opened", "[worker_pool]") {
   auto now = SnapshotIO::stampFiles({base + "callbacks.hpp"})[0];
   CHECK(cbStamp.size == now.size);
   CHECK(cbStamp.mtimeNs == now.mtimeNs - now.mtimeNs % 1000000000ull);
+  // A clean parse is an Indexed outcome.
+  REQUIRE(out.outcomes.count(tu) == 1);
+  CHECK(out.outcomes.at(tu) == TuOutcome{TuStatus::Indexed, ""});
+}
+
+TEST_CASE("the bake reports a TU with parse errors as Partial",
+          "[worker_pool]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-partial", dir));
+  const std::string tu = std::string(dir) + "/broken.cpp";
+  std::ofstream(tu) << "#include \"no_such_header.hpp\"\n"
+                       "void seen();\nvoid caller() { seen(); }\n";
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  auto out = bakeIndexes(compDb, {tu}, {}, /*threadCount=*/1);
+  REQUIRE(out.outcomes.count(tu) == 1);
+  CHECK(out.outcomes.at(tu).status == TuStatus::Partial);
+  CHECK(out.outcomes.at(tu).detail == "parse errors");
+  // The partial AST still yields facts: the cache keeps them, the outcome
+  // says they are incomplete.
+  CHECK(out.graph.findNode("caller") != nullptr);
+  llvm::sys::fs::remove_directories(dir);
+}
+
+TEST_CASE("the bake reports a TU without a compile command as Skipped",
+          "[worker_pool]") {
+  // An empty JSON database: ClangTool finds no command and skips the file.
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-skipped", dir));
+  const std::string tu = std::string(dir) + "/orphan.cpp";
+  std::ofstream(tu) << "void orphan() {}\n";
+  std::ofstream(std::string(dir) + "/compile_commands.json") << "[]\n";
+  std::string err;
+  auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
+      std::string(dir), err);
+  REQUIRE(compDb);
+  auto out = bakeIndexes(*compDb, {tu}, {}, /*threadCount=*/1);
+  REQUIRE(out.outcomes.count(tu) == 1);
+  CHECK(out.outcomes.at(tu).status == TuStatus::Skipped);
+  CHECK(out.outcomes.at(tu).detail == "no compile command");
+  CHECK(out.graph.findNode("orphan") == nullptr);
+  llvm::sys::fs::remove_directories(dir);
 }
 
 TEST_CASE("removeTUs of a set equals removing each TU in turn",
@@ -565,7 +612,34 @@ TEST_CASE("dispatcher absorbs clean batches", "[worker_pool][dispatcher]") {
   CHECK(stats.crashCount() == 0);
   for (const auto &t : stats.tuStats)
     CHECK(t.toolStatus == 0);
+  // Outcomes ride the shard meta too.
+  REQUIRE(out.outcomes.size() == files.size());
+  for (const auto &tu : files) {
+    INFO(tu);
+    CHECK(out.outcomes.at(tu) == TuOutcome{TuStatus::Indexed, ""});
+  }
 
+  llvm::sys::fs::remove_directories(dir);
+}
+
+TEST_CASE("a worker's Partial outcome survives the shard merge",
+          "[worker_pool][dispatcher]") {
+  std::string dir = makeShardDir();
+  std::vector<std::string> files = {"/tu/a.cpp", "/tu/partial.cpp"};
+  WorkerRunner runner = [&](const std::vector<std::string> &batch,
+                            const std::string &shardPath,
+                            const std::string &stderrPath) {
+    writeMarkers(stderrPath, batch);
+    writeShard(shardPath, batch);
+    return 0;
+  };
+  auto out = bakeIsolatedWithRunner(runner, files, /*workers=*/1, nullptr,
+                                    dir, /*expected=*/nullptr,
+                                    /*batchSizeOverride=*/2);
+  REQUIRE(out.outcomes.size() == 2);
+  CHECK(out.outcomes.at("/tu/a.cpp").status == TuStatus::Indexed);
+  CHECK(out.outcomes.at("/tu/partial.cpp") ==
+        TuOutcome{TuStatus::Partial, "parse errors"});
   llvm::sys::fs::remove_directories(dir);
 }
 
@@ -605,6 +679,11 @@ TEST_CASE("crash with marker poisons exactly the marked TU and re-dispatches "
   CHECK(stats.crashCount() == 1);
   CHECK(poisonedFiles(stats) ==
         std::vector<std::string>{"/tu/poison.cpp"});
+  // The poisoned TU has an outcome: it is never mistaken for indexed.
+  REQUIRE(out.outcomes.size() == 3);
+  CHECK(out.outcomes.at("/tu/poison.cpp") ==
+        TuOutcome{TuStatus::Poisoned, "worker crashed"});
+  CHECK(out.outcomes.at("/tu/a.cpp").status == TuStatus::Indexed);
 
   llvm::sys::fs::remove_directories(dir);
 }

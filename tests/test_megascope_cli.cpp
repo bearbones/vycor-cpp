@@ -614,6 +614,18 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     const auto *cfg = obj.getObject("config");
     REQUIRE(cfg != nullptr);
     CHECK(cfg->getArray("collapse_paths")->size() == 1);
+    // Provenance and coverage come from the meta section alone; the
+    // fixture recorded no outcomes, so its two TUs count as failed.
+    const auto *prov = obj.getObject("provenance");
+    REQUIRE(prov != nullptr);
+    CHECK(prov->getString("analyzer") == "");
+    CHECK(prov->getInteger("bake_start_ns") == 0);
+    const auto *cov = obj.getObject("coverage");
+    REQUIRE(cov != nullptr);
+    CHECK(cov->getInteger("requested") == 2);
+    CHECK(cov->getInteger("indexed") == 0);
+    CHECK(cov->getInteger("failed") == 2);
+    CHECK(cov->getBoolean("complete") == false);
 
     IndexFile bare("nofiles", /*withFiles=*/false);
     auto noFiles = run({"info", "--index", bare.path, "--files"});
@@ -626,6 +638,8 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     auto ls = lines(files.out);
     REQUIRE(ls.size() == 3);
     CHECK(parseObject(ls[1]).getString("path") == "/src/a.cpp");
+    CHECK(parseObject(ls[1]).getString("status") == "skipped");
+    CHECK(parseObject(ls[1]).getString("fingerprint") == "");
     CHECK(parseObject(ls[2]).getInteger("size") == 4);
   }
 

@@ -20,6 +20,7 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ConditionalGuard.h"
 #include "vycor/callgraph/FileStamp.h"
+#include "vycor/callgraph/TuOutcome.h"
 #include "vycor/callgraph/StringInterner.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -392,6 +393,11 @@ struct BakedIndexes {
   // Every file each TU's parse opened (see FileStamp.h); a TU whose parse
   // crashed before the end of the TU has no entry.
   TuDependencies deps;
+  // How every requested TU's parse ended (see TuOutcome.h): Indexed,
+  // Partial (parse errors, facts from a partial AST), Crashed (guard
+  // fired, no facts), Skipped (no compile command). Under an isolated
+  // bake the parent adds Poisoned for the TUs whose worker died.
+  TuOutcomes outcomes;
 };
 
 // Build both indexes in a single frontend parse per TU: the node/hierarchy

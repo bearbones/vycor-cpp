@@ -82,6 +82,7 @@ add_executable(vycor_tests
   test_source_selection.cpp
   test_deep_chains.cpp
   test_snapshot.cpp
+  test_input_fingerprint.cpp
   test_worker_pool.cpp
   test_extensions.cpp
   test_anneal_checkpoint.cpp
@@ -121,6 +122,14 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/cli-golden.py
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(cli_golden PROPERTIES LABELS "cli;golden")
+  # Warm-refresh equivalence (scripts/warm-refresh-check.py): after each
+  # kind of change a warm start must notice, the refreshed index equals
+  # a clean rebuild, in-process and under --isolate-workers.
+  add_test(NAME warm_refresh
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/warm-refresh-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(warm_refresh PROPERTIES LABELS "cli;refresh")
 else()
   message(STATUS "python3 not found: the cli_golden test is not registered")
 endif()

@@ -189,6 +189,21 @@ void emitMeta(std::string &out, const SnapshotMeta &meta) {
     for (uint32_t id : ids)
       putU32(out, id);
   }
+  // v10: provenance, then per TU (in meta.files order) its fingerprint
+  // and outcome. A TU the caller recorded neither for is written as an
+  // unknown fingerprint (never matches) and a Skipped outcome.
+  putLenStr(out, meta.provenance.analyzer);
+  putLenStr(out, meta.provenance.toolchain);
+  putLenStr(out, meta.provenance.environment);
+  putU64(out, meta.provenance.bakeStartNs);
+  static const TuOutcome kNoOutcome;
+  for (size_t i = 0; i < meta.files.size(); ++i) {
+    putLenStr(out, i < meta.fingerprints.size() ? meta.fingerprints[i]
+                                                : std::string());
+    const auto &oc = i < meta.outcomes.size() ? meta.outcomes[i] : kNoOutcome;
+    putU8(out, static_cast<uint8_t>(oc.status));
+    putLenStr(out, oc.detail);
+  }
 }
 
 bool readMeta(Reader &r, SnapshotMeta &meta) {
@@ -232,6 +247,22 @@ bool readMeta(Reader &r, SnapshotMeta &meta) {
       }
       meta.tuDeps[i].push_back(id);
     }
+  }
+  meta.provenance.analyzer = r.lenStr();
+  meta.provenance.toolchain = r.lenStr();
+  meta.provenance.environment = r.lenStr();
+  meta.provenance.bakeStartNs = r.u64();
+  meta.fingerprints.resize(meta.files.size());
+  meta.outcomes.resize(meta.files.size());
+  for (size_t i = 0; r.ok && i < meta.files.size(); ++i) {
+    meta.fingerprints[i] = r.lenStr();
+    uint8_t status = r.u8();
+    if (status > static_cast<uint8_t>(TuStatus::Skipped)) {
+      r.ok = false;
+      break;
+    }
+    meta.outcomes[i].status = static_cast<TuStatus>(status);
+    meta.outcomes[i].detail = r.lenStr();
   }
   return r.ok;
 }
@@ -1060,16 +1091,56 @@ constexpr uint64_t kNsPerSecond = 1000000000ull;
 /// A recorded dependency stamp (the frontend's whole-second mtime) matches
 /// the file as it is now when the sizes agree and the current mtime falls
 /// in that second.
+/// A recorded stamp with mtime 0 was marked unstable (markUnstableStamps)
+/// or never taken; it matches nothing.
 bool sameParsedVersion(const FileStamp &recorded, const FileStamp &now) {
-  return recorded.size == now.size &&
+  return recorded.mtimeNs != 0 && recorded.size == now.size &&
          recorded.mtimeNs == now.mtimeNs - now.mtimeNs % kNsPerSecond;
+}
+
+bool sameTuVersion(const FileStamp &recorded, const FileStamp &now) {
+  return recorded.mtimeNs != 0 && recorded == now;
 }
 
 } // anonymous namespace
 
-std::vector<bool> SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
-                                       const std::vector<FileStamp> &current,
-                                       size_t *viaDeps) {
+const char *tuStatusName(TuStatus status) {
+  switch (status) {
+  case TuStatus::Indexed:
+    return "indexed";
+  case TuStatus::Partial:
+    return "partial";
+  case TuStatus::Crashed:
+    return "crashed";
+  case TuStatus::Poisoned:
+    return "poisoned";
+  case TuStatus::Skipped:
+    return "skipped";
+  }
+  return "skipped";
+}
+
+IndexCoverage coverageOf(const SnapshotMeta &meta) {
+  IndexCoverage c;
+  c.requested = meta.files.size();
+  for (size_t i = 0; i < meta.files.size(); ++i) {
+    TuStatus s = i < meta.outcomes.size() ? meta.outcomes[i].status
+                                          : TuStatus::Skipped;
+    if (s == TuStatus::Indexed)
+      ++c.indexed;
+    else if (s == TuStatus::Partial)
+      ++c.partial;
+    else
+      ++c.failed;
+  }
+  return c;
+}
+
+std::vector<bool>
+SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
+                     const std::vector<FileStamp> &current,
+                     const std::vector<std::string> *fingerprints,
+                     DirtyReport *report) {
   std::unordered_map<std::string, size_t> recorded;
   recorded.reserve(meta.files.size());
   for (size_t i = 0; i < meta.files.size(); ++i)
@@ -1086,26 +1157,73 @@ std::vector<bool> SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
     depChanged[i] = !sameParsedVersion(meta.deps[i], depsNow[i]);
 
   std::vector<bool> dirty(current.size(), false);
-  size_t via = 0;
+  DirtyReport why;
+  why.reasons.assign(current.size(), DirtyReason::Clean);
   for (size_t i = 0; i < current.size(); ++i) {
     auto it = recorded.find(current[i].path);
-    if (it == recorded.end() || !(meta.files[it->second] == current[i])) {
+    if (it == recorded.end() || !sameTuVersion(meta.files[it->second],
+                                               current[i])) {
       dirty[i] = true;
+      why.reasons[i] = DirtyReason::Stamp;
       continue;
     }
-    if (it->second >= meta.tuDeps.size())
+    const size_t r = it->second;
+    // A fingerprint the meta does not carry counts as changed: the TU was
+    // baked under inputs nobody recorded.
+    if (fingerprints && (r >= meta.fingerprints.size() ||
+                         i >= fingerprints->size() ||
+                         meta.fingerprints[r] != (*fingerprints)[i])) {
+      dirty[i] = true;
+      why.reasons[i] = DirtyReason::Inputs;
+      ++why.viaInputs;
       continue;
-    for (uint32_t id : meta.tuDeps[it->second]) {
-      if (id < depChanged.size() && depChanged[id]) {
-        dirty[i] = true;
-        ++via;
-        break;
+    }
+    if (r < meta.tuDeps.size()) {
+      for (uint32_t id : meta.tuDeps[r]) {
+        if (id < depChanged.size() && depChanged[id]) {
+          dirty[i] = true;
+          why.reasons[i] = DirtyReason::Deps;
+          ++why.viaDeps;
+          break;
+        }
       }
+      if (dirty[i])
+        continue;
+    }
+    // Retry anything but a clean parse. A meta with no outcome column at
+    // all (built in memory, never through recordOutcomes) has nothing to
+    // retry; a saved one always carries the column.
+    if (!meta.outcomes.empty() &&
+        (r >= meta.outcomes.size() ||
+         meta.outcomes[r].status != TuStatus::Indexed)) {
+      dirty[i] = true;
+      why.reasons[i] = DirtyReason::Retry;
+      ++why.retried;
     }
   }
-  if (viaDeps)
-    *viaDeps = via;
+  if (report)
+    *report = std::move(why);
   return dirty;
+}
+
+size_t SnapshotIO::markUnstableStamps(SnapshotMeta &meta,
+                                      uint64_t bakeStartNs) {
+  // Whole seconds: the dependency stamps are whole seconds already, and a
+  // TU stamped in the bake's first second on a coarse filesystem has the
+  // same exposure.
+  const uint64_t bakeSecondNs = bakeStartNs - bakeStartNs % kNsPerSecond;
+  size_t marked = 0;
+  auto mark = [&](FileStamp &fs) {
+    if (fs.mtimeNs != 0 && fs.mtimeNs >= bakeSecondNs) {
+      fs.mtimeNs = 0;
+      ++marked;
+    }
+  };
+  for (auto &fs : meta.files)
+    mark(fs);
+  for (auto &fs : meta.deps)
+    mark(fs);
+  return marked;
 }
 
 TuDependencies SnapshotIO::dependenciesOf(const SnapshotMeta &meta) {
@@ -1142,6 +1260,25 @@ void SnapshotIO::recordDependencies(SnapshotMeta &meta,
       }
       meta.tuDeps[i].push_back(pos->second);
     }
+  }
+}
+
+TuOutcomes SnapshotIO::outcomesOf(const SnapshotMeta &meta) {
+  TuOutcomes out;
+  for (size_t i = 0; i < meta.files.size() && i < meta.outcomes.size(); ++i)
+    out[meta.files[i].path] = meta.outcomes[i];
+  return out;
+}
+
+void SnapshotIO::recordOutcomes(SnapshotMeta &meta,
+                                const TuOutcomes &outcomes) {
+  meta.outcomes.assign(meta.files.size(), TuOutcome{});
+  for (size_t i = 0; i < meta.files.size(); ++i) {
+    auto it = outcomes.find(meta.files[i].path);
+    if (it != outcomes.end())
+      meta.outcomes[i] = it->second;
+    else
+      meta.outcomes[i] = TuOutcome{TuStatus::Skipped, "no outcome recorded"};
   }
 }
 

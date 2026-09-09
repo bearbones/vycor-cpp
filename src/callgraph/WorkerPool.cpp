@@ -267,9 +267,12 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
         out.graph.absorb(snap->graph);
         out.cfIndex.absorb(snap->cfIndex);
         out.channels.absorb(snap->channels);
-        // The worker records its batch's dependencies in the shard meta.
+        // The worker records its batch's dependencies and per-TU
+        // outcomes in the shard meta.
         for (auto &kv : SnapshotIO::dependenciesOf(snap->meta))
           out.deps[kv.first] = std::move(kv.second);
+        for (auto &kv : SnapshotIO::outcomesOf(snap->meta))
+          out.outcomes[kv.first] = std::move(kv.second);
         if (stats) {
           // Honest per-TU accounting isn't available across a batch; record
           // the batch wall divided evenly rather than faking parse times.
@@ -281,6 +284,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
       },
       [&](const std::string &tu) {
         ++poisonedCount;
+        out.outcomes[tu] = TuOutcome{TuStatus::Poisoned, "worker crashed"};
         llvm::errs() << "megascope: worker: TU poisoned (crashed worker): "
                      << tu << "\n";
         if (stats)

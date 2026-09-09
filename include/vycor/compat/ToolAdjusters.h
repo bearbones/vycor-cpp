@@ -23,8 +23,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -365,12 +367,21 @@ getPchCacheAdjuster(const PchCache &cache) {
 /// .pch binaries instead of being stripped.
 /// When sysroot is non-empty, it overrides the default macOS SDK path; an
 /// empty string falls back to the build-time default from xcrun.
+///
+/// The tool gets its own physical file system rather than the process-wide
+/// real one: ClangTool::run enters each compile command's directory, and
+/// on the shared real file system that is a process chdir, so parallel
+/// parses of TUs with different directories (relative -I, relative
+/// sources) would race. The per-instance file system keeps the working
+/// directory local to this tool.
 inline clang::tooling::ClangTool
 makeClangTool(const clang::tooling::CompilationDatabase &compDb,
               const std::vector<std::string> &files,
               const PchCache *pchCache = nullptr,
               const std::string &sysroot = "") {
-  clang::tooling::ClangTool tool(compDb, files);
+  clang::tooling::ClangTool tool(
+      compDb, files, std::make_shared<clang::PCHContainerOperations>(),
+      llvm::vfs::createPhysicalFileSystem());
   if (pchCache && !pchCache->empty()) {
     tool.appendArgumentsAdjuster(getPchCacheAdjuster(*pchCache));
     tool.appendArgumentsAdjuster(getStripIncompatibleFlagsAdjuster(/*stripPch=*/false));
