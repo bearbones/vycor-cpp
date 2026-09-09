@@ -218,6 +218,20 @@ PathInfo ControlFlowOracle::annotatePath(const CallPath &path) const {
 
 void ControlFlowOracle::propagate(PathInfo &info,
                                   const std::string &exceptionType) const {
+  // Frame 0: a noexcept target terminates before unwinding anywhere. The
+  // spec is known only through the target's own call sites; a leaf with
+  // none is walked as if it may throw (docs/path-analysis.md, limits).
+  const PathHop &into = info.hops.back();
+  if (auto spec = cfIndex_.callerNoexceptOf(into.calleeUsr)) {
+    if (*spec == NoexceptSpec::Noexcept || *spec == NoexceptSpec::ThrowNone) {
+      info.outcome = PathOutcome::Terminates;
+      info.stopAt = into.callee;
+      info.note = into.callee + " is noexcept: a throw inside it calls "
+                                "std::terminate";
+      return;
+    }
+  }
+
   // Walk from the target outward: hops.back() is the call INTO the target.
   for (size_t i = info.hops.size(); i-- > 0;) {
     const PathHop &hop = info.hops[i];

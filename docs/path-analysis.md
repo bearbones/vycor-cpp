@@ -45,6 +45,14 @@ A reverse depth-first search from the target over caller edges
 function-pointer-through-return expansions), collecting every path from
 a start to the target within the limits.
 
+**Starts.** A start reached on the way to the target is a path and is
+expanded further: with `main` and `api` both declared as entry points
+and `main -> api -> target`, both `api -> target` and
+`main -> api -> target` are enumerated, so a handler in `main` is not
+lost because `api` is also an entry. (The previous walk stopped at the
+first start, which would have let a verdict flip with the entry-point
+list while claiming exhaustiveness.)
+
 **Identity.** `target` and each start may be a USR or a display name. A
 display name resolves through `usrsForName` to every node that carries
 it, so a query for an overloaded name searches every overload and the
@@ -91,8 +99,9 @@ cycle is still observed).
 | `WorkBudget` | `maxWork` expansions were spent | yes |
 | `HubPruned` | at least one node's ancestry was skipped for fan-in (listed in `skippedHubs` with name, usr, in-degree) | yes |
 
-`complete()` = no `PathLimit`, `WorkBudget`, or `HubPruned`: every simple
-path within `maxDepth` was enumerated. `exhaustive()` = `complete()` and
+`complete()` = a search ran (`targetKnown && startKnown`) and no
+`PathLimit`, `WorkBudget`, or `HubPruned`: every simple path within
+`maxDepth` was enumerated. `exhaustive()` = `complete()` and
 no `DepthLimit`: the paths are all the paths. `exhaustive` is the
 precondition for any unconditional always/never claim over paths.
 
@@ -120,6 +129,11 @@ not a dead end.
 `SimpleNodes`, then decide each path's outcome by walking it from the
 target outward, in propagation order:
 
+0. A `noexcept` / `throw()` target terminates before unwinding anywhere
+   (`terminates`, `stopAt` = the target). The target's specification is
+   read from its own call-site contexts, so a leaf that calls nothing has
+   no recorded specification and is walked as if it may throw (limits,
+   below).
 1. On a `ThreadSpawn` edge the exception never unwinds into the caller:
    `terminates` (an exception escaping a thread entry calls
    `std::terminate`). On an `AsyncTask` / `PackagedTask` edge it is stored
@@ -193,8 +207,8 @@ common result contract; these are the fields it consumes.
 | `query_throw_propagation` | per path: `outcome`, `hops` (`from`/`to` display names, `fromUsr`/`toUsr`, `callSite`, `kind`, `confidence`, `executionContext` when asynchronous), `rethrownAt`, `stopAt` + `note` for non-caught outcomes; the same counts and args as above | `callChain` uses display names for every node (the target used to appear as its USR) |
 | `query_all_path_contexts` | `hops`, `maxDepth`, the search facts, `max_depth` / `max_fan_in` args | `callChain` as above |
 | `query_nearest_catches` | `maxDepth`, per catch `hops` and `callSite`, `max_depth` arg, the search facts | catches on later edges into a shared caller are no longer missed |
-| `find_call_chain` | per hop `fromName` / `toName`, the search facts; `skippedHubs` entries gain `usr` | `from` / `to` stay USR strings |
-| `query_locks_held` / `query_same_lock` | the search facts (`same_lock` combines both searches: stops OR-ed, `complete` / `exhaustive` AND-ed, hubs unioned); `skippedHubs` entries gain `usr` | `max_depth` counts frames above the target (was nodes: one frame fewer); `truncated` = the path cap cut the walk (unchanged meaning); lock contexts join on the exact edge, not the first context at the site; a lock inside a recursive cycle is observed (`SimpleEdges`, as before) |
+| `find_call_chain` | per hop `fromName` / `toName`, the search facts; `skippedHubs` entries gain `usr` | `from` / `to` stay USR strings; `skippedHubs[].name` is the display name (it was the USR); `max_paths` / `max_depth` must be positive (0 used to return nothing) |
+| `query_locks_held` / `query_same_lock` | the search facts (`same_lock` combines both searches: stops OR-ed, `complete` / `exhaustive` AND-ed, hubs unioned); `skippedHubs` entries gain `usr` | `max_depth` counts frames above the target (was nodes: one frame fewer); `truncated` = the path cap cut the walk (unchanged meaning); lock contexts join on the exact edge, not the first context at the site; `locksHeld` order (innermost frame first) and a lock inside a recursive cycle (`SimpleEdges`) are as before; `skippedHubs[].name` is the display name |
 | `query_call_site_context` and every handler record | `rethrows` on each handler | calls in `if` conditions are indexed (they were not) |
 | `query_locks_held` / `query_same_lock` entry points | | display names resolve (the old walk interned entry names as if they were USRs, so a name that was not also a USR matched nothing and the answer was an empty path list) |
 
@@ -215,6 +229,13 @@ notes the version.
   evaluated).
 - Asynchronous retrieval (`future::get`, packaged-task results) is not
   modeled: `unknown`.
+- A function's exception specification is known only through its
+  indexed call sites. A `noexcept` leaf that calls nothing is walked as
+  if it may throw; the callers' specifications are always available
+  because the hop itself is a call site.
+- When several contexts share one (call site, caller, callee) — a
+  header call site seen under different macro state in two TUs — the
+  one from the lexicographically smallest TU path is used.
 - A typed handler matches through the hardcoded std hierarchy and the
   graph's recorded class hierarchy; a base class the index never saw
   defined is a miss (`uncaught`, not `unknown`).

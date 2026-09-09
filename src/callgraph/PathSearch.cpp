@@ -175,11 +175,18 @@ struct Search {
     onPath.insert(node);
     int flags = 0;
 
+    // A start reached at depth > 0 is a path; its own callers are still
+    // expanded, because another start may reach the target through it
+    // (main -> api -> target with both main and api declared as starts)
+    // and an enumeration that stopped here could not call itself
+    // exhaustive.
     if (startSet.count(node) && depth > 0) {
       found.push_back(currentEdges);
       flags |= kFound;
-    } else if (limits.maxFanIn != 0 && depth > 0 &&
-               graph.storedInDegree(node) > limits.maxFanIn) {
+    }
+
+    if (limits.maxFanIn != 0 && depth > 0 &&
+        graph.storedInDegree(node) > limits.maxFanIn) {
       // Hub: expanding its ancestry would dominate the search. Record and
       // prune. Deterministic per node, so it does not poison the memo.
       hubs.emplace(node, graph.storedInDegree(node));
@@ -190,6 +197,12 @@ struct Search {
       // is the guard for a target that is itself at the bound.
       if (hasCorridorCaller(node))
         stops |= static_cast<unsigned>(StopReason::DepthLimit);
+    } else if (pathLimitHit()) {
+      // The path just recorded filled the limit; whatever this node's
+      // callers would add stays unexplored.
+      if (hasCorridorCaller(node))
+        truncated = true;
+      flags |= kBlocked;
     } else {
       const auto &callers = callersOf(node);
       for (size_t i = 0; i < callers.size(); ++i) {

@@ -354,6 +354,45 @@ int main() { try { barrier(); } catch (...) {} }
   }
 }
 
+TEST_CASE("a noexcept target terminates before any handler",
+          "[paths][oracle]") {
+  auto b = bake({R"cpp(
+void helper() {}
+void target() noexcept { helper(); throw 1; }
+int main() { try { target(); } catch (...) {} }
+)cpp"});
+  ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
+  auto r = oracle.queryThrowPropagation("target", "int", {"main"});
+  REQUIRE(r.paths.size() == 1);
+  CHECK(r.paths[0].outcome == PathOutcome::Terminates);
+  CHECK(r.paths[0].stopAt == "target");
+  CHECK(r.protection == Protection::NoexceptBarrier);
+  CHECK(r.verdictExhaustive);
+}
+
+TEST_CASE("an entry point reached from another entry point contributes "
+          "both paths",
+          "[paths][oracle]") {
+  auto b = bake({R"cpp(
+void target() { throw 1; }
+void api_b() { target(); }
+void api_a() { try { api_b(); } catch (...) {} }
+int main() { api_a(); }
+)cpp"});
+  ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
+  auto one = oracle.queryExceptionProtection("target", "", {"main"});
+  CHECK(one.protection == Protection::AlwaysCaught);
+  auto all = oracle.queryExceptionProtection("target", "",
+                                             {"main", "api_a", "api_b"});
+  CHECK(all.paths.size() == 3);
+  CHECK(all.verdictExhaustive);
+  // The bare path from api_b is real once api_b is declared an entry;
+  // the guarded path through api_a is still enumerated.
+  CHECK(all.protection == Protection::SometimesCaught);
+  CHECK(all.caughtCount == 2);
+  CHECK(all.uncaughtCount == 1);
+}
+
 TEST_CASE("a call inside a handler body is not protected by that try",
           "[paths][oracle]") {
   auto b = bake({R"cpp(
@@ -413,6 +452,19 @@ int main() { try { std::thread t(target); t.join(); } catch (...) {} }
     CHECK(r.paths[0].outcome == PathOutcome::Terminates);
     CHECK(r.protection == Protection::NoexceptBarrier);
     CHECK(r.verdictExhaustive);
+  }
+  SECTION("std::invoke is synchronous: the caller's handler catches") {
+    auto b = bake({R"cpp(
+#include <functional>
+void target() { throw 1; }
+int main() { try { std::invoke(target); } catch (...) {} }
+)cpp"});
+    ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
+    auto r = oracle.queryThrowPropagation("target", "int", {"main"});
+    REQUIRE(r.paths.size() == 1);
+    CHECK(r.paths[0].hops.back().execContext == ExecutionContext::Invoke);
+    CHECK(r.paths[0].outcome == PathOutcome::Caught);
+    CHECK(r.protection == Protection::AlwaysCaught);
   }
   SECTION("std::async: retrieval is not modeled, so the outcome is unknown") {
     auto b = bake({R"cpp(
@@ -528,12 +580,14 @@ int main() { m1(); m2(); m3(); }
     auto r = oracle.queryExceptionProtection("target", "", {"main"}, lim);
     CHECK(r.verdictExhaustive);
   }
-  SECTION("hub cutoff below target's fan-in still expands the target, and "
-          "pruning a mid demotes the verdict") {
+  SECTION("a hub cutoff below the target's own fan-in still expands the "
+          "target") {
     SearchLimits lim;
-    lim.maxFanIn = 0;
+    lim.maxFanIn = 2; // target has three callers
     auto full = oracle.queryExceptionProtection("target", "", {"main"}, lim);
     CHECK(full.paths.size() == 3);
+    CHECK(full.verdictExhaustive);
+    CHECK(full.search.skippedHubs.empty());
   }
   SECTION("query_exception_safety spells the observed verdict") {
     std::vector<std::string> eps = {"main"};
@@ -820,6 +874,65 @@ TEST_CASE("find_call_chain reports the search facts and display names",
   CHECK(cut.getBoolean("complete") == false);
   CHECK(stringsOf(cut, "stopReasons") ==
         std::vector<std::string>{"path_limit"});
+
+  args["max_paths"] = 0;
+  CHECK(isErrorResult(handler(args, ctx)));
+  args["max_paths"] = 1;
+  args["max_depth"] = -1;
+  CHECK(isErrorResult(handler(args, ctx)));
+
+  SECTION("an unknown target is not a complete search") {
+    llvm::json::Object none;
+    none["to"] = "nope";
+    auto obj = payloadOf(handler(none, ctx));
+    CHECK(obj.getInteger("pathCount") == 0);
+    CHECK(obj.getBoolean("complete") == false);
+    CHECK(obj.getBoolean("exhaustive") == false);
+  }
+}
+
+TEST_CASE("query_locks_held lists locks innermost frame first",
+          "[paths][tools][concurrency]") {
+  // main holds `outer` around mid(); mid holds `inner` around leaf().
+  CallGraph graph;
+  graph.addNode({"main", "m.cpp", 1, true, false, ""});
+  graph.addNode({"mid", "d.cpp", 1, false, false, ""});
+  graph.addNode({"leaf", "l.cpp", 1, false, false, ""});
+  graph.addEdge({"main", "mid", EdgeKind::DirectCall, Confidence::Proven,
+                 "m.cpp:5:3", 0});
+  graph.addEdge({"mid", "leaf", EdgeKind::DirectCall, Confidence::Proven,
+                 "d.cpp:4:3", 0});
+  ControlFlowIndex cf;
+  auto add = [&](const char *caller, const char *callee, const char *site,
+                 const char *var) {
+    CallSiteContext c;
+    c.callerName = caller;
+    c.calleeName = callee;
+    c.callSite = site;
+    RaiiLocal l;
+    l.typeName = "std::lock_guard<std::mutex>";
+    l.varName = var;
+    l.kind = RaiiKind::Lock;
+    c.liveRaiiLocals.push_back(l);
+    cf.addCallSiteContext(c);
+  };
+  add("main", "mid", "m.cpp:5:3", "outer");
+  add("mid", "leaf", "d.cpp:4:3", "inner");
+  ControlFlowOracle oracle(graph, cf);
+  std::vector<std::string> eps = {"main"};
+  ToolContext ctx{graph, oracle, cf, eps};
+  llvm::json::Object args;
+  args["function"] = "leaf";
+  auto obj = payloadOf(findHandler("query_locks_held")(args, ctx));
+  auto *paths = obj.getArray("paths");
+  REQUIRE(paths != nullptr);
+  REQUIRE(paths->size() == 1);
+  auto *locks = (*paths)[0].getAsObject()->getArray("locksHeld");
+  REQUIRE(locks != nullptr);
+  REQUIRE(locks->size() == 2);
+  CHECK((*locks)[0].getAsObject()->getString("varName") == "inner");
+  CHECK((*locks)[0].getAsObject()->getString("heldAt") == "d.cpp:4:3");
+  CHECK((*locks)[1].getAsObject()->getString("varName") == "outer");
 }
 
 // ============================================================================

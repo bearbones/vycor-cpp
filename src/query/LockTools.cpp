@@ -140,10 +140,12 @@ collectLocksHeld(const CallGraph &graph, const ControlFlowIndex &cfIndex,
     for (const auto &hop : path.hops)
       pr.path.push_back(hop.calleeUsr);
     std::unordered_set<LockKey, LockKeyHash> seen;
-    // Locks are accumulated from the entry point inward: the outermost
-    // frame's guards are reported first.
-    for (const auto &hop : path.hops)
-      collectLocksOnHop(cfIndex, hop, pr.locksHeld, seen);
+    // Locks are accumulated from the target outward (the historical
+    // order): the innermost frame's guards come first, and a lock held
+    // under one (type, name) in several frames reports its innermost
+    // heldAt.
+    for (size_t i = path.hops.size(); i-- > 0;)
+      collectLocksOnHop(cfIndex, path.hops[i], pr.locksHeld, seen);
     out.paths.push_back(std::move(pr));
   }
   return out;

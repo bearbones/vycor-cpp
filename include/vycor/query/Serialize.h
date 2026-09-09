@@ -45,8 +45,9 @@ llvm::json::Value edgeToJson(const CallGraphEdge &e);
 const char *channelOperationToString(ChannelOperation op);
 llvm::json::Value serializeGuard(const ConditionalGuard &g);
 /// {tryLocation, enclosingFunction, nestingDepth, handlers: [{caughtType,
-/// isCatchAll, location, body}]} — the shape query_call_site_context has
-/// always emitted for enclosingScopes; shared by the path tools and dump.
+/// isCatchAll, rethrows, location, body}]} — the shape
+/// query_call_site_context emits for enclosingScopes; shared by the path
+/// tools and dump.
 llvm::json::Value serializeTryCatchScope(const TryCatchScope &scope);
 /// "none" | "noexcept" | "noexcept(false)" | "throw()" | "unknown".
 const char *noexceptSpecToString(NoexceptSpec spec);

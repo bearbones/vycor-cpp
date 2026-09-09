@@ -329,12 +329,18 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
     return errorResult("Missing required parameter 'to' (or 'to_usr')");
 
   int64_t maxPaths = 10;
-  if (auto mp = args.getInteger("max_paths"))
+  if (auto mp = args.getInteger("max_paths")) {
+    if (*mp <= 0)
+      return errorResult("Invalid max_paths: must be positive");
     maxPaths = *mp;
+  }
 
   int64_t maxDepth = 20;
-  if (auto md = args.getInteger("max_depth"))
+  if (auto md = args.getInteger("max_depth")) {
+    if (*md <= 0)
+      return errorResult("Invalid max_depth: must be positive");
     maxDepth = *md;
+  }
 
   // Hub cutoff: skip expanding nodes whose stored in-degree exceeds this,
   // reporting them instead. Bounds DFS work on graphs with high-fan-in
@@ -363,8 +369,8 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   // hop carries its exact edge, the paths come in canonical order, and
   // the result says why the enumeration stopped.
   SearchLimits limits;
-  limits.maxPaths = static_cast<unsigned>(std::max<int64_t>(0, maxPaths));
-  limits.maxDepth = static_cast<unsigned>(std::max<int64_t>(0, maxDepth));
+  limits.maxPaths = static_cast<unsigned>(maxPaths);
+  limits.maxDepth = static_cast<unsigned>(maxDepth);
   limits.maxFanIn = static_cast<size_t>(maxFanIn);
   auto search = findCallerPaths(
       ctx.graph, *to, starts, limits, CycleRule::SimpleNodes,

@@ -135,12 +135,13 @@ TEST_CASE("findCallerPaths: a start that is the target is not a path, and "
     CHECK(r.paths.empty());
     CHECK(r.stops == 0);
   }
-  SECTION("unknown target") {
+  SECTION("unknown target: nothing searched, so nothing is complete") {
     auto r = findCallerPaths(g, "nope", {"main"}, SearchLimits{});
     CHECK_FALSE(r.targetKnown);
     CHECK(r.paths.empty());
     CHECK(r.stops == 0);
-    CHECK(r.exhaustive());
+    CHECK_FALSE(r.complete());
+    CHECK_FALSE(r.exhaustive());
   }
   SECTION("unknown start") {
     auto r = findCallerPaths(g, "target", {"nope"}, SearchLimits{});
@@ -153,6 +154,31 @@ TEST_CASE("findCallerPaths: a start that is the target is not a path, and "
     auto r = findCallerPaths(g, "target", {}, SearchLimits{});
     CHECK_FALSE(r.startKnown);
     CHECK(r.paths.empty());
+  }
+}
+
+TEST_CASE("findCallerPaths expands past a start that another start "
+          "reaches",
+          "[pathsearch]") {
+  // main -> api -> target; both main and api are starts.
+  CallGraph g;
+  node(g, "main", true);
+  node(g, "api", true);
+  node(g, "target");
+  edge(g, "main", "api", "main.cpp:2:3");
+  edge(g, "api", "target", "api.cpp:2:3");
+  auto r = findCallerPaths(g, "target", {"main", "api"}, SearchLimits{});
+  // The nearer start is recorded first, then its callers are walked.
+  CHECK(chainsOf(r) ==
+        std::vector<std::string>{"api>target", "main>api>target"});
+  CHECK(r.exhaustive());
+
+  SECTION("a path limit reached at a start still reports the cut") {
+    SearchLimits lim;
+    lim.maxPaths = 1;
+    auto cut = findCallerPaths(g, "target", {"main", "api"}, lim);
+    CHECK(chainsOf(cut) == std::vector<std::string>{"api>target"});
+    CHECK(cut.stopped(StopReason::PathLimit));
   }
 }
 

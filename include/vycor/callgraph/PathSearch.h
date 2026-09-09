@@ -122,18 +122,18 @@ struct PathSearchResult {
   size_t expansions = 0;
   // Whether the target / any start resolved to a known graph identity. A
   // result with either false has no paths and no stop reasons: nothing
-  // was searched.
+  // was searched, and complete()/exhaustive() are false.
   bool targetKnown = false;
   bool startKnown = false;
 
   bool stopped(StopReason r) const {
     return (stops & static_cast<unsigned>(r)) != 0;
   }
-  // Every simple path within maxDepth was enumerated. DepthLimit does not
-  // clear this: it says longer walks exist, not that a path in bounds was
-  // missed.
+  // A search ran and every simple path within maxDepth was enumerated.
+  // DepthLimit does not clear this: it says longer walks exist, not that
+  // a path in bounds was missed.
   bool complete() const {
-    return !stopped(StopReason::PathLimit) &&
+    return targetKnown && startKnown && !stopped(StopReason::PathLimit) &&
            !stopped(StopReason::WorkBudget) &&
            !stopped(StopReason::HubPruned);
   }
@@ -149,7 +149,9 @@ using EdgePredicate = llvm::function_ref<bool(const CallGraph::EdgeRef &)>;
 
 // Enumerate simple paths from any of `starts` to `target` by reverse DFS
 // from the target over caller edges (stored + query-time expansions, the
-// callersOf edge set). `target` and each start may be a USR or a display
+// callersOf edge set). A start reached on the way is a path AND is
+// expanded further, so a start that another start reaches contributes
+// both paths. `target` and each start may be a USR or a display
 // name; a display name shared by several nodes resolves to all of them.
 // Preserved search optimizations: a corridor prune (forward BFS from the
 // starts records the fewest edges from any start to each node, so the DFS

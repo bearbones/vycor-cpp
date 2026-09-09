@@ -205,6 +205,12 @@ public:
   std::vector<CallSiteContext>
   contextsForCaller(const std::string &callerName) const;
 
+  // The exception specification recorded for a function (usr or display
+  // accepted), taken from its first live call-site context; nullopt for a
+  // function with no indexed call site (a leaf, or not indexed at all).
+  std::optional<NoexceptSpec>
+  callerNoexceptOf(const std::string &caller) const;
+
   // All call sites targeting calleeName that are inside a try/catch.
   std::vector<CallSiteContext>
   protectedCallsTo(const std::string &calleeName) const;
