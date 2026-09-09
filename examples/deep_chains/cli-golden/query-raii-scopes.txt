@@ -1,0 +1,2 @@
+# megascope query-raii-scopes-at-callsite --call-site {callsite:Pipeline::run->stage1_ingest} --format ndjson -> exit 1
+{"_summary":{"callSite":"{fixture}/pipeline.cpp:22:10","callee":"stage1_ingest","caller":"Pipeline::run","callerUsr":"c:@S@Pipeline@F@run#I#"}}

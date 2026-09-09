@@ -1,0 +1,2 @@
+# megascope query-nearest-catches --function stage5_sink --format ndjson -> exit 1
+{"_summary":{"function":"stage5_sink","usr":"c:@F@stage5_sink#&$@S@Registry#I#"}}

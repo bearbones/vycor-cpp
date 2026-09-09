@@ -1,0 +1,2 @@
+# megascope get-callers -> exit 2
+{"error":"Missing required parameter 'name' (or 'usr')"}

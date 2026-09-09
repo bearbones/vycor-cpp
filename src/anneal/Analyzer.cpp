@@ -19,6 +19,7 @@
 #include "vycor/anneal/TypeNormalize.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/WorkerPool.h"
+#include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
 #include "vycor/ext/Extensions.h"
@@ -209,7 +210,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
   if (!opts_.enableAdlDiag)
     return true;
   // Only analyze calls in the main file (not in included headers).
-  if (!sm_.isInMainFile(expr->getBeginLoc()))
+  if (!sm_.isInMainFile(callBeginLoc(expr)))
     return true;
 
   auto *callee = expr->getDirectCallee();
@@ -331,7 +332,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
             buildSig(entry->qualifiedName, entry->paramTypes);
         Diagnostic diag;
         diag.kind = Diagnostic::ADL_SameScore;
-        diag.callLocation = formatLocation(expr->getBeginLoc());
+        diag.callLocation = formatLocation(callBeginLoc(expr));
         diag.resolvedDecl = resolvedSig;
         diag.betterDecl = candidateSig;
         diag.missingHeader = entry->headerPath;
@@ -350,7 +351,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
     std::string candidateSig = buildSig(entry->qualifiedName, entry->paramTypes);
 
     Diagnostic diag;
-    diag.callLocation = formatLocation(expr->getBeginLoc());
+    diag.callLocation = formatLocation(callBeginLoc(expr));
     diag.resolvedDecl = resolvedSig;
     diag.betterDecl = candidateSig;
     diag.missingHeader = entry->headerPath;

@@ -1,0 +1,3 @@
+# megascope list-entry-points --format ndjson -> exit 0
+{"_summary":{}}
+{"file":"{fixture}/main.cpp","line":75,"name":"main"}

@@ -1,0 +1,4 @@
+# megascope get-callees --name Pipeline::run --format tsv -> exit 0
+callSite	calleeName	callerName	confidence	kind
+{fixture}/pipeline.cpp:19:18	cbs::startupHook	Pipeline::run	Plausible	FunctionPointer
+{fixture}/pipeline.cpp:22:10	stage1_ingest	Pipeline::run	Proven	DirectCall

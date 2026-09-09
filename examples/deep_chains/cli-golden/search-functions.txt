@@ -1,0 +1,7 @@
+# megascope search-functions --query stage --limit 20 --format ndjson -> exit 0
+{"_summary":{"query":"stage"}}
+{"file":"{fixture}/stage1_ingest.hpp","line":15,"qualifiedName":"stage1_ingest","usr":"c:@F@stage1_ingest#&$@S@Registry#I#"}
+{"file":"{fixture}/stage2_parse.hpp","line":18,"qualifiedName":"stage2_parse","usr":"c:@F@stage2_parse#&$@S@Registry#I#"}
+{"file":"{fixture}/stage3_transform.hpp","line":15,"qualifiedName":"stage3_transform","usr":"c:@F@stage3_transform#&$@S@Registry#I#"}
+{"file":"{fixture}/stage4_dispatch.hpp","line":16,"qualifiedName":"stage4_dispatch","usr":"c:@F@stage4_dispatch#&$@S@Registry#I#"}
+{"file":"{fixture}/stage5_sink.hpp","line":15,"qualifiedName":"stage5_sink","usr":"c:@F@stage5_sink#&$@S@Registry#I#"}

@@ -1,0 +1,2 @@
+# megascope lookup-function --name stage2_parse -> exit 0
+{"file":"{fixture}/stage2_parse.hpp","isEntryPoint":false,"isVirtual":false,"line":18,"qualifiedName":"stage2_parse","usr":"c:@F@stage2_parse#&$@S@Registry#I#"}

@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/UsrIdent.h"
+#include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/PchCache.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -338,7 +339,7 @@ public:
     if (caller.display.empty())
       return true;
 
-    if (!isInUserCode(expr->getBeginLoc()))
+    if (!isInUserCode(callBeginLoc(expr)))
       return true;
 
     if (auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr))
@@ -367,7 +368,7 @@ public:
       if (expr->getNumArgs() > 0) {
         GuardEntry guard;
         guard.conditionText = getSourceText(expr->getArg(0));
-        guard.location = formatLocation(expr->getBeginLoc());
+        guard.location = formatLocation(callBeginLoc(expr));
         guard.inTrueBranch = true;
         guard.isAssertion = true;
         // Assertions don't create a scope — they guard everything after
@@ -381,7 +382,7 @@ public:
     }
 
     CallSiteContext ctx = buildContext(caller, calleeId,
-                                       expr->getBeginLoc());
+                                       callBeginLoc(expr));
     index_.addCallSiteContext(std::move(ctx));
     return true;
   }

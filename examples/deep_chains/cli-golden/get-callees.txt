@@ -1,0 +1,4 @@
+# megascope get-callees --name Pipeline::run --format ndjson -> exit 0
+{"_summary":{"function":"Pipeline::run","usr":"c:@S@Pipeline@F@run#I#"}}
+{"callSite":"{fixture}/pipeline.cpp:19:18","calleeName":"cbs::startupHook","callerName":"Pipeline::run","confidence":"Plausible","kind":"FunctionPointer"}
+{"callSite":"{fixture}/pipeline.cpp:22:10","calleeName":"stage1_ingest","callerName":"Pipeline::run","confidence":"Proven","kind":"DirectCall"}

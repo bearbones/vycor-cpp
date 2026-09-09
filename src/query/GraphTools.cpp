@@ -661,8 +661,11 @@ handleGraphSummary(const llvm::json::Object & /*args*/,
 
   auto topN = [](std::vector<std::pair<std::string, size_t>> v,
                  size_t n) -> llvm::json::Array {
-    std::sort(v.begin(), v.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
+    // Count descending, then name: ties must not depend on map order
+    // (cold and warm-refreshed indexes iterate differently).
+    std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
+      return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
     if (v.size() > n)
       v.resize(n);
     llvm::json::Array out;

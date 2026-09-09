@@ -1,0 +1,4 @@
+# megascope batch -> exit 0
+{"error":"line 3: unknown tool 'no_such_tool'","exit":2,"id":3,"tool":"no_such_tool"}
+{"exit":0,"id":1,"result":{"callerCount":1,"callers":[{"callSite":"{fixture}/stage1_ingest.cpp:20:10","calleeName":"stage2_parse","callerName":"stage1_ingest","confidence":"Proven","kind":"DirectCall"}],"function":"stage2_parse","usr":"c:@F@stage2_parse#&$@S@Registry#I#"},"tool":"get_callers"}
+{"exit":1,"id":2,"result":{"error":"Function not found: nope"},"tool":"lookup_function"}

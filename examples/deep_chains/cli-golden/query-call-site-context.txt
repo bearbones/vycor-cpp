@@ -1,0 +1,2 @@
+# megascope query-call-site-context --call-site {callsite:Pipeline::run->stage1_ingest} -> exit 0
+{"callSite":"{fixture}/pipeline.cpp:22:10","callee":"stage1_ingest","caller":"Pipeline::run","callerUsr":"c:@S@Pipeline@F@run#I#","enclosingGuardCount":0,"enclosingGuards":[],"enclosingScopeCount":0,"enclosingScopes":[],"isUnderTryCatch":false,"liveRaiiLocalsCount":0,"wouldTerminateIfThrows":false}

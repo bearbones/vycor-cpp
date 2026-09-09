@@ -1,0 +1,3 @@
+# megascope get-callers --name stage3_transform --format ndjson -> exit 0
+{"_summary":{"function":"stage3_transform","usr":"c:@F@stage3_transform#&$@S@Registry#I#"}}
+{"callSite":"{fixture}/stage2_parse.cpp:33:10","calleeName":"stage3_transform","callerName":"stage2_parse","confidence":"Proven","kind":"DirectCall"}

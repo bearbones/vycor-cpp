@@ -284,6 +284,31 @@ printf '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}\n' | \
   --source SecurityModule.cpp | jq -c 'select(.kind=="call_site" and .enclosingTryCatches==[])'
 ```
 
+**Recipes** (`--format ndjson` puts one record per line after a
+`{"_summary":...}` line; `--format tsv` is `cut`/`awk` fodder):
+
+```bash
+# Unique callers of a function, walking one level up
+./build/vycor-cpp megascope get-callers --name Foo::bar --format ndjson | \
+  jq -r 'select(.callerName) | .callerName' | sort -u
+
+# Every path from main to a function, one line each
+./build/vycor-cpp megascope find-call-chain --from main --to Foo::bar --format ndjson | \
+  jq -r 'select(type=="array") | [.[0].from] + map(.to) | join(" -> ")'
+
+# Unprotected call sites of the whole index (no enclosing try/catch)
+./build/vycor-cpp megascope dump | \
+  jq -c 'select(.kind=="call_site" and .enclosingTryCatches==[]) | {callerName, calleeName, callSite}'
+
+# Dead functions under one directory, as a file:line list
+./build/vycor-cpp megascope analyze-dead-code --format ndjson | \
+  jq -r 'select(.file? and (.file|test("/src/net/"))) | "\(.file):\(.line) \(.name)"'
+
+# Exit codes drive scripts: 1 is "answered, empty", 4 is "ambiguous name"
+./build/vycor-cpp megascope get-callers --name bar --format ndjson; case $? in
+  4) echo "pick a --usr from the candidates above";; esac
+```
+
 Query verbs find the index via `--index`, `$VYCOR_INDEX`,
 `<build-path>/.vycor/megascope.vycs`, or `./.vycor/megascope.vycs`, so a
 query run from the build directory needs no path at all. Output is compact

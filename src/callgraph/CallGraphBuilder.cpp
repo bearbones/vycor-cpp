@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
 
@@ -674,7 +675,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
     return true;
 
   // Skip calls from within system headers.
-  if (!isInUserCode(expr->getBeginLoc()))
+  if (!isInUserCode(callBeginLoc(expr)))
     return true;
 
   // Skip internal edges within collapsed paths (keep boundary edges).
@@ -704,7 +705,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   args.reserve(expr->getNumArgs());
   for (unsigned i = 0; i < expr->getNumArgs(); ++i)
     args.push_back(expr->getArg(i));
-  processCallableArgs(args, caller.usr, expr->getBeginLoc(), spawnerCtx);
+  processCallableArgs(args, caller.usr, callBeginLoc(expr), spawnerCtx);
 
   auto *callee = expr->getDirectCallee();
   if (!callee)
@@ -715,7 +716,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
     auto *methodDecl = memberCall->getMethodDecl();
     if (methodDecl && methodDecl->isVirtual()) {
       handleVirtualDispatch(caller.usr, methodDecl,
-                            expr->getBeginLoc());
+                            callBeginLoc(expr));
       return true;
     }
   }
@@ -724,7 +725,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   if (llvm::isa<clang::CXXOperatorCallExpr>(expr)) {
     graph_.addEdge({caller.usr, identForCallee(callee).usr,
                     EdgeKind::OperatorCall, Confidence::Proven,
-                    formatLocation(expr->getBeginLoc()), 0}, tuPath_);
+                    formatLocation(callBeginLoc(expr)), 0}, tuPath_);
     return true;
   }
 
@@ -753,7 +754,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
               graph_.addNode(std::move(ctorNode));
               graph_.addEdge({caller.usr, ctorId.usr,
                               EdgeKind::ConstructorCall, Confidence::Proven,
-                              formatLocation(expr->getBeginLoc()), 0}, tuPath_);
+                              formatLocation(callBeginLoc(expr)), 0}, tuPath_);
             }
             // Also just add a generic constructor node for the type. It is
             // synthesized (no decl backs "Type::Type" as spelled), so it
@@ -769,7 +770,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
             graph_.addNode(std::move(synth), tuPath_);
             graph_.addEdge({caller.usr, "vycor-synth:" + ctorName,
                             EdgeKind::ConstructorCall, Confidence::Proven,
-                            formatLocation(expr->getBeginLoc()), 0}, tuPath_);
+                            formatLocation(callBeginLoc(expr)), 0}, tuPath_);
           }
         }
       }
@@ -779,7 +780,7 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   // Regular direct call.
   graph_.addEdge({caller.usr, identForCallee(callee).usr,
                   EdgeKind::DirectCall, Confidence::Proven,
-                  formatLocation(expr->getBeginLoc()), 0}, tuPath_);
+                  formatLocation(callBeginLoc(expr)), 0}, tuPath_);
 
   return true;
 }

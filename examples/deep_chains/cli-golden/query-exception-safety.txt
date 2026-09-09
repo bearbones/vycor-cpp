@@ -1,0 +1,2 @@
+# megascope query-exception-safety --function stage5_sink --exception-type std::exception -> exit 0
+{"caughtPaths":0,"function":"stage5_sink","protection":"never_caught","summary":"c:@F@stage5_sink#&$@S@Registry#I# throwing std::exception is NOT caught on any of the 1 path(s) from entry points.","totalPaths":1,"uncaughtPaths":1,"usr":"c:@F@stage5_sink#&$@S@Registry#I#"}

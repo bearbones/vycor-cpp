@@ -1,0 +1,25 @@
+# megascope tools -> exit 0
+  analyze-dead-code              Run dead code analysis via call graph reachability.
+  explain-ordering               Compare two channel call sites for the evidence needed to explain an ordering assumption between them: whether they're the same channel, each site's enclosing guard conditions (e.g. only reachable when some flag is true), and which ThreadEntry/AsyncTask/PackagedTask/Invoke boundaries reach each site's enclosing function.
+  find-call-chain                Find call chains from a source function (or entry points) to a target function.
+  get-callees                    List all functions called by a given function.
+  get-callers                    List all functions that call a given function.
+  get-class-hierarchy            Query class inheritance relationships and virtual method overrides.
+  graph-summary                  Return aggregate statistics about the call graph: node and edge counts, call-site count, entry-point count, top-5 fan-out callers and callees, and histograms by confidence and edge kind.
+  list-callback-sites            List every callback registration or invocation site grouped by target.
+  list-channels                  List every tracked channel (queue/map/event-bus instance registered via --channel-types-json) with its type, category, and producer/consumer site counts.
+  list-concurrency-entry-points  List every ThreadEntry edge: functions (including synthetic lambda targets) that are handed to std::thread, std::jthread, std::async, std::packaged_task, std::invoke, or std::bind.
+  list-entry-points              List the configured entry-point functions with their file/line when resolved in the call graph.
+  lookup-function                Look up metadata for a function by qualified name.
+  query-all-path-contexts        Enumerate the call paths from the entry points to a function, each with the try/catch scopes and conditional guards along it.
+  query-call-site-context        Get exception handling and guard context at a specific call site location (file:line:col).
+  query-channel                  List every producer and consumer call site on one channel: {producers:[...], consumers:[...]}, each site {channelType, category, operation, function, functionUsr, callSite, guards:[{conditionText, location, inTrueBranch, isAssertion}]}.
+  query-channels-for-function    List the channel sites (producer or consumer) inside one function.
+  query-exception-safety         Determine whether a function is protected by try/catch on its call paths from entry points.
+  query-locks-held               For each entry point, enumerate call paths reaching `function` via reverse-walking the call graph, and report Lock-kind RAII locals live on any edge of each path.
+  query-nearest-catches          For each call path into a function, the nearest enclosing try/catch walking up the callers: the handler scope, how many frames up it sits, and the path segment between.
+  query-raii-scopes-at-callsite  List RAII-capable locals (non-trivial-destructor) live at a call site.
+  query-same-lock                Compute the intersection of locks held across paths reaching fn_a and fn_b.
+  query-throw-propagation        If a function throws the given exception type, is it caught before unwinding to an entry point? Reports the protection verdict plus every call path with its try/catch scopes, guards, and where the throw would be caught.
+  reindex-tu                     Re-index a single translation unit after source changes.  [serve only]
+  search-functions               Find functions by name substring when the exact qualified name is unknown.
