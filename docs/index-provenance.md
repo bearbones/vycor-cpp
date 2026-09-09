@@ -163,7 +163,10 @@ This does not claim content correctness from timestamps: an edit that
 lands after the bake with an older-than-bake mtime (a `touch -d`, a
 restore from backup, `git checkout` of a file with a preserved time) is
 only seen if the size differs. That is the same limit build systems
-accept.
+accept. The converse costs time, not correctness: a file whose mtime
+is ahead of the bake's clock (clock skew on a network file system) is
+marked unstable at every save and re-indexed on every refresh that
+rewrites the index.
 
 ## Per-TU outcomes and retry
 
@@ -211,9 +214,9 @@ header never existed to be recorded), so the recovery needs a
 piggybacked retry or `--retry-failed`. `coverage.complete == false` in
 `info` or the `index` summary is the signal an orchestrator can act on.
 The warning line names the count (`K of N TU(s) indexed cleanly (P
-partial, F failed); the rest are retried on the next warm start`). To
-stop paying for chronic failures, fix the inputs (`--extra-arg`) or
-narrow the selection.
+partial, F failed); the rest are retried with the next refresh that
+rewrites the index, or --retry-failed`). To stop paying for chronic
+failures, fix the inputs (`--extra-arg`) or narrow the selection.
 
 The ephemeral query mode (`--source ...` without an index) prints the
 same coverage warning so a partial in-memory bake is visible, but it

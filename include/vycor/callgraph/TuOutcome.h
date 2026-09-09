@@ -22,9 +22,10 @@
 namespace vycor {
 
 /// How a requested TU's parse ended. Only an Indexed TU is a trustworthy
-/// cache entry: every other status is retried on the next warm start
-/// (SnapshotIO::dirtyTUs) and counted against the index's coverage
-/// (IndexCoverage in Snapshot.h).
+/// cache entry: every other status is dirty on the next warm start
+/// (SnapshotIO::dirtyTUs), re-parsed alongside any refresh that rewrites
+/// the index or on --retry-failed, and counted against the index's
+/// coverage (IndexCoverage in Snapshot.h).
 enum class TuStatus : uint8_t {
   Indexed = 0,  // clean parse: this TU's facts are complete
   Partial = 1,  // the parse reported errors: facts from a partial AST

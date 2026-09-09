@@ -1172,7 +1172,7 @@ int main(int argc, const char **argv) {
         vycor::SnapshotIO::DirtyReport dirtyWhy;
         auto dirtyFlags = vycor::SnapshotIO::dirtyTUs(
             snap->meta, currentStamps, &currentFingerprints, &dirtyWhy);
-        size_t dirty = static_cast<size_t>(
+        const size_t dirty = static_cast<size_t>(
             std::count(dirtyFlags.begin(), dirtyFlags.end(), true));
         const size_t changed = dirty - dirtyWhy.retried;
         size_t dropped = 0;
@@ -1198,7 +1198,6 @@ int main(int argc, const char **argv) {
                        << " TU(s) whose last parse failed are left as "
                           "recorded (pass --retry-failed to re-parse "
                           "them)\n";
-          dirty = 0;
           dirtyWhy.retried = 0;
         }
         if (McpForce) {
@@ -1362,7 +1361,8 @@ int main(int argc, const char **argv) {
     bool saveFailed = false;
     if (!indexPath.empty() && !indexesChanged) {
       llvm::errs() << "megascope: index unchanged — skipping re-save\n";
-      // Nothing was dirty, so every kept outcome is Indexed.
+      // Nothing re-indexed: the coverage is what the index records
+      // (failed TUs left as recorded included).
       coverage = vycor::coverageOf(snap->meta);
     } else if (!indexPath.empty()) {
       vycor::SnapshotMeta meta;
@@ -1386,8 +1386,9 @@ int main(int argc, const char **argv) {
         llvm::errs() << "megascope: WARNING: " << coverage.indexed << " of "
                      << coverage.requested << " TU(s) indexed cleanly ("
                      << coverage.partial << " partial, " << coverage.failed
-                     << " failed); the rest are retried on the next warm "
-                        "start\n";
+                     << " failed); the rest are retried with the next "
+                        "refresh that rewrites the index, or "
+                        "--retry-failed\n";
       auto snapSaveStart = StatsClock::now();
       if (vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
                                   channels)) {

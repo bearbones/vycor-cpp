@@ -61,7 +61,7 @@ bake as a cold build; drops TUs removed from the selection), and skips
 the re-save when nothing changed:
 
 ```
-megascope: re-indexing 4 TU(s), 4 for changed headers...
+megascope: re-indexing 4 TU(s): 4 for changed headers, 0 for changed compile inputs, 0 retried after a failed parse...
 megascope: warm start from /path/to/build/.vycor/megascope.vycs (4 TU(s) re-indexed, 0 dropped, ...)
 ```
 

@@ -1171,6 +1171,7 @@ SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
     // A fingerprint the meta does not carry counts as changed: the TU was
     // baked under inputs nobody recorded.
     if (fingerprints && (r >= meta.fingerprints.size() ||
+                         i >= fingerprints->size() ||
                          meta.fingerprints[r] != (*fingerprints)[i])) {
       dirty[i] = true;
       why.reasons[i] = DirtyReason::Inputs;
