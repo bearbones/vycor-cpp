@@ -20,6 +20,6 @@
   query-nearest-catches          For each call path into a function, the nearest enclosing try/catch walking up the callers: the handler scope, how many frames up it sits, and the path segment between.
   query-raii-scopes-at-callsite  List RAII-capable locals (non-trivial-destructor) live at a call site.
   query-same-lock                Compute the intersection of locks held across paths reaching fn_a and fn_b.
-  query-throw-propagation        If a function throws the given exception type, is it caught before unwinding to an entry point? Reports the protection verdict plus every call path with its try/catch scopes, guards, and where the throw would be caught.
+  query-throw-propagation        If a function throws the given exception type, is it caught before unwinding to an entry point? Reports the protection verdict (see query_exception_safety) plus every call path with its exact hops (call sites), try/catch scopes, guards, and outcome: caught (where and by which handler), uncaught (escapes the entry point), terminates (noexcept or thread boundary), or unknown (no context indexed, async boundary).
   reindex-tu                     Re-index a single translation unit after source changes.  [serve only]
   search-functions               Find functions by name substring when the exact qualified name is unknown.

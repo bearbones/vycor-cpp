@@ -250,7 +250,7 @@ TEST_CASE("Oracle determines exception protection across paths",
   }
 
   SECTION("queryNearestCatches finds the catch in processFile") {
-    auto catches = oracle.queryNearestCatches("allocateBuffer");
+    auto catches = oracle.queryNearestCatches("allocateBuffer").catches;
     // Should find at least one catch (processFile's try/catch, 2 frames up).
     bool foundProcessFile = false;
     for (const auto &c : catches) {

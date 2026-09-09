@@ -40,15 +40,39 @@ namespace vycor {
 // Tool 5: query_exception_safety
 // ============================================================================
 
-static const char *protectionToStr(Protection p) {
-  switch (p) {
-  case Protection::AlwaysCaught: return "always_caught";
-  case Protection::SometimesCaught: return "sometimes_caught";
-  case Protection::NeverCaught: return "never_caught";
-  case Protection::NoexceptBarrier: return "noexcept_barrier";
-  case Protection::Unknown: return "unknown";
+// Bounded-search knobs shared by the path tools: max_paths, max_depth
+// (edges), max_fan_in. Returns an error message for a non-positive
+// max_paths/max_depth.
+static std::optional<std::string>
+parseSearchLimits(const llvm::json::Object &args, SearchLimits &out) {
+  if (auto mp = args.getInteger("max_paths")) {
+    if (*mp <= 0)
+      return "Invalid max_paths: must be positive";
+    out.maxPaths = static_cast<unsigned>(*mp);
   }
-  return "unknown";
+  if (auto md = args.getInteger("max_depth")) {
+    if (*md <= 0)
+      return "Invalid max_depth: must be positive";
+    out.maxDepth = static_cast<unsigned>(*md);
+  }
+  if (auto mf = args.getInteger("max_fan_in"))
+    out.maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
+  return std::nullopt;
+}
+
+static void attachFacts(llvm::json::Object &obj, const PathSearchFacts &f) {
+  attachSearchFacts(obj, f.stops, f.complete, f.exhaustive, f.skippedHubs);
+}
+
+static void addSearchLimitProps(llvm::json::Object &props) {
+  props["max_paths"] = intProp(
+      "Maximum number of paths to enumerate (default 100)");
+  props["max_depth"] = intProp(
+      "Maximum number of edges in a path (default 20)");
+  props["max_fan_in"] = intProp(
+      "Skip expanding functions with more stored callers than this; "
+      "skipped hubs are listed in the response. 0 disables "
+      "(default: 1000).");
 }
 
 // `entry_points` from the arguments, else the context's configured list
@@ -81,27 +105,30 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
   if (auto et = args.getString("exception_type"))
     exceptionType = et->str();
 
+  SearchLimits limits;
+  if (auto err = parseSearchLimits(args, limits))
+    return errorResult(*err);
+
   auto result = ctx.oracle.queryExceptionProtection(
-      *ident, exceptionType, entryPointsArg(args, ctx));
+      *ident, exceptionType, entryPointsArg(args, ctx), limits);
 
   llvm::json::Object obj;
   auto function = args.getString("function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
-  obj["protection"] = protectionToStr(result.protection);
+  obj["protection"] = protectionName(result.protection);
   obj["totalPaths"] = static_cast<int64_t>(result.paths.size());
   obj["summary"] = result.summary;
-
-  // Include path summaries (without full detail to keep response manageable).
-  int64_t caught = 0, uncaught = 0;
-  for (auto &p : result.paths) {
-    if (p.isCaught)
-      ++caught;
-    else
-      ++uncaught;
-  }
-  obj["caughtPaths"] = caught;
-  obj["uncaughtPaths"] = uncaught;
+  // Path counts by outcome (the counts, not the paths: see
+  // query_throw_propagation for per-path detail). uncaughtPaths keeps its
+  // historical meaning of "not caught" and so includes the paths that
+  // terminate or are unknown; the finer split follows.
+  obj["caughtPaths"] = static_cast<int64_t>(result.caughtCount);
+  obj["uncaughtPaths"] = static_cast<int64_t>(
+      result.paths.size() - result.caughtCount);
+  obj["terminatingPaths"] = static_cast<int64_t>(result.terminatesCount);
+  obj["unknownPaths"] = static_cast<int64_t>(result.unknownCount);
+  attachFacts(obj, result.search);
 
   return llvm::json::Value(std::move(obj));
 }
@@ -315,16 +342,36 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
 // query_exception_safety keeps to the counts.
 // ============================================================================
 
-static llvm::json::Value serializePathInfo(const PathInfo &p) {
+// withOutcome=false for query_all_path_contexts, which does no
+// propagation walk (no outcome to report).
+static llvm::json::Value serializePathInfo(const PathInfo &p,
+                                           bool withOutcome) {
   llvm::json::Object obj;
   llvm::json::Array chain;
   for (const auto &fn : p.callChain)
     chain.push_back(fn);
   obj["callChain"] = std::move(chain);
+  llvm::json::Array hops;
+  for (const auto &hop : p.hops)
+    hops.push_back(serializePathHop(hop));
+  obj["hops"] = std::move(hops);
   obj["isCaught"] = p.isCaught;
   if (p.isCaught) {
     obj["caughtAt"] = p.caughtAt;
     obj["caughtBy"] = p.caughtBy;
+  }
+  if (withOutcome) {
+    obj["outcome"] = pathOutcomeName(p.outcome);
+    if (!p.rethrownAt.empty()) {
+      llvm::json::Array rethrown;
+      for (const auto &loc : p.rethrownAt)
+        rethrown.push_back(loc);
+      obj["rethrownAt"] = std::move(rethrown);
+    }
+    if (p.outcome != PathOutcome::Caught) {
+      obj["stopAt"] = p.stopAt;
+      obj["note"] = p.note;
+    }
   }
   llvm::json::Array scopes;
   for (const auto &scope : p.tryCatchesOnPath)
@@ -337,10 +384,11 @@ static llvm::json::Value serializePathInfo(const PathInfo &p) {
   return llvm::json::Value(std::move(obj));
 }
 
-static llvm::json::Value serializePaths(const std::vector<PathInfo> &paths) {
+static llvm::json::Value serializePaths(const std::vector<PathInfo> &paths,
+                                        bool withOutcome) {
   llvm::json::Array arr;
   for (const auto &p : paths)
-    arr.push_back(serializePathInfo(p));
+    arr.push_back(serializePathInfo(p, withOutcome));
   return llvm::json::Value(std::move(arr));
 }
 
@@ -357,18 +405,28 @@ handleQueryThrowPropagation(const llvm::json::Object &args,
   if (auto et = args.getString("exception_type"))
     exceptionType = et->str();
 
-  auto result = ctx.oracle.queryThrowPropagation(*ident, exceptionType,
-                                                 entryPointsArg(args, ctx));
+  SearchLimits limits;
+  if (auto err = parseSearchLimits(args, limits))
+    return errorResult(*err);
+
+  auto result = ctx.oracle.queryThrowPropagation(
+      *ident, exceptionType, entryPointsArg(args, ctx), limits);
 
   llvm::json::Object obj;
   auto function = args.getString("function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
   obj["exceptionType"] = exceptionType;
-  obj["protection"] = protectionToStr(result.protection);
+  obj["protection"] = protectionName(result.protection);
   obj["totalPaths"] = static_cast<int64_t>(result.paths.size());
+  obj["caughtPaths"] = static_cast<int64_t>(result.caughtCount);
+  obj["uncaughtPaths"] = static_cast<int64_t>(
+      result.paths.size() - result.caughtCount);
+  obj["terminatingPaths"] = static_cast<int64_t>(result.terminatesCount);
+  obj["unknownPaths"] = static_cast<int64_t>(result.unknownCount);
   obj["summary"] = result.summary;
-  obj["paths"] = serializePaths(result.paths);
+  attachFacts(obj, result.search);
+  obj["paths"] = serializePaths(result.paths, /*withOutcome=*/true);
   return llvm::json::Value(std::move(obj));
 }
 
@@ -381,24 +439,22 @@ handleQueryAllPathContexts(const llvm::json::Object &args,
     return std::move(*ambiguous);
   if (!ident)
     return errorResult("Missing required parameter 'function' (or 'usr')");
-  unsigned maxPaths = 100;
-  if (auto mp = args.getInteger("max_paths")) {
-    if (*mp <= 0)
-      return errorResult("Invalid max_paths: must be positive");
-    maxPaths = static_cast<unsigned>(*mp);
-  }
+  SearchLimits limits;
+  if (auto err = parseSearchLimits(args, limits))
+    return errorResult(*err);
 
-  auto paths = ctx.oracle.queryAllPathContexts(*ident,
-                                               entryPointsArg(args, ctx),
-                                               maxPaths);
+  auto result = ctx.oracle.queryAllPathContexts(
+      *ident, entryPointsArg(args, ctx), limits);
 
   llvm::json::Object obj;
   auto function = args.getString("function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
-  obj["totalPaths"] = static_cast<int64_t>(paths.size());
-  obj["maxPaths"] = static_cast<int64_t>(maxPaths);
-  obj["paths"] = serializePaths(paths);
+  obj["totalPaths"] = static_cast<int64_t>(result.paths.size());
+  obj["maxPaths"] = static_cast<int64_t>(limits.maxPaths);
+  obj["maxDepth"] = static_cast<int64_t>(limits.maxDepth);
+  attachFacts(obj, result.search);
+  obj["paths"] = serializePaths(result.paths, /*withOutcome=*/false);
   return llvm::json::Value(std::move(obj));
 }
 
@@ -412,20 +468,35 @@ handleQueryNearestCatches(const llvm::json::Object &args,
   if (!ident)
     return errorResult("Missing required parameter 'function' (or 'usr')");
 
-  auto catches = ctx.oracle.queryNearestCatches(*ident);
+  unsigned maxDepth = 20;
+  if (auto md = args.getInteger("max_depth")) {
+    if (*md <= 0)
+      return errorResult("Invalid max_depth: must be positive");
+    maxDepth = static_cast<unsigned>(*md);
+  }
+
+  auto result = ctx.oracle.queryNearestCatches(*ident, maxDepth);
 
   llvm::json::Object obj;
   auto function = args.getString("function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
+  obj["maxDepth"] = static_cast<int64_t>(result.maxDepth);
+  attachSearchFacts(obj, result.stops, result.complete,
+                    result.stops == 0, {});
   llvm::json::Array arr;
-  for (const auto &c : catches) {
+  for (const auto &c : result.catches) {
     llvm::json::Object o;
     o["framesFromTarget"] = static_cast<int64_t>(c.framesFromTarget);
     llvm::json::Array segment;
     for (const auto &fn : c.pathSegment)
       segment.push_back(fn);
     o["pathSegment"] = std::move(segment);
+    llvm::json::Array hops;
+    for (const auto &hop : c.hops)
+      hops.push_back(serializePathHop(hop));
+    o["hops"] = std::move(hops);
+    o["callSite"] = c.callSite;
     o["scope"] = serializeTryCatchScope(c.scope);
     arr.push_back(llvm::json::Value(std::move(o)));
   }
@@ -449,16 +520,22 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
         "Exception type to check (e.g. 'std::runtime_error')");
     props["entry_points"] = stringArrayProp(
         "Entry point function names (default: configured entry points)");
+    addSearchLimitProps(props);
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
 
     tools.push_back({"query_exception_safety",
                      "Determine whether a function is protected by try/catch "
-                     "on its call paths from entry points. Reports always, "
-                     "sometimes, or never caught. An ambiguous name returns "
-                     "{ambiguous:true, candidates:[...]} — re-query with "
-                     "'usr'.",
+                     "on its call paths from entry points. protection is "
+                     "always_caught / never_caught / noexcept_barrier only "
+                     "when every path was enumerated (exhaustive:true); "
+                     "sometimes_caught needs one witness of each; "
+                     "observed_caught / observed_uncaught describe the "
+                     "paths examined when the search stopped early "
+                     "(stopReasons) or a path's outcome is unknown. An "
+                     "ambiguous name returns {ambiguous:true, "
+                     "candidates:[...]} — re-query with 'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryExceptionSafety});
   }
@@ -547,16 +624,22 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
         "empty matches any handler");
     props["entry_points"] = stringArrayProp(
         "Entry point function names (default: configured entry points)");
+    addSearchLimitProps(props);
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
     tools.push_back({"query_throw_propagation",
                      "If a function throws the given exception type, is it "
                      "caught before unwinding to an entry point? Reports "
-                     "the protection verdict plus every call path with its "
-                     "try/catch scopes, guards, and where the throw would be "
-                     "caught. An ambiguous name returns {ambiguous:true, "
-                     "candidates:[...]} — re-query with 'usr'.",
+                     "the protection verdict (see query_exception_safety) "
+                     "plus every call path with its exact hops (call "
+                     "sites), try/catch scopes, guards, and outcome: "
+                     "caught (where and by which handler), uncaught "
+                     "(escapes the entry point), terminates (noexcept or "
+                     "thread boundary), or unknown (no context indexed, "
+                     "async boundary). An ambiguous name returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with "
+                     "'usr'.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryThrowPropagation});
   }
@@ -566,8 +649,7 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props = functionProps();
     props["entry_points"] = stringArrayProp(
         "Entry point function names (default: configured entry points)");
-    props["max_paths"] = intProp(
-        "Maximum number of paths to enumerate (default 100)");
+    addSearchLimitProps(props);
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
@@ -585,6 +667,8 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
   // 6d. query_nearest_catches
   {
     llvm::json::Object props = functionProps();
+    props["max_depth"] = intProp(
+        "Maximum number of frames above the function to walk (default 20)");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);

@@ -394,19 +394,25 @@ vycor-cpp megascope query-exception-safety \
   --exception-type std::exception \
   --entry-points RBX::Network::Replicator::readItem \
   --entry-points RBX::Network::ServerReplicator::readItem \
-  | jq -r '.protection, .summary'   # never_caught / sometimes_caught / always_caught
+  | jq -r '.protection, .exhaustive, .summary'   # never_caught / sometimes_caught / always_caught / observed_*
 
 # The same question with every path spelled out (scopes, guards, where
 # the throw would be caught):
 vycor-cpp megascope query-throw-propagation \
   --function RBX::Network::deserializeUnsignedVarint \
   --exception-type std::exception --format ndjson \
-  | jq -r 'select(.callChain) | (if .isCaught then "CAUGHT  " else "UNCAUGHT" end) + " " + (.callChain | join(" -> "))'
+  | jq -r 'select(.callChain) | .outcome + " " + (.callChain | join(" -> ")) + " @" + .hops[-1].callSite'
 ```
 
 `protection: never_caught` means every path from the entry points to the
-target function is unprotected. For functions that consume untrusted input
-this is the primary signal of interest.
+target function is unprotected, and `exhaustive: true` that every path
+was enumerated. For functions that consume untrusted input this is the
+primary signal of interest. Each path is one exact chain of call sites
+(`hops`), so two calls to the same function from the same caller — one
+under a try, one not — are two paths with two outcomes. When the search
+stopped early (`stopReasons` non-empty, `exhaustive: false`) the verdict
+is `observed_caught` / `observed_uncaught`: a statement about the paths
+examined, not about all of them. See `docs/path-analysis.md`.
 
 ### Step 4 — Check call site context for specific callers
 
@@ -444,8 +450,11 @@ vycor-cpp megascope find-call-chain \
 ```
 
 `max_depth` counts edges (not nodes). If every chain is longer than
-`max_depth`, the result is empty (exit code 1) with no partial result —
-increase `max_depth` if you suspect a longer path.
+`max_depth`, the result is empty (exit code 1) with
+`stopReasons: ["depth_limit"]` — increase `max_depth`. `path_limit`
+means more chains exist than `max_paths`; `hub_pruned` lists the
+high-fan-in functions whose ancestry was skipped (`skippedHubs`, raise
+`max_fan_in` or query them with `get_callers`).
 
 ---
 
@@ -512,11 +521,19 @@ appears on stderr.
 
 | `protection` value | Meaning |
 |---|---|
-| `always_caught` | All sampled paths from entry points have a try/catch that covers the target |
-| `never_caught` | No path is protected — any throw propagates uncaught to the entry point |
-| `sometimes_caught` | Mixed — some paths are protected, others are not; review uncaught paths |
-| `noexcept_barrier` | A `noexcept` function sits on the path; a throw would `std::terminate` |
-| `unknown` | No paths found from the given entry points — either the entry points are wrong or the function is unreachable from them in the indexed graph |
+| `always_caught` | Every path from the entry points has a handler that catches the type (search exhaustive, every outcome known) |
+| `never_caught` | No path is protected — a throw propagates uncaught to an entry point on at least one, and on none is it caught (exhaustive) |
+| `sometimes_caught` | Mixed — a caught witness and an uncaught or terminating witness; the response lists both |
+| `noexcept_barrier` | Every path terminates at a `noexcept` function or a spawned thread's entry: a throw would `std::terminate` (exhaustive) |
+| `observed_caught` / `observed_uncaught` | The same as `always` / `never`, over the paths examined only: the search stopped early (`stopReasons`) or some path's outcome is `unknown` |
+| `unknown` | No paths found from the given entry points (wrong entry points, unreachable in the indexed graph, or everything pruned), or every path's outcome is unknown (no context indexed, async boundary) |
+
+Per-path `outcome` (`query_throw_propagation`): `caught` (with
+`caughtAt` / `caughtBy`, and `rethrownAt` for handlers that rethrew on
+the way), `uncaught` (escapes the entry point), `terminates` (noexcept
+or thread boundary, `stopAt` says where), `unknown` (`note` says why).
+`docs/path-analysis.md` has the propagation order and the limits of the
+model.
 
 For security-sensitive functions called on data-plane paths (packet
 deserialization, authentication message handlers), `never_caught` from

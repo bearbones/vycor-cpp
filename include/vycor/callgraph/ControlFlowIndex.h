@@ -81,6 +81,10 @@ struct CatchHandlerInfo {
   // First min(160 chars, 3 lines) of the handler body source text. Empty
   // when the body is macro-expanded or the source range is invalid.
   std::string bodySummary;
+  // The handler body contains a bare `throw;`: the caught exception may
+  // continue to the enclosing scopes. A handler that throws a NEW object
+  // is not a rethrow (the original exception is consumed).
+  bool rethrows = false;
 };
 
 struct TryCatchScope {
@@ -172,6 +176,18 @@ public:
   std::optional<CallSiteContext>
   contextAtSite(const std::string &callSite,
                 const std::string &callerUsrOrName) const;
+
+  // The context of one call-graph edge: among the contexts at `callSite`
+  // whose caller is `callerUsr` (usr or display accepted), the one
+  // recorded for `calleeUsr`, else the one with the smallest callee
+  // identity (a virtual-dispatch expansion or a deferred function-return
+  // join names the static target, so a callee mismatch is expected
+  // there). nullopt when nothing is indexed at the site for that caller —
+  // "missing context", which path consumers must not read as "no
+  // try/catch".
+  std::optional<CallSiteContext>
+  contextForEdge(const std::string &callSite, const std::string &callerUsr,
+                 const std::string &calleeUsr) const;
 
   // All live contexts sharing a spelling (macro expansion gives several
   // call sites one file:line:col). Mirrors contextAtSite; the MCP

@@ -14,6 +14,7 @@
 // limitations under the License.
 
 
+#include "vycor/callgraph/PathSearch.h"
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
@@ -358,163 +359,34 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
     starts = ctx.entryPoints;
   }
 
-  // Reverse DFS from target to start nodes, entirely in interned-id space:
-  // no string materialization per hop and no string-keyed sets — measured
-  // 5.4s -> ms-scale on a 938-TU / 345k-edge graph, where the ancestor
-  // cone is large and names are long. Strings are resolved only for found
-  // paths and skipped hubs. We track the edge used for every hop so the
-  // response can carry kind/confidence/callSite per hop.
-  using SId = StringInterner::Id;
-  const auto &interner = ctx.graph.interner();
-
-  std::set<SId> startSet;
-  for (const auto &st : starts) {
-    if (auto sid = interner.find(st))
-      startSet.insert(*sid);
-  }
-  auto targetId = interner.find(*to);
-  struct FoundPath {
-    std::vector<SId> nodes;                     // start -> ... -> target
-    std::vector<CallGraph::EdgeRef> edges;      // edges[i]: nodes[i] -> nodes[i+1]
-  };
-  std::vector<FoundPath> foundPaths;
-  std::vector<SId> currentPath;                 // target -> ... -> start
-  std::vector<CallGraph::EdgeRef> currentEdges; // parallel to currentPath
-  std::unordered_set<SId> onPath;
-  std::map<SId, size_t> skippedHubs; // id -> stored in-degree
-
-  // Dead-end memo. Without it the simple-path enumeration re-explores the
-  // whole ancestor cone once per permutation — exponential in the no-path
-  // case (and in the ancestry of any near-miss). deadAt[n] = d records
-  // that n's ancestry was exhaustively explored from depth d (budget
-  // maxDepth - d) finding no start, with the failure independent of the
-  // current path; a revisit at depth >= d has no more budget and cannot
-  // succeed. Failures caused by an on-path exclusion or by the maxPaths
-  // early-stop are path/search-state-dependent and are never memoized
-  // (kBlocked poisons cleanness up the recursion). Budget-exhaustion
-  // failures ARE memoizable: the depth comparison encodes the budget.
-  // Corridor prune: one forward BFS from the start set over callee edges
-  // (respecting the same edge filter) records the fewest edges from any
-  // start to each node, bounded by maxDepth. The reverse DFS then only
-  // expands nodes that can still complete a start->...->target path within
-  // budget: minFromStart[node] + depth(node from target) <= maxDepth.
-  // In the no-path case the DFS dies immediately after one O(E) BFS —
-  // previously it enumerated the target's whole ancestor cone.
-  std::unordered_map<SId, unsigned> minFromStart;
-  {
-    std::vector<SId> frontier(startSet.begin(), startSet.end());
-    for (SId st : frontier)
-      minFromStart.emplace(st, 0);
-    unsigned dist = 0;
-    while (!frontier.empty() && dist < static_cast<unsigned>(maxDepth)) {
-      ++dist;
-      std::vector<SId> next;
-      for (SId node : frontier) {
-        for (const auto &edge : ctx.graph.calleeRefsOf(node)) {
-          if (!filter.allowsRef(edge))
-            continue;
-          if (minFromStart.emplace(edge.callee, dist).second)
-            next.push_back(edge.callee);
-        }
-      }
-      frontier = std::move(next);
-    }
-  }
-
-  std::unordered_map<SId, unsigned> deadAt;
-  // callerRefsOf synthesizes virtual-dispatch / deferred-return
-  // expansions; a node can be visited several times at different depths,
-  // so compute once per call.
-  std::unordered_map<SId, std::vector<CallGraph::EdgeRef>> callersMemo;
-  constexpr int kFound = 1, kBlocked = 2;
-
-  std::function<int(SId, unsigned)> dfs = [&](SId node,
-                                              unsigned depth) -> int {
-    if (static_cast<int64_t>(foundPaths.size()) >= maxPaths)
-      return kBlocked;
-    if (depth > static_cast<unsigned>(maxDepth))
-      return 0;
-    auto dit = deadAt.find(node);
-    if (dit != deadAt.end() && depth >= dit->second)
-      return 0;
-
-    currentPath.push_back(node);
-    onPath.insert(node);
-    int flags = 0;
-
-    if (startSet.count(node)) {
-      FoundPath fp;
-      fp.nodes.assign(currentPath.rbegin(), currentPath.rend());
-      fp.edges.assign(currentEdges.rbegin(), currentEdges.rend());
-      foundPaths.push_back(std::move(fp));
-      flags |= kFound;
-    } else if (maxFanIn > 0 && depth > 0 &&
-               ctx.graph.storedInDegree(node) >
-                   static_cast<size_t>(maxFanIn)) {
-      // Hub: expanding its ancestry would dominate the search. Record
-      // and prune; the caller can re-run with a higher max_fan_in or
-      // query the hub directly. Deterministic per node, so it does not
-      // poison the dead-end memo.
-      skippedHubs.emplace(node, ctx.graph.storedInDegree(node));
-    } else {
-      auto cit = callersMemo.find(node);
-      if (cit == callersMemo.end())
-        cit = callersMemo.emplace(node, ctx.graph.callerRefsOf(node)).first;
-      const auto &callers = cit->second;
-      for (const auto &edge : callers) {
-        if (onPath.count(edge.caller)) {
-          flags |= kBlocked; // path-dependent exclusion
-          continue;
-        }
-        if (!filter.allowsRef(edge))
-          continue;
-        // Corridor prune: the caller must be reachable from a start with
-        // enough budget left to descend back to the target.
-        auto mit = minFromStart.find(edge.caller);
-        if (mit == minFromStart.end() ||
-            mit->second + depth + 1 > static_cast<unsigned>(maxDepth))
-          continue;
-        currentEdges.push_back(edge);
-        flags |= dfs(edge.caller, depth + 1);
-        currentEdges.pop_back();
-        if (static_cast<int64_t>(foundPaths.size()) >= maxPaths) {
-          flags |= kBlocked; // exploration truncated, not exhausted
-          break;
-        }
-      }
-    }
-
-    currentPath.pop_back();
-    onPath.erase(node);
-
-    if (!(flags & (kFound | kBlocked))) {
-      auto [it, inserted] = deadAt.emplace(node, depth);
-      if (!inserted && depth < it->second)
-        it->second = depth;
-    }
-    return flags;
-  };
-
-  if (targetId) {
-    auto tmit = minFromStart.find(*targetId);
-    if (tmit != minFromStart.end() &&
-        tmit->second <= static_cast<unsigned>(maxDepth))
-      dfs(*targetId, 0);
-  }
+  // The shared bounded reverse search (callgraph/PathSearch.h): every
+  // hop carries its exact edge, the paths come in canonical order, and
+  // the result says why the enumeration stopped.
+  SearchLimits limits;
+  limits.maxPaths = static_cast<unsigned>(std::max<int64_t>(0, maxPaths));
+  limits.maxDepth = static_cast<unsigned>(std::max<int64_t>(0, maxDepth));
+  limits.maxFanIn = static_cast<size_t>(maxFanIn);
+  auto search = findCallerPaths(
+      ctx.graph, *to, starts, limits, CycleRule::SimpleNodes,
+      [&](const CallGraph::EdgeRef &e) { return filter.allowsRef(e); });
 
   llvm::json::Array pathsJson;
-  for (auto &fp : foundPaths) {
+  for (const auto &path : search.paths) {
     llvm::json::Array chain;
-    for (const auto &edge : fp.edges) {
-      llvm::json::Object hop;
-      hop["from"] = interner.resolve(edge.caller);
-      hop["to"] = interner.resolve(edge.callee);
-      hop["kind"] = edgeKindToString(edge.kind);
-      hop["confidence"] = confidenceToString(edge.confidence);
-      hop["callSite"] = interner.resolve(edge.callSite);
-      if (edge.execContext != ExecutionContext::Synchronous)
-        hop["executionContext"] = executionContextToString(edge.execContext);
-      chain.push_back(llvm::json::Value(std::move(hop)));
+    for (const auto &hop : path.hops) {
+      // from/to stay USR strings (the historical shape); the display
+      // names ride in fromName/toName.
+      llvm::json::Object h;
+      h["from"] = hop.callerUsr;
+      h["to"] = hop.calleeUsr;
+      h["fromName"] = hop.caller;
+      h["toName"] = hop.callee;
+      h["kind"] = edgeKindToString(hop.kind);
+      h["confidence"] = confidenceToString(hop.confidence);
+      h["callSite"] = hop.callSite;
+      if (hop.execContext != ExecutionContext::Synchronous)
+        h["executionContext"] = executionContextToString(hop.execContext);
+      chain.push_back(llvm::json::Value(std::move(h)));
     }
     pathsJson.push_back(llvm::json::Value(std::move(chain)));
   }
@@ -523,17 +395,11 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   auto toName = args.getString("to");
   obj["target"] = toName ? toName->str() : *to;
   attachUsr(obj, ctx, *to, "targetUsr");
-  obj["pathCount"] = static_cast<int64_t>(foundPaths.size());
+  obj["pathCount"] = static_cast<int64_t>(search.paths.size());
   obj["paths"] = std::move(pathsJson);
-  if (!skippedHubs.empty()) {
-    llvm::json::Array hubs;
-    for (const auto &[hubId, inDegree] : skippedHubs) {
-      llvm::json::Object hub;
-      hub["name"] = interner.resolve(hubId);
-      hub["inDegree"] = static_cast<int64_t>(inDegree);
-      hubs.push_back(llvm::json::Value(std::move(hub)));
-    }
-    obj["skippedHubs"] = std::move(hubs);
+  attachSearchFacts(obj, search.stops, search.complete(),
+                    search.exhaustive(), search.skippedHubs);
+  if (!search.skippedHubs.empty()) {
     obj["skippedHubsNote"] =
         "Ancestry of these high-fan-in functions was not expanded "
         "(stored in-degree exceeds max_fan_in). Re-run with a higher "
@@ -541,7 +407,6 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   }
   return llvm::json::Value(std::move(obj));
 }
-
 
 // ============================================================================
 // Tool 8: get_class_hierarchy

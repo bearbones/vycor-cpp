@@ -50,6 +50,7 @@ ControlFlowIndex::scopeSetKey(const std::vector<TryCatchScope> &scopes) {
     for (const auto &h : scope.handlers) {
       keyStr(key, h.caughtType);
       key.push_back(h.isCatchAll ? 1 : 0);
+      key.push_back(h.rethrows ? 1 : 0);
       keyStr(key, h.location);
       keyStr(key, h.bodySummary);
     }
@@ -325,6 +326,29 @@ ControlFlowIndex::contextAtSite(const std::string &callSite,
       return materialize(se);
   }
   return std::nullopt;
+}
+
+std::optional<CallSiteContext>
+ControlFlowIndex::contextForEdge(const std::string &callSite,
+                                 const std::string &callerUsr,
+                                 const std::string &calleeUsr) const {
+  auto contexts = contextsAtSite(callSite);
+  std::vector<CallSiteContext> mine;
+  for (auto &ctx : contexts) {
+    if (ctx.callerUsr == callerUsr || ctx.callerName == callerUsr)
+      mine.push_back(std::move(ctx));
+  }
+  if (mine.empty())
+    return std::nullopt;
+  std::sort(mine.begin(), mine.end(),
+            [&](const CallSiteContext &a, const CallSiteContext &b) {
+              const bool am = a.calleeUsr == calleeUsr;
+              const bool bm = b.calleeUsr == calleeUsr;
+              if (am != bm)
+                return am;
+              return a.calleeUsr < b.calleeUsr;
+            });
+  return std::move(mine.front());
 }
 
 std::vector<CallSiteContext>

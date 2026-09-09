@@ -294,6 +294,10 @@ package F's storage work starts from this layout. Rejecting older
 formats is deliberate: a pre-v10 index has no fingerprints or outcomes
 to trust.
 
+Format v11 (package B, `docs/path-analysis.md`) adds one byte per catch
+handler record (`rethrows`, after `isCatchAll`) in the control-flow
+section; the meta section is unchanged.
+
 ## Measurements
 
 Setup: llvm-project at `extern/llvm-project`, the 938-TU `lib/` subset
