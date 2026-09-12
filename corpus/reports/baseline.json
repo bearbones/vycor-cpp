@@ -1,7 +1,7 @@
 {
  "report_version": 1,
  "revision": {
-  "commit": "ce5ddcd78009030c6e80e975c5e538220ef62ef8",
+  "commit": "89493b105a717fe08c99c0a4a25be2f02ef2ce1f",
   "dirty": false,
   "branch": "feat/validation-corpus"
  },
@@ -24,8 +24,8 @@
   "cpus": 12,
   "python": "3.12.3"
  },
- "started": "2026-09-12T19:28:23+00:00",
- "finished": "2026-09-12T19:28:25+00:00",
+ "started": "2026-09-12T19:38:14+00:00",
+ "finished": "2026-09-12T19:38:16+00:00",
  "reps": 5,
  "fault_injected": null,
  "cases": [
@@ -38,21 +38,21 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search",
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/target.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/target.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 13.8,
-     "peak_rss_kb": 35164
+     "wall_ms": 8.2,
+     "peak_rss_kb": 40808
     },
     {
      "argv": [
@@ -61,7 +61,7 @@
       "--to",
       "target",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
      ]
     },
     {
@@ -73,7 +73,7 @@
       "--max-paths",
       "2",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
      ]
     },
     {
@@ -85,7 +85,7 @@
       "--max-depth",
       "1",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
      ]
     },
     {
@@ -95,7 +95,7 @@
       "--to",
       "nonesuch",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
      ]
     },
     {
@@ -105,7 +105,7 @@
       "--name",
       "target",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
      ]
     }
    ],
@@ -119,7 +119,7 @@
       "edges": 8,
       "failed": 0,
       "files": 2,
-      "index": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs",
       "indexed": 2,
       "mode": "cold",
       "nodes": 6,
@@ -139,7 +139,7 @@
         "--to",
         "target",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -204,7 +204,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241894921201108",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -216,7 +216,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:7:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:7:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -225,7 +225,7 @@
             "toName": "a1"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:2:13",
             "confidence": "Proven",
             "from": "c:@F@a1#",
             "fromName": "a1",
@@ -236,7 +236,7 @@
           ],
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:8:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:8:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -245,7 +245,7 @@
             "toName": "a2"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:3:13",
             "confidence": "Proven",
             "from": "c:@F@a2#",
             "fromName": "a2",
@@ -256,7 +256,7 @@
           ],
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:9:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:9:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -265,7 +265,7 @@
             "toName": "a3"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:4:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:4:13",
             "confidence": "Proven",
             "from": "c:@F@a3#",
             "fromName": "a3",
@@ -276,7 +276,7 @@
           ],
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:10:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:10:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -285,7 +285,7 @@
             "toName": "a4"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:5:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:5:13",
             "confidence": "Proven",
             "from": "c:@F@a4#",
             "fromName": "a4",
@@ -350,11 +350,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 8.2,
-        "min": 7.5,
-        "max": 11.2
+        "median": 5.6,
+        "min": 5.3,
+        "max": 6.6
        },
-       "peak_rss_kb": 19780
+       "peak_rss_kb": 21784
       },
       {
        "id": "path-limit-keeps-canonical-prefix",
@@ -366,7 +366,7 @@
         "--max-paths",
         "2",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -441,7 +441,7 @@
          "complete": false,
          "exhaustive": false,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241894921201108",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -453,7 +453,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:7:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:7:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -462,7 +462,7 @@
             "toName": "a1"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:2:13",
             "confidence": "Proven",
             "from": "c:@F@a1#",
             "fromName": "a1",
@@ -473,7 +473,7 @@
           ],
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:8:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:8:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -482,7 +482,7 @@
             "toName": "a2"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:3:13",
             "confidence": "Proven",
             "from": "c:@F@a2#",
             "fromName": "a2",
@@ -559,11 +559,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.2,
-        "min": 6.9,
-        "max": 8.0
+        "median": 5.9,
+        "min": 5.4,
+        "max": 6.9
        },
-       "peak_rss_kb": 19884
+       "peak_rss_kb": 21812
       },
       {
        "id": "depth-limit-is-complete-not-exhaustive",
@@ -575,7 +575,7 @@
         "--max-depth",
         "1",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
        ],
        "expected": {
         "exit": 1,
@@ -595,7 +595,7 @@
          "complete": true,
          "exhaustive": false,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241894921201108",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -657,11 +657,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.3,
-        "min": 6.8,
-        "max": 7.4
+        "median": 5.6,
+        "min": 5.5,
+        "max": 6.1
        },
-       "peak_rss_kb": 19900
+       "peak_rss_kb": 22432
       },
       {
        "id": "unknown-target-is-not-complete",
@@ -671,7 +671,7 @@
         "--to",
         "nonesuch",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
        ],
        "expected": {
         "exit": 1,
@@ -689,7 +689,7 @@
          "complete": false,
          "exhaustive": false,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241894921201108",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -748,11 +748,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.2,
-        "min": 6.9,
-        "max": 9.7
+        "median": 5.8,
+        "min": 5.5,
+        "max": 6.2
        },
-       "peak_rss_kb": 19804
+       "peak_rss_kb": 22392
       },
       {
        "id": "callers-of-target-in-canonical-order",
@@ -762,7 +762,7 @@
         "--name",
         "target",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -796,28 +796,28 @@
          "callerCount": 4,
          "callers": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:2:13",
            "calleeName": "target",
            "callerName": "a1",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:3:13",
            "calleeName": "target",
            "callerName": "a2",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:4:13",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:4:13",
            "calleeName": "target",
            "callerName": "a3",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:5:13",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/bounded_path_search/main.cpp:5:13",
            "calleeName": "target",
            "callerName": "a4",
            "confidence": "Proven",
@@ -826,7 +826,7 @@
          ],
          "function": "target",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241894921201108",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -870,11 +870,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.0,
-        "min": 6.6,
-        "max": 7.8
+        "median": 5.3,
+        "min": 5.1,
+        "max": 5.6
        },
-       "peak_rss_kb": 19800
+       "peak_rss_kb": 21960
       }
      ]
     }
@@ -891,23 +891,23 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/tu.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/pad2.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 12.8,
-     "peak_rss_kb": 35344
+     "wall_ms": 8.5,
+     "peak_rss_kb": 42540
     },
     {
      "argv": [
@@ -916,7 +916,7 @@
       "--name",
       "entry",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
      ]
     },
     {
@@ -924,23 +924,23 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/tu.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/pad2.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 10.1,
-     "peak_rss_kb": 34420
+     "wall_ms": 7.7,
+     "peak_rss_kb": 40644
     },
     {
      "argv": [
@@ -949,7 +949,7 @@
       "--name",
       "entry",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
      ]
     },
     {
@@ -959,7 +959,7 @@
       "--to",
       "alpha",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
      ]
     },
     {
@@ -969,7 +969,7 @@
       "--name",
       "alpha",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
      ]
     }
    ],
@@ -983,7 +983,7 @@
       "edges": 4,
       "failed": 0,
       "files": 3,
-      "index": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs",
       "indexed": 3,
       "mode": "cold",
       "nodes": 8,
@@ -1009,7 +1009,7 @@
         "--name",
         "entry",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1040,7 +1040,7 @@
          "calleeCount": 1,
          "callees": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp:6:16",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/tu.cpp:6:16",
            "calleeName": "alpha",
            "callerName": "entry",
            "confidence": "Proven",
@@ -1049,7 +1049,7 @@
          ],
          "function": "entry",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303940481748",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895074941130",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1098,11 +1098,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.0,
-        "min": 6.8,
-        "max": 7.2
+        "median": 5.5,
+        "min": 5.1,
+        "max": 5.9
        },
-       "peak_rss_kb": 19792
+       "peak_rss_kb": 22304
       }
      ]
     },
@@ -1115,7 +1115,7 @@
       "edges": 4,
       "failed": 0,
       "files": 3,
-      "index": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs",
       "indexed": 3,
       "mode": "warm",
       "nodes": 8,
@@ -1156,7 +1156,7 @@
         "--name",
         "entry",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1187,7 +1187,7 @@
          "calleeCount": 1,
          "callees": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp:4:16",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/tu.cpp:4:16",
            "calleeName": "beta",
            "callerName": "entry",
            "confidence": "Proven",
@@ -1196,7 +1196,7 @@
          ],
          "function": "entry",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895112609494",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1245,11 +1245,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.5,
-        "min": 7.2,
-        "max": 7.7
+        "median": 6.0,
+        "min": 5.3,
+        "max": 6.4
        },
-       "peak_rss_kb": 19632
+       "peak_rss_kb": 22264
       },
       {
        "id": "alpha-proven-unreachable-after-flag",
@@ -1259,7 +1259,7 @@
         "--to",
         "alpha",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
        ],
        "expected": {
         "exit": 1,
@@ -1277,7 +1277,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895112609494",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1337,11 +1337,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.9,
-        "min": 6.8,
-        "max": 9.8
+        "median": 5.3,
+        "min": 5.2,
+        "max": 6.0
        },
-       "peak_rss_kb": 19780
+       "peak_rss_kb": 22368
       },
       {
        "id": "alpha-still-declared-in-the-tu",
@@ -1351,7 +1351,7 @@
         "--name",
         "alpha",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1363,9 +1363,9 @@
        "observed": {
         "exit": 0,
         "payload": {
-         "file": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+         "file": "/tmp/vycor-corpus-_alr0sk5/compile_flag_invalidation/tu.cpp",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895112609494",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1408,11 +1408,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.8,
-        "min": 5.6,
-        "max": 7.0
+        "median": 5.2,
+        "min": 5.1,
+        "max": 5.5
        },
-       "peak_rss_kb": 19684
+       "peak_rss_kb": 22224
       }
      ]
     }
@@ -1429,23 +1429,23 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/header_change",
+      "/tmp/vycor-corpus-_alr0sk5/header_change",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/tu.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/pad2.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 9.5,
-     "peak_rss_kb": 35440
+     "wall_ms": 9.7,
+     "peak_rss_kb": 41112
     },
     {
      "argv": [
@@ -1454,7 +1454,7 @@
       "--name",
       "via_header",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     },
     {
@@ -1464,7 +1464,7 @@
       "--to",
       "gamma",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     },
     {
@@ -1472,23 +1472,23 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/header_change",
+      "/tmp/vycor-corpus-_alr0sk5/header_change",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/tu.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/header_change/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/header_change/pad2.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 8.2,
-     "peak_rss_kb": 34712
+     "wall_ms": 7.3,
+     "peak_rss_kb": 40620
     },
     {
      "argv": [
@@ -1497,7 +1497,7 @@
       "--name",
       "via_header",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     },
     {
@@ -1507,7 +1507,7 @@
       "--name",
       "gamma",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     },
     {
@@ -1517,7 +1517,7 @@
       "--to",
       "gamma",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     },
     {
@@ -1527,7 +1527,7 @@
       "--to",
       "delta",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
      ]
     }
    ],
@@ -1541,7 +1541,7 @@
       "edges": 4,
       "failed": 0,
       "files": 3,
-      "index": "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs",
       "indexed": 3,
       "mode": "cold",
       "nodes": 7,
@@ -1567,7 +1567,7 @@
         "--name",
         "via_header",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1598,7 +1598,7 @@
          "calleeCount": 1,
          "callees": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/target.h:3:28",
            "calleeName": "gamma",
            "callerName": "via_header",
            "confidence": "Proven",
@@ -1607,7 +1607,7 @@
          ],
          "function": "via_header",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304109008157",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895205839747",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1656,11 +1656,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.6,
-        "min": 5.2,
-        "max": 6.3
+        "median": 5.9,
+        "min": 5.7,
+        "max": 5.9
        },
-       "peak_rss_kb": 19700
+       "peak_rss_kb": 22560
       },
       {
        "id": "main-reaches-gamma",
@@ -1670,7 +1670,7 @@
         "--to",
         "gamma",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1702,7 +1702,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304109008157",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895205839747",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1714,7 +1714,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp:3:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/tu.cpp:3:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -1723,7 +1723,7 @@
             "toName": "via_header"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/target.h:3:28",
             "confidence": "Proven",
             "from": "c:@F@via_header#",
             "fromName": "via_header",
@@ -1783,11 +1783,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.7,
-        "min": 5.3,
-        "max": 6.1
+        "median": 5.8,
+        "min": 5.2,
+        "max": 6.0
        },
-       "peak_rss_kb": 19704
+       "peak_rss_kb": 21812
       }
      ]
     },
@@ -1800,7 +1800,7 @@
       "edges": 4,
       "failed": 0,
       "files": 3,
-      "index": "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs",
       "indexed": 3,
       "mode": "warm",
       "nodes": 7,
@@ -1836,7 +1836,7 @@
         "--name",
         "via_header",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -1867,7 +1867,7 @@
          "calleeCount": 1,
          "callees": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/target.h:3:28",
            "calleeName": "delta",
            "callerName": "via_header",
            "confidence": "Proven",
@@ -1876,7 +1876,7 @@
          ],
          "function": "via_header",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895273689821",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1925,11 +1925,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.5,
-        "min": 4.7,
-        "max": 7.9
+        "median": 5.8,
+        "min": 5.2,
+        "max": 6.2
        },
-       "peak_rss_kb": 19688
+       "peak_rss_kb": 22340
       },
       {
        "id": "gamma-has-no-callers",
@@ -1939,7 +1939,7 @@
         "--name",
         "gamma",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 1,
@@ -1955,7 +1955,7 @@
          "callers": [],
          "function": "gamma",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895273689821",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -1993,11 +1993,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.2,
-        "min": 5.6,
-        "max": 6.7
+        "median": 5.2,
+        "min": 5.0,
+        "max": 5.9
        },
-       "peak_rss_kb": 19672
+       "peak_rss_kb": 22092
       },
       {
        "id": "gamma-is-unknown-not-proven-unreachable",
@@ -2007,7 +2007,7 @@
         "--to",
         "gamma",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 1,
@@ -2024,7 +2024,7 @@
          "complete": false,
          "exhaustive": false,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895273689821",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -2078,11 +2078,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.6,
-        "min": 5.2,
-        "max": 5.9
+        "median": 6.0,
+        "min": 5.1,
+        "max": 6.7
        },
-       "peak_rss_kb": 19696
+       "peak_rss_kb": 22464
       },
       {
        "id": "main-reaches-delta",
@@ -2092,7 +2092,7 @@
         "--to",
         "delta",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/header_change/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2109,7 +2109,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895273689821",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -2121,7 +2121,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp:3:3",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/tu.cpp:3:3",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -2130,7 +2130,7 @@
             "toName": "via_header"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/header_change/target.h:3:28",
             "confidence": "Proven",
             "from": "c:@F@via_header#",
             "fromName": "via_header",
@@ -2185,11 +2185,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.7,
-        "min": 5.6,
-        "max": 6.1
+        "median": 5.9,
+        "min": 5.1,
+        "max": 6.2
        },
-       "peak_rss_kb": 19804
+       "peak_rss_kb": 22328
       }
      ]
     }
@@ -2206,25 +2206,25 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/lib.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/lib.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/pad2.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 142.4,
-     "peak_rss_kb": 57656
+     "wall_ms": 156.1,
+     "peak_rss_kb": 61052
     },
     {
      "argv": [
@@ -2235,7 +2235,7 @@
       "--exception-type",
       "std::exception",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
      ]
     },
     {
@@ -2247,7 +2247,7 @@
       "--exception-type",
       "std::exception",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
      ]
     },
     {
@@ -2259,7 +2259,7 @@
       "--exception-type",
       "std::exception",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
      ]
     },
     {
@@ -2267,27 +2267,27 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/lib.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/lib.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/pad1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad2.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/pad2.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/broken.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/broken.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 11.1,
-     "peak_rss_kb": 35496
+     "wall_ms": 11.2,
+     "peak_rss_kb": 41796
     },
     {
      "argv": [
@@ -2298,7 +2298,7 @@
       "--exception-type",
       "std::exception",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
      ]
     },
     {
@@ -2310,7 +2310,7 @@
       "--exception-type",
       "std::exception",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
      ]
     }
    ],
@@ -2324,7 +2324,7 @@
       "edges": 9,
       "failed": 0,
       "files": 4,
-      "index": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs",
       "indexed": 4,
       "mode": "cold",
       "nodes": 1335,
@@ -2367,7 +2367,7 @@
         "--exception-type",
         "std::exception",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2394,7 +2394,7 @@
          "exhaustive": true,
          "function": "risky",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895397095842",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -2461,7 +2461,7 @@
         {
          "kind": "field",
          "ok": true,
-         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241895397095842\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
         },
         {
          "kind": "regex",
@@ -2474,10 +2474,10 @@
        "latency_ms": {
         "reps": 5,
         "median": 6.6,
-        "min": 5.8,
-        "max": 7.3
+        "min": 6.2,
+        "max": 6.8
        },
-       "peak_rss_kb": 20720
+       "peak_rss_kb": 23132
       },
       {
        "id": "guarded-always-caught",
@@ -2489,7 +2489,7 @@
         "--exception-type",
         "std::exception",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2511,7 +2511,7 @@
          "exhaustive": true,
          "function": "guarded",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895397095842",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -2522,7 +2522,7 @@
          "protection": "always_caught",
          "status": "ok",
          "stopReasons": [],
-         "summary": "c:@F@guarded# throwing std::exception is caught on all 1 path(s) from entry points. Caught by const std::exception & at /tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:13:3.",
+         "summary": "c:@F@guarded# throwing std::exception is caught on all 1 path(s) from entry points. Caught by const std::exception & at /tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:13:3.",
          "terminatingPaths": 0,
          "totalPaths": 1,
          "uncaughtPaths": 0,
@@ -2568,18 +2568,18 @@
         {
          "kind": "field",
          "ok": true,
-         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241895397095842\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
         }
        ],
        "ok": true,
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.7,
-        "min": 6.3,
-        "max": 7.1
+        "median": 6.8,
+        "min": 6.5,
+        "max": 7.6
        },
-       "peak_rss_kb": 20680
+       "peak_rss_kb": 22756
       },
       {
        "id": "propagation-of-risky",
@@ -2591,7 +2591,7 @@
         "--exception-type",
         "std::exception",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2640,7 +2640,7 @@
          "exhaustive": true,
          "function": "risky",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895397095842",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -2655,12 +2655,12 @@
             "safe_caller",
             "risky"
            ],
-           "caughtAt": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:4:3",
+           "caughtAt": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:4:3",
            "caughtBy": "const std::exception &",
            "guardsOnPath": [],
            "hops": [
             {
-             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:11:3",
+             "callSite": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:11:3",
              "confidence": "Proven",
              "from": "main",
              "fromUsr": "c:@F@main#",
@@ -2669,7 +2669,7 @@
              "toUsr": "c:@F@safe_caller#"
             },
             {
-             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:5:5",
+             "callSite": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:5:5",
              "confidence": "Proven",
              "from": "safe_caller",
              "fromUsr": "c:@F@safe_caller#",
@@ -2688,12 +2688,12 @@
                "body": "{\n  }",
                "caughtType": "const std::exception &",
                "isCatchAll": false,
-               "location": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:6:5",
+               "location": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:6:5",
                "rethrows": false
               }
              ],
              "nestingDepth": 0,
-             "tryLocation": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:4:3"
+             "tryLocation": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:4:3"
             }
            ]
           },
@@ -2706,7 +2706,7 @@
            "guardsOnPath": [],
            "hops": [
             {
-             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:12:3",
+             "callSite": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:12:3",
              "confidence": "Proven",
              "from": "main",
              "fromUsr": "c:@F@main#",
@@ -2715,7 +2715,7 @@
              "toUsr": "c:@F@unsafe_caller#"
             },
             {
-             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:9:24",
+             "callSite": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/main.cpp:9:24",
              "confidence": "Proven",
              "from": "unsafe_caller",
              "fromUsr": "c:@F@unsafe_caller#",
@@ -2797,11 +2797,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.9,
-        "min": 6.5,
-        "max": 8.2
+        "median": 6.6,
+        "min": 6.3,
+        "max": 7.2
        },
-       "peak_rss_kb": 20764
+       "peak_rss_kb": 23252
       }
      ]
     },
@@ -2814,7 +2814,7 @@
       "edges": 9,
       "failed": 0,
       "files": 5,
-      "index": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs",
       "indexed": 4,
       "mode": "warm",
       "nodes": 1336,
@@ -2852,7 +2852,7 @@
         "--exception-type",
         "std::exception",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2879,7 +2879,7 @@
          "exhaustive": true,
          "function": "guarded",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895656678409",
           "complete": false,
           "failed": 0,
           "freshness": "unchecked",
@@ -2936,7 +2936,7 @@
         {
          "kind": "field",
          "ok": true,
-         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false, \"partial\": 1, \"requested\": 5}"
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241895656678409\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false, \"partial\": 1, \"requested\": 5}"
         },
         {
          "kind": "regex",
@@ -2948,11 +2948,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.9,
+        "median": 7.3,
         "min": 6.5,
-        "max": 9.1
+        "max": 7.7
        },
-       "peak_rss_kb": 20616
+       "peak_rss_kb": 23152
       },
       {
        "id": "risky-unchanged-by-coverage",
@@ -2964,7 +2964,7 @@
         "--exception-type",
         "std::exception",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/mixed_exception_protection/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -2984,7 +2984,7 @@
          "exhaustive": true,
          "function": "risky",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895656678409",
           "complete": false,
           "failed": 0,
           "freshness": "unchecked",
@@ -3031,18 +3031,18 @@
         {
          "kind": "field",
          "ok": true,
-         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false}"
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241895656678409\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false}"
         }
        ],
        "ok": true,
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.6,
-        "min": 6.3,
-        "max": 7.9
+        "median": 6.8,
+        "min": 6.4,
+        "max": 7.5
        },
-       "peak_rss_kb": 20660
+       "peak_rss_kb": 23204
       }
      ]
     }
@@ -3059,19 +3059,19 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu2.cpp"
      ],
      "exit": 0,
-     "wall_ms": 10.3,
-     "peak_rss_kb": 37348
+     "wall_ms": 8.8,
+     "peak_rss_kb": 42576
     },
     {
      "argv": [
@@ -3080,11 +3080,11 @@
       "--threads",
       "1",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu2.cpp"
      ]
     },
     {
@@ -3093,11 +3093,11 @@
       "--threads",
       "1",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu1.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+      "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu2.cpp"
      ]
     }
    ],
@@ -3111,7 +3111,7 @@
       "edges": 8,
       "failed": 0,
       "files": 2,
-      "index": "/tmp/vycor-corpus-egrx70zn/odr_divergence/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/odr_divergence/index.vycs",
       "indexed": 2,
       "mode": "cold",
       "nodes": 6,
@@ -3131,11 +3131,11 @@
         "--threads",
         "1",
         "--build-path",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence",
         "--source",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu1.cpp",
         "--source",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu2.cpp"
        ],
        "expected": {
         "exit": 0,
@@ -3154,7 +3154,7 @@
        "observed": {
         "exit": 0,
         "payload": null,
-        "stdout": "/tmp/vycor-corpus-egrx70zn/odr_divergence/cls1.hpp:2: ODR violation: 'Cfg' has 2 definitions with differing bodies (/tmp/vycor-corpus-egrx70zn/odr_divergence/cls1.hpp:2, /tmp/vycor-corpus-egrx70zn/odr_divergence/cls2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-egrx70zn/odr_divergence/dup1.hpp:2: ODR violation: 'dup' has 2 definitions with differing bodies (/tmp/vycor-corpus-egrx70zn/odr_divergence/dup1.hpp:2, /tmp/vycor-corpus-egrx70zn/odr_divergence/dup2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-egrx70zn/odr_divergence/magic.hpp:2: ODR violation: 'magic' at /tmp/vycor-corpus-egrx70zn/odr_divergence/magic.hpp:2 compiles to 2 different definitions across TUs \u2014 its body depends on preprocessor state that differs between compile commands. Every TU must see an identical definition.\n"
+        "stdout": "/tmp/vycor-corpus-_alr0sk5/odr_divergence/cls1.hpp:2: ODR violation: 'Cfg' has 2 definitions with differing bodies (/tmp/vycor-corpus-_alr0sk5/odr_divergence/cls1.hpp:2, /tmp/vycor-corpus-_alr0sk5/odr_divergence/cls2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-_alr0sk5/odr_divergence/dup1.hpp:2: ODR violation: 'dup' has 2 definitions with differing bodies (/tmp/vycor-corpus-_alr0sk5/odr_divergence/dup1.hpp:2, /tmp/vycor-corpus-_alr0sk5/odr_divergence/dup2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-_alr0sk5/odr_divergence/magic.hpp:2: ODR violation: 'magic' at /tmp/vycor-corpus-_alr0sk5/odr_divergence/magic.hpp:2 compiles to 2 different definitions across TUs \u2014 its body depends on preprocessor state that differs between compile commands. Every TU must see an identical definition.\n"
        },
        "declared": {},
        "checks": [
@@ -3193,11 +3193,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 12.4,
-        "min": 10.3,
-        "max": 13.4
+        "median": 10.9,
+        "min": 10.2,
+        "max": 12.5
        },
-       "peak_rss_kb": 37120
+       "peak_rss_kb": 42420
       },
       {
        "id": "no-odr-without-the-check",
@@ -3206,11 +3206,11 @@
         "--threads",
         "1",
         "--build-path",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence",
         "--source",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu1.cpp",
         "--source",
-        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+        "/tmp/vycor-corpus-_alr0sk5/odr_divergence/tu2.cpp"
        ],
        "expected": {
         "exit": 0,
@@ -3250,11 +3250,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 11.4,
-        "min": 10.2,
-        "max": 14.5
+        "median": 10.8,
+        "min": 10.5,
+        "max": 11.7
        },
-       "peak_rss_kb": 36852
+       "peak_rss_kb": 41828
       }
      ]
     }
@@ -3271,21 +3271,21 @@
       "megascope",
       "index",
       "--build-path",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity",
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs",
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs",
       "--threads",
       "2",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/f.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.cpp",
       "--source",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp",
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp",
       "--entry-point",
       "main"
      ],
      "exit": 0,
-     "wall_ms": 11.3,
-     "peak_rss_kb": 36220
+     "wall_ms": 8.8,
+     "peak_rss_kb": 42244
     },
     {
      "argv": [
@@ -3294,7 +3294,7 @@
       "--name",
       "f",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3304,7 +3304,7 @@
       "--usr",
       "c:@F@f#I#",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3314,7 +3314,7 @@
       "--usr",
       "c:@F@f#d#",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3324,7 +3324,7 @@
       "--name",
       "main",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3336,7 +3336,7 @@
       "--limit",
       "1",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3346,7 +3346,7 @@
       "--to",
       "f",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3356,7 +3356,7 @@
       "--to-usr",
       "c:@F@f#I#",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     },
     {
@@ -3366,7 +3366,7 @@
       "--to-usr",
       "c:@F@f#d#",
       "--index",
-      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+      "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
      ]
     }
    ],
@@ -3380,7 +3380,7 @@
       "edges": 5,
       "failed": 0,
       "files": 2,
-      "index": "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs",
+      "index": "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs",
       "indexed": 2,
       "mode": "cold",
       "nodes": 5,
@@ -3400,7 +3400,7 @@
         "--name",
         "f",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 4,
@@ -3430,20 +3430,20 @@
          "ambiguous": true,
          "candidates": [
           {
-           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "file": "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.h",
            "line": 2,
            "qualifiedName": "f",
            "usr": "c:@F@f#I#"
           },
           {
-           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "file": "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.h",
            "line": 3,
            "qualifiedName": "f",
            "usr": "c:@F@f#d#"
           }
          ],
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -3500,11 +3500,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.7,
-        "min": 5.2,
-        "max": 6.6
+        "median": 5.5,
+        "min": 5.1,
+        "max": 6.3
        },
-       "peak_rss_kb": 19592
+       "peak_rss_kb": 22192
       },
       {
        "id": "callers-of-f-int",
@@ -3514,7 +3514,7 @@
         "--usr",
         "c:@F@f#I#",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -3564,14 +3564,14 @@
          "callerCount": 2,
          "callers": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:2:18",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:2:18",
            "calleeName": "f",
            "callerName": "g",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:33",
            "calleeName": "f",
            "callerName": "main",
            "confidence": "Proven",
@@ -3580,7 +3580,7 @@
          ],
          "function": "c:@F@f#I#",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -3640,10 +3640,10 @@
        "latency_ms": {
         "reps": 5,
         "median": 5.8,
-        "min": 5.2,
-        "max": 8.1
+        "min": 5.0,
+        "max": 6.5
        },
-       "peak_rss_kb": 19780
+       "peak_rss_kb": 22464
       },
       {
        "id": "callers-of-f-double",
@@ -3653,7 +3653,7 @@
         "--usr",
         "c:@F@f#d#",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -3690,7 +3690,7 @@
          "callerCount": 1,
          "callers": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:3:18",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:3:18",
            "calleeName": "f",
            "callerName": "h",
            "confidence": "Proven",
@@ -3699,7 +3699,7 @@
          ],
          "function": "c:@F@f#d#",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -3754,10 +3754,10 @@
        "latency_ms": {
         "reps": 5,
         "median": 5.9,
-        "min": 5.6,
-        "max": 7.3
+        "min": 5.0,
+        "max": 6.2
        },
-       "peak_rss_kb": 19688
+       "peak_rss_kb": 22400
       },
       {
        "id": "callees-of-main-in-canonical-order",
@@ -3767,7 +3767,7 @@
         "--name",
         "main",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -3798,21 +3798,21 @@
          "calleeCount": 3,
          "callees": [
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:33",
            "calleeName": "f",
            "callerName": "main",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:21",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:21",
            "calleeName": "g",
            "callerName": "main",
            "confidence": "Proven",
            "kind": "DirectCall"
           },
           {
-           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:27",
+           "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:27",
            "calleeName": "h",
            "callerName": "main",
            "confidence": "Proven",
@@ -3821,7 +3821,7 @@
          ],
          "function": "main",
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -3865,11 +3865,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.4,
+        "median": 5.9,
         "min": 5.3,
-        "max": 6.6
+        "max": 6.1
        },
-       "peak_rss_kb": 19696
+       "peak_rss_kb": 21776
       },
       {
        "id": "search-limit-cuts-on-usr",
@@ -3881,7 +3881,7 @@
         "--limit",
         "1",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -3914,7 +3914,7 @@
         "exit": 0,
         "payload": {
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -3924,7 +3924,7 @@
          },
          "matches": [
           {
-           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "file": "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.h",
            "line": 2,
            "qualifiedName": "f",
            "usr": "c:@F@f#I#"
@@ -3985,10 +3985,10 @@
        "latency_ms": {
         "reps": 5,
         "median": 5.6,
-        "min": 5.1,
-        "max": 6.0
+        "min": 5.3,
+        "max": 6.2
        },
-       "peak_rss_kb": 19628
+       "peak_rss_kb": 21960
       },
       {
        "id": "chain-to-name-is-ambiguous",
@@ -3998,7 +3998,7 @@
         "--to",
         "f",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 4,
@@ -4014,20 +4014,20 @@
          "ambiguous": true,
          "candidates": [
           {
-           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "file": "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.h",
            "line": 2,
            "qualifiedName": "f",
            "usr": "c:@F@f#I#"
           },
           {
-           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "file": "/tmp/vycor-corpus-_alr0sk5/overload_identity/f.h",
            "line": 3,
            "qualifiedName": "f",
            "usr": "c:@F@f#d#"
           }
          ],
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -4074,11 +4074,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 5.7,
-        "min": 5.0,
-        "max": 6.7
+        "median": 5.8,
+        "min": 5.5,
+        "max": 6.2
        },
-       "peak_rss_kb": 19652
+       "peak_rss_kb": 21824
       },
       {
        "id": "chains-to-f-int",
@@ -4088,7 +4088,7 @@
         "--to-usr",
         "c:@F@f#I#",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -4180,7 +4180,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -4192,7 +4192,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:21",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:21",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -4201,7 +4201,7 @@
             "toName": "g"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:2:18",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:2:18",
             "confidence": "Proven",
             "from": "c:@F@g#",
             "fromName": "g",
@@ -4212,7 +4212,7 @@
           ],
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:33",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -4302,11 +4302,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 7.0,
-        "min": 6.5,
-        "max": 7.8
+        "median": 5.8,
+        "min": 5.7,
+        "max": 6.1
        },
-       "peak_rss_kb": 19656
+       "peak_rss_kb": 22284
       },
       {
        "id": "chains-to-f-double",
@@ -4316,7 +4316,7 @@
         "--to-usr",
         "c:@F@f#d#",
         "--index",
-        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+        "/tmp/vycor-corpus-_alr0sk5/overload_identity/index.vycs"
        ],
        "expected": {
         "exit": 0,
@@ -4360,7 +4360,7 @@
          "complete": true,
          "exhaustive": true,
          "indexScope": {
-          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241895860832211",
           "complete": true,
           "failed": 0,
           "freshness": "unchecked",
@@ -4372,7 +4372,7 @@
          "paths": [
           [
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:27",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:4:27",
             "confidence": "Proven",
             "from": "c:@F@main#",
             "fromName": "main",
@@ -4381,7 +4381,7 @@
             "toName": "h"
            },
            {
-            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:3:18",
+            "callSite": "/tmp/vycor-corpus-_alr0sk5/overload_identity/main.cpp:3:18",
             "confidence": "Proven",
             "from": "c:@F@h#",
             "fromName": "h",
@@ -4451,11 +4451,11 @@
        "stable_across_reps": true,
        "latency_ms": {
         "reps": 5,
-        "median": 6.4,
-        "min": 5.8,
-        "max": 6.8
+        "median": 5.7,
+        "min": 5.2,
+        "max": 6.3
        },
-       "peak_rss_kb": 19788
+       "peak_rss_kb": 21792
       }
      ]
     }
@@ -4486,48 +4486,48 @@
    "index_bakes": [
     {
      "case": "bounded_path_search",
-     "wall_ms": 13.8,
-     "peak_rss_kb": 35164
-    },
-    {
-     "case": "compile_flag_invalidation",
-     "wall_ms": 12.8,
-     "peak_rss_kb": 35344
-    },
-    {
-     "case": "compile_flag_invalidation",
-     "wall_ms": 10.1,
-     "peak_rss_kb": 34420
-    },
-    {
-     "case": "header_change",
-     "wall_ms": 9.5,
-     "peak_rss_kb": 35440
-    },
-    {
-     "case": "header_change",
      "wall_ms": 8.2,
-     "peak_rss_kb": 34712
+     "peak_rss_kb": 40808
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "wall_ms": 8.5,
+     "peak_rss_kb": 42540
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "wall_ms": 7.7,
+     "peak_rss_kb": 40644
+    },
+    {
+     "case": "header_change",
+     "wall_ms": 9.7,
+     "peak_rss_kb": 41112
+    },
+    {
+     "case": "header_change",
+     "wall_ms": 7.3,
+     "peak_rss_kb": 40620
     },
     {
      "case": "mixed_exception_protection",
-     "wall_ms": 142.4,
-     "peak_rss_kb": 57656
+     "wall_ms": 156.1,
+     "peak_rss_kb": 61052
     },
     {
      "case": "mixed_exception_protection",
-     "wall_ms": 11.1,
-     "peak_rss_kb": 35496
+     "wall_ms": 11.2,
+     "peak_rss_kb": 41796
     },
     {
      "case": "odr_divergence",
-     "wall_ms": 10.3,
-     "peak_rss_kb": 37348
+     "wall_ms": 8.8,
+     "peak_rss_kb": 42576
     },
     {
      "case": "overload_identity",
-     "wall_ms": 11.3,
-     "peak_rss_kb": 36220
+     "wall_ms": 8.8,
+     "peak_rss_kb": 42244
     }
    ],
    "queries": [
@@ -4536,165 +4536,165 @@
      "id": "unbounded",
      "latency_ms": {
       "reps": 5,
-      "median": 8.2,
-      "min": 7.5,
-      "max": 11.2
+      "median": 5.6,
+      "min": 5.3,
+      "max": 6.6
      },
-     "peak_rss_kb": 19780
+     "peak_rss_kb": 21784
     },
     {
      "case": "bounded_path_search",
      "id": "path-limit-keeps-canonical-prefix",
      "latency_ms": {
       "reps": 5,
-      "median": 7.2,
-      "min": 6.9,
-      "max": 8.0
+      "median": 5.9,
+      "min": 5.4,
+      "max": 6.9
      },
-     "peak_rss_kb": 19884
+     "peak_rss_kb": 21812
     },
     {
      "case": "bounded_path_search",
      "id": "depth-limit-is-complete-not-exhaustive",
      "latency_ms": {
       "reps": 5,
-      "median": 7.3,
-      "min": 6.8,
-      "max": 7.4
+      "median": 5.6,
+      "min": 5.5,
+      "max": 6.1
      },
-     "peak_rss_kb": 19900
+     "peak_rss_kb": 22432
     },
     {
      "case": "bounded_path_search",
      "id": "unknown-target-is-not-complete",
      "latency_ms": {
       "reps": 5,
-      "median": 7.2,
-      "min": 6.9,
-      "max": 9.7
+      "median": 5.8,
+      "min": 5.5,
+      "max": 6.2
      },
-     "peak_rss_kb": 19804
+     "peak_rss_kb": 22392
     },
     {
      "case": "bounded_path_search",
      "id": "callers-of-target-in-canonical-order",
      "latency_ms": {
       "reps": 5,
-      "median": 7.0,
-      "min": 6.6,
-      "max": 7.8
+      "median": 5.3,
+      "min": 5.1,
+      "max": 5.6
      },
-     "peak_rss_kb": 19800
+     "peak_rss_kb": 21960
     },
     {
      "case": "compile_flag_invalidation",
      "id": "entry-calls-alpha",
      "latency_ms": {
       "reps": 5,
-      "median": 7.0,
-      "min": 6.8,
-      "max": 7.2
+      "median": 5.5,
+      "min": 5.1,
+      "max": 5.9
      },
-     "peak_rss_kb": 19792
+     "peak_rss_kb": 22304
     },
     {
      "case": "compile_flag_invalidation",
      "id": "entry-calls-beta",
      "latency_ms": {
       "reps": 5,
-      "median": 7.5,
-      "min": 7.2,
-      "max": 7.7
+      "median": 6.0,
+      "min": 5.3,
+      "max": 6.4
      },
-     "peak_rss_kb": 19632
+     "peak_rss_kb": 22264
     },
     {
      "case": "compile_flag_invalidation",
      "id": "alpha-proven-unreachable-after-flag",
      "latency_ms": {
       "reps": 5,
-      "median": 6.9,
-      "min": 6.8,
-      "max": 9.8
+      "median": 5.3,
+      "min": 5.2,
+      "max": 6.0
      },
-     "peak_rss_kb": 19780
+     "peak_rss_kb": 22368
     },
     {
      "case": "compile_flag_invalidation",
      "id": "alpha-still-declared-in-the-tu",
      "latency_ms": {
       "reps": 5,
-      "median": 6.8,
-      "min": 5.6,
-      "max": 7.0
+      "median": 5.2,
+      "min": 5.1,
+      "max": 5.5
      },
-     "peak_rss_kb": 19684
+     "peak_rss_kb": 22224
     },
     {
      "case": "header_change",
      "id": "via-header-calls-gamma",
      "latency_ms": {
       "reps": 5,
-      "median": 5.6,
-      "min": 5.2,
-      "max": 6.3
+      "median": 5.9,
+      "min": 5.7,
+      "max": 5.9
      },
-     "peak_rss_kb": 19700
+     "peak_rss_kb": 22560
     },
     {
      "case": "header_change",
      "id": "main-reaches-gamma",
      "latency_ms": {
       "reps": 5,
-      "median": 5.7,
-      "min": 5.3,
-      "max": 6.1
+      "median": 5.8,
+      "min": 5.2,
+      "max": 6.0
      },
-     "peak_rss_kb": 19704
+     "peak_rss_kb": 21812
     },
     {
      "case": "header_change",
      "id": "via-header-calls-delta",
      "latency_ms": {
       "reps": 5,
-      "median": 5.5,
-      "min": 4.7,
-      "max": 7.9
+      "median": 5.8,
+      "min": 5.2,
+      "max": 6.2
      },
-     "peak_rss_kb": 19688
+     "peak_rss_kb": 22340
     },
     {
      "case": "header_change",
      "id": "gamma-has-no-callers",
      "latency_ms": {
       "reps": 5,
-      "median": 6.2,
-      "min": 5.6,
-      "max": 6.7
+      "median": 5.2,
+      "min": 5.0,
+      "max": 5.9
      },
-     "peak_rss_kb": 19672
+     "peak_rss_kb": 22092
     },
     {
      "case": "header_change",
      "id": "gamma-is-unknown-not-proven-unreachable",
      "latency_ms": {
       "reps": 5,
-      "median": 5.6,
-      "min": 5.2,
-      "max": 5.9
+      "median": 6.0,
+      "min": 5.1,
+      "max": 6.7
      },
-     "peak_rss_kb": 19696
+     "peak_rss_kb": 22464
     },
     {
      "case": "header_change",
      "id": "main-reaches-delta",
      "latency_ms": {
       "reps": 5,
-      "median": 5.7,
-      "min": 5.6,
-      "max": 6.1
+      "median": 5.9,
+      "min": 5.1,
+      "max": 6.2
      },
-     "peak_rss_kb": 19804
+     "peak_rss_kb": 22328
     },
     {
      "case": "mixed_exception_protection",
@@ -4702,87 +4702,87 @@
      "latency_ms": {
       "reps": 5,
       "median": 6.6,
-      "min": 5.8,
-      "max": 7.3
+      "min": 6.2,
+      "max": 6.8
      },
-     "peak_rss_kb": 20720
+     "peak_rss_kb": 23132
     },
     {
      "case": "mixed_exception_protection",
      "id": "guarded-always-caught",
      "latency_ms": {
       "reps": 5,
-      "median": 6.7,
-      "min": 6.3,
-      "max": 7.1
+      "median": 6.8,
+      "min": 6.5,
+      "max": 7.6
      },
-     "peak_rss_kb": 20680
+     "peak_rss_kb": 22756
     },
     {
      "case": "mixed_exception_protection",
      "id": "propagation-of-risky",
      "latency_ms": {
       "reps": 5,
-      "median": 6.9,
-      "min": 6.5,
-      "max": 8.2
+      "median": 6.6,
+      "min": 6.3,
+      "max": 7.2
      },
-     "peak_rss_kb": 20764
+     "peak_rss_kb": 23252
     },
     {
      "case": "mixed_exception_protection",
      "id": "guarded-demoted-to-observed",
      "latency_ms": {
       "reps": 5,
-      "median": 6.9,
+      "median": 7.3,
       "min": 6.5,
-      "max": 9.1
+      "max": 7.7
      },
-     "peak_rss_kb": 20616
+     "peak_rss_kb": 23152
     },
     {
      "case": "mixed_exception_protection",
      "id": "risky-unchanged-by-coverage",
      "latency_ms": {
       "reps": 5,
-      "median": 6.6,
-      "min": 6.3,
-      "max": 7.9
+      "median": 6.8,
+      "min": 6.4,
+      "max": 7.5
      },
-     "peak_rss_kb": 20660
+     "peak_rss_kb": 23204
     },
     {
      "case": "odr_divergence",
      "id": "odr-diag",
      "latency_ms": {
       "reps": 5,
-      "median": 12.4,
-      "min": 10.3,
-      "max": 13.4
+      "median": 10.9,
+      "min": 10.2,
+      "max": 12.5
      },
-     "peak_rss_kb": 37120
+     "peak_rss_kb": 42420
     },
     {
      "case": "odr_divergence",
      "id": "no-odr-without-the-check",
      "latency_ms": {
       "reps": 5,
-      "median": 11.4,
-      "min": 10.2,
-      "max": 14.5
+      "median": 10.8,
+      "min": 10.5,
+      "max": 11.7
      },
-     "peak_rss_kb": 36852
+     "peak_rss_kb": 41828
     },
     {
      "case": "overload_identity",
      "id": "name-is-ambiguous",
      "latency_ms": {
       "reps": 5,
-      "median": 5.7,
-      "min": 5.2,
-      "max": 6.6
+      "median": 5.5,
+      "min": 5.1,
+      "max": 6.3
      },
-     "peak_rss_kb": 19592
+     "peak_rss_kb": 22192
     },
     {
      "case": "overload_identity",
@@ -4790,10 +4790,10 @@
      "latency_ms": {
       "reps": 5,
       "median": 5.8,
-      "min": 5.2,
-      "max": 8.1
+      "min": 5.0,
+      "max": 6.5
      },
-     "peak_rss_kb": 19780
+     "peak_rss_kb": 22464
     },
     {
      "case": "overload_identity",
@@ -4801,21 +4801,21 @@
      "latency_ms": {
       "reps": 5,
       "median": 5.9,
-      "min": 5.6,
-      "max": 7.3
+      "min": 5.0,
+      "max": 6.2
      },
-     "peak_rss_kb": 19688
+     "peak_rss_kb": 22400
     },
     {
      "case": "overload_identity",
      "id": "callees-of-main-in-canonical-order",
      "latency_ms": {
       "reps": 5,
-      "median": 5.4,
+      "median": 5.9,
       "min": 5.3,
-      "max": 6.6
+      "max": 6.1
      },
-     "peak_rss_kb": 19696
+     "peak_rss_kb": 21776
     },
     {
      "case": "overload_identity",
@@ -4823,46 +4823,46 @@
      "latency_ms": {
       "reps": 5,
       "median": 5.6,
-      "min": 5.1,
-      "max": 6.0
+      "min": 5.3,
+      "max": 6.2
      },
-     "peak_rss_kb": 19628
+     "peak_rss_kb": 21960
     },
     {
      "case": "overload_identity",
      "id": "chain-to-name-is-ambiguous",
      "latency_ms": {
       "reps": 5,
-      "median": 5.7,
-      "min": 5.0,
-      "max": 6.7
+      "median": 5.8,
+      "min": 5.5,
+      "max": 6.2
      },
-     "peak_rss_kb": 19652
+     "peak_rss_kb": 21824
     },
     {
      "case": "overload_identity",
      "id": "chains-to-f-int",
      "latency_ms": {
       "reps": 5,
-      "median": 7.0,
-      "min": 6.5,
-      "max": 7.8
+      "median": 5.8,
+      "min": 5.7,
+      "max": 6.1
      },
-     "peak_rss_kb": 19656
+     "peak_rss_kb": 22284
     },
     {
      "case": "overload_identity",
      "id": "chains-to-f-double",
      "latency_ms": {
       "reps": 5,
-      "median": 6.4,
-      "min": 5.8,
-      "max": 6.8
+      "median": 5.7,
+      "min": 5.2,
+      "max": 6.3
      },
-     "peak_rss_kb": 19788
+     "peak_rss_kb": 21792
     }
    ],
-   "query_median_of_medians_ms": 6.7
+   "query_median_of_medians_ms": 5.8
   }
  },
  "ok": true
