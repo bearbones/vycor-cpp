@@ -50,5 +50,13 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      - name: Toolchain include search paths
+        # The header search the bake records as warm-start dependencies
+        # (docs/index-provenance.md); printed so a stamp that looks
+        # wrong in a test log can be read against the driver's own view.
+        run: |
+          clang++-${{ matrix.llvm-version }} -v -x c++ -E /dev/null -o /dev/null 2>&1 | sed -n '/#include <...> search starts here/,/End of search list/p'
+          ls -la /usr/include/c++/ /usr/lib/gcc/x86_64-linux-gnu/ 2>&1 | head -20
+
       - name: Test
         run: cd build && ctest --output-on-failure
