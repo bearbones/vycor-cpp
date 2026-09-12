@@ -111,7 +111,7 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
 
   auto result = ctx.oracle.queryExceptionProtection(
       *ident, exceptionType, entryPointsArg(args, ctx), limits,
-      ctx.facts.coverage.complete());
+      ctx.facts.coversRequested());
 
   llvm::json::Object obj;
   auto function = args.getString("function");
@@ -412,7 +412,7 @@ handleQueryThrowPropagation(const llvm::json::Object &args,
 
   auto result = ctx.oracle.queryThrowPropagation(
       *ident, exceptionType, entryPointsArg(args, ctx), limits,
-      ctx.facts.coverage.complete());
+      ctx.facts.coversRequested());
 
   llvm::json::Object obj;
   auto function = args.getString("function");
@@ -531,11 +531,13 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
                      "Determine whether a function is protected by try/catch "
                      "on its call paths from entry points. protection is "
                      "always_caught / never_caught / noexcept_barrier only "
-                     "when every path was enumerated (exhaustive:true); "
-                     "sometimes_caught needs one witness of each; "
-                     "observed_caught / observed_uncaught describe the "
-                     "paths examined when the search stopped early "
-                     "(stopReasons) or a path's outcome is unknown. An "
+                     "when every path was enumerated (exhaustive:true) and "
+                     "the index holds every requested TU "
+                     "(indexScope.complete:true); sometimes_caught needs "
+                     "one witness of each; observed_caught / "
+                     "observed_uncaught describe the paths examined when "
+                     "the search stopped early (stopReasons), the index is "
+                     "incomplete, or a path's outcome is unknown. An "
                      "ambiguous name returns {ambiguous:true, "
                      "candidates:[...]} — re-query with 'usr'.",
                      llvm::json::Value(std::move(schema)),

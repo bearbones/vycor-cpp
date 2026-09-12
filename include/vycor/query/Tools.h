@@ -75,9 +75,21 @@ struct IndexFacts {
   /// no saved bake to cite (the ephemeral mode).
   std::string bake;
   IndexFreshness freshness = IndexFreshness::Unknown;
+  /// Whether the bake registered channel types (SnapshotMeta::channelTypes).
+  /// Without them no channel site was ever indexed, and the channel tools
+  /// are `unavailable` rather than empty. Adapters always hand handlers a
+  /// ChannelIndex, so its emptiness cannot tell the two apart.
+  bool channelsIndexed = false;
 
-  /// Facts of a loaded or in-memory meta: coverageOf(meta) and the
-  /// provenance reference (empty when the meta records no bake).
+  /// Whether an adapter stated these facts at all.
+  bool stated() const { return freshness != IndexFreshness::Unknown; }
+  /// The coverage precondition of a universal verdict: stated and
+  /// complete. Unstated facts fail closed (docs/result-contract.md).
+  bool coversRequested() const { return stated() && coverage.complete(); }
+
+  /// Facts of a loaded or in-memory meta: coverageOf(meta), the
+  /// provenance reference (empty when the meta records no bake), and
+  /// whether channel types were registered.
   static IndexFacts of(const SnapshotMeta &meta, IndexFreshness freshness);
 };
 
@@ -104,8 +116,9 @@ struct ToolContext {
   const IndexSummary *summary = nullptr;
   /// Where the indexes came from and how much of the requested scope
   /// they hold (docs/result-contract.md). Set by the adapter that owns
-  /// the indexes; the default (vacuous coverage, freshness unknown) is
-  /// what a handler called directly, as the unit tests do, sees.
+  /// the indexes; the default (freshness unknown, nothing indexed) is
+  /// what a handler called directly, as the unit tests do, sees, and it
+  /// fails closed: no universal verdict, no channel facts.
   IndexFacts facts;
 };
 

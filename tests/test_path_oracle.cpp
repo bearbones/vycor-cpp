@@ -788,6 +788,8 @@ int main() { try { mid(); } catch (...) {} }
   ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
   std::vector<std::string> eps = {"main"};
   ToolContext ctx{b.ix.graph, oracle, b.ix.cfIndex, eps};
+  // A universal verdict needs stated coverage (docs/result-contract.md).
+  ctx.facts.freshness = IndexFreshness::Baked;
   llvm::json::Object args;
   args["function"] = "target";
   args["exception_type"] = "int";

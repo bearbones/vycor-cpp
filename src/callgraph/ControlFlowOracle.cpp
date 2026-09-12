@@ -642,6 +642,11 @@ ControlFlowOracle::buildSummary(const ExceptionPathResult &result,
       if (result.terminatesCount > 0)
         ss << " (" << result.terminatesCount << " terminate, "
            << result.unknownCount << " unknown)";
+      // A would-be noexcept_barrier demoted by the search bound or the
+      // coverage: say which, as the observed verdicts do.
+      if (result.terminatesCount > 0 && result.unknownCount == 0 &&
+          !result.verdictExhaustive)
+        ss << "; every observed path terminates, but " << whyObserved();
       ss << ".";
     }
     break;

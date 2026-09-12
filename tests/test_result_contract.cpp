@@ -150,6 +150,8 @@ struct Fixture {
             &baked.ix.channels, &cache} {
     ctx.facts = IndexFacts::of(metaWith({TuStatus::Indexed}, "e3b0"),
                                IndexFreshness::Unchecked);
+    // As if the bake had registered channel types (it holds no site).
+    ctx.facts.channelsIndexed = true;
   }
 
   llvm::json::Object run(llvm::StringRef tool,
@@ -282,11 +284,21 @@ TEST_CASE("IndexFacts::of cites the bake and the coverage",
                             IndexFreshness::Baked);
     CHECK(f.bake.empty());
     CHECK(f.coverage.complete());
+    CHECK(f.coversRequested());
+    CHECK_FALSE(f.channelsIndexed);
   }
-  SECTION("the default is vacuous coverage, freshness unknown") {
+  SECTION("channel types registered by the bake") {
+    SnapshotMeta meta = metaWith({TuStatus::Indexed});
+    meta.channelTypes.push_back(ChannelTypeSpec{});
+    CHECK(IndexFacts::of(meta, IndexFreshness::Unchecked).channelsIndexed);
+  }
+  SECTION("the default is unstated and fails closed") {
     IndexFacts f;
-    CHECK(f.coverage.complete());
     CHECK(f.freshness == IndexFreshness::Unknown);
+    CHECK_FALSE(f.stated());
+    CHECK(f.coverage.complete()); // vacuous
+    CHECK_FALSE(f.coversRequested());
+    CHECK_FALSE(f.channelsIndexed);
   }
 }
 
@@ -439,15 +451,45 @@ TEST_CASE("a named thing the index lacks is not_found", "[query][contract]") {
 TEST_CASE("absent semantic information is unavailable, exit 3",
           "[query][contract][cli]") {
   Fixture fx(kMixedFixture);
-  fx.ctx.channels = nullptr; // started without channel types
+  // The real condition: the adapters always pass a ChannelIndex, so an
+  // index baked without channel types is an empty one, not a null one.
+  fx.ctx.facts.channelsIndexed = false;
+  REQUIRE(fx.ctx.channels != nullptr);
   auto chan = fx.run("query_channel", {{"channel_id", "c1"}});
   CHECK(chan.getString("status") == "unavailable");
   CHECK(exitCodeFor(valueOf(chan), "") == kExitIndex);
   auto order = fx.run("explain_ordering", {{"call_site_a", "/a.cpp:1:1"},
                                            {"call_site_b", "/b.cpp:1:1"}});
   CHECK(order.getString("status") == "unavailable");
+  // The listing tools too: an empty list would claim there are none.
+  auto list = fx.run("list_channels", {});
+  CHECK(list.getString("status") == "unavailable");
+  CHECK(exitCodeFor(valueOf(list), "channels") == kExitIndex);
+  auto forFn = fx.run("query_channels_for_function", {{"function", "main"}});
+  CHECK(forFn.getString("status") == "unavailable");
   auto mcp = objectOf(wrapToolResult(valueOf(chan)));
   CHECK(mcp.getBoolean("isError") == true);
+
+  // With channel types registered, the same index answers empty and ok.
+  fx.ctx.facts.channelsIndexed = true;
+  auto listed = fx.run("list_channels", {});
+  CHECK(listed.getString("status") == "ok");
+  CHECK(listed.getInteger("count") == 0);
+  fx.ctx.channels = nullptr;
+  CHECK(fx.run("list_channels", {}).getString("status") == "unavailable");
+}
+
+TEST_CASE("unstated index facts never yield a universal verdict",
+          "[query][contract][oracle]") {
+  Fixture fx(kCaughtFixture);
+  fx.ctx.facts = IndexFacts{}; // an adapter that said nothing
+  auto out = fx.run("query_exception_safety", {{"function", "target"}});
+  CHECK(out.getString("protection") == "observed_caught");
+  CHECK(out.getBoolean("exhaustive") == true); // the search fact alone
+  CHECK(scopeOf(out).getString("freshness") == "unknown");
+  CHECK(scopeOf(out).getBoolean("complete") == true); // vacuous
+  CHECK(out.getString("summary")->contains(
+      "the index does not cover every requested TU"));
 }
 
 TEST_CASE("index failure exits 3 before any tool runs", "[contract][cli]") {
@@ -526,6 +568,10 @@ int main() { wall(); }
   auto part = barrier.run("query_exception_safety", {{"function", "target"}});
   CHECK(part.getString("protection") == "unknown");
   CHECK(part.getInteger("terminatingPaths") == 1);
+  // The demotion says why, as the observed verdicts do.
+  CHECK(part.getString("summary")->contains(
+      "every observed path terminates, but the index does not cover every "
+      "requested TU"));
 }
 
 TEST_CASE("sometimes_caught needs two witnesses and is never demoted",

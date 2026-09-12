@@ -117,6 +117,7 @@ IndexFacts IndexFacts::of(const SnapshotMeta &meta, IndexFreshness freshness) {
     f.bake = meta.provenance.environment + "@" +
              std::to_string(meta.provenance.bakeStartNs);
   f.freshness = freshness;
+  f.channelsIndexed = !meta.channelTypes.empty();
   return f;
 }
 

@@ -985,6 +985,7 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
   snap->meta.collapsePaths = collapsePaths;
+  snap->meta.channelTypes = channelCfg.registeredTypes;
   // The in-memory index carries the same coverage facts a saved one
   // would, and an incomplete bake is said out loud: a query over it
   // cannot tell that a TU's facts are missing.

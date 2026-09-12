@@ -41,7 +41,7 @@ prose.
 | `ambiguous` | the identity names several functions or call sites; pick one and re-query | `ambiguous: true`, `candidates`, the tool's disambiguation fields |
 | `usage_error` | the arguments are malformed: a parameter is missing, has the wrong type, or an invalid value | `error` |
 | `not_found` | the arguments are well-formed and name something the index does not contain (a function, a call site, a channel, a channel site) | `error` |
-| `unavailable` | the facts the tool needs are not loaded or were never indexed (the channel index when the adapter was started without channel types) | `error` |
+| `unavailable` | the facts the tool needs are not loaded or were never indexed (the channel tools over a bake that registered no channel types; `reindex_tu` without a compilation database) | `error` |
 
 An empty, complete answer is `ok` with an empty record list, not an
 error. `not_found` is for a named thing that is absent; the message
@@ -84,8 +84,11 @@ proof:
 
 - `indexScope.complete`: every requested TU parsed cleanly. A partial
   TU contributed facts from an errored AST; a failed TU contributed
-  none. A function that lives in a failed TU is `not_found`, and a
-  handler that lives there is invisible to every path tool.
+  none. A function that lives in a failed TU is `not_found` to
+  `lookup_function` (the by-name edge tools, `get_callers` and
+  `get_callees`, answer `ok` with an empty list for any name without
+  edges, as they always have), and a handler that lives there is
+  invisible to every path tool.
 - `complete` / `exhaustive` / `stopReasons` / `skippedHubs` on the path
   tools: the search facts of `docs/path-analysis.md`. `exhaustive`
   means every path within the indexed graph was enumerated; it says
@@ -102,7 +105,16 @@ observed one (`observed_caught`, `observed_uncaught`) or `unknown`, the
 counts and witnesses are reported as found, and the summary says which
 condition failed. `sometimes_caught` needs two witnesses and is never
 demoted. A capped search and an index missing a requested TU therefore
-cannot emit an unconditional claim.
+cannot emit an unconditional claim. The gate fails closed: a handler
+whose adapter stated no facts (`freshness: unknown`) is treated as
+incomplete, and a handler called directly gets an observed verdict.
+
+The channel tools have their own precondition: a bake that registered
+channel types. The adapters always hand handlers a channel index, so an
+index baked without channel types is an empty one, and an empty answer
+over it would claim there are no channels. `IndexFacts::channelsIndexed`
+(from `SnapshotMeta::channelTypes`) is what the four channel tools
+check; without it every one of them is `unavailable`.
 
 ### Exit codes
 
@@ -162,8 +174,10 @@ they were. Two things to check:
 
 - a script that treated an MCP error's text as the message reads
   `.error` of the JSON text now;
-- a script that expected exit 1 from a channel tool run without a
-  channel index gets exit 3.
+- a script that expected exit 1 from `query_channel` or
+  `explain_ordering`, or an empty `ok` from `list_channels` or
+  `query_channels_for_function`, over an index baked without channel
+  types gets `unavailable`, exit 3.
 
 Scripts that classified errors by message prefix should read `status`;
 the prefixes still happen to hold for the current messages but are no
@@ -171,11 +185,12 @@ longer a contract.
 
 ## Implementation
 
-`ToolContext::facts` (`IndexFacts {coverage, bake, freshness}`) is set
-by the adapter that owns the index: the query verbs from the loaded
-meta (`freshness: unchecked`), the ephemeral bake from its in-memory
-meta (`baked`, no `bake`), `serve` from the meta it saved or kept
-(`baked`). `IndexFacts::of(meta, freshness)` builds it.
+`ToolContext::facts` (`IndexFacts {coverage, bake, freshness,
+channelsIndexed}`) is set by the adapter that owns the index: the query
+verbs from the loaded meta (`freshness: unchecked`), the ephemeral bake
+from its in-memory meta (`baked`, no `bake`), `serve` from the meta it
+saved or kept (`baked`). `IndexFacts::of(meta, freshness)` builds it;
+`coversRequested()` is the verdict gate (stated and complete).
 
 `runTool(entry, args, ctx)` runs the handler and passes the payload
 through `completeResult(payload, ctx)`, which stamps `status` (from the
@@ -187,7 +202,7 @@ for `exitCodeFor` and `wrapToolResult`.
 The coverage gate is `ControlFlowOracle::queryExceptionProtection` and
 `queryThrowPropagation`'s `indexComplete` argument: `verdictExhaustive
 = search.exhaustive && unknownCount == 0 && indexComplete`. The
-exception tools pass `ctx.facts.coverage.complete()`.
+exception tools pass `ctx.facts.coversRequested()`.
 
 ## Tests
 

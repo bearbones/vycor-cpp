@@ -1410,6 +1410,7 @@ int main(int argc, const char **argv) {
       // No index file: the coverage of this in-memory bake, with no
       // saved bake to cite.
       vycor::SnapshotMeta meta;
+      meta.channelTypes = channelCfg.registeredTypes;
       meta.files = currentStamps;
       vycor::SnapshotIO::recordOutcomes(meta, outcomes);
       coverage = vycor::coverageOf(meta);
