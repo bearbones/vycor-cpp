@@ -1161,12 +1161,28 @@ SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
   std::vector<bool> dirty(current.size(), false);
   DirtyReport why;
   why.reasons.assign(current.size(), DirtyReason::Clean);
+  why.detail.assign(current.size(), std::string());
+  auto stampText = [](const FileStamp &fs) {
+    if (fs.mtimeNs == 0)
+      return std::string("unstable or absent");
+    return "mtime " + std::to_string(fs.mtimeNs / kNsPerSecond) + "." +
+           std::to_string(fs.mtimeNs % kNsPerSecond) + " size " +
+           std::to_string(fs.size);
+  };
   for (size_t i = 0; i < current.size(); ++i) {
     auto it = recorded.find(current[i].path);
-    if (it == recorded.end() || !sameTuVersion(meta.files[it->second],
-                                               current[i])) {
+    if (it == recorded.end()) {
       dirty[i] = true;
       why.reasons[i] = DirtyReason::Stamp;
+      why.detail[i] = "not recorded in the index";
+      continue;
+    }
+    if (!sameTuVersion(meta.files[it->second], current[i])) {
+      dirty[i] = true;
+      why.reasons[i] = DirtyReason::Stamp;
+      why.detail[i] = "own stamp changed (recorded " +
+                      stampText(meta.files[it->second]) + ", now " +
+                      stampText(current[i]) + ")";
       continue;
     }
     const size_t r = it->second;
@@ -1177,6 +1193,7 @@ SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
                          meta.fingerprints[r] != (*fingerprints)[i])) {
       dirty[i] = true;
       why.reasons[i] = DirtyReason::Inputs;
+      why.detail[i] = "compile inputs changed (fingerprint differs)";
       ++why.viaInputs;
       continue;
     }
@@ -1185,6 +1202,9 @@ SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
         if (id < depChanged.size() && depChanged[id]) {
           dirty[i] = true;
           why.reasons[i] = DirtyReason::Deps;
+          why.detail[i] = "opened file changed: " + meta.deps[id].path +
+                          " (recorded " + stampText(meta.deps[id]) +
+                          ", now " + stampText(depsNow[id]) + ")";
           ++why.viaDeps;
           break;
         }
@@ -1200,6 +1220,7 @@ SnapshotIO::dirtyTUs(const SnapshotMeta &meta,
          meta.outcomes[r].status != TuStatus::Indexed)) {
       dirty[i] = true;
       why.reasons[i] = DirtyReason::Retry;
+      why.detail[i] = "last parse did not end indexed";
       ++why.retried;
     }
   }

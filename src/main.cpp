@@ -1218,6 +1218,22 @@ int main(int argc, const char **argv) {
           llvm::errs() << "megascope: " << changed << " of " << files.size()
                        << " selected TUs are new or changed — full "
                           "rebuild instead of a warm refresh\n";
+          // Say which, and why: an unexpected cold rebuild is usually a
+          // stamp the bake did not expect to move (a header a package
+          // manager rewrote, a clock, a copied tree).
+          size_t listed = 0;
+          for (size_t i = 0; i < dirtyFlags.size(); ++i) {
+            if (!dirtyFlags[i] ||
+                dirtyWhy.reasons[i] == vycor::SnapshotIO::DirtyReason::Retry)
+              continue;
+            if (++listed > 12) {
+              llvm::errs() << "megascope:   ... and " << (changed - 12)
+                           << " more\n";
+              break;
+            }
+            llvm::errs() << "megascope:   " << currentStamps[i].path << ": "
+                         << dirtyWhy.detail[i] << "\n";
+          }
         } else {
           std::set<std::string> current(files.begin(), files.end());
           std::vector<std::string> toDrop, toBake;
@@ -1290,6 +1306,12 @@ int main(int argc, const char **argv) {
                              << " for changed compile inputs, "
                              << dirtyWhy.retried
                              << " retried after a failed parse...\n";
+                if (McpVerbose) {
+                  for (size_t i = 0; i < dirtyFlags.size(); ++i)
+                    if (dirtyFlags[i])
+                      llvm::errs() << "megascope:   " << currentStamps[i].path
+                                   << ": " << dirtyWhy.detail[i] << "\n";
+                }
                 auto bakeStart = StatsClock::now();
                 auto fresh = runBake(toBake);
                 warmBakeMs = msSince(bakeStart);
