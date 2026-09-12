@@ -164,21 +164,26 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
     return true;
   };
 
-  // Both lists come out of an unordered map; order them by location so
-  // offset/limit pages are stable across processes and the output is
-  // deterministic.
+  // Both lists come out of an unordered map; order them by (file, line,
+  // usr) — docs/deterministic-output.md — so offset/limit pages are
+  // stable across processes and the output is deterministic. The usr,
+  // not the display name, breaks a location tie (a macro defining two
+  // functions): the two orders differ, e.g. for a static function whose
+  // usr carries its file. An entry without a node falls back to its
+  // display name, which is unique in the results map.
   struct Entry {
     llvm::StringRef file;
     unsigned line;
     const std::string *name;
     const CallGraphNode *node;
+    const std::string &key() const { return node ? node->usr : *name; }
   };
   auto byLocation = [](const Entry &a, const Entry &b) {
     if (a.file != b.file)
       return a.file < b.file;
     if (a.line != b.line)
       return a.line < b.line;
-    return *a.name < *b.name;
+    return a.key() < b.key();
   };
   auto toJson = [](const Entry &e) {
     llvm::json::Object entry;

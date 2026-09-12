@@ -219,8 +219,10 @@ struct HandGraph {
 };
 
 /// Two overloads of `f` (same qualified name, different usrs), two
-/// callers of `g` at two sites, and two dead functions at one location,
-/// inserted in the given order.
+/// callers of `g` at two sites, and two dead functions at one location
+/// whose name order (dead_x, dead_y) is the reverse of their usr order
+/// (dead_x is file-local, so its usr carries the file), inserted in the
+/// given order.
 HandGraph tieGraph(bool reversed) {
   HandGraph h;
   std::vector<CallGraphNode> nodes = {
@@ -230,7 +232,7 @@ HandGraph tieGraph(bool reversed) {
       {"g", "g.cpp", 1, false, false, "", "c:@F@g#"},
       {"caller_a", "c.cpp", 1, false, false, "", "c:@F@caller_a#"},
       {"caller_b", "c.cpp", 2, false, false, "", "c:@F@caller_b#"},
-      {"dead_x", "macro.cpp", 7, false, false, "", "c:@F@dead_x#"},
+      {"dead_x", "macro.cpp", 7, false, false, "", "c:macro.cpp@F@dead_x#"},
       {"dead_y", "macro.cpp", 7, false, false, "", "c:@F@dead_y#"},
   };
   std::vector<CallGraphEdge> edges = {
@@ -304,16 +306,17 @@ TEST_CASE("ties break the same way whatever the insertion order",
     CHECK(ra == b.run("graph_summary", args));
   }
 
-  SECTION("analyze_dead_code: one location, two functions") {
+  SECTION("analyze_dead_code: one location, two functions, usr order") {
     llvm::json::Object args;
     std::string ra = a.run("analyze_dead_code", args);
     CHECK(ra == b.run("analyze_dead_code", args));
-    CHECK(ra.find("dead_x") < ra.find("dead_y"));
+    // "c:@F@dead_y#" < "c:macro.cpp@F@dead_x#": the usr, not the name.
+    CHECK(ra.find("dead_y") < ra.find("dead_x"));
     llvm::json::Object page{{"limit", 1}, {"offset", 1}};
     std::string pa = a.run("analyze_dead_code", page);
     CHECK(pa == b.run("analyze_dead_code", page));
-    CHECK(pa.find("dead_y") != std::string::npos);
-    CHECK(pa.find("dead_x") == std::string::npos);
+    CHECK(pa.find("dead_x") != std::string::npos);
+    CHECK(pa.find("dead_y") == std::string::npos);
   }
 
   SECTION("a name only a removed TU knew is unknown, as in a clean bake") {
@@ -347,11 +350,11 @@ TEST_CASE("ties break the same way whatever the insertion order",
 
   SECTION("list_callback_sites and thread entries") {
     for (auto &h : {&a, &b}) {
-      h->graph.addEdge({"c:@F@caller_b#", "c:@F@dead_x#",
+      h->graph.addEdge({"c:@F@caller_b#", "c:macro.cpp@F@dead_x#",
                         EdgeKind::FunctionPointer, Confidence::Plausible,
                         "c.cpp:2:40", 1, ExecutionContext::Synchronous},
                        "tu.cpp");
-      h->graph.addEdge({"c:@F@caller_a#", "c:@F@dead_x#",
+      h->graph.addEdge({"c:@F@caller_a#", "c:macro.cpp@F@dead_x#",
                         EdgeKind::FunctionPointer, Confidence::Plausible,
                         "c.cpp:1:40", 1, ExecutionContext::Synchronous},
                        "tu.cpp");
