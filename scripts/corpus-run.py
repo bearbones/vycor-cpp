@@ -296,8 +296,10 @@ class Runner:
         for e in entry_points:
             argv += ["--entry-point", e]
         code, out, err, wall, rss = run_measured(self.command(argv), d)
+        # The bake's own account of what it refreshed and why (stderr) is
+        # the evidence when an index check fails.
         log.append({"argv": argv, "exit": code, "wall_ms": round(wall, 1),
-                    "peak_rss_kb": rss})
+                    "peak_rss_kb": rss, "stderr": err[-2000:]})
         if self.verbose:
             print(f"$ {' '.join(argv)} -> {code} ({wall:.0f} ms)",
                   file=sys.stderr)
@@ -393,6 +395,7 @@ class Runner:
                                                report["commands"])
                 pr = {"name": phase.get("name", f"phase{i}"),
                       "index_summary": summary, "index_checks": [],
+                      "index_stderr": report["commands"][-1]["stderr"],
                       "queries": []}
                 for k, v in phase.get("index", {}).items():
                     pr["index_checks"].append({
@@ -543,9 +546,12 @@ def print_summary(report: dict) -> None:
         print(f"{mark} {c['name']}" + (f": {c['error']}" if c["error"]
                                        else ""))
         for ph in c["phases"]:
-            for k in ph["index_checks"]:
-                if not k["ok"]:
-                    print(f"       [{ph['name']}] {k['detail']}")
+            failed_index = [k for k in ph["index_checks"] if not k["ok"]]
+            for k in failed_index:
+                print(f"       [{ph['name']}] {k['detail']}")
+            if failed_index:
+                for line in ph["index_stderr"].strip().splitlines():
+                    print(f"         index: {line}")
             for r in ph["queries"]:
                 if not r["ok"]:
                     print(f"       [{ph['name']}] {r['id']}: "
