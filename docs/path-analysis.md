@@ -57,9 +57,15 @@ list while claiming exhaustiveness.)
 display name resolves through `usrsForName` to every node that carries
 it, so a query for an overloaded name searches every overload and the
 result says which one each path reaches (`PathHop::calleeUsr`). A USR
-resolves to exactly one node. `targetKnown` / `startKnown` say whether
-anything resolved; a result with either false has no paths and no stop
-reasons, because nothing was searched.
+resolves to exactly one node. A name or USR is *known* only when the
+graph references it — a registered node, or an edge end (a callee that
+is declared but never defined). The string table alone does not decide:
+it never forgets a string, so after a warm refresh removed the TU that
+named a function, a search for that name must say unknown, as a clean
+bake of the same sources does, not "no callers". `targetKnown` /
+`startKnown` say whether anything resolved; a result with either false
+has no paths and no stop reasons, because nothing was searched, and is
+neither `complete` nor `exhaustive`.
 
 **Hops.** Every path is a sequence of `PathHop`s in call direction, each
 carrying the exact edge: `callerUsr`, `calleeUsr`, the display names,

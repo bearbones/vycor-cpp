@@ -42,6 +42,17 @@ int confidenceRank(Confidence c);
 
 llvm::json::Value edgeToJson(const CallGraphEdge &e);
 
+/// The canonical order of an edge list (docs/deterministic-output.md):
+/// caller usr, callee usr, call site, kind, confidence, execution
+/// context, indirection depth — the key the path search expands callers
+/// by, applied to a whole edge. A list with one end fixed (get_callees,
+/// get_callers) is therefore ordered by the other end's usr, then the
+/// call site; a whole-graph list (callback sites, thread entries) by both
+/// ends. Storage order follows TU and insertion order and is not stable
+/// across bakes.
+bool canonicalEdgeLess(const CallGraphEdge &a, const CallGraphEdge &b);
+void sortEdgesCanonically(std::vector<CallGraphEdge> &edges);
+
 const char *channelOperationToString(ChannelOperation op);
 llvm::json::Value serializeGuard(const ConditionalGuard &g);
 /// {tryLocation, enclosingFunction, nestingDepth, handlers: [{caughtType,

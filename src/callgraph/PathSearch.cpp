@@ -70,13 +70,26 @@ struct EdgeKeyHash {
 std::vector<SId> resolveIds(const CallGraph &graph, const std::string &name) {
   std::vector<SId> ids;
   const auto &interner = graph.interner();
+  // Known to the search means the graph itself references the usr: a
+  // node, or an edge end (a declared-only callee). Neither the interner
+  // nor the name map can say on their own — the interner never forgets a
+  // string, and an unregistered name resolves to itself — so after a warm
+  // refresh removed the TU that knew a function, a search for it would
+  // otherwise claim a complete, exhaustive answer (no callers) where a
+  // clean bake of the same sources says the target is unknown.
+  auto referenced = [&](SId id) {
+    return graph.findNode(interner.resolve(id)) != nullptr ||
+           !graph.callerRefsOf(id).empty() || !graph.calleeRefsOf(id).empty();
+  };
   for (const auto &usr : graph.usrsForName(name)) {
     if (auto id = interner.find(usr))
-      ids.push_back(*id);
+      if (referenced(*id))
+        ids.push_back(*id);
   }
   if (ids.empty()) {
     if (auto id = interner.find(name))
-      ids.push_back(*id);
+      if (referenced(*id))
+        ids.push_back(*id);
   }
   std::sort(ids.begin(), ids.end());
   ids.erase(std::unique(ids.begin(), ids.end()), ids.end());

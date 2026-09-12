@@ -36,6 +36,19 @@
 namespace vycor {
 
 // ----------------------------------------------------------------------------
+/// Sites in (call site, channel id, function usr) order
+/// (docs/deterministic-output.md).
+static void sortChannelSites(std::vector<ChannelSite> &sites) {
+  std::sort(sites.begin(), sites.end(),
+            [](const ChannelSite &a, const ChannelSite &b) {
+              if (a.callSite != b.callSite)
+                return a.callSite < b.callSite;
+              if (a.channelId != b.channelId)
+                return a.channelId < b.channelId;
+              return a.siteFunctionUsr < b.siteFunctionUsr;
+            });
+}
+
 /// The channel tools' precondition (docs/result-contract.md): a channel
 /// index whose bake registered channel types. An index baked without
 /// them holds no channel site, and an empty answer over it would claim
@@ -58,7 +71,10 @@ static llvm::json::Value handleListChannels(const llvm::json::Object &,
     return std::move(*err);
   llvm::json::Array channelsArr;
   if (ctx.channels) {
-    for (const auto &id : ctx.channels->allChannelIds()) {
+    // Id order: the channel map is a hash map.
+    auto ids = ctx.channels->allChannelIds();
+    std::sort(ids.begin(), ids.end());
+    for (const auto &id : ids) {
       auto producers = ctx.channels->producersOf(id);
       auto consumers = ctx.channels->consumersOf(id);
       llvm::json::Object entry;
@@ -100,6 +116,10 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
     return notFoundError("No channel found with id '" + channelId->str() +
                           "'");
 
+  // Site order: call site, then function usr (storage follows the bake's
+  // TU order).
+  sortChannelSites(producers);
+  sortChannelSites(consumers);
   llvm::json::Array producersArr, consumersArr;
   for (const auto &s : producers)
     producersArr.push_back(serializeChannelSite(s));
@@ -129,7 +149,9 @@ handleQueryChannelsForFunction(const llvm::json::Object &args,
 
   llvm::json::Array arr;
   {
-    for (const auto &s : ctx.channels->sitesForFunction(function->str()))
+    auto sites = ctx.channels->sitesForFunction(function->str());
+    sortChannelSites(sites);
+    for (const auto &s : sites)
       arr.push_back(serializeChannelSite(s));
   }
   llvm::json::Object obj;

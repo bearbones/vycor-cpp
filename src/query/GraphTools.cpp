@@ -111,6 +111,17 @@ parseEdgeFilter(const llvm::json::Object &args, EdgeFilter &out) {
 }
 
 
+/// allNodes() walks a hash map; every list a tool derives from it is
+/// emitted in usr order (docs/deterministic-output.md).
+static std::vector<const CallGraphNode *> sortedNodes(const CallGraph &g) {
+  auto nodes = g.allNodes();
+  std::sort(nodes.begin(), nodes.end(),
+            [](const CallGraphNode *a, const CallGraphNode *b) {
+              return a->usr < b->usr;
+            });
+  return nodes;
+}
+
 // ============================================================================
 // Tool 1: lookup_function
 // ============================================================================
@@ -215,7 +226,11 @@ handleSearchFunctions(const llvm::json::Object &args,
       return a.tier < b.tier;
     if (a.node->qualifiedName.size() != b.node->qualifiedName.size())
       return a.node->qualifiedName.size() < b.node->qualifiedName.size();
-    return a.node->qualifiedName < b.node->qualifiedName;
+    if (a.node->qualifiedName != b.node->qualifiedName)
+      return a.node->qualifiedName < b.node->qualifiedName;
+    // Overloads share a name: the usr decides, so a `limit` cut falls
+    // in the same place whatever order the nodes were indexed in.
+    return a.node->usr < b.node->usr;
   });
 
   llvm::json::Array results;
@@ -262,6 +277,9 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
 
   // Query by the resolved USR: the by-name union path is never taken.
   auto edges = ctx.graph.calleesOf(*ident);
+  // Canonical order (callee usr, call site, ...): storage order follows
+  // the bake's TU order (docs/deterministic-output.md).
+  sortEdgesCanonically(edges);
   llvm::json::Array results;
   for (const auto &e : edges) {
     if (!filter.allows(e))
@@ -299,6 +317,7 @@ static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
 
   // Query by the resolved USR: the by-name union path is never taken.
   auto edges = ctx.graph.callersOf(*ident);
+  sortEdgesCanonically(edges); // caller usr, call site, ...
   llvm::json::Array results;
   for (const auto &e : edges) {
     if (!filter.allows(e))
@@ -435,6 +454,8 @@ handleGetClassHierarchy(const llvm::json::Object &args,
 
   auto derived = transitive ? ctx.graph.getAllDerivedClasses(className->str())
                             : ctx.graph.getDerivedClasses(className->str());
+  // Name order: the hierarchy maps follow insertion order.
+  std::sort(derived.begin(), derived.end());
 
   llvm::json::Array derivedArr;
   for (auto &cls : derived)
@@ -446,9 +467,10 @@ handleGetClassHierarchy(const llvm::json::Object &args,
   obj["derivedClasses"] = std::move(derivedArr);
 
   if (includeOverrides) {
-    // Collect all virtual methods that belong to this class and show overrides.
+    // Collect all virtual methods that belong to this class and show
+    // overrides, in usr order (allNodes iterates a hash map).
     llvm::json::Array overridesArr;
-    for (auto *node : ctx.graph.allNodes()) {
+    for (auto *node : sortedNodes(ctx.graph)) {
       if (node->enclosingClass != className->str())
         continue;
       if (!node->isVirtual)
@@ -456,6 +478,7 @@ handleGetClassHierarchy(const llvm::json::Object &args,
       auto overrides = ctx.graph.getOverrides(node->usr);
       if (overrides.empty())
         continue;
+      std::sort(overrides.begin(), overrides.end());
       llvm::json::Object methodObj;
       methodObj["baseMethod"] = node->qualifiedName;
       llvm::json::Array ovArr;
@@ -611,6 +634,9 @@ handleListCallbackSites(const llvm::json::Object &args,
 
   llvm::json::Array targets;
   for (auto &kv : byTarget) {
+    // Targets are in name order (std::map); sites within a target in
+    // canonical edge order rather than the hash-map walk's.
+    sortEdgesCanonically(kv.second);
     llvm::json::Array sites;
     for (const auto &e : kv.second) {
       llvm::json::Object site;
@@ -661,28 +687,32 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
     }
   }
 
-  llvm::json::Array entries;
-  size_t total = 0;
+  std::vector<CallGraphEdge> spawns;
   for (auto *node : ctx.graph.allNodes()) {
     for (const auto &e : ctx.graph.calleesOf(node->usr)) {
       if (e.kind != EdgeKind::ThreadEntry)
         continue;
       if (!ctxFilter.empty() && !ctxFilter.count(e.execContext))
         continue;
-      ++total;
-      llvm::json::Object entry;
-      entry["spawner"] = e.callerName;
-      entry["target"] = e.calleeName;
-      entry["executionContext"] =
-          executionContextToString(e.execContext);
-      entry["callSite"] = e.callSite;
-      entry["confidence"] = confidenceToString(e.confidence);
-      entries.push_back(llvm::json::Value(std::move(entry)));
+      spawns.push_back(e);
     }
+  }
+  // Canonical edge order (spawner usr, target usr, call site, ...): the
+  // node walk above is a hash-map walk.
+  sortEdgesCanonically(spawns);
+  llvm::json::Array entries;
+  for (const auto &e : spawns) {
+    llvm::json::Object entry;
+    entry["spawner"] = e.callerName;
+    entry["target"] = e.calleeName;
+    entry["executionContext"] = executionContextToString(e.execContext);
+    entry["callSite"] = e.callSite;
+    entry["confidence"] = confidenceToString(e.confidence);
+    entries.push_back(llvm::json::Value(std::move(entry)));
   }
 
   llvm::json::Object obj;
-  obj["count"] = static_cast<int64_t>(total);
+  obj["count"] = static_cast<int64_t>(spawns.size());
   obj["entries"] = std::move(entries);
   return llvm::json::Value(std::move(obj));
 }

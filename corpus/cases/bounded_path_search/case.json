@@ -1,0 +1,226 @@
+{
+ "schema": 1,
+ "title": "Four routes from main to target: an unbounded search is exhaustive, max_paths keeps the canonical prefix and says so, max_depth is not exhaustive, and an unknown target is not complete",
+ "sources": [
+  "target.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "unbounded",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "target"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "pathCount": 4,
+     "complete": true,
+     "exhaustive": true,
+     "stopReasons": []
+    },
+    "sequence": [
+     {
+      "in": "paths",
+      "match": [
+       [
+        {
+         "fromName": "main",
+         "toName": "a1"
+        },
+        {
+         "fromName": "a1",
+         "toName": "target"
+        }
+       ],
+       [
+        {
+         "fromName": "main",
+         "toName": "a2"
+        },
+        {
+         "fromName": "a2",
+         "toName": "target"
+        }
+       ],
+       [
+        {
+         "fromName": "main",
+         "toName": "a3"
+        },
+        {
+         "fromName": "a3",
+         "toName": "target"
+        }
+       ],
+       [
+        {
+         "fromName": "main",
+         "toName": "a4"
+        },
+        {
+         "fromName": "a4",
+         "toName": "target"
+        }
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "path-limit-keeps-canonical-prefix",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "target",
+    "--max-paths",
+    "2"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "pathCount": 2,
+     "complete": false,
+     "exhaustive": false,
+     "stopReasons": [
+      "path_limit"
+     ]
+    },
+    "sequence": [
+     {
+      "in": "paths",
+      "match": [
+       [
+        {
+         "fromName": "main",
+         "toName": "a1"
+        },
+        {
+         "fromName": "a1",
+         "toName": "target"
+        }
+       ],
+       [
+        {
+         "fromName": "main",
+         "toName": "a2"
+        },
+        {
+         "fromName": "a2",
+         "toName": "target"
+        }
+       ]
+      ]
+     }
+    ],
+    "negatives": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "a3"
+       },
+       {
+        "fromName": "a3",
+        "toName": "target"
+       }
+      ]
+     },
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "a4"
+       },
+       {
+        "fromName": "a4",
+        "toName": "target"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "depth-limit-is-complete-not-exhaustive",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "target",
+    "--max-depth",
+    "1"
+   ],
+   "expect": {
+    "exit": 1,
+    "status": "ok",
+    "fields": {
+     "pathCount": 0,
+     "complete": true,
+     "exhaustive": false,
+     "stopReasons": [
+      "depth_limit"
+     ]
+    }
+   }
+  },
+  {
+   "id": "unknown-target-is-not-complete",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "nonesuch"
+   ],
+   "expect": {
+    "exit": 1,
+    "status": "ok",
+    "fields": {
+     "pathCount": 0,
+     "complete": false,
+     "exhaustive": false,
+     "stopReasons": []
+    }
+   }
+  },
+  {
+   "id": "callers-of-target-in-canonical-order",
+   "argv": [
+    "get-callers",
+    "--name",
+    "target"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callers": 4
+    },
+    "sequence": [
+     {
+      "in": "callers",
+      "match": [
+       {
+        "callerName": "a1"
+       },
+       {
+        "callerName": "a2"
+       },
+       {
+        "callerName": "a3"
+       },
+       {
+        "callerName": "a4"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

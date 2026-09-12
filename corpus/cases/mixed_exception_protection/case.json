@@ -1,0 +1,185 @@
+{
+ "schema": 1,
+ "title": "risky() is caught on one path and not the other; guarded() is always caught, but only while the index covers every TU",
+ "sources": [
+  "lib.cpp",
+  "main.cpp",
+  "pad1.cpp",
+  "pad2.cpp"
+ ],
+ "phases": [
+  {
+   "name": "complete-coverage",
+   "index": {
+    "mode": "cold",
+    "indexed": 4,
+    "partial": 0,
+    "failed": 0
+   },
+   "queries": [
+    {
+     "id": "risky-sometimes-caught",
+     "argv": [
+      "query-exception-safety",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "protection": "sometimes_caught",
+       "totalPaths": 2,
+       "caughtPaths": 1,
+       "uncaughtPaths": 1,
+       "exhaustive": true,
+       "indexScope": {
+        "complete": true
+       }
+      },
+      "regex": {
+       "summary": "caught on 1 of 2 path"
+      }
+     }
+    },
+    {
+     "id": "guarded-always-caught",
+     "argv": [
+      "query-exception-safety",
+      "--function",
+      "guarded",
+      "--exception-type",
+      "std::exception"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "protection": "always_caught",
+       "totalPaths": 1,
+       "exhaustive": true,
+       "indexScope": {
+        "complete": true
+       }
+      }
+     }
+    },
+    {
+     "id": "propagation-of-risky",
+     "argv": [
+      "query-throw-propagation",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "protection": "sometimes_caught"
+      },
+      "witnesses": [
+       {
+        "in": "paths",
+        "match": {
+         "outcome": "caught"
+        }
+       },
+       {
+        "in": "paths",
+        "match": {
+         "outcome": "uncaught"
+        }
+       }
+      ],
+      "count": {
+       "paths": 2
+      },
+      "negatives": [
+       {
+        "in": "paths",
+        "match": {
+         "outcome": "terminates"
+        }
+       },
+       {
+        "in": "paths",
+        "match": {
+         "outcome": "unknown"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "partial-coverage",
+   "overlay": "partial",
+   "sources": [
+    "lib.cpp",
+    "main.cpp",
+    "pad1.cpp",
+    "pad2.cpp",
+    "broken.cpp"
+   ],
+   "index": {
+    "mode": "warm",
+    "indexed": 4,
+    "partial": 1
+   },
+   "queries": [
+    {
+     "id": "guarded-demoted-to-observed",
+     "argv": [
+      "query-exception-safety",
+      "--function",
+      "guarded",
+      "--exception-type",
+      "std::exception"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "protection": "observed_caught",
+       "totalPaths": 1,
+       "exhaustive": true,
+       "indexScope": {
+        "complete": false,
+        "partial": 1,
+        "requested": 5
+       }
+      },
+      "regex": {
+       "summary": "does not cover every requested TU"
+      }
+     }
+    },
+    {
+     "id": "risky-unchanged-by-coverage",
+     "argv": [
+      "query-exception-safety",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "protection": "sometimes_caught",
+       "indexScope": {
+        "complete": false
+       }
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,24 @@ MISSING_H = "void after_include();\n"
 # later per aging pass so an edited file (even one of the same size) gets
 # a stamp its previous version never had.
 AGE_SECONDS = 120
+
+# Tool queries whose raw stdout must be identical over a warm-refreshed
+# index and a clean rebuild (the order of every list is contractual;
+# only the bake reference differs).
+RAW_QUERIES = (
+    ["get-callers", "--name", "alpha"],
+    ["get-callees", "--name", "main"],
+    ["find-call-chain", "--to", "gamma"],
+    ["search-functions", "--query", "a", "--limit", "3"],
+    ["list-callback-sites"],
+    ["analyze-dead-code"],
+    ["graph-summary"],
+)
+BAKE_RE = re.compile(r'"bake":"[0-9a-f]+@[0-9]+"')
+
+
+def strip_bake(text: str) -> str:
+    return BAKE_RE.sub('"bake":"<bake>"', text)
 
 
 class Check:
@@ -183,6 +202,16 @@ class Check:
         self.expect(scenario, ia["coverage"] == ib["coverage"],
                     f"coverage differs: warm {ia['coverage']} vs clean "
                     f"{ib['coverage']}")
+        # The tool answers, raw: every list in its contractual order
+        # (docs/deterministic-output.md), not as a sorted multiset.
+        for argv in RAW_QUERIES:
+            ca, oa, _ = self.megascope([*argv, "--index", str(warm)], d)
+            cb, ob, _ = self.megascope([*argv, "--index", str(clean)], d)
+            oa, ob = strip_bake(oa), strip_bake(ob)
+            self.expect(scenario, (ca, oa) == (cb, ob),
+                        f"{' '.join(argv)}: warm answer differs from "
+                        f"clean rebuild (exit {ca} vs {cb})\n"
+                        f"  warm:  {oa[:200]!r}\n  clean: {ob[:200]!r}")
 
     def expect_summary(self, scenario: str, s: dict, **fields: int | str
                        ) -> None:

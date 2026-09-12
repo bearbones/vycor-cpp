@@ -1,0 +1,130 @@
+{
+ "schema": 1,
+ "title": "Only the compile command changes (-DNEW_TARGET): the input fingerprint marks the TU dirty and the answer follows the flag; alpha stays a known, provably unreached function because the TU itself declares it",
+ "sources": [
+  "tu.cpp",
+  "pad1.cpp",
+  "pad2.cpp"
+ ],
+ "phases": [
+  {
+   "name": "before",
+   "index": {
+    "mode": "cold"
+   },
+   "queries": [
+    {
+     "id": "entry-calls-alpha",
+     "argv": [
+      "get-callees",
+      "--name",
+      "entry"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "callees": 1
+      },
+      "witnesses": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "alpha"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "beta"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "after",
+   "flags": {
+    "tu.cpp": [
+     "-DNEW_TARGET"
+    ]
+   },
+   "index": {
+    "mode": "warm",
+    "refreshed": 1,
+    "refreshed_for_inputs": 1,
+    "refreshed_for_headers": 0
+   },
+   "queries": [
+    {
+     "id": "entry-calls-beta",
+     "argv": [
+      "get-callees",
+      "--name",
+      "entry"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "callees": 1
+      },
+      "witnesses": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "beta"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "alpha"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "alpha-proven-unreachable-after-flag",
+     "argv": [
+      "find-call-chain",
+      "--to",
+      "alpha"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "fields": {
+       "pathCount": 0,
+       "complete": true,
+       "exhaustive": true,
+       "targetUsr": "c:@F@alpha#"
+      }
+     }
+    },
+    {
+     "id": "alpha-still-declared-in-the-tu",
+     "argv": [
+      "lookup-function",
+      "--name",
+      "alpha"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "usr": "c:@F@alpha#"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}
