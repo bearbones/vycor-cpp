@@ -137,14 +137,18 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
       "deep_chains/stage5_sink\\.cpp$", "--threads", "1"], None, True),
 ]
 
-# Keys whose values depend on the host, the run, or the scratch location.
-VOLATILE_KEYS = {"index", "index_bytes", "dependency_count"}
+# Keys whose values depend on the host, the run, or the scratch location
+# (`bake` is the environment fingerprint plus the bake's start time).
+VOLATILE_KEYS = {"index", "index_bytes", "dependency_count", "bake"}
 PATH_RE = re.compile(r'"/[^"]*"')
 # Standard-library USRs spell out template signatures that shift between
 # standard-library versions; display names do not. Records that name a
 # system-header location are dropped outright (which declarations a
 # header carries is host-dependent too).
 STD_USR_RE = re.compile(r'"c:@N@(std|__gnu_cxx)@[^"]*"')
+# `--pretty` output is one JSON document over many lines, so the
+# per-line scrub above cannot drop its volatile bake reference.
+BAKE_RE = re.compile(r'"bake": ?"[0-9a-f]+@[0-9]+"')
 
 
 def write_compile_commands(build: Path) -> None:
@@ -177,7 +181,7 @@ def normalize(text: str, subs: list[tuple[str, str]]) -> list[str]:
         try:
             v = json.loads(line)
         except ValueError:
-            out.append(line)
+            out.append(BAKE_RE.sub('"bake": "<bake>"', line))
             continue
         if isinstance(v, dict) and "_summary" in v:
             # Counts here may include toolchain records dropped below.

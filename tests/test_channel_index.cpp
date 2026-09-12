@@ -330,6 +330,7 @@ TEST_CASE("explain_ordering MCP tool proves same-vs-different channel "
   ControlFlowOracle oracle(built.graph, built.cfIndex);
   std::vector<std::string> eps = {"main"};
   ToolContext ctx{built.graph, oracle, built.cfIndex, eps, &built.channels};
+  ctx.facts.channelsIndexed = true; // the bake registered channel types
 
   auto tools = getRegisteredTools();
   auto findTool = [&](const std::string &name) -> const ToolEntry & {

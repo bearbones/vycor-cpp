@@ -1716,6 +1716,9 @@ TEST_CASE("query_throw_propagation reports the verdict with per-path detail",
   ControlFlowOracle oracle(graph, cfIndex);
   std::vector<std::string> eps = {"main"};
   ToolContext ctx{graph, oracle, cfIndex, eps};
+  // A universal verdict needs stated, complete coverage; unstated facts
+  // fail closed (docs/result-contract.md).
+  ctx.facts.freshness = IndexFreshness::Baked;
   auto handler = findHandler("query_throw_propagation");
   REQUIRE(handler);
 

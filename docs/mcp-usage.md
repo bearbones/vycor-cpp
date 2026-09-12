@@ -108,15 +108,23 @@ and `jq -c` work without loading the whole result), `--format tsv` for
 the flat tables (sorted columns, header first). stderr carries only error
 messages unless `-v`.
 
-Exit codes are the contract to branch on:
+Every payload carries `status` (`ok`, `ambiguous`, `usage_error`,
+`not_found`, `unavailable`) and `indexScope` (which bake the index came
+from, whether it was checked against the sources, and how many of the
+requested TUs it holds cleanly) — see `docs/result-contract.md`. Exit
+codes derive from `status` and are the contract to branch on:
 
 | Code | Meaning |
 |---|---|
 | 0 | answered, results |
-| 1 | answered, empty (not found, no paths, no dead code) |
-| 2 | usage or argument error |
-| 3 | index missing, wrong format version, or unreadable |
+| 1 | answered, empty (no callers, no paths, no dead code), or `not_found` (a named function, call site, or channel the index lacks) |
+| 2 | usage or argument error (`usage_error`) |
+| 3 | index missing, wrong format version, unreadable, or lacking the facts the tool needs (`unavailable`) |
 | 4 | ambiguous identity — candidates on stdout; re-run with `--usr` |
+
+An `indexScope.complete` of `false` means some requested TU failed to
+parse; a function that lives there is `not_found`, and the exception
+tools report `observed_*` instead of a universal verdict.
 
 For many related queries, `megascope batch` reads NDJSON requests from
 stdin and answers each on one line, in order, on one loaded index:
@@ -126,11 +134,12 @@ printf '%s\n' \
   '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}' \
   '{"id":2,"tool":"query_exception_safety","args":{"function":"Foo::bar"}}' \
   | vycor-cpp megascope batch
-# {"exit":0,"id":1,"result":{...},"tool":"get_callers"}
-# {"exit":0,"id":2,"result":{...},"tool":"query_exception_safety"}
+# {"exit":0,"id":1,"result":{...},"status":"ok","tool":"get_callers"}
+# {"exit":0,"id":2,"result":{...},"status":"ok","tool":"query_exception_safety"}
 ```
 
-`exit` carries the same code the one-shot verb would have returned.
+`exit` carries the same code the one-shot verb would have returned and
+`status` mirrors `result.status`.
 
 ### 5. Serve over MCP
 
@@ -435,9 +444,9 @@ vycor-cpp megascope dump \
 ```
 
 **Note:** an unindexed site is an error payload (`{"error": "Call site
-not indexed: ..."}`, exit code 1): the TU that contains it may not have
-been included, or the path spelling differs from the compilation
-database's.
+not indexed: ...", "status": "not_found"}`, exit code 1): the TU that
+contains it may not have been included (check `indexScope`), or the
+path spelling differs from the compilation database's.
 
 ### Step 5 — Trace specific paths with `find_call_chain`
 
@@ -484,9 +493,9 @@ is hidden.
 ## Known gotchas
 
 **`lookup_function` is exact-match only.** Partial names, namespaces
-without the full path, and operator spellings will all fail silently
-with `isError: true`. Mine real names from `search_functions` or a
-`megascope dump` first.
+without the full path, and operator spellings all answer `not_found`
+(`isError: true` over MCP, exit 1 on the CLI). Mine real names from
+`search_functions` or a `megascope dump` first.
 
 **Duplicate edges in `get_callers`/`get_callees`.** The same function can
 appear multiple times with different `callSite` values. Deduplicate on

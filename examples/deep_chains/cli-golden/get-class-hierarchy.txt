@@ -1,2 +1,2 @@
 # megascope get-class-hierarchy --class-name Plugin -> exit 0
-{"className":"Plugin","derivedClassCount":3,"derivedClasses":["PluginAlpha","PluginBeta","PluginGamma"]}
+{"className":"Plugin","derivedClassCount":3,"derivedClasses":["PluginAlpha","PluginBeta","PluginGamma"],"indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok"}

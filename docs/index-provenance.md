@@ -276,10 +276,11 @@ producer-side shapes, additive to the existing payloads):
 `snapshot.retried`, `snapshot.fingerprint_ms`,
 `snapshot.unstable_stamps`, and a root `coverage` object.
 
-Suggested use by C: reference the index by `provenance.environment` plus
-`bake_start_ns` (together they identify a bake), and carry `coverage` as
-the indexed-scope completeness fact; keep per-TU rows behind `info
---files` rather than repeating them per record.
+Package C did that (`docs/result-contract.md`): every tool payload
+carries `indexScope` with `bake` = `<environment>@<bake_start_ns>`
+(also `provenance.bake` in `info`), `freshness`, and the coverage
+counts; the per-TU rows stay behind `info --files`; the exception tools
+demote a universal verdict when `coverage.complete` is false.
 
 ## Format v10
 
@@ -346,5 +347,6 @@ opened file, and the fingerprint covers the inputs that are not files.
   working-directory scenario caught it). `makeClangTool` now gives every
   tool its own physical file system. anneal and morph share the helper
   and inherit the fix.
-- `reindex_tu` over MCP should report the TU's new outcome in its
-  result once C's envelope exists.
+- `reindex_tu` over MCP answers a JSON payload through C's envelope now,
+  but still not the TU's new outcome: `bakeTU` reports none, so the
+  served `indexScope` keeps describing the bake the server started from.

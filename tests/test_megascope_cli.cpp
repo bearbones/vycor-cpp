@@ -349,12 +349,14 @@ TEST_CASE("exit codes follow the payload contract", "[megascope][cli]") {
   scalar["usr"] = "c:@F@f#";
   CHECK(exitCodeFor(llvm::json::Value(std::move(scalar)), "") ==
         kExitResults);
-  CHECK(exitCodeFor(errorResult("Missing required parameter 'name'"), "") ==
+  CHECK(exitCodeFor(usageError("Missing required parameter 'name'"), "") ==
         kExitUsage);
-  CHECK(exitCodeFor(errorResult("Invalid call_site format"), "") ==
+  CHECK(exitCodeFor(usageError("Invalid call_site format"), "") ==
         kExitUsage);
-  CHECK(exitCodeFor(errorResult("Function not found: nope"), "") ==
+  CHECK(exitCodeFor(notFoundError("Function not found: nope"), "") ==
         kExitEmpty);
+  CHECK(exitCodeFor(unavailableError("No channel index loaded"), "") ==
+        kExitIndex);
   llvm::json::Object amb;
   amb["ambiguous"] = true;
   amb["candidates"] = llvm::json::Array{llvm::json::Object{{"usr", "a"}}};
@@ -442,14 +444,14 @@ TEST_CASE("tsv output has a sorted header and escaped cells",
     CHECK(none.empty());
   }
 
-  SECTION("errors go to stderr and a two-line error block on stdout") {
+  SECTION("errors go to stderr and a two-column error block on stdout") {
     int code = 0;
     std::string err;
-    std::string text = emit(errorResult("Function not found: x"), "callers",
+    std::string text = emit(notFoundError("Function not found: x"), "callers",
                             OutputFormat::Tsv, false, &code, &err);
     CHECK(code == kExitEmpty);
     CHECK(err == "megascope get-callers: Function not found: x\n");
-    CHECK(text == "error\nFunction not found: x\n");
+    CHECK(text == "error\tstatus\nFunction not found: x\tnot_found\n");
   }
 }
 
@@ -457,7 +459,7 @@ TEST_CASE("error payloads reach stdout as JSON and stderr as a message",
           "[megascope][cli]") {
   int code = 0;
   std::string err;
-  std::string out = emit(errorResult("Missing required parameter 'name'"),
+  std::string out = emit(usageError("Missing required parameter 'name'"),
                          "callers", OutputFormat::Json, false, &code, &err);
   CHECK(code == kExitUsage);
   CHECK(parseObject(out).getString("error") ==

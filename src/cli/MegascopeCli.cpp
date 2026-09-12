@@ -342,8 +342,12 @@ void printToolHelp(const ToolEntry &tool, llvm::raw_ostream &os) {
         "  --format <fmt>        json (default) | ndjson | tsv\n"
         "  --pretty              Indent JSON output\n"
         "  -v, --verbose         Progress on stderr\n"
-        "\nExit codes: 0 results, 1 empty, 2 usage, 3 index missing or\n"
-        "unreadable, 4 ambiguous identity (candidates on stdout).\n";
+        "\nEvery payload carries `status` (ok, ambiguous, usage_error,\n"
+        "not_found, unavailable) and `indexScope` (bake, freshness, TU\n"
+        "coverage); see docs/result-contract.md.\n"
+        "\nExit codes: 0 results, 1 empty or not found, 2 usage, 3 index\n"
+        "missing, unreadable, or lacking the needed facts, 4 ambiguous\n"
+        "identity (candidates on stdout).\n";
 }
 
 // ============================================================================
@@ -351,13 +355,6 @@ void printToolHelp(const ToolEntry &tool, llvm::raw_ostream &os) {
 // ============================================================================
 
 namespace {
-
-/// Handler error messages that describe malformed arguments rather than an
-/// empty answer: the prefixes the result contract in Tools.h reserves.
-bool isUsageMessage(llvm::StringRef msg) {
-  return msg.starts_with("Missing") || msg.starts_with("Requires") ||
-         msg.starts_with("Invalid");
-}
 
 llvm::StringRef effectiveRecordsKey(const llvm::json::Value &payload,
                                     llvm::StringRef recordsKey) {
@@ -487,10 +484,18 @@ void writeNdjson(llvm::raw_ostream &os, const llvm::json::Value &payload,
 } // namespace
 
 int exitCodeFor(const llvm::json::Value &payload, llvm::StringRef recordsKey) {
-  if (auto msg = errorMessage(payload))
-    return isUsageMessage(*msg) ? kExitUsage : kExitEmpty;
-  if (isAmbiguousResult(payload))
+  switch (statusOf(payload)) {
+  case ResultStatus::UsageError:
+    return kExitUsage;
+  case ResultStatus::NotFound:
+    return kExitEmpty;
+  case ResultStatus::Unavailable:
+    return kExitIndex;
+  case ResultStatus::Ambiguous:
     return kExitAmbiguous;
+  case ResultStatus::Ok:
+    break;
+  }
   if (const auto *records = recordsOf(payload, recordsKey))
     return records->empty() ? kExitEmpty : kExitResults;
   return kExitResults;
@@ -504,7 +509,8 @@ int emitToolResult(const llvm::json::Value &payload, llvm::StringRef recordsKey,
     if (!tool.empty())
       err << "megascope " << tool << ": " << *msg << "\n";
     if (format == OutputFormat::Tsv)
-      out << "error\n" << tsvEscape(*msg) << "\n";
+      out << "error\tstatus\n" << tsvEscape(*msg) << "\t"
+          << resultStatusName(statusOf(payload)) << "\n";
     else
       writeJson(out, payload, pretty && format == OutputFormat::Json);
     return code;
@@ -677,8 +683,13 @@ void printVerbHelp(llvm::raw_ostream &os) {
         "--threads, and --org-config qualify the bake as for `index`).\n"
         "Run `megascope <tool> --help` for a tool's flags.\n"
         "\n"
-        "Exit codes: 0 results, 1 empty, 2 usage, 3 index missing or\n"
-        "unreadable, 4 ambiguous identity (candidates on stdout).\n";
+        "Every payload carries `status` (ok, ambiguous, usage_error,\n"
+        "not_found, unavailable) and `indexScope` (bake, freshness, TU\n"
+        "coverage); see docs/result-contract.md.\n"
+        "\n"
+        "Exit codes: 0 results, 1 empty or not found, 2 usage, 3 index\n"
+        "missing, unreadable, or lacking the needed facts, 4 ambiguous\n"
+        "identity (candidates on stdout).\n";
 }
 
 /// Up to the first sentence-ending ". " — skipping the abbreviations the
@@ -781,7 +792,14 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   prov["environment"] = snap.meta.provenance.environment;
   prov["bake_start_ns"] =
       static_cast<int64_t>(snap.meta.provenance.bakeStartNs);
+  // The reference a tool payload's indexScope.bake carries.
+  const IndexFacts facts =
+      IndexFacts::of(snap.meta, IndexFreshness::Unchecked);
+  if (!facts.bake.empty())
+    prov["bake"] = facts.bake;
   o["provenance"] = std::move(prov);
+  // info never compares the index with the sources.
+  o["freshness"] = "unchecked";
   const IndexCoverage cov = coverageOf(snap.meta);
   llvm::json::Object coverage;
   coverage["requested"] = static_cast<int64_t>(cov.requested);
@@ -839,6 +857,7 @@ int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
     };
     auto batchError = [&](const llvm::Twine &msg) {
       resp["error"] = ("line " + llvm::Twine(lineNo) + ": " + msg).str();
+      resp["status"] = resultStatusName(ResultStatus::UsageError);
       resp["exit"] = static_cast<int64_t>(kExitUsage);
       emit();
     };
@@ -872,7 +891,8 @@ int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
       args = *a;
     else if (const auto *a = req->getObject("arguments"))
       args = *a;
-    llvm::json::Value payload = it->second->handler(args, ctx);
+    llvm::json::Value payload = runTool(*it->second, args, ctx);
+    resp["status"] = resultStatusName(statusOf(payload));
     resp["exit"] = static_cast<int64_t>(
         exitCodeFor(payload, it->second->recordsKey));
     resp["result"] = std::move(payload);
@@ -965,6 +985,7 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
   snap->meta.collapsePaths = collapsePaths;
+  snap->meta.channelTypes = channelCfg.registeredTypes;
   // The in-memory index carries the same coverage facts a saved one
   // would, and an incomplete bake is said out loud: a query over it
   // cannot tell that a TU's facts are missing.
@@ -1277,11 +1298,17 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
   ToolContext ctx{snap->graph,  oracle,          snap->cfIndex,
                   entryPoints, &snap->channels, &cache,
                   &snap->summary};
+  // What every payload says about its index (docs/result-contract.md):
+  // an in-memory bake is fresh by construction and has no saved bake to
+  // cite; a loaded index is taken as-is, unchecked.
+  ctx.facts = IndexFacts::of(snap->meta, common->ephemeral()
+                                             ? IndexFreshness::Baked
+                                             : IndexFreshness::Unchecked);
 
   if (verb == "batch")
     return runBatch(tools, ctx, in, out);
 
-  llvm::json::Value payload = tool->handler(toolArgs, ctx);
+  llvm::json::Value payload = runTool(*tool, toolArgs, ctx);
   return emitToolResult(payload, tool->recordsKey, *format, common->pretty,
                         out, err, hyphenated(tool->name));
 }

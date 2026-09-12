@@ -36,11 +36,26 @@
 namespace vycor {
 
 // ----------------------------------------------------------------------------
+/// The channel tools' precondition (docs/result-contract.md): a channel
+/// index whose bake registered channel types. An index baked without
+/// them holds no channel site, and an empty answer over it would claim
+/// there are none.
+static std::optional<llvm::json::Value>
+channelsUnavailable(const ToolContext &ctx) {
+  if (ctx.channels && ctx.facts.channelsIndexed)
+    return std::nullopt;
+  return unavailableError(
+      "No channel facts indexed: the bake registered no channel types "
+      "(--channel-types-json or an --org-config with channel types)");
+}
+
 // Tool 13: list_channels
 // ----------------------------------------------------------------------------
 
 static llvm::json::Value handleListChannels(const llvm::json::Object &,
                                             const ToolContext &ctx) {
+  if (auto err = channelsUnavailable(ctx))
+    return std::move(*err);
   llvm::json::Array channelsArr;
   if (ctx.channels) {
     for (const auto &id : ctx.channels->allChannelIds()) {
@@ -75,16 +90,14 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
                                             const ToolContext &ctx) {
   auto channelId = args.getString("channel_id");
   if (!channelId)
-    return errorResult("Requires 'channel_id' (from list_channels)");
-  if (!ctx.channels)
-    return errorResult(
-        "No channel index loaded (server started without "
-        "--channel-types-json)");
+    return usageError("Requires 'channel_id' (from list_channels)");
+  if (auto err = channelsUnavailable(ctx))
+    return std::move(*err);
 
   auto producers = ctx.channels->producersOf(channelId->str());
   auto consumers = ctx.channels->consumersOf(channelId->str());
   if (producers.empty() && consumers.empty())
-    return errorResult("No channel found with id '" + channelId->str() +
+    return notFoundError("No channel found with id '" + channelId->str() +
                           "'");
 
   llvm::json::Array producersArr, consumersArr;
@@ -109,10 +122,13 @@ handleQueryChannelsForFunction(const llvm::json::Object &args,
                               const ToolContext &ctx) {
   auto function = args.getString("function");
   if (!function)
-    return errorResult("Requires 'function' (qualified name or usr)");
+    return usageError("Requires 'function' (qualified name or usr)");
+
+  if (auto err = channelsUnavailable(ctx))
+    return std::move(*err);
 
   llvm::json::Array arr;
-  if (ctx.channels) {
+  {
     for (const auto &s : ctx.channels->sitesForFunction(function->str()))
       arr.push_back(serializeChannelSite(s));
   }
@@ -184,21 +200,19 @@ static llvm::json::Value handleExplainOrdering(const llvm::json::Object &args,
   auto siteAArg = args.getString("call_site_a");
   auto siteBArg = args.getString("call_site_b");
   if (!siteAArg || !siteBArg)
-    return errorResult(
+    return usageError(
         "Requires 'call_site_a' and 'call_site_b' (file:line:col, from "
         "query_channel or query_channels_for_function)");
-  if (!ctx.channels)
-    return errorResult(
-        "No channel index loaded (server started without "
-        "--channel-types-json)");
+  if (auto err = channelsUnavailable(ctx))
+    return std::move(*err);
 
   auto siteA = findChannelSiteAt(*ctx.channels, siteAArg->str());
   auto siteB = findChannelSiteAt(*ctx.channels, siteBArg->str());
   if (!siteA)
-    return errorResult("No channel site indexed at '" + siteAArg->str() +
+    return notFoundError("No channel site indexed at '" + siteAArg->str() +
                           "'");
   if (!siteB)
-    return errorResult("No channel site indexed at '" + siteBArg->str() +
+    return notFoundError("No channel site indexed at '" + siteBArg->str() +
                           "'");
 
   bool sameChannel = siteA->channelId == siteB->channelId;

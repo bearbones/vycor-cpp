@@ -33,10 +33,11 @@ namespace vycor {
 
 class PchCache;
 
-/// Translate a query-tool payload (vycor/query/Tools.h result contract)
-/// into an MCP tools/call result: the payload is stringified into one
-/// `content[0].text` block; an error payload becomes `isError: true` with
-/// the bare message as text.
+/// Translate a query-tool payload (docs/result-contract.md) into an MCP
+/// tools/call result: the payload is stringified into one
+/// `content[0].text` block, `isError: true` when its status is an error
+/// status (the text is still the JSON payload, `error` and `status`
+/// included).
 llvm::json::Value wrapToolResult(const llvm::json::Value &payload);
 /// MCP tools/call result carrying plain text (no JSON payload).
 llvm::json::Value mcpTextResult(llvm::StringRef text, bool isError = false);
@@ -67,6 +68,11 @@ public:
   /// default: the "server started" readiness line is always printed.
   void setVerbose(bool verbose) { verbose_ = verbose; }
 
+  /// What every tool payload says about the indexes served
+  /// (`indexScope`, docs/result-contract.md): set by main.cpp from the
+  /// meta the bake saved or kept.
+  void setIndexFacts(IndexFacts facts) { facts_ = std::move(facts); }
+
   /// Re-index a single TU. Removes old edges/contexts, re-runs Phase 1+2+3.
   /// Returns {edgesRemoved, edgesAfter, contextsRemoved, contextsAfter}.
   struct ReindexResult {
@@ -88,9 +94,10 @@ private:
   // Whole-graph query results, valid until the next index mutation
   // (reindexTU clears it).
   QueryCache queryCache_;
+  IndexFacts facts_;
   bool initialized_ = false;
-  // Tool name -> handler, populated lazily on the first tools/call.
-  std::unordered_map<std::string, ToolHandler> handlers_;
+  // Tool name -> entry, populated lazily on the first tools/call.
+  std::unordered_map<std::string, ToolEntry> tools_;
 
   void dispatch(const McpRequest &req);
 

@@ -153,7 +153,7 @@ resolveIdentity(const llvm::json::Object &args, const ToolContext &ctx,
     for (const auto &c : contexts)
       callees.insert(c.calleeUsr.empty() ? c.calleeName : c.calleeUsr);
     if (callees.empty()) {
-      ambiguous = errorResult(
+      ambiguous = notFoundError(
           "No call site found at '" + site->str() +
           "' (expected 'file:line:col' as spelled in the compile command; "
           "use query_call_site_context to inspect a site).");
@@ -170,7 +170,7 @@ resolveIdentity(const llvm::json::Object &args, const ToolContext &ctx,
         if (named.count(c))
           agreeing.insert(c);
       if (agreeing.empty()) {
-        ambiguous = errorResult(
+        ambiguous = notFoundError(
             "Call site '" + site->str() + "' does not call '" +
             name->str() + "' (it calls: " + *callees.begin() +
             (callees.size() > 1 ? ", ..." : "") + ").");

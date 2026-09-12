@@ -59,13 +59,22 @@ TEST_CASE("wrapToolResult stringifies a payload into one text block",
   CHECK(parsed->getAsObject()->getArray("items")->size() == 2);
 }
 
-TEST_CASE("wrapToolResult maps an error payload to isError with bare text",
+TEST_CASE("wrapToolResult maps an error payload to isError with the "
+          "payload as text",
           "[mcp][adapter]") {
-  auto result = wrapToolResult(errorResult("Missing required 'name'"));
+  auto result = wrapToolResult(usageError("Missing required 'name'"));
   const auto &content = firstContent(result);
   CHECK(result.getAsObject()->getBoolean("isError") == true);
-  // The message itself, not a JSON-encoded {"error": ...} string.
-  CHECK(content.getString("text") == "Missing required 'name'");
+  // The JSON payload, so a client reads `error` and `status` the same
+  // way it reads any other result (docs/result-contract.md).
+  auto parsed = llvm::json::parse(*content.getString("text"));
+  REQUIRE(bool(parsed));
+  CHECK(parsed->getAsObject()->getString("error") ==
+        "Missing required 'name'");
+  CHECK(parsed->getAsObject()->getString("status") == "usage_error");
+  CHECK(wrapToolResult(notFoundError("Function not found: x"))
+            .getAsObject()
+            ->getBoolean("isError") == true);
 }
 
 TEST_CASE("wrapToolResult keeps an ambiguity payload a non-error result",
@@ -81,10 +90,10 @@ TEST_CASE("wrapToolResult keeps an ambiguity payload a non-error result",
 }
 
 TEST_CASE("query result predicates", "[query][contract]") {
-  CHECK(isErrorResult(errorResult("x")));
-  CHECK(errorMessage(errorResult("boom")) == "boom");
+  CHECK(isErrorResult(notFoundError("x")));
+  CHECK(errorMessage(usageError("boom")) == "boom");
   CHECK_FALSE(isErrorResult(llvm::json::Value(llvm::json::Object{})));
   CHECK_FALSE(isErrorResult(llvm::json::Value("a string")));
-  CHECK_FALSE(isAmbiguousResult(errorResult("x")));
+  CHECK_FALSE(isAmbiguousResult(notFoundError("x")));
   CHECK_FALSE(errorMessage(llvm::json::Value(1)).has_value());
 }

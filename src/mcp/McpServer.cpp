@@ -41,13 +41,11 @@ llvm::json::Value mcpTextResult(llvm::StringRef text, bool isError) {
 }
 
 llvm::json::Value wrapToolResult(const llvm::json::Value &payload) {
-  if (auto msg = errorMessage(payload))
-    return mcpTextResult(*msg, /*isError=*/true);
   std::string text;
   llvm::raw_string_ostream os(text);
   os << payload;
   os.flush();
-  return mcpTextResult(text);
+  return mcpTextResult(text, isErrorStatus(statusOf(payload)));
 }
 
 McpServer::McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
@@ -173,13 +171,15 @@ llvm::json::Value McpServer::handleToolsCall(
   }
 
   // Look up tool by name.
-  if (handlers_.empty()) {
-    for (auto &entry : getRegisteredTools())
-      handlers_[entry.name] = std::move(entry.handler);
+  if (tools_.empty()) {
+    for (auto &entry : getRegisteredTools()) {
+      std::string name = entry.name;
+      tools_.emplace(std::move(name), std::move(entry));
+    }
   }
 
-  auto it = handlers_.find(toolName->str());
-  if (it == handlers_.end()) {
+  auto it = tools_.find(toolName->str());
+  if (it == tools_.end()) {
     return mcpTextResult("Unknown tool: " + toolName->str(),
                          /*isError=*/true);
   }
@@ -191,28 +191,35 @@ llvm::json::Value McpServer::handleToolsCall(
       args = *argsObj;
   }
 
-  if (*toolName == "reindex_tu") {
-    auto filePath = args.getString("file");
-    if (!filePath) {
-      return mcpTextResult("Missing required 'file' argument",
-                           /*isError=*/true);
-    }
-    if (!buildParams_.compDb) {
-      return mcpTextResult("reindex_tu unavailable: no compilation database",
-                           /*isError=*/true);
-    }
-    auto r = reindexTU(filePath->str());
-    std::string msg = "Reindexed " + filePath->str() + "\n" +
-                      "Edges removed: " + std::to_string(r.edgesRemoved) +
-                      ", total edges: " + std::to_string(r.edgesAfter) + "\n" +
-                      "Contexts removed: " + std::to_string(r.contextsRemoved) +
-                      ", total contexts: " + std::to_string(r.contextsAfter);
-    return mcpTextResult(msg);
-  }
-
   ToolContext ctx{graph_,       oracle_,    cfIndex_,
                   entryPoints_, &channels_, &queryCache_};
-  return wrapToolResult(it->second(args, ctx));
+  ctx.facts = facts_;
+
+  if (*toolName == "reindex_tu") {
+    // Adapter-implemented (it mutates the indexes); answers through the
+    // same contract as every tool. The coverage facts stay those of the
+    // bake the server started from: the single-TU re-parse reports no
+    // outcome (docs/index-provenance.md, follow-ups).
+    auto filePath = args.getString("file");
+    if (!filePath)
+      return wrapToolResult(completeResult(
+          usageError("Missing required 'file' argument"), ctx));
+    if (!buildParams_.compDb)
+      return wrapToolResult(completeResult(
+          unavailableError("reindex_tu unavailable: no compilation database"),
+          ctx));
+    auto r = reindexTU(filePath->str());
+    llvm::json::Object obj;
+    obj["file"] = filePath->str();
+    obj["edgesRemoved"] = static_cast<int64_t>(r.edgesRemoved);
+    obj["edgesAfter"] = static_cast<int64_t>(r.edgesAfter);
+    obj["contextsRemoved"] = static_cast<int64_t>(r.contextsRemoved);
+    obj["contextsAfter"] = static_cast<int64_t>(r.contextsAfter);
+    return wrapToolResult(
+        completeResult(llvm::json::Value(std::move(obj)), ctx));
+  }
+
+  return wrapToolResult(runTool(it->second, args, ctx));
 }
 
 } // namespace vycor

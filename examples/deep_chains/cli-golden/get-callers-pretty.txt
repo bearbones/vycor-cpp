@@ -4,12 +4,22 @@
       "callerName": "stage4_dispatch",
       "confidence": "Proven",
       "kind": "DirectCall"
+    "bake": "<bake>",
+    "complete": true,
+    "failed": 0,
+    "freshness": "unchecked",
+    "indexed": 14,
+    "partial": 0,
+    "requested": 14
     {
     }
   "callerCount": 1,
   "callers": [
   "function": "stage5_sink",
+  "indexScope": {
+  "status": "ok",
   "usr": "c:@F@stage5_sink#&$@S@Registry#I#"
   ],
+  },
 {
 }
