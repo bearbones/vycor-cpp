@@ -170,17 +170,22 @@ guard on every hop, matched or not.
 
 | Value | Meaning | Requires |
 |---|---|---|
-| `always_caught` | every path is caught | exhaustive search, no unknown path |
-| `never_caught` | no path is caught, at least one is uncaught | exhaustive search, no unknown path |
-| `noexcept_barrier` | every path terminates at a noexcept or thread boundary | exhaustive search, no unknown path |
+| `always_caught` | every path is caught | exhaustive search, no unknown path, complete index coverage |
+| `never_caught` | no path is caught, at least one is uncaught | exhaustive search, no unknown path, complete index coverage |
+| `noexcept_barrier` | every path terminates at a noexcept or thread boundary | exhaustive search, no unknown path, complete index coverage |
 | `sometimes_caught` | a caught witness and an uncaught or terminating witness | two witnesses; never demoted |
 | `observed_caught` | caught on every path examined, but the search stopped early or some path is unknown | |
 | `observed_uncaught` | uncaught on some path, caught on none examined, same qualification | |
 | `unknown` | no paths (target or entry points not in the graph, nothing reachable, everything pruned), or every path's outcome is unknown | |
 
-`verdictExhaustive` (payload `exhaustive`) is `search.exhaustive && no
-unknown paths`. The summary string appends `Search stopped: <reasons>.`
-when the search did not run to completion.
+`verdictExhaustive` is `search.exhaustive && no unknown paths &&
+indexComplete`, where `indexComplete` is the adapter's coverage fact
+(`ToolContext::facts`, `docs/result-contract.md`): an index missing a
+requested TU may be missing the handler. The payload's `exhaustive` is
+the search fact alone; `indexScope.complete` carries the coverage. The
+summary of an observed verdict names which condition failed (the search
+bound, the coverage, unknown outcomes), and appends `Search stopped:
+<reasons>.` when the search did not run to completion.
 
 `query_all_path_contexts` runs the same search and annotation with no
 propagation walk (no `outcome` per path).
@@ -198,8 +203,10 @@ set of catches depended on edge order.
 
 Common to every path tool (`attachSearchFacts`): `complete`,
 `exhaustive`, `stopReasons` (array, possibly empty), and `skippedHubs`
-`[{name, usr, inDegree}]` when any hub was pruned. Package C owns the
-common result contract; these are the fields it consumes.
+`[{name, usr, inDegree}]` when any hub was pruned. These are the search
+facts; the common result contract (`docs/result-contract.md`) adds
+`status` and `indexScope` to every payload and gates the universal
+verdicts on `indexScope.complete`.
 
 | Tool | Added | Changed |
 |---|---|---|
@@ -273,10 +280,12 @@ package):
 
 ## Handoff
 
-- **C (common result contract):** the completeness fields are produced
-  by `attachSearchFacts` (`query/Serialize.h`) from `PathSearchResult` /
-  `PathSearchFacts`; the spelling of stop reasons is `stopReasonName`.
-  Consumers should treat `exhaustive:false` as "bounded claim".
+- **C (common result contract):** done — `docs/result-contract.md`. The
+  completeness fields are produced by `attachSearchFacts`
+  (`query/Serialize.h`) from `PathSearchResult` / `PathSearchFacts`; the
+  spelling of stop reasons is `stopReasonName`; the universal verdicts
+  are additionally gated on the index coverage. Consumers should treat
+  `exhaustive:false` or `indexScope.complete:false` as "bounded claim".
 - **D (deterministic ordering):** path order is canonical inside the
   engine; `find_call_chain` and the lock tools no longer order anything
   themselves. D's remaining ordering work in `GraphTools.cpp` /

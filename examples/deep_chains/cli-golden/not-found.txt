@@ -1,2 +1,2 @@
 # megascope get-callers --name does_not_exist -> exit 1
-{"callerCount":0,"callers":[],"function":"does_not_exist"}
+{"callerCount":0,"callers":[],"function":"does_not_exist","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok"}

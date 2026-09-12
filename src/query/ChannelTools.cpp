@@ -75,16 +75,16 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
                                             const ToolContext &ctx) {
   auto channelId = args.getString("channel_id");
   if (!channelId)
-    return errorResult("Requires 'channel_id' (from list_channels)");
+    return usageError("Requires 'channel_id' (from list_channels)");
   if (!ctx.channels)
-    return errorResult(
+    return unavailableError(
         "No channel index loaded (server started without "
         "--channel-types-json)");
 
   auto producers = ctx.channels->producersOf(channelId->str());
   auto consumers = ctx.channels->consumersOf(channelId->str());
   if (producers.empty() && consumers.empty())
-    return errorResult("No channel found with id '" + channelId->str() +
+    return notFoundError("No channel found with id '" + channelId->str() +
                           "'");
 
   llvm::json::Array producersArr, consumersArr;
@@ -109,7 +109,7 @@ handleQueryChannelsForFunction(const llvm::json::Object &args,
                               const ToolContext &ctx) {
   auto function = args.getString("function");
   if (!function)
-    return errorResult("Requires 'function' (qualified name or usr)");
+    return usageError("Requires 'function' (qualified name or usr)");
 
   llvm::json::Array arr;
   if (ctx.channels) {
@@ -184,21 +184,21 @@ static llvm::json::Value handleExplainOrdering(const llvm::json::Object &args,
   auto siteAArg = args.getString("call_site_a");
   auto siteBArg = args.getString("call_site_b");
   if (!siteAArg || !siteBArg)
-    return errorResult(
+    return usageError(
         "Requires 'call_site_a' and 'call_site_b' (file:line:col, from "
         "query_channel or query_channels_for_function)");
   if (!ctx.channels)
-    return errorResult(
+    return unavailableError(
         "No channel index loaded (server started without "
         "--channel-types-json)");
 
   auto siteA = findChannelSiteAt(*ctx.channels, siteAArg->str());
   auto siteB = findChannelSiteAt(*ctx.channels, siteBArg->str());
   if (!siteA)
-    return errorResult("No channel site indexed at '" + siteAArg->str() +
+    return notFoundError("No channel site indexed at '" + siteAArg->str() +
                           "'");
   if (!siteB)
-    return errorResult("No channel site indexed at '" + siteBArg->str() +
+    return notFoundError("No channel site indexed at '" + siteBArg->str() +
                           "'");
 
   bool sameChannel = siteA->channelId == siteB->channelId;

@@ -179,7 +179,7 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'function' (or 'usr')");
+    return usageError("Missing required parameter 'function' (or 'usr')");
 
   unsigned maxDepth = kDefaultMaxDepth;
   if (auto md = args.getInteger("max_depth"))
@@ -235,7 +235,7 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!a || !b)
-    return errorResult(
+    return usageError(
         "Missing required parameters 'fn_a' and 'fn_b' (or their *_usr "
         "twins)");
 

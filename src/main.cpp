@@ -1359,11 +1359,17 @@ int main(int argc, const char **argv) {
                                              : channels.size();
 
     bool saveFailed = false;
+    // What every served payload says about these indexes
+    // (docs/result-contract.md): the bake that wrote or kept the index,
+    // and its coverage. Baked here, so `baked`.
+    vycor::IndexFacts serveFacts;
     if (!indexPath.empty() && !indexesChanged) {
       llvm::errs() << "megascope: index unchanged — skipping re-save\n";
       // Nothing re-indexed: the coverage is what the index records
       // (failed TUs left as recorded included).
       coverage = vycor::coverageOf(snap->meta);
+      serveFacts =
+          vycor::IndexFacts::of(snap->meta, vycor::IndexFreshness::Baked);
     } else if (!indexPath.empty()) {
       vycor::SnapshotMeta meta;
       meta.collapsePaths = collapsePaths;
@@ -1382,6 +1388,7 @@ int main(int argc, const char **argv) {
       unstableStamps =
           vycor::SnapshotIO::markUnstableStamps(meta, bakeStartNs);
       coverage = vycor::coverageOf(meta);
+      serveFacts = vycor::IndexFacts::of(meta, vycor::IndexFreshness::Baked);
       if (!coverage.complete())
         llvm::errs() << "megascope: WARNING: " << coverage.indexed << " of "
                      << coverage.requested << " TU(s) indexed cleanly ("
@@ -1399,6 +1406,14 @@ int main(int argc, const char **argv) {
         llvm::errs() << "megascope: WARNING: could not save index to "
                      << indexPath << "\n";
       }
+    } else {
+      // No index file: the coverage of this in-memory bake, with no
+      // saved bake to cite.
+      vycor::SnapshotMeta meta;
+      meta.files = currentStamps;
+      vycor::SnapshotIO::recordOutcomes(meta, outcomes);
+      coverage = vycor::coverageOf(meta);
+      serveFacts = vycor::IndexFacts::of(meta, vycor::IndexFreshness::Baked);
     }
 
     if (!McpStatsJson.empty()) {
@@ -1559,6 +1574,7 @@ int main(int argc, const char **argv) {
                                  std::move(channels), std::move(entryPoints),
                                  std::move(buildParams));
     server.setVerbose(McpVerbose);
+    server.setIndexFacts(std::move(serveFacts));
     return server.run();
   }
 

@@ -111,8 +111,11 @@ struct ExceptionPathResult {
   size_t uncaughtCount = 0;
   size_t terminatesCount = 0;
   size_t unknownCount = 0;
-  // search.exhaustive && unknownCount == 0: the precondition for a
-  // universal verdict.
+  // The caller's statement that the index covers every requested TU
+  // (docs/result-contract.md); false demotes a universal verdict.
+  bool indexComplete = true;
+  // search.exhaustive && unknownCount == 0 && indexComplete: the
+  // precondition for a universal verdict.
   bool verdictExhaustive = false;
 };
 
@@ -168,12 +171,16 @@ public:
   // handler passes the exception on), then the caller's noexcept
   // boundary, then the next hop. Contexts are joined on the exact (call
   // site, caller USR); a hop with no indexed context is unknown, not
-  // unprotected.
+  // unprotected. `indexComplete` is the adapter's coverage fact: with
+  // it false the universal verdicts (Always/Never/NoexceptBarrier) are
+  // demoted to the observed ones, since a handler may live in a TU the
+  // index does not hold.
   ExceptionPathResult
   queryExceptionProtection(const std::string &functionName,
                            const std::string &exceptionType,
                            const std::vector<std::string> &entryPoints,
-                           const SearchLimits &limits = {}) const;
+                           const SearchLimits &limits = {},
+                           bool indexComplete = true) const;
 
   // Q3: All paths from entries to X with their exception context (no
   // propagation walk: scopes and guards of every hop, outcome Unknown).
@@ -187,7 +194,8 @@ public:
   queryThrowPropagation(const std::string &throwingFunction,
                         const std::string &thrownType,
                         const std::vector<std::string> &entryPoints,
-                        const SearchLimits &limits = {}) const;
+                        const SearchLimits &limits = {},
+                        bool indexComplete = true) const;
 
   // Q5: Nearest try/catch on each caller chain into X: a breadth-first
   // walk over caller edges (each edge examined once, callers in canonical

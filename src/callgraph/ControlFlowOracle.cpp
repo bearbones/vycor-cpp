@@ -335,9 +335,10 @@ PathSearchFacts ControlFlowOracle::factsOf(const PathSearchResult &r,
 ExceptionPathResult ControlFlowOracle::queryExceptionProtection(
     const std::string &functionName, const std::string &exceptionType,
     const std::vector<std::string> &entryPoints,
-    const SearchLimits &limits) const {
+    const SearchLimits &limits, bool indexComplete) const {
 
   ExceptionPathResult result;
+  result.indexComplete = indexComplete;
   const auto found = findCallerPaths(graph_, functionName, entryPoints,
                                      limits, CycleRule::SimpleNodes);
   result.search = factsOf(found, limits);
@@ -354,8 +355,8 @@ ExceptionPathResult ControlFlowOracle::queryExceptionProtection(
     result.paths.push_back(std::move(pi));
   }
 
-  result.verdictExhaustive =
-      result.search.exhaustive && result.unknownCount == 0;
+  result.verdictExhaustive = result.search.exhaustive &&
+                             result.unknownCount == 0 && indexComplete;
   const bool exhaustive = result.verdictExhaustive;
   const size_t caught = result.caughtCount;
   const size_t uncaught = result.uncaughtCount;
@@ -406,9 +407,9 @@ PathContextsResult ControlFlowOracle::queryAllPathContexts(
 ExceptionPathResult ControlFlowOracle::queryThrowPropagation(
     const std::string &throwingFunction, const std::string &thrownType,
     const std::vector<std::string> &entryPoints,
-    const SearchLimits &limits) const {
+    const SearchLimits &limits, bool indexComplete) const {
   return queryExceptionProtection(throwingFunction, thrownType, entryPoints,
-                                  limits);
+                                  limits, indexComplete);
 }
 
 // ============================================================================
@@ -559,6 +560,26 @@ ControlFlowOracle::buildSummary(const ExceptionPathResult &result,
     return s;
   };
 
+  // Which precondition of a universal verdict failed: the search bound,
+  // the index coverage, or an unknown path outcome (any combination).
+  auto whyObserved = [&]() {
+    std::vector<std::string> parts;
+    if (!result.search.exhaustive)
+      parts.push_back("the search is not exhaustive");
+    if (!result.indexComplete)
+      parts.push_back("the index does not cover every requested TU");
+    if (result.unknownCount > 0)
+      parts.push_back(std::to_string(result.unknownCount) +
+                      " path(s) have an unknown outcome");
+    std::string why;
+    for (size_t i = 0; i < parts.size(); ++i) {
+      if (i > 0)
+        why += i + 1 == parts.size() ? " and " : ", ";
+      why += parts[i];
+    }
+    return why;
+  };
+
   switch (result.protection) {
   case Protection::AlwaysCaught:
     ss << functionName << " throwing " << what << " is caught on all "
@@ -594,21 +615,13 @@ ControlFlowOracle::buildSummary(const ExceptionPathResult &result,
 
   case Protection::ObservedCaught:
     ss << functionName << " throwing " << what << " is caught on every one "
-       << "of the " << total << " observed path(s), but the search is not "
-       << "exhaustive";
-    if (result.unknownCount > 0)
-      ss << " (" << result.unknownCount << " path(s) have an unknown "
-         << "outcome)";
+       << "of the " << total << " observed path(s), but " << whyObserved();
     ss << "; unexamined paths may be unprotected.";
     break;
 
   case Protection::ObservedUncaught:
     ss << functionName << " throwing " << what << " is NOT caught on any "
-       << "of the " << total << " observed path(s); the search is not "
-       << "exhaustive";
-    if (result.unknownCount > 0)
-      ss << " (" << result.unknownCount << " path(s) have an unknown "
-         << "outcome)";
+       << "of the " << total << " observed path(s); " << whyObserved();
     ss << ".";
     if (const PathInfo *p = firstUncaught())
       ss << " Uncaught path: " << chainOf(*p) << ".";

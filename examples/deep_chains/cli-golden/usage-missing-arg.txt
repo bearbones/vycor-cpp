@@ -1,2 +1,2 @@
 # megascope get-callers -> exit 2
-{"error":"Missing required parameter 'name' (or 'usr')"}
+{"error":"Missing required parameter 'name' (or 'usr')","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"usage_error"}

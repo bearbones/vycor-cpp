@@ -99,7 +99,7 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'function' (or 'usr')");
+    return usageError("Missing required parameter 'function' (or 'usr')");
 
   std::string exceptionType;
   if (auto et = args.getString("exception_type"))
@@ -107,10 +107,11 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
 
   SearchLimits limits;
   if (auto err = parseSearchLimits(args, limits))
-    return errorResult(*err);
+    return usageError(*err);
 
   auto result = ctx.oracle.queryExceptionProtection(
-      *ident, exceptionType, entryPointsArg(args, ctx), limits);
+      *ident, exceptionType, entryPointsArg(args, ctx), limits,
+      ctx.facts.coverage.complete());
 
   llvm::json::Object obj;
   auto function = args.getString("function");
@@ -194,7 +195,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
                           const ToolContext &ctx) {
   auto callSite = args.getString("call_site");
   if (!callSite)
-    return errorResult("Missing required parameter 'call_site'");
+    return usageError("Missing required parameter 'call_site'");
 
   // Validate file:line:col format. Split on the rightmost two colons so that
   // Unix absolute paths are preserved.
@@ -216,7 +217,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
       !isDigits(llvm::StringRef(raw).substr(secondLast + 1,
                                             lastColon - secondLast - 1)) ||
       !isDigits(llvm::StringRef(raw).substr(lastColon + 1))) {
-    return errorResult(
+    return usageError(
         "Invalid call_site format: expected 'file:line:col' (e.g. "
         "'src/foo.cpp:12:3'), got '" +
         raw + "'");
@@ -230,7 +231,7 @@ handleQueryCallSiteContext(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!rawCtx) {
-    return errorResult(
+    return notFoundError(
         "Call site not indexed: '" + raw +
         "'. Ensure the path matches the compilation database "
         "canonicalization (typically an absolute path).");
@@ -286,7 +287,7 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
                                 const ToolContext &ctx) {
   auto callSite = args.getString("call_site");
   if (!callSite)
-    return errorResult("Missing required parameter 'call_site'");
+    return usageError("Missing required parameter 'call_site'");
 
   // Optional kinds filter. If absent or empty, all kinds are included.
   std::set<RaiiKind> allowed;
@@ -295,7 +296,7 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
       if (auto s = v.getAsString()) {
         auto k = parseRaiiKind(*s);
         if (!k) {
-          return errorResult(
+          return usageError(
               "Invalid value in kinds: '" + s->str() +
               "' (expected lock, smart_ptr, or other)");
         }
@@ -314,7 +315,7 @@ handleQueryRaiiScopesAtCallsite(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!csCtx) {
-    return errorResult(
+    return notFoundError(
         "Call site not indexed: '" + callSite->str() +
         "'. Ensure the path matches the compilation database "
         "canonicalization (typically an absolute path).");
@@ -400,17 +401,18 @@ handleQueryThrowPropagation(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'function' (or 'usr')");
+    return usageError("Missing required parameter 'function' (or 'usr')");
   std::string exceptionType;
   if (auto et = args.getString("exception_type"))
     exceptionType = et->str();
 
   SearchLimits limits;
   if (auto err = parseSearchLimits(args, limits))
-    return errorResult(*err);
+    return usageError(*err);
 
   auto result = ctx.oracle.queryThrowPropagation(
-      *ident, exceptionType, entryPointsArg(args, ctx), limits);
+      *ident, exceptionType, entryPointsArg(args, ctx), limits,
+      ctx.facts.coverage.complete());
 
   llvm::json::Object obj;
   auto function = args.getString("function");
@@ -438,10 +440,10 @@ handleQueryAllPathContexts(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'function' (or 'usr')");
+    return usageError("Missing required parameter 'function' (or 'usr')");
   SearchLimits limits;
   if (auto err = parseSearchLimits(args, limits))
-    return errorResult(*err);
+    return usageError(*err);
 
   auto result = ctx.oracle.queryAllPathContexts(
       *ident, entryPointsArg(args, ctx), limits);
@@ -466,12 +468,12 @@ handleQueryNearestCatches(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'function' (or 'usr')");
+    return usageError("Missing required parameter 'function' (or 'usr')");
 
   unsigned maxDepth = 20;
   if (auto md = args.getInteger("max_depth")) {
     if (*md <= 0)
-      return errorResult("Invalid max_depth: must be positive");
+      return usageError("Invalid max_depth: must be positive");
     maxDepth = static_cast<unsigned>(*md);
   }
 

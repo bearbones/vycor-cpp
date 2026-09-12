@@ -122,11 +122,11 @@ static llvm::json::Value handleLookupFunction(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'name' (or 'usr')");
+    return usageError("Missing required parameter 'name' (or 'usr')");
 
   auto *node = ctx.graph.findNode(*ident);
   if (!node)
-    return errorResult("Function not found: " + *ident);
+    return notFoundError("Function not found: " + *ident);
 
   llvm::json::Object obj;
   obj["qualifiedName"] = node->qualifiedName;
@@ -149,7 +149,7 @@ handleSearchFunctions(const llvm::json::Object &args,
                       const ToolContext &ctx) {
   auto query = args.getString("query");
   if (!query || query->empty())
-    return errorResult("Missing required parameter 'query'");
+    return usageError("Missing required parameter 'query'");
 
   int64_t limit = 25;
   if (auto l = args.getInteger("limit"))
@@ -254,11 +254,11 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'name' (or 'usr')");
+    return usageError("Missing required parameter 'name' (or 'usr')");
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
-    return errorResult(*err);
+    return usageError(*err);
 
   // Query by the resolved USR: the by-name union path is never taken.
   auto edges = ctx.graph.calleesOf(*ident);
@@ -291,11 +291,11 @@ static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!ident)
-    return errorResult("Missing required parameter 'name' (or 'usr')");
+    return usageError("Missing required parameter 'name' (or 'usr')");
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
-    return errorResult(*err);
+    return usageError(*err);
 
   // Query by the resolved USR: the by-name union path is never taken.
   auto edges = ctx.graph.callersOf(*ident);
@@ -326,19 +326,19 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
   if (ambiguous)
     return std::move(*ambiguous);
   if (!to)
-    return errorResult("Missing required parameter 'to' (or 'to_usr')");
+    return usageError("Missing required parameter 'to' (or 'to_usr')");
 
   int64_t maxPaths = 10;
   if (auto mp = args.getInteger("max_paths")) {
     if (*mp <= 0)
-      return errorResult("Invalid max_paths: must be positive");
+      return usageError("Invalid max_paths: must be positive");
     maxPaths = *mp;
   }
 
   int64_t maxDepth = 20;
   if (auto md = args.getInteger("max_depth")) {
     if (*md <= 0)
-      return errorResult("Invalid max_depth: must be positive");
+      return usageError("Invalid max_depth: must be positive");
     maxDepth = *md;
   }
 
@@ -351,7 +351,7 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
-    return errorResult(*err);
+    return usageError(*err);
 
   // `from` is optional (absent -> entry points); the ambiguity check
   // applies only when an identity IS provided.
@@ -423,7 +423,7 @@ handleGetClassHierarchy(const llvm::json::Object &args,
                         const ToolContext &ctx) {
   auto className = args.getString("class_name");
   if (!className)
-    return errorResult("Missing required parameter 'class_name'");
+    return usageError("Missing required parameter 'class_name'");
 
   bool transitive = false;
   if (auto t = args.getBoolean("include_transitive"))
@@ -652,7 +652,7 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
         continue;
       auto parsed = parseExecutionContext(*s);
       if (!parsed) {
-        return errorResult(
+        return usageError(
             "Invalid value in execution_contexts: '" + s->str() +
             "' (expected Synchronous, ThreadSpawn, AsyncTask, "
             "PackagedTask, or Invoke)");

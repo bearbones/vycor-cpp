@@ -160,7 +160,7 @@ handlers directly.
 
 | File | Purpose |
 |---|---|
-| `Tools.h` | `ToolContext`, `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract: success = payload object; error = `{"error": msg}` (`errorResult`/`isErrorResult`); ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`) |
+| `Tools.h` | `ToolContext` (indexes, entry points, cache, header summary, and `facts` — the `IndexFacts` every payload cites), `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract (`docs/result-contract.md`): success = payload object; error = `{"error": msg, "status": kind}` built with `usageError` / `notFoundError` / `unavailableError`; ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`); `runTool` runs a handler and `completeResult` stamps `status` (`statusOf`) and `indexScope` onto the payload — what every adapter calls |
 | `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR), the disambiguation payload, `attachUsr` |
 | `Serialize.h/.cpp` | Enum spellings (`EdgeKind`, `Confidence`, `ExecutionContext`, `ChannelOperation`) and JSON serializers for edges, guards, channel sites — part of the output contract |
 | `GraphTools.cpp` | lookup, search, callers, callees, call chain, class hierarchy, entry points, graph summary, callback/concurrency sites |
@@ -179,7 +179,7 @@ handlers directly.
 | File | Purpose |
 |---|---|
 | `BakeConfig.h/.cpp` | `parseChannelTypesJson`, `loadOrgConfigIfSet`, `mergeExtensionConfig` — the bake configuration shared by `main.cpp`'s verbs and the ephemeral query mode |
-| `MegascopeCli.h/.cpp` | The query verbs (`<tool>`, `call`, `tools`, `info`, `batch`, `dump`): `parseToolArgs` derives `--flags` from each tool's JSON Schema (strings take a value, integers parse, booleans are bare, arrays repeat; hyphens and underscores interchangeable; `--args '<json>'` seeds), `emitToolResult` implements the output contract (compact JSON / `--pretty` / `--format ndjson` with a leading `{"_summary":...}` line / `--format tsv` with sorted columns) and `exitCodeFor` the exit codes (0 results, 1 empty, 2 usage, 3 index, 4 ambiguous); `resolveIndexPath` is the `--index` → `$VYCOR_INDEX` → `<build-path>/.vycor/megascope.vycs` → `./.vycor/megascope.vycs` chain; `dump` streams every call-site context and channel site through `ControlFlowIndex::forEachContext` (ndjson default, or one json document via `llvm::json::OStream`); ephemeral mode (`--source`/`--source-list`/`--source-re` with `--build-path`) runs `selectSources` + `bakeIndexes` in memory and answers from that, no index read or written |
+| `MegascopeCli.h/.cpp` | The query verbs (`<tool>`, `call`, `tools`, `info`, `batch`, `dump`): `parseToolArgs` derives `--flags` from each tool's JSON Schema (strings take a value, integers parse, booleans are bare, arrays repeat; hyphens and underscores interchangeable; `--args '<json>'` seeds), `emitToolResult` implements the output contract (compact JSON / `--pretty` / `--format ndjson` with a leading `{"_summary":...}` line / `--format tsv` with sorted columns) and `exitCodeFor` the exit codes, derived from the payload's typed `status` (0 results, 1 empty or not found, 2 usage, 3 index missing or unavailable facts, 4 ambiguous; `docs/result-contract.md`); `resolveIndexPath` is the `--index` → `$VYCOR_INDEX` → `<build-path>/.vycor/megascope.vycs` → `./.vycor/megascope.vycs` chain; `dump` streams every call-site context and channel site through `ControlFlowIndex::forEachContext` (ndjson default, or one json document via `llvm::json::OStream`); ephemeral mode (`--source`/`--source-list`/`--source-re` with `--build-path`) runs `selectSources` + `bakeIndexes` in memory and answers from that, no index read or written |
 
 The query verbs load the index with `LoadMode::ReadOnly`
 (`callgraph/Snapshot.h`): the edge dedup map and per-TU provenance that
@@ -248,7 +248,7 @@ kind of refresh equals a clean rebuild, in-process and isolated.
 
 | File | Purpose |
 |---|---|
-| `McpServer.h/.cpp` | JSON-RPC dispatch loop; owns the indexes and `QueryCache`; `wrapToolResult` turns a query payload into a `content[0].text` block (error payload → `isError`); implements `reindex_tu` (needs mutable indexes) |
+| `McpServer.h/.cpp` | JSON-RPC dispatch loop; owns the indexes, `QueryCache`, and the `IndexFacts` main.cpp sets; `wrapToolResult` turns a query payload into a `content[0].text` block (the JSON payload itself; an error status → `isError`); implements `reindex_tu` (needs mutable indexes) as a JSON payload through the same contract |
 | `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 
 **24 tools** (CLI verbs and MCP): `search_functions`, `lookup_function`, `get_callees`,
@@ -271,6 +271,14 @@ with resolved strings. Path-walking tools (`find_call_chain`,
 share one traversal (`callgraph/PathSearch.h`), accept `max_paths` /
 `max_depth` (edges) / `max_fan_in`, and report `stopReasons`,
 `complete`, `exhaustive`, and `skippedHubs` (`docs/path-analysis.md`).
+
+Every tool payload, on every transport, carries `status` (`ok`,
+`ambiguous`, `usage_error`, `not_found`, `unavailable`) and
+`indexScope` (the bake reference, `freshness`, and the requested /
+indexed / partial / failed TU counts of the index answered from). Exit
+codes and MCP `isError` derive from `status`, never from message text;
+a universal exception verdict needs an exhaustive search and complete
+coverage (`docs/result-contract.md`).
 
 ### `ext` — Organization Extension Points
 
