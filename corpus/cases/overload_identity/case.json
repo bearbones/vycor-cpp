@@ -1,0 +1,347 @@
+{
+ "schema": 1,
+ "title": "Two overloads of f: a name is ambiguous, a usr is exact, and every list orders the overloads by usr",
+ "sources": [
+  "f.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "name-is-ambiguous",
+   "argv": [
+    "get-callers",
+    "--name",
+    "f"
+   ],
+   "expect": {
+    "exit": 4,
+    "status": "ambiguous",
+    "fields": {
+     "ambiguous": true,
+     "total_candidates": 2
+    },
+    "witnesses": [
+     {
+      "in": "candidates",
+      "match": {
+       "usr": "c:@F@f#I#"
+      }
+     },
+     {
+      "in": "candidates",
+      "match": {
+       "usr": "c:@F@f#d#"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "callers-of-f-int",
+   "argv": [
+    "get-callers",
+    "--usr",
+    "c:@F@f#I#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callers": 2
+    },
+    "witnesses": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "g"
+      }
+     },
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "main"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "h"
+      }
+     }
+    ],
+    "sequence": [
+     {
+      "in": "callers",
+      "match": [
+       {
+        "callerName": "g"
+       },
+       {
+        "callerName": "main"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "callers-of-f-double",
+   "argv": [
+    "get-callers",
+    "--usr",
+    "c:@F@f#d#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callers": 1
+    },
+    "witnesses": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "h"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "g"
+      }
+     },
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "main"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "callees-of-main-in-canonical-order",
+   "argv": [
+    "get-callees",
+    "--name",
+    "main"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callees": 3
+    },
+    "sequence": [
+     {
+      "in": "callees",
+      "match": [
+       {
+        "calleeName": "f"
+       },
+       {
+        "calleeName": "g"
+       },
+       {
+        "calleeName": "h"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "search-limit-cuts-on-usr",
+   "argv": [
+    "search-functions",
+    "--query",
+    "f",
+    "--limit",
+    "1"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "matches": 1
+    },
+    "witnesses": [
+     {
+      "in": "matches",
+      "match": {
+       "usr": "c:@F@f#I#"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "matches",
+      "match": {
+       "usr": "c:@F@f#d#"
+      }
+     }
+    ],
+    "fields": {
+     "totalMatches": 2,
+     "truncated": true
+    }
+   }
+  },
+  {
+   "id": "chain-to-name-is-ambiguous",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "f"
+   ],
+   "expect": {
+    "exit": 4,
+    "status": "ambiguous",
+    "fields": {
+     "ambiguous": true,
+     "total_candidates": 2
+    }
+   }
+  },
+  {
+   "id": "chains-to-f-int",
+   "argv": [
+    "find-call-chain",
+    "--to-usr",
+    "c:@F@f#I#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "pathCount": 2,
+     "complete": true,
+     "exhaustive": true,
+     "stopReasons": [],
+     "targetUsr": "c:@F@f#I#"
+    },
+    "witnesses": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "g"
+       },
+       {
+        "fromName": "g",
+        "to": "c:@F@f#I#"
+       }
+      ]
+     },
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "to": "c:@F@f#I#"
+       }
+      ]
+     }
+    ],
+    "negatives": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "h"
+       },
+       {
+        "fromName": "h",
+        "to": "c:@F@f#d#"
+       }
+      ]
+     },
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main"
+       },
+       {
+        "fromName": "g",
+        "to": "c:@F@f#d#"
+       }
+      ]
+     }
+    ],
+    "sequence": [
+     {
+      "in": "paths",
+      "match": [
+       [
+        {
+         "fromName": "main"
+        },
+        {
+         "fromName": "g",
+         "to": "c:@F@f#I#"
+        }
+       ],
+       [
+        {
+         "fromName": "main",
+         "to": "c:@F@f#I#"
+        }
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "chains-to-f-double",
+   "argv": [
+    "find-call-chain",
+    "--to-usr",
+    "c:@F@f#d#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "pathCount": 1,
+     "complete": true,
+     "exhaustive": true,
+     "targetUsr": "c:@F@f#d#"
+    },
+    "witnesses": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "h"
+       },
+       {
+        "fromName": "h",
+        "to": "c:@F@f#d#"
+       }
+      ]
+     }
+    ],
+    "negatives": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "to": "c:@F@f#d#"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

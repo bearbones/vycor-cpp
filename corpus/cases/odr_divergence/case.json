@@ -1,0 +1,58 @@
+{
+ "schema": 1,
+ "title": "Vague-linkage definitions that differ across TUs (anneal --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
+ "sources": [
+  "tu1.cpp",
+  "tu2.cpp"
+ ],
+ "flags": {
+  "tu1.cpp": [
+   "-DMODE"
+  ]
+ },
+ "entry_points": [],
+ "queries": [
+  {
+   "id": "odr-diag",
+   "argv": [
+    "anneal",
+    "--odr-diag",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 0,
+    "lines": {
+     "present": [
+      "ODR violation: 'magic'",
+      "ODR violation: 'dup'",
+      "ODR violation: 'Cfg'"
+     ],
+     "absent": [
+      "'same'",
+      "'Cfg::get'"
+     ]
+    }
+   }
+  },
+  {
+   "id": "no-odr-without-the-check",
+   "argv": [
+    "anneal",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 0,
+    "lines": {
+     "present": [
+      "^anneal: no issues found"
+     ],
+     "absent": [
+      "ODR violation"
+     ]
+    }
+   }
+  }
+ ]
+}

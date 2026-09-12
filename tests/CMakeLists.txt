@@ -82,6 +82,7 @@ add_executable(vycor_tests
   test_mcp_server.cpp
   test_megascope_cli.cpp
   test_result_contract.cpp
+  test_determinism.cpp
   test_source_selection.cpp
   test_deep_chains.cpp
   test_snapshot.cpp
@@ -133,6 +134,20 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/warm-refresh-check.py
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(warm_refresh PROPERTIES LABELS "cli;refresh")
+  # The validation corpus (scripts/corpus-run.py, docs/validation.md):
+  # every case under corpus/cases/ baked and queried, expectations
+  # checked. corpus_selfcheck proves the checks can fail: the corpus
+  # under each fault injection must fail in the right category.
+  add_test(NAME corpus
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/corpus-run.py
+                   --binary $<TARGET_FILE:vycor-cpp> --reps 1)
+  set_tests_properties(corpus PROPERTIES LABELS "cli;corpus")
+  add_test(NAME corpus_selfcheck
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/corpus-run.py
+                   --binary $<TARGET_FILE:vycor-cpp> --reps 1 --self-check)
+  set_tests_properties(corpus_selfcheck PROPERTIES LABELS "cli;corpus")
 else()
   message(STATUS "python3 not found: the cli_golden test is not registered")
 endif()

@@ -461,6 +461,19 @@ the goldens in the same PR. `scripts/bench.py --cli [--sections]`
 measures the one-shot query latency the CLI model pays per call
 (process start + index load + query), with the per-section load split.
 
+The order of every list a tool emits is contractual
+(`docs/deterministic-output.md`): the same sources baked in any TU
+order, on any thread count, cold or warm, answer byte for byte the
+same; `tests/test_determinism.cpp` compares raw payloads and
+`scripts/warm-refresh-check.py` compares raw tool output over a warm
+index against a clean rebuild. The validation corpus
+(`corpus/cases/`, `scripts/corpus-run.py`, ctest `corpus` and
+`corpus_selfcheck`; `docs/validation.md`) checks answers against
+hand-written witnesses, negatives, and orders, and writes a report that
+keeps quality and cost apart. Its `header_change` and
+`compile_flag_invalidation` cases are before/after patch pairs.
+Benchmarks (`scripts/bench.py`) are run by hand, never by ctest.
+
 Run tests from the project root, or ensure `PROJECT_SOURCE_DIR` is set
 correctly (the CMake build sets it automatically via a compile definition).
 

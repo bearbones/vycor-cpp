@@ -250,6 +250,11 @@ public:
     size_t viaDeps = 0;   // DirtyReason::Deps
     size_t retried = 0;   // DirtyReason::Retry
     std::vector<DirtyReason> reasons;
+    /// Per TU, the evidence behind its reason, for a diagnostic line:
+    /// "not recorded", "own stamp changed", the first changed
+    /// dependency with its recorded and current stamps, ... Empty for
+    /// a clean TU.
+    std::vector<std::string> detail;
   };
 
   /// Which of `current` (stamps of the selected TUs, taken before the

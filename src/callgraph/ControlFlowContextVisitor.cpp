@@ -969,10 +969,17 @@ namespace {
 // fan-out and the function-pointer-through-return join are both deferred to
 // query time) and the CF visitor never reads the graph during traversal.
 // The indexer runs first so same-TU state precedes the edge walk.
-// Every file the frontend opened for this TU, as absolute dot-free paths
-// (the spelling TU stamps use), with the stamp the FileManager recorded
-// when it opened the file — whole-second mtime and size — and the TU
-// itself left out. This is the warm start's dependency list.
+// Every file the frontend opened for this TU, with the stamp the
+// FileManager recorded when it opened the file — whole-second mtime and
+// size — and the TU itself left out. This is the warm start's
+// dependency list. Each file is spelled by the real path the file
+// system resolved when it was opened; the lexical spelling (absolute,
+// dots removed — what TU stamps use) is the fallback, and is what
+// identifies the TU. The two differ across symlinks: a `..` that climbs
+// out of a symlinked directory lands somewhere else on disk than on
+// paper (`/lib/gcc/<triple>/N/../..` is under `/usr` on a merged-/usr
+// system), and a dependency recorded by the paper spelling names a file
+// that is never there, so every warm start after it rebuilds cold.
 std::vector<FileStamp> openedFiles(clang::SourceManager &sm,
                                    const std::string &tuPath) {
   std::vector<FileStamp> out;
@@ -984,8 +991,9 @@ std::vector<FileStamp> openedFiles(clang::SourceManager &sm,
     llvm::sys::path::remove_dots(path, /*remove_dot_dot=*/true);
     if (path == tuPath)
       continue;
+    llvm::StringRef real = entry.getFileEntry().tryGetRealPathName();
     FileStamp fs;
-    fs.path = std::string(path);
+    fs.path = real.empty() ? std::string(path) : std::string(real);
     fs.mtimeNs = static_cast<uint64_t>(entry.getModificationTime()) *
                  1000000000ull;
     fs.size = static_cast<uint64_t>(entry.getSize());

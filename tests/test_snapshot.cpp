@@ -21,9 +21,11 @@
 #include "vycor/callgraph/Snapshot.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/FileSystem.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <iterator>
 #include <fstream>
@@ -897,4 +899,49 @@ TEST_CASE("snapshot round-trips multi-contributor deduped edges",
   CHECK(loaded->graph.edgeCount() == 1);
   CHECK(loaded->graph.removeTU("/src/b.cpp") == 1);
   CHECK(loaded->graph.edgeCount() == 0);
+}
+
+TEST_CASE("dependencies are recorded by the path the file system opened",
+          "[snapshot]") {
+  // A GCC toolchain found through /../lib (a bare `clang++` in the
+  // compile command on a merged-/usr distribution) spells every
+  // libstdc++ header as /../lib/gcc/<triple>/N/../../../../include/c++/N.
+  // Lexically that is /include/c++/N; on disk /lib is a symlink into
+  // /usr/lib, so the `..` climb out of it lands in /usr. A dependency
+  // recorded by the lexical spelling names a file that does not exist,
+  // and every warm start after that rebuilds cold. The same shape, in
+  // a scratch tree: `link` is a symlink into `real/sub`, and the
+  // include path climbs out of it.
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-symlink-dep", dir));
+  const std::string base = std::string(dir) + "/";
+  REQUIRE(!llvm::sys::fs::create_directories(base + "real/inc"));
+  REQUIRE(!llvm::sys::fs::create_directories(base + "real/sub"));
+  REQUIRE(!llvm::sys::fs::create_link(base + "real/sub", base + "link"));
+  auto header = writeText(base + "real/inc/h.h", "int h();\n");
+  auto tu = writeText(base + "tu.cpp", "#include \"h.h\"\nint m() { return h(); }\n");
+
+  llvm::SmallString<256> realHeader;
+  REQUIRE(!llvm::sys::fs::real_path(header, realHeader));
+  clang::tooling::FixedCompilationDatabase compDb(
+      std::string(dir), {"-std=c++17", "-I", base + "link/../inc"});
+  auto baked = bakeIndexes(compDb, {tu}, {}, /*threadCount=*/1);
+
+  REQUIRE(baked.deps.count(tu) == 1);
+  std::vector<std::string> paths;
+  for (const auto &dep : baked.deps[tu])
+    paths.push_back(dep.path);
+  INFO("recorded: " << [&] {
+    std::string s;
+    for (const auto &p : paths)
+      s += p + "\n";
+    return s;
+  }());
+  CHECK(std::find(paths.begin(), paths.end(), std::string(realHeader)) !=
+        paths.end());
+  CHECK(std::find(paths.begin(), paths.end(), base + "inc/h.h") ==
+        paths.end());
+  for (const auto &p : paths)
+    CHECK(llvm::sys::fs::exists(p));
+  llvm::sys::fs::remove_directories(dir);
 }

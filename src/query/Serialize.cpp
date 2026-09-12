@@ -17,6 +17,8 @@
 #include "vycor/query/Serialize.h"
 #include "vycor/ext/Extensions.h"
 
+#include <algorithm>
+
 namespace vycor {
 
 // ============================================================================
@@ -121,6 +123,31 @@ int confidenceRank(Confidence c) {
 // ============================================================================
 // Serialize a CallGraphEdge to JSON
 // ============================================================================
+
+bool canonicalEdgeLess(const CallGraphEdge &a, const CallGraphEdge &b) {
+  if (a.callerUsr != b.callerUsr)
+    return a.callerUsr < b.callerUsr;
+  if (a.calleeUsr != b.calleeUsr)
+    return a.calleeUsr < b.calleeUsr;
+  if (a.callSite != b.callSite)
+    return a.callSite < b.callSite;
+  if (a.kind != b.kind)
+    return a.kind < b.kind;
+  if (a.confidence != b.confidence)
+    return a.confidence < b.confidence;
+  if (a.execContext != b.execContext)
+    return a.execContext < b.execContext;
+  if (a.indirectionDepth != b.indirectionDepth)
+    return a.indirectionDepth < b.indirectionDepth;
+  // Materialized edges carry usrs; hand-built graphs may not.
+  if (a.callerName != b.callerName)
+    return a.callerName < b.callerName;
+  return a.calleeName < b.calleeName;
+}
+
+void sortEdgesCanonically(std::vector<CallGraphEdge> &edges) {
+  std::sort(edges.begin(), edges.end(), canonicalEdgeLess);
+}
 
 llvm::json::Value edgeToJson(const CallGraphEdge &e) {
   llvm::json::Object obj;

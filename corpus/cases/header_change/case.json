@@ -1,0 +1,173 @@
+{
+ "schema": 1,
+ "title": "A header edit retargets an inline function: the warm refresh re-parses the one TU that includes it, and the old callee, which only that header ever named, is unknown afterwards",
+ "sources": [
+  "tu.cpp",
+  "pad1.cpp",
+  "pad2.cpp"
+ ],
+ "phases": [
+  {
+   "name": "before",
+   "index": {
+    "mode": "cold"
+   },
+   "queries": [
+    {
+     "id": "via-header-calls-gamma",
+     "argv": [
+      "get-callees",
+      "--name",
+      "via_header"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "callees": 1
+      },
+      "witnesses": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "gamma"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "delta"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "main-reaches-gamma",
+     "argv": [
+      "find-call-chain",
+      "--to",
+      "gamma"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "pathCount": 1,
+       "complete": true,
+       "exhaustive": true
+      },
+      "witnesses": [
+       {
+        "in": "paths",
+        "match": [
+         {
+          "fromName": "main",
+          "toName": "via_header"
+         },
+         {
+          "fromName": "via_header",
+          "toName": "gamma"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "after",
+   "overlay": "after",
+   "index": {
+    "mode": "warm",
+    "refreshed": 1,
+    "refreshed_for_headers": 1
+   },
+   "queries": [
+    {
+     "id": "via-header-calls-delta",
+     "argv": [
+      "get-callees",
+      "--name",
+      "via_header"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "callees": 1
+      },
+      "witnesses": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "delta"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "callees",
+        "match": {
+         "calleeName": "gamma"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "gamma-has-no-callers",
+     "argv": [
+      "get-callers",
+      "--name",
+      "gamma"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "count": {
+       "callers": 0
+      }
+     }
+    },
+    {
+     "id": "gamma-is-unknown-not-proven-unreachable",
+     "argv": [
+      "find-call-chain",
+      "--to",
+      "gamma"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "fields": {
+       "pathCount": 0,
+       "complete": false,
+       "exhaustive": false
+      }
+     }
+    },
+    {
+     "id": "main-reaches-delta",
+     "argv": [
+      "find-call-chain",
+      "--to",
+      "delta"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "pathCount": 1,
+       "complete": true,
+       "exhaustive": true
+      }
+     }
+    }
+   ]
+  }
+ ]
+}
