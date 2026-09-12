@@ -1,0 +1,4869 @@
+{
+ "report_version": 1,
+ "revision": {
+  "commit": "ce5ddcd78009030c6e80e975c5e538220ef62ef8",
+  "dirty": false,
+  "branch": "feat/validation-corpus"
+ },
+ "toolchain": "LLVM (http://llvm.org/):\n  LLVM version 20.1.2\n  Optimized build.\nvycor-cpp version 0.2.0\nHost compiler: GNU 13.3.0",
+ "binary": "/home/stinky/git/vycor-cpp/.worktrees/d-validation/build/src/vycor-cpp",
+ "corpus": {
+  "version": "1",
+  "cases": [
+   "bounded_path_search",
+   "compile_flag_invalidation",
+   "header_change",
+   "mixed_exception_protection",
+   "odr_divergence",
+   "overload_identity"
+  ]
+ },
+ "host": {
+  "platform": "Linux-7.0.11-76070011-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "cpus": 12,
+  "python": "3.12.3"
+ },
+ "started": "2026-09-12T19:28:23+00:00",
+ "finished": "2026-09-12T19:28:25+00:00",
+ "reps": 5,
+ "fault_injected": null,
+ "cases": [
+  {
+   "name": "bounded_path_search",
+   "title": "Four routes from main to target: an unbounded search is exhaustive, max_paths keeps the canonical prefix and says so, max_depth is not exhaustive, and an unknown target is not complete",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/target.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 13.8,
+     "peak_rss_kb": 35164
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "target",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "target",
+      "--max-paths",
+      "2",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "target",
+      "--max-depth",
+      "1",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "nonesuch",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callers",
+      "--name",
+      "target",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "single",
+     "index_summary": {
+      "call_sites": 8,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 8,
+      "failed": 0,
+      "files": 2,
+      "index": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs",
+      "indexed": 2,
+      "mode": "cold",
+      "nodes": 6,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [],
+     "queries": [
+      {
+       "id": "unbounded",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "target",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 4,
+         "complete": true,
+         "exhaustive": true,
+         "stopReasons": []
+        },
+        "sequence": [
+         {
+          "in": "paths",
+          "match": [
+           [
+            {
+             "fromName": "main",
+             "toName": "a1"
+            },
+            {
+             "fromName": "a1",
+             "toName": "target"
+            }
+           ],
+           [
+            {
+             "fromName": "main",
+             "toName": "a2"
+            },
+            {
+             "fromName": "a2",
+             "toName": "target"
+            }
+           ],
+           [
+            {
+             "fromName": "main",
+             "toName": "a3"
+            },
+            {
+             "fromName": "a3",
+             "toName": "target"
+            }
+           ],
+           [
+            {
+             "fromName": "main",
+             "toName": "a4"
+            },
+            {
+             "fromName": "a4",
+             "toName": "target"
+            }
+           ]
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 4,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:7:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a1#",
+            "toName": "a1"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+            "confidence": "Proven",
+            "from": "c:@F@a1#",
+            "fromName": "a1",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ],
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:8:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a2#",
+            "toName": "a2"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+            "confidence": "Proven",
+            "from": "c:@F@a2#",
+            "fromName": "a2",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ],
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:9:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a3#",
+            "toName": "a3"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:4:13",
+            "confidence": "Proven",
+            "from": "c:@F@a3#",
+            "fromName": "a3",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ],
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:10:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a4#",
+            "toName": "a4"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:5:13",
+            "confidence": "Proven",
+            "from": "c:@F@a4#",
+            "fromName": "a4",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "target",
+         "targetUsr": "c:@F@target#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 4, expected 4"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "stopReasons = [], expected []"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "paths does not contain, in this order: [[{\"fromName\": \"main\", \"toName\": \"a1\"}, {\"fromName\": \"a1\", \"toName\": \"target\"}], [{\"fromName\": \"main\", \"toName\": \"a2\"}, {\"fromName\": \"a2\", \"toName\": \"target\"}], [{\"fromName\": \"main\", \"toName\": \"a3\"}, {\"fromName\": \"a3\", \"toName\": \"target\"}], [{\"fromName\": \"main\", \"toName\": \"a4\"}, {\"fromName\": \"a4\", \""
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 8.2,
+        "min": 7.5,
+        "max": 11.2
+       },
+       "peak_rss_kb": 19780
+      },
+      {
+       "id": "path-limit-keeps-canonical-prefix",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "target",
+        "--max-paths",
+        "2",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 2,
+         "complete": false,
+         "exhaustive": false,
+         "stopReasons": [
+          "path_limit"
+         ]
+        },
+        "sequence": [
+         {
+          "in": "paths",
+          "match": [
+           [
+            {
+             "fromName": "main",
+             "toName": "a1"
+            },
+            {
+             "fromName": "a1",
+             "toName": "target"
+            }
+           ],
+           [
+            {
+             "fromName": "main",
+             "toName": "a2"
+            },
+            {
+             "fromName": "a2",
+             "toName": "target"
+            }
+           ]
+          ]
+         }
+        ],
+        "negatives": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "a3"
+           },
+           {
+            "fromName": "a3",
+            "toName": "target"
+           }
+          ]
+         },
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "a4"
+           },
+           {
+            "fromName": "a4",
+            "toName": "target"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": false,
+         "exhaustive": false,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 2,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:7:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a1#",
+            "toName": "a1"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+            "confidence": "Proven",
+            "from": "c:@F@a1#",
+            "fromName": "a1",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ],
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:8:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@a2#",
+            "toName": "a2"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+            "confidence": "Proven",
+            "from": "c:@F@a2#",
+            "fromName": "a2",
+            "kind": "DirectCall",
+            "to": "c:@F@target#",
+            "toName": "target"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [
+          "path_limit"
+         ],
+         "target": "target",
+         "targetUsr": "c:@F@target#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": false,
+        "exhaustive": false,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 2, expected 2"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "stopReasons = [\"path_limit\"], expected [\"path_limit\"]"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence [{\"fromName\": \"main\", \"toName\": \"a3\"}, {\"fromName\": \"a3\", \"toName\": \"target\"}]"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence [{\"fromName\": \"main\", \"toName\": \"a4\"}, {\"fromName\": \"a4\", \"toName\": \"target\"}]"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "paths does not contain, in this order: [[{\"fromName\": \"main\", \"toName\": \"a1\"}, {\"fromName\": \"a1\", \"toName\": \"target\"}], [{\"fromName\": \"main\", \"toName\": \"a2\"}, {\"fromName\": \"a2\", \"toName\": \"target\"}]]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.2,
+        "min": 6.9,
+        "max": 8.0
+       },
+       "peak_rss_kb": 19884
+      },
+      {
+       "id": "depth-limit-is-complete-not-exhaustive",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "target",
+        "--max-depth",
+        "1",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+       ],
+       "expected": {
+        "exit": 1,
+        "status": "ok",
+        "fields": {
+         "pathCount": 0,
+         "complete": true,
+         "exhaustive": false,
+         "stopReasons": [
+          "depth_limit"
+         ]
+        }
+       },
+       "observed": {
+        "exit": 1,
+        "payload": {
+         "complete": true,
+         "exhaustive": false,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 0,
+         "paths": [],
+         "status": "ok",
+         "stopReasons": [
+          "depth_limit"
+         ],
+         "target": "target",
+         "targetUsr": "c:@F@target#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": false,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 1, expected 1"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 0, expected 0"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "stopReasons = [\"depth_limit\"], expected [\"depth_limit\"]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.3,
+        "min": 6.8,
+        "max": 7.4
+       },
+       "peak_rss_kb": 19900
+      },
+      {
+       "id": "unknown-target-is-not-complete",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "nonesuch",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+       ],
+       "expected": {
+        "exit": 1,
+        "status": "ok",
+        "fields": {
+         "pathCount": 0,
+         "complete": false,
+         "exhaustive": false,
+         "stopReasons": []
+        }
+       },
+       "observed": {
+        "exit": 1,
+        "payload": {
+         "complete": false,
+         "exhaustive": false,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 0,
+         "paths": [],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "nonesuch"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": false,
+        "exhaustive": false,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 1, expected 1"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 0, expected 0"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "stopReasons = [], expected []"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.2,
+        "min": 6.9,
+        "max": 9.7
+       },
+       "peak_rss_kb": 19804
+      },
+      {
+       "id": "callers-of-target-in-canonical-order",
+       "argv": [
+        "megascope",
+        "get-callers",
+        "--name",
+        "target",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/bounded_path_search/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callers": 4
+        },
+        "sequence": [
+         {
+          "in": "callers",
+          "match": [
+           {
+            "callerName": "a1"
+           },
+           {
+            "callerName": "a2"
+           },
+           {
+            "callerName": "a3"
+           },
+           {
+            "callerName": "a4"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "callerCount": 4,
+         "callers": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:2:13",
+           "calleeName": "target",
+           "callerName": "a1",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:3:13",
+           "calleeName": "target",
+           "callerName": "a2",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:4:13",
+           "calleeName": "target",
+           "callerName": "a3",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/bounded_path_search/main.cpp:5:13",
+           "calleeName": "target",
+           "callerName": "a4",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "target",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303731362289",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "status": "ok",
+         "usr": "c:@F@target#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callers has 4 records, expected 4"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "callers does not contain, in this order: [{\"callerName\": \"a1\"}, {\"callerName\": \"a2\"}, {\"callerName\": \"a3\"}, {\"callerName\": \"a4\"}]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.0,
+        "min": 6.6,
+        "max": 7.8
+       },
+       "peak_rss_kb": 19800
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  },
+  {
+   "name": "compile_flag_invalidation",
+   "title": "Only the compile command changes (-DNEW_TARGET): the input fingerprint marks the TU dirty and the answer follows the flag; alpha stays a known, provably unreached function because the TU itself declares it",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad2.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 12.8,
+     "peak_rss_kb": 35344
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callees",
+      "--name",
+      "entry",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/pad2.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 10.1,
+     "peak_rss_kb": 34420
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callees",
+      "--name",
+      "entry",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "alpha",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "lookup-function",
+      "--name",
+      "alpha",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "before",
+     "index_summary": {
+      "call_sites": 4,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 4,
+      "failed": 0,
+      "files": 3,
+      "index": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "indexed": 3,
+      "mode": "cold",
+      "nodes": 8,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'cold', expected 'cold'"
+      }
+     ],
+     "queries": [
+      {
+       "id": "entry-calls-alpha",
+       "argv": [
+        "megascope",
+        "get-callees",
+        "--name",
+        "entry",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callees": 1
+        },
+        "witnesses": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "alpha"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "beta"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "calleeCount": 1,
+         "callees": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp:6:16",
+           "calleeName": "alpha",
+           "callerName": "entry",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "entry",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303940481748",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "status": "ok",
+         "usr": "c:@F@entry#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callees has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callees matches {\"calleeName\": \"alpha\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callees match the expected absence {\"calleeName\": \"beta\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.0,
+        "min": 6.8,
+        "max": 7.2
+       },
+       "peak_rss_kb": 19792
+      }
+     ]
+    },
+    {
+     "name": "after",
+     "index_summary": {
+      "call_sites": 4,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 4,
+      "failed": 0,
+      "files": 3,
+      "index": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs",
+      "indexed": 3,
+      "mode": "warm",
+      "nodes": 8,
+      "partial": 0,
+      "refreshed": 1,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 1,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'warm', expected 'warm'"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary refreshed = 1, expected 1"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary refreshed_for_inputs = 1, expected 1"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary refreshed_for_headers = 0, expected 0"
+      }
+     ],
+     "queries": [
+      {
+       "id": "entry-calls-beta",
+       "argv": [
+        "megascope",
+        "get-callees",
+        "--name",
+        "entry",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callees": 1
+        },
+        "witnesses": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "beta"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "alpha"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "calleeCount": 1,
+         "callees": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp:4:16",
+           "calleeName": "beta",
+           "callerName": "entry",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "entry",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "status": "ok",
+         "usr": "c:@F@entry#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callees has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callees matches {\"calleeName\": \"beta\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callees match the expected absence {\"calleeName\": \"alpha\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.5,
+        "min": 7.2,
+        "max": 7.7
+       },
+       "peak_rss_kb": 19632
+      },
+      {
+       "id": "alpha-proven-unreachable-after-flag",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "alpha",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+       ],
+       "expected": {
+        "exit": 1,
+        "status": "ok",
+        "fields": {
+         "pathCount": 0,
+         "complete": true,
+         "exhaustive": true,
+         "targetUsr": "c:@F@alpha#"
+        }
+       },
+       "observed": {
+        "exit": 1,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "pathCount": 0,
+         "paths": [],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "alpha",
+         "targetUsr": "c:@F@alpha#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 1, expected 1"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 0, expected 0"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "targetUsr = \"c:@F@alpha#\", expected \"c:@F@alpha#\""
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.9,
+        "min": 6.8,
+        "max": 9.8
+       },
+       "peak_rss_kb": 19780
+      },
+      {
+       "id": "alpha-still-declared-in-the-tu",
+       "argv": [
+        "megascope",
+        "lookup-function",
+        "--name",
+        "alpha",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "usr": "c:@F@alpha#"
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "file": "/tmp/vycor-corpus-egrx70zn/compile_flag_invalidation/tu.cpp",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241303988173308",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "isEntryPoint": false,
+         "isVirtual": false,
+         "line": 1,
+         "qualifiedName": "alpha",
+         "status": "ok",
+         "usr": "c:@F@alpha#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "usr = \"c:@F@alpha#\", expected \"c:@F@alpha#\""
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.8,
+        "min": 5.6,
+        "max": 7.0
+       },
+       "peak_rss_kb": 19684
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  },
+  {
+   "name": "header_change",
+   "title": "A header edit retargets an inline function: the warm refresh re-parses the one TU that includes it, and the old callee, which only that header ever named, is unknown afterwards",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/header_change",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/pad2.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 9.5,
+     "peak_rss_kb": 35440
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callees",
+      "--name",
+      "via_header",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "gamma",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/header_change",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/header_change/pad2.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 8.2,
+     "peak_rss_kb": 34712
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callees",
+      "--name",
+      "via_header",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callers",
+      "--name",
+      "gamma",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "gamma",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "delta",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "before",
+     "index_summary": {
+      "call_sites": 4,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 4,
+      "failed": 0,
+      "files": 3,
+      "index": "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "indexed": 3,
+      "mode": "cold",
+      "nodes": 7,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'cold', expected 'cold'"
+      }
+     ],
+     "queries": [
+      {
+       "id": "via-header-calls-gamma",
+       "argv": [
+        "megascope",
+        "get-callees",
+        "--name",
+        "via_header",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callees": 1
+        },
+        "witnesses": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "gamma"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "delta"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "calleeCount": 1,
+         "callees": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+           "calleeName": "gamma",
+           "callerName": "via_header",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "via_header",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304109008157",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "status": "ok",
+         "usr": "c:@F@via_header#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callees has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callees matches {\"calleeName\": \"gamma\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callees match the expected absence {\"calleeName\": \"delta\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.6,
+        "min": 5.2,
+        "max": 6.3
+       },
+       "peak_rss_kb": 19700
+      },
+      {
+       "id": "main-reaches-gamma",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "gamma",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 1,
+         "complete": true,
+         "exhaustive": true
+        },
+        "witnesses": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "via_header"
+           },
+           {
+            "fromName": "via_header",
+            "toName": "gamma"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304109008157",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "pathCount": 1,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp:3:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@via_header#",
+            "toName": "via_header"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+            "confidence": "Proven",
+            "from": "c:@F@via_header#",
+            "fromName": "via_header",
+            "kind": "DirectCall",
+            "to": "c:@F@gamma#",
+            "toName": "gamma"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "gamma",
+         "targetUsr": "c:@F@gamma#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches [{\"fromName\": \"main\", \"toName\": \"via_header\"}, {\"fromName\": \"via_header\", \"toName\": \"gamma\"}]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.7,
+        "min": 5.3,
+        "max": 6.1
+       },
+       "peak_rss_kb": 19704
+      }
+     ]
+    },
+    {
+     "name": "after",
+     "index_summary": {
+      "call_sites": 4,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 4,
+      "failed": 0,
+      "files": 3,
+      "index": "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs",
+      "indexed": 3,
+      "mode": "warm",
+      "nodes": 7,
+      "partial": 0,
+      "refreshed": 1,
+      "refreshed_for_headers": 1,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'warm', expected 'warm'"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary refreshed = 1, expected 1"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary refreshed_for_headers = 1, expected 1"
+      }
+     ],
+     "queries": [
+      {
+       "id": "via-header-calls-delta",
+       "argv": [
+        "megascope",
+        "get-callees",
+        "--name",
+        "via_header",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callees": 1
+        },
+        "witnesses": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "delta"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callees",
+          "match": {
+           "calleeName": "gamma"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "calleeCount": 1,
+         "callees": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+           "calleeName": "delta",
+           "callerName": "via_header",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "via_header",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "status": "ok",
+         "usr": "c:@F@via_header#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callees has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callees matches {\"calleeName\": \"delta\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callees match the expected absence {\"calleeName\": \"gamma\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.5,
+        "min": 4.7,
+        "max": 7.9
+       },
+       "peak_rss_kb": 19688
+      },
+      {
+       "id": "gamma-has-no-callers",
+       "argv": [
+        "megascope",
+        "get-callers",
+        "--name",
+        "gamma",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 1,
+        "status": "ok",
+        "count": {
+         "callers": 0
+        }
+       },
+       "observed": {
+        "exit": 1,
+        "payload": {
+         "callerCount": 0,
+         "callers": [],
+         "function": "gamma",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "status": "ok"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 1, expected 1"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callers has 0 records, expected 0"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.2,
+        "min": 5.6,
+        "max": 6.7
+       },
+       "peak_rss_kb": 19672
+      },
+      {
+       "id": "gamma-is-unknown-not-proven-unreachable",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "gamma",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 1,
+        "status": "ok",
+        "fields": {
+         "pathCount": 0,
+         "complete": false,
+         "exhaustive": false
+        }
+       },
+       "observed": {
+        "exit": 1,
+        "payload": {
+         "complete": false,
+         "exhaustive": false,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "pathCount": 0,
+         "paths": [],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "gamma"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": false,
+        "exhaustive": false,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 1, expected 1"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 0, expected 0"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = false, expected false"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = false, expected false"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.6,
+        "min": 5.2,
+        "max": 5.9
+       },
+       "peak_rss_kb": 19696
+      },
+      {
+       "id": "main-reaches-delta",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "delta",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/header_change/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 1,
+         "complete": true,
+         "exhaustive": true
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304176568997",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 3,
+          "partial": 0,
+          "requested": 3
+         },
+         "pathCount": 1,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/tu.cpp:3:3",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@via_header#",
+            "toName": "via_header"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/header_change/target.h:3:28",
+            "confidence": "Proven",
+            "from": "c:@F@via_header#",
+            "fromName": "via_header",
+            "kind": "DirectCall",
+            "to": "c:@F@delta#",
+            "toName": "delta"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "delta",
+         "targetUsr": "c:@F@delta#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.7,
+        "min": 5.6,
+        "max": 6.1
+       },
+       "peak_rss_kb": 19804
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  },
+  {
+   "name": "mixed_exception_protection",
+   "title": "risky() is caught on one path and not the other; guarded() is always caught, but only while the index covers every TU",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/lib.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad2.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 142.4,
+     "peak_rss_kb": 57656
+    },
+    {
+     "argv": [
+      "megascope",
+      "query-exception-safety",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "query-exception-safety",
+      "--function",
+      "guarded",
+      "--exception-type",
+      "std::exception",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "query-throw-propagation",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/lib.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/pad2.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/broken.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 11.1,
+     "peak_rss_kb": 35496
+    },
+    {
+     "argv": [
+      "megascope",
+      "query-exception-safety",
+      "--function",
+      "guarded",
+      "--exception-type",
+      "std::exception",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "query-exception-safety",
+      "--function",
+      "risky",
+      "--exception-type",
+      "std::exception",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "complete-coverage",
+     "index_summary": {
+      "call_sites": 9,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 9,
+      "failed": 0,
+      "files": 4,
+      "index": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "indexed": 4,
+      "mode": "cold",
+      "nodes": 1335,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'cold', expected 'cold'"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary indexed = 4, expected 4"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary partial = 0, expected 0"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary failed = 0, expected 0"
+      }
+     ],
+     "queries": [
+      {
+       "id": "risky-sometimes-caught",
+       "argv": [
+        "megascope",
+        "query-exception-safety",
+        "--function",
+        "risky",
+        "--exception-type",
+        "std::exception",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "protection": "sometimes_caught",
+         "totalPaths": 2,
+         "caughtPaths": 1,
+         "uncaughtPaths": 1,
+         "exhaustive": true,
+         "indexScope": {
+          "complete": true
+         }
+        },
+        "regex": {
+         "summary": "caught on 1 of 2 path"
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "caughtPaths": 1,
+         "complete": true,
+         "exhaustive": true,
+         "function": "risky",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 4,
+          "partial": 0,
+          "requested": 4
+         },
+         "protection": "sometimes_caught",
+         "status": "ok",
+         "stopReasons": [],
+         "summary": "c:@F@risky# throwing std::exception is caught on 1 of 2 path(s). Uncaught path: main -> unsafe_caller -> risky.",
+         "terminatingPaths": 0,
+         "totalPaths": 2,
+         "uncaughtPaths": 1,
+         "unknownPaths": 0,
+         "usr": "c:@F@risky#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "protection": "sometimes_caught",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "protection = \"sometimes_caught\", expected \"sometimes_caught\""
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "totalPaths = 2, expected 2"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "caughtPaths = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "uncaughtPaths = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
+        },
+        {
+         "kind": "regex",
+         "ok": true,
+         "detail": "summary = 'c:@F@risky# throwing std::exception is caught on 1 of 2 path(s). Uncaught path: main -> unsafe_caller -> risky.', expected a match for 'caught on 1 of 2 path'"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.6,
+        "min": 5.8,
+        "max": 7.3
+       },
+       "peak_rss_kb": 20720
+      },
+      {
+       "id": "guarded-always-caught",
+       "argv": [
+        "megascope",
+        "query-exception-safety",
+        "--function",
+        "guarded",
+        "--exception-type",
+        "std::exception",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "protection": "always_caught",
+         "totalPaths": 1,
+         "exhaustive": true,
+         "indexScope": {
+          "complete": true
+         }
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "caughtPaths": 1,
+         "complete": true,
+         "exhaustive": true,
+         "function": "guarded",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 4,
+          "partial": 0,
+          "requested": 4
+         },
+         "protection": "always_caught",
+         "status": "ok",
+         "stopReasons": [],
+         "summary": "c:@F@guarded# throwing std::exception is caught on all 1 path(s) from entry points. Caught by const std::exception & at /tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:13:3.",
+         "terminatingPaths": 0,
+         "totalPaths": 1,
+         "uncaughtPaths": 0,
+         "unknownPaths": 0,
+         "usr": "c:@F@guarded#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "protection": "always_caught",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "protection = \"always_caught\", expected \"always_caught\""
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "totalPaths = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853\", \"complete\": true, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 0, \"requested\": 4}, expected {\"complete\": true}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.7,
+        "min": 6.3,
+        "max": 7.1
+       },
+       "peak_rss_kb": 20680
+      },
+      {
+       "id": "propagation-of-risky",
+       "argv": [
+        "megascope",
+        "query-throw-propagation",
+        "--function",
+        "risky",
+        "--exception-type",
+        "std::exception",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "protection": "sometimes_caught"
+        },
+        "witnesses": [
+         {
+          "in": "paths",
+          "match": {
+           "outcome": "caught"
+          }
+         },
+         {
+          "in": "paths",
+          "match": {
+           "outcome": "uncaught"
+          }
+         }
+        ],
+        "count": {
+         "paths": 2
+        },
+        "negatives": [
+         {
+          "in": "paths",
+          "match": {
+           "outcome": "terminates"
+          }
+         },
+         {
+          "in": "paths",
+          "match": {
+           "outcome": "unknown"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "caughtPaths": 1,
+         "complete": true,
+         "exceptionType": "std::exception",
+         "exhaustive": true,
+         "function": "risky",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304305133853",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 4,
+          "partial": 0,
+          "requested": 4
+         },
+         "paths": [
+          {
+           "callChain": [
+            "main",
+            "safe_caller",
+            "risky"
+           ],
+           "caughtAt": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:4:3",
+           "caughtBy": "const std::exception &",
+           "guardsOnPath": [],
+           "hops": [
+            {
+             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:11:3",
+             "confidence": "Proven",
+             "from": "main",
+             "fromUsr": "c:@F@main#",
+             "kind": "DirectCall",
+             "to": "safe_caller",
+             "toUsr": "c:@F@safe_caller#"
+            },
+            {
+             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:5:5",
+             "confidence": "Proven",
+             "from": "safe_caller",
+             "fromUsr": "c:@F@safe_caller#",
+             "kind": "DirectCall",
+             "to": "risky",
+             "toUsr": "c:@F@risky#"
+            }
+           ],
+           "isCaught": true,
+           "outcome": "caught",
+           "tryCatchesOnPath": [
+            {
+             "enclosingFunction": "safe_caller",
+             "handlers": [
+              {
+               "body": "{\n  }",
+               "caughtType": "const std::exception &",
+               "isCatchAll": false,
+               "location": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:6:5",
+               "rethrows": false
+              }
+             ],
+             "nestingDepth": 0,
+             "tryLocation": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:4:3"
+            }
+           ]
+          },
+          {
+           "callChain": [
+            "main",
+            "unsafe_caller",
+            "risky"
+           ],
+           "guardsOnPath": [],
+           "hops": [
+            {
+             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:12:3",
+             "confidence": "Proven",
+             "from": "main",
+             "fromUsr": "c:@F@main#",
+             "kind": "DirectCall",
+             "to": "unsafe_caller",
+             "toUsr": "c:@F@unsafe_caller#"
+            },
+            {
+             "callSite": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/main.cpp:9:24",
+             "confidence": "Proven",
+             "from": "unsafe_caller",
+             "fromUsr": "c:@F@unsafe_caller#",
+             "kind": "DirectCall",
+             "to": "risky",
+             "toUsr": "c:@F@risky#"
+            }
+           ],
+           "isCaught": false,
+           "note": "escapes the entry point main",
+           "outcome": "uncaught",
+           "stopAt": "main",
+           "tryCatchesOnPath": []
+          }
+         ],
+         "protection": "sometimes_caught",
+         "status": "ok",
+         "stopReasons": [],
+         "summary": "c:@F@risky# throwing std::exception is caught on 1 of 2 path(s). Uncaught path: main -> unsafe_caller -> risky.",
+         "terminatingPaths": 0,
+         "totalPaths": 2,
+         "uncaughtPaths": 1,
+         "unknownPaths": 0,
+         "usr": "c:@F@risky#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "protection": "sometimes_caught",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "protection = \"sometimes_caught\", expected \"sometimes_caught\""
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "paths has 2 records, expected 2"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches {\"outcome\": \"caught\"}"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches {\"outcome\": \"uncaught\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence {\"outcome\": \"terminates\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence {\"outcome\": \"unknown\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.9,
+        "min": 6.5,
+        "max": 8.2
+       },
+       "peak_rss_kb": 20764
+      }
+     ]
+    },
+    {
+     "name": "partial-coverage",
+     "index_summary": {
+      "call_sites": 9,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 9,
+      "failed": 0,
+      "files": 5,
+      "index": "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs",
+      "indexed": 4,
+      "mode": "warm",
+      "nodes": 1336,
+      "partial": 1,
+      "refreshed": 1,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary mode = 'warm', expected 'warm'"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary indexed = 4, expected 4"
+      },
+      {
+       "kind": "index",
+       "ok": true,
+       "detail": "index summary partial = 1, expected 1"
+      }
+     ],
+     "queries": [
+      {
+       "id": "guarded-demoted-to-observed",
+       "argv": [
+        "megascope",
+        "query-exception-safety",
+        "--function",
+        "guarded",
+        "--exception-type",
+        "std::exception",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "protection": "observed_caught",
+         "totalPaths": 1,
+         "exhaustive": true,
+         "indexScope": {
+          "complete": false,
+          "partial": 1,
+          "requested": 5
+         }
+        },
+        "regex": {
+         "summary": "does not cover every requested TU"
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "caughtPaths": 1,
+         "complete": true,
+         "exhaustive": true,
+         "function": "guarded",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673",
+          "complete": false,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 4,
+          "partial": 1,
+          "requested": 5
+         },
+         "protection": "observed_caught",
+         "status": "ok",
+         "stopReasons": [],
+         "summary": "c:@F@guarded# throwing std::exception is caught on every one of the 1 observed path(s), but the index does not cover every requested TU; unexamined paths may be unprotected.",
+         "terminatingPaths": 0,
+         "totalPaths": 1,
+         "uncaughtPaths": 0,
+         "unknownPaths": 0,
+         "usr": "c:@F@guarded#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "protection": "observed_caught",
+        "indexScope.complete": false,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "protection = \"observed_caught\", expected \"observed_caught\""
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "totalPaths = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false, \"partial\": 1, \"requested\": 5}"
+        },
+        {
+         "kind": "regex",
+         "ok": true,
+         "detail": "summary = 'c:@F@guarded# throwing std::exception is caught on every one of the 1 observed path(s), but the index does not cover every requested TU; unexamined paths may be unprotected.', expected a match for 'does not cover every requested TU'"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.9,
+        "min": 6.5,
+        "max": 9.1
+       },
+       "peak_rss_kb": 20616
+      },
+      {
+       "id": "risky-unchanged-by-coverage",
+       "argv": [
+        "megascope",
+        "query-exception-safety",
+        "--function",
+        "risky",
+        "--exception-type",
+        "std::exception",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/mixed_exception_protection/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "protection": "sometimes_caught",
+         "indexScope": {
+          "complete": false
+         }
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "caughtPaths": 1,
+         "complete": true,
+         "exhaustive": true,
+         "function": "risky",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673",
+          "complete": false,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 4,
+          "partial": 1,
+          "requested": 5
+         },
+         "protection": "sometimes_caught",
+         "status": "ok",
+         "stopReasons": [],
+         "summary": "c:@F@risky# throwing std::exception is caught on 1 of 2 path(s). Uncaught path: main -> unsafe_caller -> risky.",
+         "terminatingPaths": 0,
+         "totalPaths": 2,
+         "uncaughtPaths": 1,
+         "unknownPaths": 0,
+         "usr": "c:@F@risky#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "protection": "sometimes_caught",
+        "indexScope.complete": false,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "protection = \"sometimes_caught\", expected \"sometimes_caught\""
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "indexScope = {\"bake\": \"c7a7966025526fa468b486e40401193f6a73557a@1789241304550644673\", \"complete\": false, \"failed\": 0, \"freshness\": \"unchecked\", \"indexed\": 4, \"partial\": 1, \"requested\": 5}, expected {\"complete\": false}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.6,
+        "min": 6.3,
+        "max": 7.9
+       },
+       "peak_rss_kb": 20660
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  },
+  {
+   "name": "odr_divergence",
+   "title": "Vague-linkage definitions that differ across TUs (anneal --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+     ],
+     "exit": 0,
+     "wall_ms": 10.3,
+     "peak_rss_kb": 37348
+    },
+    {
+     "argv": [
+      "anneal",
+      "--odr-diag",
+      "--threads",
+      "1",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+     ]
+    },
+    {
+     "argv": [
+      "anneal",
+      "--threads",
+      "1",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "single",
+     "index_summary": {
+      "call_sites": 8,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 8,
+      "failed": 0,
+      "files": 2,
+      "index": "/tmp/vycor-corpus-egrx70zn/odr_divergence/index.vycs",
+      "indexed": 2,
+      "mode": "cold",
+      "nodes": 6,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [],
+     "queries": [
+      {
+       "id": "odr-diag",
+       "argv": [
+        "anneal",
+        "--odr-diag",
+        "--threads",
+        "1",
+        "--build-path",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+        "--source",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+        "--source",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+       ],
+       "expected": {
+        "exit": 0,
+        "lines": {
+         "present": [
+          "ODR violation: 'magic'",
+          "ODR violation: 'dup'",
+          "ODR violation: 'Cfg'"
+         ],
+         "absent": [
+          "'same'",
+          "'Cfg::get'"
+         ]
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": null,
+        "stdout": "/tmp/vycor-corpus-egrx70zn/odr_divergence/cls1.hpp:2: ODR violation: 'Cfg' has 2 definitions with differing bodies (/tmp/vycor-corpus-egrx70zn/odr_divergence/cls1.hpp:2, /tmp/vycor-corpus-egrx70zn/odr_divergence/cls2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-egrx70zn/odr_divergence/dup1.hpp:2: ODR violation: 'dup' has 2 definitions with differing bodies (/tmp/vycor-corpus-egrx70zn/odr_divergence/dup1.hpp:2, /tmp/vycor-corpus-egrx70zn/odr_divergence/dup2.hpp:2). TUs including different ones link silently, and the linker keeps one arbitrarily \u2014 unify or rename.\n/tmp/vycor-corpus-egrx70zn/odr_divergence/magic.hpp:2: ODR violation: 'magic' at /tmp/vycor-corpus-egrx70zn/odr_divergence/magic.hpp:2 compiles to 2 different definitions across TUs \u2014 its body depends on preprocessor state that differs between compile commands. Every TU must see an identical definition.\n"
+       },
+       "declared": {},
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "line-present",
+         "ok": true,
+         "detail": "expected a line matching \"ODR violation: 'magic'\""
+        },
+        {
+         "kind": "line-present",
+         "ok": true,
+         "detail": "expected a line matching \"ODR violation: 'dup'\""
+        },
+        {
+         "kind": "line-present",
+         "ok": true,
+         "detail": "expected a line matching \"ODR violation: 'Cfg'\""
+        },
+        {
+         "kind": "line-absent",
+         "ok": true,
+         "detail": "expected no line matching \"'same'\""
+        },
+        {
+         "kind": "line-absent",
+         "ok": true,
+         "detail": "expected no line matching \"'Cfg::get'\""
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 12.4,
+        "min": 10.3,
+        "max": 13.4
+       },
+       "peak_rss_kb": 37120
+      },
+      {
+       "id": "no-odr-without-the-check",
+       "argv": [
+        "anneal",
+        "--threads",
+        "1",
+        "--build-path",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence",
+        "--source",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu1.cpp",
+        "--source",
+        "/tmp/vycor-corpus-egrx70zn/odr_divergence/tu2.cpp"
+       ],
+       "expected": {
+        "exit": 0,
+        "lines": {
+         "present": [
+          "^anneal: no issues found"
+         ],
+         "absent": [
+          "ODR violation"
+         ]
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": null,
+        "stdout": "anneal: no issues found.\n"
+       },
+       "declared": {},
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "line-present",
+         "ok": true,
+         "detail": "expected a line matching '^anneal: no issues found'"
+        },
+        {
+         "kind": "line-absent",
+         "ok": true,
+         "detail": "expected no line matching 'ODR violation'"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 11.4,
+        "min": 10.2,
+        "max": 14.5
+       },
+       "peak_rss_kb": 36852
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  },
+  {
+   "name": "overload_identity",
+   "title": "Two overloads of f: a name is ambiguous, a usr is exact, and every list orders the overloads by usr",
+   "commands": [
+    {
+     "argv": [
+      "megascope",
+      "index",
+      "--build-path",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs",
+      "--threads",
+      "2",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/f.cpp",
+      "--source",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp",
+      "--entry-point",
+      "main"
+     ],
+     "exit": 0,
+     "wall_ms": 11.3,
+     "peak_rss_kb": 36220
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callers",
+      "--name",
+      "f",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callers",
+      "--usr",
+      "c:@F@f#I#",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callers",
+      "--usr",
+      "c:@F@f#d#",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "get-callees",
+      "--name",
+      "main",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "search-functions",
+      "--query",
+      "f",
+      "--limit",
+      "1",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to",
+      "f",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to-usr",
+      "c:@F@f#I#",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    },
+    {
+     "argv": [
+      "megascope",
+      "find-call-chain",
+      "--to-usr",
+      "c:@F@f#d#",
+      "--index",
+      "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+     ]
+    }
+   ],
+   "phases": [
+    {
+     "name": "single",
+     "index_summary": {
+      "call_sites": 5,
+      "channel_sites": 0,
+      "dropped": 0,
+      "edges": 5,
+      "failed": 0,
+      "files": 2,
+      "index": "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs",
+      "indexed": 2,
+      "mode": "cold",
+      "nodes": 5,
+      "partial": 0,
+      "refreshed": 0,
+      "refreshed_for_headers": 0,
+      "refreshed_for_inputs": 0,
+      "retried": 0
+     },
+     "index_checks": [],
+     "queries": [
+      {
+       "id": "name-is-ambiguous",
+       "argv": [
+        "megascope",
+        "get-callers",
+        "--name",
+        "f",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 4,
+        "status": "ambiguous",
+        "fields": {
+         "ambiguous": true,
+         "total_candidates": 2
+        },
+        "witnesses": [
+         {
+          "in": "candidates",
+          "match": {
+           "usr": "c:@F@f#I#"
+          }
+         },
+         {
+          "in": "candidates",
+          "match": {
+           "usr": "c:@F@f#d#"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 4,
+        "payload": {
+         "ambiguous": true,
+         "candidates": [
+          {
+           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "line": 2,
+           "qualifiedName": "f",
+           "usr": "c:@F@f#I#"
+          },
+          {
+           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "line": 3,
+           "qualifiedName": "f",
+           "usr": "c:@F@f#d#"
+          }
+         ],
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "name": "f",
+         "note": "Multiple functions share this name. Re-run with the 'usr' parameter of the intended candidate, or narrow with 'site' (a call-site 'file:line:col' resolves to the exact overload/instantiation called there) or 'filter' (a literal substring matched against candidate usr/name/file \u2014 not type-aware).",
+         "parameter": "name",
+         "status": "ambiguous",
+         "total_candidates": 2
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ambiguous",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 4, expected 4"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ambiguous', expected 'ambiguous'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "ambiguous = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "total_candidates = 2, expected 2"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in candidates matches {\"usr\": \"c:@F@f#I#\"}"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in candidates matches {\"usr\": \"c:@F@f#d#\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.7,
+        "min": 5.2,
+        "max": 6.6
+       },
+       "peak_rss_kb": 19592
+      },
+      {
+       "id": "callers-of-f-int",
+       "argv": [
+        "megascope",
+        "get-callers",
+        "--usr",
+        "c:@F@f#I#",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callers": 2
+        },
+        "witnesses": [
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "g"
+          }
+         },
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "main"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "h"
+          }
+         }
+        ],
+        "sequence": [
+         {
+          "in": "callers",
+          "match": [
+           {
+            "callerName": "g"
+           },
+           {
+            "callerName": "main"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "callerCount": 2,
+         "callers": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:2:18",
+           "calleeName": "f",
+           "callerName": "g",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+           "calleeName": "f",
+           "callerName": "main",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "c:@F@f#I#",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "status": "ok",
+         "usr": "c:@F@f#I#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callers has 2 records, expected 2"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callers matches {\"callerName\": \"g\"}"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callers matches {\"callerName\": \"main\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callers match the expected absence {\"callerName\": \"h\"}"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "callers does not contain, in this order: [{\"callerName\": \"g\"}, {\"callerName\": \"main\"}]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.8,
+        "min": 5.2,
+        "max": 8.1
+       },
+       "peak_rss_kb": 19780
+      },
+      {
+       "id": "callers-of-f-double",
+       "argv": [
+        "megascope",
+        "get-callers",
+        "--usr",
+        "c:@F@f#d#",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callers": 1
+        },
+        "witnesses": [
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "h"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "g"
+          }
+         },
+         {
+          "in": "callers",
+          "match": {
+           "callerName": "main"
+          }
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "callerCount": 1,
+         "callers": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:3:18",
+           "calleeName": "f",
+           "callerName": "h",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "c:@F@f#d#",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "status": "ok",
+         "usr": "c:@F@f#d#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callers has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in callers matches {\"callerName\": \"h\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callers match the expected absence {\"callerName\": \"g\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in callers match the expected absence {\"callerName\": \"main\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.9,
+        "min": 5.6,
+        "max": 7.3
+       },
+       "peak_rss_kb": 19688
+      },
+      {
+       "id": "callees-of-main-in-canonical-order",
+       "argv": [
+        "megascope",
+        "get-callees",
+        "--name",
+        "main",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "callees": 3
+        },
+        "sequence": [
+         {
+          "in": "callees",
+          "match": [
+           {
+            "calleeName": "f"
+           },
+           {
+            "calleeName": "g"
+           },
+           {
+            "calleeName": "h"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "calleeCount": 3,
+         "callees": [
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+           "calleeName": "f",
+           "callerName": "main",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:21",
+           "calleeName": "g",
+           "callerName": "main",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          },
+          {
+           "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:27",
+           "calleeName": "h",
+           "callerName": "main",
+           "confidence": "Proven",
+           "kind": "DirectCall"
+          }
+         ],
+         "function": "main",
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "status": "ok",
+         "usr": "c:@F@main#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "callees has 3 records, expected 3"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "callees does not contain, in this order: [{\"calleeName\": \"f\"}, {\"calleeName\": \"g\"}, {\"calleeName\": \"h\"}]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.4,
+        "min": 5.3,
+        "max": 6.6
+       },
+       "peak_rss_kb": 19696
+      },
+      {
+       "id": "search-limit-cuts-on-usr",
+       "argv": [
+        "megascope",
+        "search-functions",
+        "--query",
+        "f",
+        "--limit",
+        "1",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "count": {
+         "matches": 1
+        },
+        "witnesses": [
+         {
+          "in": "matches",
+          "match": {
+           "usr": "c:@F@f#I#"
+          }
+         }
+        ],
+        "negatives": [
+         {
+          "in": "matches",
+          "match": {
+           "usr": "c:@F@f#d#"
+          }
+         }
+        ],
+        "fields": {
+         "totalMatches": 2,
+         "truncated": true
+        }
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "matches": [
+          {
+           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "line": 2,
+           "qualifiedName": "f",
+           "usr": "c:@F@f#I#"
+          }
+         ],
+         "query": "f",
+         "returned": 1,
+         "status": "ok",
+         "totalMatches": 2,
+         "truncated": true
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "totalMatches = 2, expected 2"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "truncated = true, expected true"
+        },
+        {
+         "kind": "count",
+         "ok": true,
+         "detail": "matches has 1 records, expected 1"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in matches matches {\"usr\": \"c:@F@f#I#\"}"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in matches match the expected absence {\"usr\": \"c:@F@f#d#\"}"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.6,
+        "min": 5.1,
+        "max": 6.0
+       },
+       "peak_rss_kb": 19628
+      },
+      {
+       "id": "chain-to-name-is-ambiguous",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to",
+        "f",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 4,
+        "status": "ambiguous",
+        "fields": {
+         "ambiguous": true,
+         "total_candidates": 2
+        }
+       },
+       "observed": {
+        "exit": 4,
+        "payload": {
+         "ambiguous": true,
+         "candidates": [
+          {
+           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "line": 2,
+           "qualifiedName": "f",
+           "usr": "c:@F@f#I#"
+          },
+          {
+           "file": "/tmp/vycor-corpus-egrx70zn/overload_identity/f.h",
+           "line": 3,
+           "qualifiedName": "f",
+           "usr": "c:@F@f#d#"
+          }
+         ],
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "name": "f",
+         "note": "Multiple functions share this name. Re-run with the 'usr' parameter of the intended candidate, or narrow with 'site' (a call-site 'file:line:col' resolves to the exact overload/instantiation called there) or 'filter' (a literal substring matched against candidate usr/name/file \u2014 not type-aware).",
+         "parameter": "to",
+         "status": "ambiguous",
+         "total_candidates": 2
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ambiguous",
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 4, expected 4"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ambiguous', expected 'ambiguous'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "ambiguous = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "total_candidates = 2, expected 2"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 5.7,
+        "min": 5.0,
+        "max": 6.7
+       },
+       "peak_rss_kb": 19652
+      },
+      {
+       "id": "chains-to-f-int",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to-usr",
+        "c:@F@f#I#",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 2,
+         "complete": true,
+         "exhaustive": true,
+         "stopReasons": [],
+         "targetUsr": "c:@F@f#I#"
+        },
+        "witnesses": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "g"
+           },
+           {
+            "fromName": "g",
+            "to": "c:@F@f#I#"
+           }
+          ]
+         },
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "to": "c:@F@f#I#"
+           }
+          ]
+         }
+        ],
+        "negatives": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "h"
+           },
+           {
+            "fromName": "h",
+            "to": "c:@F@f#d#"
+           }
+          ]
+         },
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main"
+           },
+           {
+            "fromName": "g",
+            "to": "c:@F@f#d#"
+           }
+          ]
+         }
+        ],
+        "sequence": [
+         {
+          "in": "paths",
+          "match": [
+           [
+            {
+             "fromName": "main"
+            },
+            {
+             "fromName": "g",
+             "to": "c:@F@f#I#"
+            }
+           ],
+           [
+            {
+             "fromName": "main",
+             "to": "c:@F@f#I#"
+            }
+           ]
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 2,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:21",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@g#",
+            "toName": "g"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:2:18",
+            "confidence": "Proven",
+            "from": "c:@F@g#",
+            "fromName": "g",
+            "kind": "DirectCall",
+            "to": "c:@F@f#I#",
+            "toName": "f"
+           }
+          ],
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:33",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@f#I#",
+            "toName": "f"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "c:@F@f#I#",
+         "targetUsr": "c:@F@f#I#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 2, expected 2"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "stopReasons = [], expected []"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "targetUsr = \"c:@F@f#I#\", expected \"c:@F@f#I#\""
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches [{\"fromName\": \"main\", \"toName\": \"g\"}, {\"fromName\": \"g\", \"to\": \"c:@F@f#I#\"}]"
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches [{\"fromName\": \"main\", \"to\": \"c:@F@f#I#\"}]"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence [{\"fromName\": \"main\", \"toName\": \"h\"}, {\"fromName\": \"h\", \"to\": \"c:@F@f#d#\"}]"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence [{\"fromName\": \"main\"}, {\"fromName\": \"g\", \"to\": \"c:@F@f#d#\"}]"
+        },
+        {
+         "kind": "sequence",
+         "ok": true,
+         "detail": "paths does not contain, in this order: [[{\"fromName\": \"main\"}, {\"fromName\": \"g\", \"to\": \"c:@F@f#I#\"}], [{\"fromName\": \"main\", \"to\": \"c:@F@f#I#\"}]]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 7.0,
+        "min": 6.5,
+        "max": 7.8
+       },
+       "peak_rss_kb": 19656
+      },
+      {
+       "id": "chains-to-f-double",
+       "argv": [
+        "megascope",
+        "find-call-chain",
+        "--to-usr",
+        "c:@F@f#d#",
+        "--index",
+        "/tmp/vycor-corpus-egrx70zn/overload_identity/index.vycs"
+       ],
+       "expected": {
+        "exit": 0,
+        "status": "ok",
+        "fields": {
+         "pathCount": 1,
+         "complete": true,
+         "exhaustive": true,
+         "targetUsr": "c:@F@f#d#"
+        },
+        "witnesses": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "toName": "h"
+           },
+           {
+            "fromName": "h",
+            "to": "c:@F@f#d#"
+           }
+          ]
+         }
+        ],
+        "negatives": [
+         {
+          "in": "paths",
+          "match": [
+           {
+            "fromName": "main",
+            "to": "c:@F@f#d#"
+           }
+          ]
+         }
+        ]
+       },
+       "observed": {
+        "exit": 0,
+        "payload": {
+         "complete": true,
+         "exhaustive": true,
+         "indexScope": {
+          "bake": "c7a7966025526fa468b486e40401193f6a73557a@1789241304768051374",
+          "complete": true,
+          "failed": 0,
+          "freshness": "unchecked",
+          "indexed": 2,
+          "partial": 0,
+          "requested": 2
+         },
+         "pathCount": 1,
+         "paths": [
+          [
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:4:27",
+            "confidence": "Proven",
+            "from": "c:@F@main#",
+            "fromName": "main",
+            "kind": "DirectCall",
+            "to": "c:@F@h#",
+            "toName": "h"
+           },
+           {
+            "callSite": "/tmp/vycor-corpus-egrx70zn/overload_identity/main.cpp:3:18",
+            "confidence": "Proven",
+            "from": "c:@F@h#",
+            "fromName": "h",
+            "kind": "DirectCall",
+            "to": "c:@F@f#d#",
+            "toName": "f"
+           }
+          ]
+         ],
+         "status": "ok",
+         "stopReasons": [],
+         "target": "c:@F@f#d#",
+         "targetUsr": "c:@F@f#d#"
+        },
+        "stdout": null
+       },
+       "declared": {
+        "status": "ok",
+        "complete": true,
+        "exhaustive": true,
+        "indexScope.complete": true,
+        "indexScope.freshness": "unchecked"
+       },
+       "checks": [
+        {
+         "kind": "exit",
+         "ok": true,
+         "detail": "exit 0, expected 0"
+        },
+        {
+         "kind": "status",
+         "ok": true,
+         "detail": "status 'ok', expected 'ok'"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "pathCount = 1, expected 1"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "complete = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "exhaustive = true, expected true"
+        },
+        {
+         "kind": "field",
+         "ok": true,
+         "detail": "targetUsr = \"c:@F@f#d#\", expected \"c:@F@f#d#\""
+        },
+        {
+         "kind": "witness",
+         "ok": true,
+         "detail": "no record in paths matches [{\"fromName\": \"main\", \"toName\": \"h\"}, {\"fromName\": \"h\", \"to\": \"c:@F@f#d#\"}]"
+        },
+        {
+         "kind": "negative",
+         "ok": true,
+         "detail": "0 record(s) in paths match the expected absence [{\"fromName\": \"main\", \"to\": \"c:@F@f#d#\"}]"
+        }
+       ],
+       "ok": true,
+       "stable_across_reps": true,
+       "latency_ms": {
+        "reps": 5,
+        "median": 6.4,
+        "min": 5.8,
+        "max": 6.8
+       },
+       "peak_rss_kb": 19788
+      }
+     ]
+    }
+   ],
+   "ok": true,
+   "error": null
+  }
+ ],
+ "summary": {
+  "quality": {
+   "queries": 30,
+   "passed": 30,
+   "failed": 0,
+   "checks": 177,
+   "missing_findings": 0,
+   "false_findings": 0,
+   "field_mismatches": 0,
+   "order_mismatches": 0,
+   "unparseable_outputs": 0,
+   "index_check_failures": 0,
+   "declared_incomplete": 5,
+   "declared_unknown": 0,
+   "unstable_across_reps": 0,
+   "case_errors": 0,
+   "scope": "every expectation is hand-written against the case's sources; rates are over these queries only and say nothing about unlisted behavior"
+  },
+  "cost": {
+   "index_bakes": [
+    {
+     "case": "bounded_path_search",
+     "wall_ms": 13.8,
+     "peak_rss_kb": 35164
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "wall_ms": 12.8,
+     "peak_rss_kb": 35344
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "wall_ms": 10.1,
+     "peak_rss_kb": 34420
+    },
+    {
+     "case": "header_change",
+     "wall_ms": 9.5,
+     "peak_rss_kb": 35440
+    },
+    {
+     "case": "header_change",
+     "wall_ms": 8.2,
+     "peak_rss_kb": 34712
+    },
+    {
+     "case": "mixed_exception_protection",
+     "wall_ms": 142.4,
+     "peak_rss_kb": 57656
+    },
+    {
+     "case": "mixed_exception_protection",
+     "wall_ms": 11.1,
+     "peak_rss_kb": 35496
+    },
+    {
+     "case": "odr_divergence",
+     "wall_ms": 10.3,
+     "peak_rss_kb": 37348
+    },
+    {
+     "case": "overload_identity",
+     "wall_ms": 11.3,
+     "peak_rss_kb": 36220
+    }
+   ],
+   "queries": [
+    {
+     "case": "bounded_path_search",
+     "id": "unbounded",
+     "latency_ms": {
+      "reps": 5,
+      "median": 8.2,
+      "min": 7.5,
+      "max": 11.2
+     },
+     "peak_rss_kb": 19780
+    },
+    {
+     "case": "bounded_path_search",
+     "id": "path-limit-keeps-canonical-prefix",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.2,
+      "min": 6.9,
+      "max": 8.0
+     },
+     "peak_rss_kb": 19884
+    },
+    {
+     "case": "bounded_path_search",
+     "id": "depth-limit-is-complete-not-exhaustive",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.3,
+      "min": 6.8,
+      "max": 7.4
+     },
+     "peak_rss_kb": 19900
+    },
+    {
+     "case": "bounded_path_search",
+     "id": "unknown-target-is-not-complete",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.2,
+      "min": 6.9,
+      "max": 9.7
+     },
+     "peak_rss_kb": 19804
+    },
+    {
+     "case": "bounded_path_search",
+     "id": "callers-of-target-in-canonical-order",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.0,
+      "min": 6.6,
+      "max": 7.8
+     },
+     "peak_rss_kb": 19800
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "id": "entry-calls-alpha",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.0,
+      "min": 6.8,
+      "max": 7.2
+     },
+     "peak_rss_kb": 19792
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "id": "entry-calls-beta",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.5,
+      "min": 7.2,
+      "max": 7.7
+     },
+     "peak_rss_kb": 19632
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "id": "alpha-proven-unreachable-after-flag",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.9,
+      "min": 6.8,
+      "max": 9.8
+     },
+     "peak_rss_kb": 19780
+    },
+    {
+     "case": "compile_flag_invalidation",
+     "id": "alpha-still-declared-in-the-tu",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.8,
+      "min": 5.6,
+      "max": 7.0
+     },
+     "peak_rss_kb": 19684
+    },
+    {
+     "case": "header_change",
+     "id": "via-header-calls-gamma",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.6,
+      "min": 5.2,
+      "max": 6.3
+     },
+     "peak_rss_kb": 19700
+    },
+    {
+     "case": "header_change",
+     "id": "main-reaches-gamma",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.7,
+      "min": 5.3,
+      "max": 6.1
+     },
+     "peak_rss_kb": 19704
+    },
+    {
+     "case": "header_change",
+     "id": "via-header-calls-delta",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.5,
+      "min": 4.7,
+      "max": 7.9
+     },
+     "peak_rss_kb": 19688
+    },
+    {
+     "case": "header_change",
+     "id": "gamma-has-no-callers",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.2,
+      "min": 5.6,
+      "max": 6.7
+     },
+     "peak_rss_kb": 19672
+    },
+    {
+     "case": "header_change",
+     "id": "gamma-is-unknown-not-proven-unreachable",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.6,
+      "min": 5.2,
+      "max": 5.9
+     },
+     "peak_rss_kb": 19696
+    },
+    {
+     "case": "header_change",
+     "id": "main-reaches-delta",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.7,
+      "min": 5.6,
+      "max": 6.1
+     },
+     "peak_rss_kb": 19804
+    },
+    {
+     "case": "mixed_exception_protection",
+     "id": "risky-sometimes-caught",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.6,
+      "min": 5.8,
+      "max": 7.3
+     },
+     "peak_rss_kb": 20720
+    },
+    {
+     "case": "mixed_exception_protection",
+     "id": "guarded-always-caught",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.7,
+      "min": 6.3,
+      "max": 7.1
+     },
+     "peak_rss_kb": 20680
+    },
+    {
+     "case": "mixed_exception_protection",
+     "id": "propagation-of-risky",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.9,
+      "min": 6.5,
+      "max": 8.2
+     },
+     "peak_rss_kb": 20764
+    },
+    {
+     "case": "mixed_exception_protection",
+     "id": "guarded-demoted-to-observed",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.9,
+      "min": 6.5,
+      "max": 9.1
+     },
+     "peak_rss_kb": 20616
+    },
+    {
+     "case": "mixed_exception_protection",
+     "id": "risky-unchanged-by-coverage",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.6,
+      "min": 6.3,
+      "max": 7.9
+     },
+     "peak_rss_kb": 20660
+    },
+    {
+     "case": "odr_divergence",
+     "id": "odr-diag",
+     "latency_ms": {
+      "reps": 5,
+      "median": 12.4,
+      "min": 10.3,
+      "max": 13.4
+     },
+     "peak_rss_kb": 37120
+    },
+    {
+     "case": "odr_divergence",
+     "id": "no-odr-without-the-check",
+     "latency_ms": {
+      "reps": 5,
+      "median": 11.4,
+      "min": 10.2,
+      "max": 14.5
+     },
+     "peak_rss_kb": 36852
+    },
+    {
+     "case": "overload_identity",
+     "id": "name-is-ambiguous",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.7,
+      "min": 5.2,
+      "max": 6.6
+     },
+     "peak_rss_kb": 19592
+    },
+    {
+     "case": "overload_identity",
+     "id": "callers-of-f-int",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.8,
+      "min": 5.2,
+      "max": 8.1
+     },
+     "peak_rss_kb": 19780
+    },
+    {
+     "case": "overload_identity",
+     "id": "callers-of-f-double",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.9,
+      "min": 5.6,
+      "max": 7.3
+     },
+     "peak_rss_kb": 19688
+    },
+    {
+     "case": "overload_identity",
+     "id": "callees-of-main-in-canonical-order",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.4,
+      "min": 5.3,
+      "max": 6.6
+     },
+     "peak_rss_kb": 19696
+    },
+    {
+     "case": "overload_identity",
+     "id": "search-limit-cuts-on-usr",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.6,
+      "min": 5.1,
+      "max": 6.0
+     },
+     "peak_rss_kb": 19628
+    },
+    {
+     "case": "overload_identity",
+     "id": "chain-to-name-is-ambiguous",
+     "latency_ms": {
+      "reps": 5,
+      "median": 5.7,
+      "min": 5.0,
+      "max": 6.7
+     },
+     "peak_rss_kb": 19652
+    },
+    {
+     "case": "overload_identity",
+     "id": "chains-to-f-int",
+     "latency_ms": {
+      "reps": 5,
+      "median": 7.0,
+      "min": 6.5,
+      "max": 7.8
+     },
+     "peak_rss_kb": 19656
+    },
+    {
+     "case": "overload_identity",
+     "id": "chains-to-f-double",
+     "latency_ms": {
+      "reps": 5,
+      "median": 6.4,
+      "min": 5.8,
+      "max": 6.8
+     },
+     "peak_rss_kb": 19788
+    }
+   ],
+   "query_median_of_medians_ms": 6.7
+  }
+ },
+ "ok": true
+}
