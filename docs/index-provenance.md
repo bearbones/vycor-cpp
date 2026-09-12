@@ -113,7 +113,13 @@ Covered without any action (a change re-indexes the affected TUs, or
 rebuilds when it is bake-wide):
 
 - source and header edits, including system headers, because the bake
-  records every file the frontend opened with the frontend's own stat;
+  records every file the frontend opened with the frontend's own stat,
+  spelled by the real path the file system resolved when it opened the
+  file (not a lexical `..` removal, which crosses symlinks wrongly: a
+  toolchain found through `/../lib/gcc` on a merged-`/usr` system spells
+  its headers as `/include/c++/N` on paper and `/usr/include/c++/N` on
+  disk, and a dependency recorded on paper is never found again, so
+  every warm start rebuilds cold);
 - the compile command, working directory, extra args, sysroot, PCH
   directory, GCC installation, LLVM version, vycor-cpp version, index
   format;
