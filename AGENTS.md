@@ -168,8 +168,22 @@ handlers directly.
 | `LockTools.cpp` | locks held, same-lock path search |
 | `DeadCodeTools.cpp` | dead-code analysis (cached liveness) |
 | `ChannelTools.cpp` | channel listing/query, channels-for-function, explain-ordering |
+| `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
 | `Schema.h` | JSON Schema property builders shared by the registrations |
+
+### `impact` — Semantic Diff and Change Impact
+
+**Headers:** `include/vycor/impact/`
+**Sources:** `src/impact/`
+
+| File | Purpose |
+|---|---|
+| `SemanticDiff.h/.cpp` | `IdentityTable` (stable keys: usr, lambda keys by enclosing function and ordinal, byte offsets in closure-type USRs by ordinal), `ContextSignatures` (one id-level pass over the stored contexts, so a side's control-flow index is dropped before the other side loads), `semanticDiff` (functions and call relationships added/removed, per-relationship context signatures changed, moves, rename candidates, ambiguity), `checkComparability` (config, TU selection, failed TUs, analyzer), `diffRoutes` (path sets to a target on both sides), `changedFunctionsAfter` |
+| `ImpactSearch.h/.cpp` | `findImpact`: bounded reverse BFS from the changed functions (`max_depth`, `max_fan_in` — the seeds themselves are always expanded — `max_work`), one shallowest path per affected function, canonical order |
+| `PatchMapping.h/.cpp` | `parseUnifiedDiff` (after-side hunk ranges, deletions as the two lines they sit between) and `mapRangesToFunctions` (call-site or declaration hit exactly, else the nearest anchors' extents, else the file) |
+
+Contract and worked examples: `docs/change-impact.md`.
 
 ### `cli` — megascope Verbs (adapter)
 
@@ -180,6 +194,7 @@ handlers directly.
 |---|---|
 | `BakeConfig.h/.cpp` | `parseChannelTypesJson`, `loadOrgConfigIfSet`, `mergeExtensionConfig` — the bake configuration shared by `main.cpp`'s verbs and the ephemeral query mode |
 | `MegascopeCli.h/.cpp` | The query verbs (`<tool>`, `call`, `tools`, `info`, `batch`, `dump`): `parseToolArgs` derives `--flags` from each tool's JSON Schema (strings take a value, integers parse, booleans are bare, arrays repeat; hyphens and underscores interchangeable; `--args '<json>'` seeds), `emitToolResult` implements the output contract (compact JSON / `--pretty` / `--format ndjson` with a leading `{"_summary":...}` line / `--format tsv` with sorted columns) and `exitCodeFor` the exit codes, derived from the payload's typed `status` (0 results, 1 empty or not found, 2 usage, 3 index missing or unavailable facts, 4 ambiguous; `docs/result-contract.md`); `resolveIndexPath` is the `--index` → `$VYCOR_INDEX` → `<build-path>/.vycor/megascope.vycs` → `./.vycor/megascope.vycs` chain; `dump` streams every call-site context and channel site through `ControlFlowIndex::forEachContext` (ndjson default, or one json document via `llvm::json::OStream`); ephemeral mode (`--source`/`--source-list`/`--source-re` with `--build-path`) runs `selectSources` + `bakeIndexes` in memory and answers from that, no index read or written |
+| `DiffVerb.cpp` | the `diff` verb: loads `--before` and `--after` saved indexes, refuses non-comparable pairs unless `--allow-mismatch`, `--to` adds the route diff, `--impact` the walk from the changed functions; `seedImpactPatch` turns `--patch-file` / `--git-base` `--git-head` into `impact_of_change`'s `patch` argument |
 
 The query verbs load the index with `LoadMode::ReadOnly`
 (`callgraph/Snapshot.h`): the edge dedup map and per-TU provenance that
@@ -251,7 +266,7 @@ kind of refresh equals a clean rebuild, in-process and isolated.
 | `McpServer.h/.cpp` | JSON-RPC dispatch loop; owns the indexes, `QueryCache`, and the `IndexFacts` main.cpp sets; `wrapToolResult` turns a query payload into a `content[0].text` block (the JSON payload itself; an error status → `isError`); implements `reindex_tu` (needs mutable indexes) as a JSON payload through the same contract |
 | `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
 
-**24 tools** (CLI verbs and MCP): `search_functions`, `lookup_function`, `get_callees`,
+**25 tools** (CLI verbs and MCP): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -260,7 +275,7 @@ kind of refresh equals a clean rebuild, in-process and isolated.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`reindex_tu` (serve only).
+`impact_of_change`, `reindex_tu` (serve only).
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
@@ -329,6 +344,7 @@ vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags fr
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin
 vycor-cpp megascope dump    [--index <file> | --build-path <dir>] [--format ndjson|json] [--pretty]   # stream every call-site context and channel site
+vycor-cpp megascope diff    --before <index> --after <index> [--to <name>] [--impact] [--no-context] [--allow-mismatch]   # semantic diff of two saved indexes
 vycor-cpp megascope serve   --build-path <dir> [same selection flags as index] [--index <file>] [--entry-point <name>...] [-v]
 vycor-cpp megascope tools | info [--files] | help
 ```
@@ -470,8 +486,9 @@ index against a clean rebuild. The validation corpus
 (`corpus/cases/`, `scripts/corpus-run.py`, ctest `corpus` and
 `corpus_selfcheck`; `docs/validation.md`) checks answers against
 hand-written witnesses, negatives, and orders, and writes a report that
-keeps quality and cost apart. Its `header_change` and
-`compile_flag_invalidation` cases are before/after patch pairs.
+keeps quality and cost apart. Its `header_change`,
+`compile_flag_invalidation`, and `change_impact` cases are before/after
+patch pairs.
 Benchmarks (`scripts/bench.py`) are run by hand, never by ctest.
 
 Run tests from the project root, or ensure `PROJECT_SOURCE_DIR` is set

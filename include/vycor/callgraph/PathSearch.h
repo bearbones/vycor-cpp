@@ -143,6 +143,21 @@ struct PathSearchResult {
   bool exhaustive() const { return complete() && stops == 0; }
 };
 
+// The graph identities a usr-or-display name resolves to for a search:
+// every node carrying the display name, else the string itself when the
+// graph references it (an edge end without a node). Empty when the name
+// is unknown to the graph — the interner alone never decides (see
+// docs/path-analysis.md, "Identity"). Sorted, deduplicated.
+std::vector<StringInterner::Id> resolveKnownIds(const CallGraph &graph,
+                                                const std::string &name);
+
+// Sort caller-side edge refs into the canonical order the search expands
+// them in: caller usr, call site, kind, confidence, execution context,
+// indirection depth — by resolved strings, so the order is independent
+// of TU and insertion order (docs/deterministic-output.md).
+void sortCallerRefsCanonically(const CallGraph &graph,
+                               std::vector<CallGraph::EdgeRef> &edges);
+
 // Per-edge admission predicate; a false return prunes the edge (it is
 // neither followed nor counted as a stop reason).
 using EdgePredicate = llvm::function_ref<bool(const CallGraph::EdgeRef &)>;

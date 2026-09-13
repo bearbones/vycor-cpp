@@ -310,13 +310,26 @@ class Runner:
         except (ValueError, IndexError):
             raise Fail(f"megascope index printed no summary: {out[:200]!r}")
 
-    def query(self, q: dict, d: Path, index: Path, sources: list[str]
-              ) -> dict:
-        argv = list(q["argv"])
+    def expand(self, token: str, d: Path, index: Path, case_dir: Path
+               ) -> str:
+        """Placeholders a query's argv may use: {dir} (the scratch copy of
+        the sources), {index} (the phase's index), {case} (the case
+        directory: patch files), {saved:NAME} (an index a phase kept with
+        save_index_as)."""
+        token = token.replace("{dir}", str(d)).replace("{index}", str(index))
+        token = token.replace("{case}", str(case_dir))
+        return re.sub(r"\{saved:([^}]+)\}",
+                      lambda m: str(d / m.group(1)), token)
+
+    def query(self, q: dict, d: Path, index: Path, sources: list[str],
+              case_dir: Path) -> dict:
+        argv = [self.expand(a, d, index, case_dir) for a in q["argv"]]
         if argv[0] == "anneal":
             argv += ["--build-path", str(d)]
             for s in sources:
                 argv += ["--source", str(d / s)]
+        elif argv[0] == "diff" or "--index" in argv:
+            argv = ["megascope", *argv]  # names its own indexes
         else:
             argv = ["megascope", *argv, "--index", str(index)]
         runs = []
@@ -393,6 +406,9 @@ class Runner:
                 summary = self.megascope_index(d, index, sources,
                                                entry_points,
                                                report["commands"])
+                if phase.get("save_index_as"):
+                    # Keep this phase's index for a later phase's `diff`.
+                    shutil.copyfile(index, d / phase["save_index_as"])
                 pr = {"name": phase.get("name", f"phase{i}"),
                       "index_summary": summary, "index_checks": [],
                       "index_stderr": report["commands"][-1]["stderr"],
@@ -403,7 +419,7 @@ class Runner:
                         "detail": f"index summary {k} = "
                                   f"{summary.get(k)!r}, expected {v!r}"})
                 for q in phase.get("queries", []):
-                    qr = self.query(q, d, index, sources)
+                    qr = self.query(q, d, index, sources, case_dir)
                     report["commands"].append({"argv": qr["argv"]})
                     pr["queries"].append(qr)
                 report["phases"].append(pr)

@@ -6,6 +6,7 @@
   get-callers                    List all functions that call a given function.
   get-class-hierarchy            Query class inheritance relationships and virtual method overrides.
   graph-summary                  Return aggregate statistics about the call graph: node and edge counts, call-site count, entry-point count, top-5 fan-out callers and callees, and histograms by confidence and edge kind.
+  impact-of-change               Callers affected by a change: the functions with a call chain to any changed function within max_depth, each at its shallowest depth with a witness path, plus the entry points among them.
   list-callback-sites            List every callback registration or invocation site grouped by target.
   list-channels                  List every tracked channel (queue/map/event-bus instance registered via --channel-types-json) with its type, category, and producer/consumer site counts.
   list-concurrency-entry-points  List every ThreadEntry edge: functions (including synthetic lambda targets) that are handed to std::thread, std::jthread, std::async, std::packaged_task, std::invoke, or std::bind.

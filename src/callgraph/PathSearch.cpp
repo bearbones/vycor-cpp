@@ -134,22 +134,7 @@ struct Search {
     if (it != callersMemo.end())
       return it->second;
     auto edges = graph.callerRefsOf(node);
-    std::sort(edges.begin(), edges.end(),
-              [&](const CallGraph::EdgeRef &a, const CallGraph::EdgeRef &b) {
-                if (a.caller != b.caller)
-                  return interner.resolve(a.caller) <
-                         interner.resolve(b.caller);
-                if (a.callSite != b.callSite)
-                  return interner.resolve(a.callSite) <
-                         interner.resolve(b.callSite);
-                if (a.kind != b.kind)
-                  return a.kind < b.kind;
-                if (a.confidence != b.confidence)
-                  return a.confidence < b.confidence;
-                if (a.execContext != b.execContext)
-                  return a.execContext < b.execContext;
-                return a.indirectionDepth < b.indirectionDepth;
-              });
+    sortCallerRefsCanonically(graph, edges);
     return callersMemo.emplace(node, std::move(edges)).first->second;
   }
 
@@ -267,6 +252,32 @@ struct Search {
 };
 
 } // namespace
+
+std::vector<StringInterner::Id> resolveKnownIds(const CallGraph &graph,
+                                                const std::string &name) {
+  return resolveIds(graph, name);
+}
+
+void sortCallerRefsCanonically(const CallGraph &graph,
+                               std::vector<CallGraph::EdgeRef> &edges) {
+  const StringInterner &interner = graph.interner();
+  std::sort(edges.begin(), edges.end(),
+            [&](const CallGraph::EdgeRef &a, const CallGraph::EdgeRef &b) {
+              if (a.caller != b.caller)
+                return interner.resolve(a.caller) <
+                       interner.resolve(b.caller);
+              if (a.callSite != b.callSite)
+                return interner.resolve(a.callSite) <
+                       interner.resolve(b.callSite);
+              if (a.kind != b.kind)
+                return a.kind < b.kind;
+              if (a.confidence != b.confidence)
+                return a.confidence < b.confidence;
+              if (a.execContext != b.execContext)
+                return a.execContext < b.execContext;
+              return a.indirectionDepth < b.indirectionDepth;
+            });
+}
 
 PathSearchResult findCallerPaths(const CallGraph &graph,
                                  const std::string &target,

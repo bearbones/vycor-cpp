@@ -31,7 +31,12 @@ add_library(vycor_lib
   query/DeadCodeTools.cpp
   query/ChannelTools.cpp
   query/Registry.cpp
+  query/ImpactTools.cpp
+  impact/SemanticDiff.cpp
+  impact/ImpactSearch.cpp
+  impact/PatchMapping.cpp
   cli/BakeConfig.cpp
+  cli/DiffVerb.cpp
   cli/MegascopeCli.cpp
   cli/SourceSelection.cpp
   ext/Extensions.cpp

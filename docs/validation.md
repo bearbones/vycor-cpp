@@ -63,7 +63,8 @@ appended, and is checked as text.
   "entry_points": ["main"],
   "queries": [ ... ]                  // single phase, or:
   "phases": [
-    {"name": "before", "index": {"mode": "cold"}, "queries": [ ... ]},
+    {"name": "before", "index": {"mode": "cold"},
+     "save_index_as": "before.vycs", "queries": [ ... ]},
     {"name": "after", "overlay": "after", "flags": {"a.cpp": ["-DX"]},
      "sources": ["a.cpp", "b.cpp", "c.cpp"],
      "index": {"mode": "warm", "refreshed": 1, "refreshed_for_headers": 1},
@@ -80,6 +81,14 @@ Every phase runs `megascope index` again on the same index file — a
 warm refresh — and `index` names fields of the one-line summary that
 must hold (`mode`, `refreshed`, `refreshed_for_headers`,
 `refreshed_for_inputs`, `indexed`, `partial`, `failed`, ...).
+`save_index_as` copies the index, after the phase's refresh, to a file
+in the scratch directory, so a later phase can compare against it.
+
+An `argv` may use `{index}` (the index file), `{dir}` (the scratch
+directory), `{case}` (the case directory, for a patch file kept beside
+`case.json`), and `{saved:NAME}` (a file a `save_index_as` wrote). The
+runner appends `--index` unless the query is a `diff` or names
+`--index` itself.
 
 A two-phase case is a **patch pair**: `src/` is *before*, the overlay
 (or flag change) is the patch, and the expectations of both phases say
@@ -124,6 +133,7 @@ not necessarily adjacent. Text queries take `"lines": {"present":
 | `bounded_path_search` | four two-hop routes from `main` to `target` | unbounded: 4 paths, `complete`, `exhaustive`; `max_paths 2`: the canonical prefix (`a1`, `a2`), `complete: false`, `path_limit`; `max_depth 1`: `complete` but not `exhaustive`; unknown target: neither |
 | `header_change` | an inline function in a header calls `gamma`; the patch makes it call `delta` | warm refresh re-parses the one including TU (`refreshed_for_headers: 1`); afterwards `gamma`, which only the old header ever named, is **unknown** (`complete: false`), not "proven unreachable" |
 | `compile_flag_invalidation` | `entry()` calls `alpha` or `beta` under `#ifdef`; the patch adds `-DNEW_TARGET` to one compile command | `refreshed_for_inputs: 1`; the callee follows the flag; `alpha` stays a known node with no callers (the TU declares it), so its chain is `complete` with 0 paths |
+| `change_impact` | `process` calls `helper` bare, `main` calls `process`; the patch wraps the call in a try/catch, adds `fresh` (calls `helper`, called by `main`), and drops `caller_of_retired`'s call; a whitespace-only overlay in between | `diff` of the whitespace pair is empty (exit 1, `changeCount` 0); the patch pair yields exactly `function_added`, `call_removed`, two `call_added`, `context_changed` in that order; `--to helper` adds one route and removes none; `impact-of-change --changed helper` lists `fresh`, `process`, `main` by depth; `--patch-file` maps three functions by call site and reports `ops.cpp`, whose functions are declared in `ops.h`, as unmapped |
 | `odr_divergence` | `anneal --odr-diag` over the fixture from `tests/test_anneal_odr.cpp`: a `-D`-dependent inline body, one function defined by two headers, a class defined twice, an identical copy | the three violations are reported; the identical copy and the flagged class's own method are not; without the check nothing is |
 
 Every case carries expected negatives; `header_change` is the

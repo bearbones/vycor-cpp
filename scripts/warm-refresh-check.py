@@ -212,6 +212,20 @@ class Check:
                         f"{' '.join(argv)}: warm answer differs from "
                         f"clean rebuild (exit {ca} vs {cb})\n"
                         f"  warm:  {oa[:200]!r}\n  clean: {ob[:200]!r}")
+        # The semantic diff of the two must be empty: same functions, same
+        # calls, same call-site contexts (docs/change-impact.md).
+        rc, out, _ = self.megascope(
+            ["diff", "--before", str(warm), "--after", str(clean)], d)
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            payload = {}
+        n = payload.get("summary", {}).get("changeCount")
+        self.expect(scenario, rc == 1 and payload.get("status") == "ok"
+                    and n == 0,
+                    f"diff warm/clean: exit {rc}, status "
+                    f"{payload.get('status')!r}, {n} changes\n"
+                    f"  {out[:300]!r}")
 
     def expect_summary(self, scenario: str, s: dict, **fields: int | str
                        ) -> None:
