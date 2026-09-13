@@ -15,13 +15,63 @@
 
 #include "vycor/callgraph/ControlFlowIndex.h"
 
+#include "llvm/Support/Endian.h"
+#include "llvm/Support/MemoryBuffer.h"
+
 #include <algorithm>
+#include <cassert>
 #include <tuple>
 #include <unordered_set>
 
 namespace vycor {
 
+// The mapped form: the v12 control-flow section's record region, read in
+// place. Layout after the set tables, every integer little-endian u32:
+//   count, then count records of kRecordBytes (the resident record's
+//     fields in order: caller, callee, callerDisplay, calleeDisplay,
+//     site, tuPath, scopeSet, guardSet, raiiSet, u8 noexcept, u8
+//     insideCatch), stably sorted by site id
+//   stringOffsets[stringCount]: each id's length-prefixed entry in the
+//     interner table body
+//   sortedIds[stringCount]: ids in string order (findId bisects it)
+//   byCaller[count], byCallee[count]: record positions by (id, position)
+//   n, byCallerDisplay[n]; n, byCalleeDisplay[n]: the positions whose
+//     display id differs from the usr id, by (display id, position)
+// Nothing is trusted: every offset, id, and position is bounds-checked
+// where it is read, and a record that fails validation reads as dead.
+struct ControlFlowIndex::MappedStore {
+  std::shared_ptr<llvm::MemoryBuffer> buffer;
+  const char *strings = nullptr;
+  size_t stringBytes = 0;
+  uint32_t stringCount = 0;
+  const char *stringOffsets = nullptr;
+  const char *sortedIds = nullptr;
+  const char *records = nullptr;
+  uint32_t recordCount = 0;
+  const char *byCaller = nullptr;
+  const char *byCallee = nullptr;
+  const char *byCallerDisplay = nullptr;
+  uint32_t callerDisplayCount = 0;
+  const char *byCalleeDisplay = nullptr;
+  uint32_t calleeDisplayCount = 0;
+};
+
 namespace {
+
+// Record field offsets (bytes).
+constexpr size_t kFieldCaller = 0;
+constexpr size_t kFieldCallee = 4;
+constexpr size_t kFieldCallerDisplay = 8;
+constexpr size_t kFieldCalleeDisplay = 12;
+constexpr size_t kFieldSite = 16;
+constexpr size_t kFieldTuPath = 20;
+constexpr size_t kFieldScopeSet = 24;
+constexpr size_t kFieldGuardSet = 28;
+constexpr size_t kFieldRaiiSet = 32;
+constexpr size_t kFieldNoexcept = 36;
+constexpr size_t kFieldInsideCatch = 37;
+
+uint32_t ldU32(const char *p) { return llvm::support::endian::read32le(p); }
 
 // ----------------------------------------------------------------------------
 // Set-table canonical keys. Every variable-length field is length-prefixed so
@@ -79,8 +129,10 @@ ControlFlowIndex::ControlFlowIndex() {
   raiiSets_.emplace_back();
 }
 
+ControlFlowIndex::~ControlFlowIndex() = default;
+
 ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
-    : interner_(std::move(other.interner_)),
+    : mapped_(std::move(other.mapped_)), interner_(std::move(other.interner_)),
       contexts_(std::move(other.contexts_)),
       scopeSets_(std::move(other.scopeSets_)),
       guardSets_(std::move(other.guardSets_)),
@@ -92,12 +144,13 @@ ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
       byCaller_(std::move(other.byCaller_)),
       byCalleeDisplay_(std::move(other.byCalleeDisplay_)),
       byCallerDisplay_(std::move(other.byCallerDisplay_)),
-      bySite_(std::move(other.bySite_)),
-      byTu_(std::move(other.byTu_)),
+      bySite_(std::move(other.bySite_)), byTu_(std::move(other.byTu_)),
       noProvenance_(std::move(other.noProvenance_)),
       liveCount_(other.liveCount_) {}
 
-ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
+ControlFlowIndex &
+ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
+  mapped_ = std::move(other.mapped_);
   interner_ = std::move(other.interner_);
   contexts_ = std::move(other.contexts_);
   scopeSets_ = std::move(other.scopeSets_);
@@ -118,6 +171,9 @@ ControlFlowIndex &ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept
 }
 
 void ControlFlowIndex::reserveContexts(size_t n) {
+  assert(!mapped_ && "mapped control-flow index is read-only");
+  if (mapped_)
+    return;
   std::lock_guard<std::mutex> lock(mutex_);
   byCallee_.reserve(n);
   byCaller_.reserve(n);
@@ -208,6 +264,9 @@ void ControlFlowIndex::insertStored(SId caller, SId callee, SId callerDisplay,
 }
 
 void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
+  assert(!mapped_ && "mapped control-flow index is read-only");
+  if (mapped_)
+    return;
   // Intern strings and build set dedup keys BEFORE taking mutex_: the
   // interner has its own reader/writer lock, so only the set-table lookups
   // and the index insert need the exclusive index mutex. Keeps the critical
@@ -253,13 +312,13 @@ void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
 
 CallSiteContext ControlFlowIndex::materialize(const StoredContext &se) const {
   CallSiteContext ctx;
-  ctx.callerName = interner_.resolve(se.callerDisplay);
-  ctx.calleeName = interner_.resolve(se.calleeDisplay);
-  ctx.callerUsr = interner_.resolve(se.caller);
-  ctx.calleeUsr = interner_.resolve(se.callee);
-  ctx.callSite = interner_.resolve(se.site);
+  ctx.callerName = stringOf(se.callerDisplay);
+  ctx.calleeName = stringOf(se.calleeDisplay);
+  ctx.callerUsr = stringOf(se.caller);
+  ctx.calleeUsr = stringOf(se.callee);
+  ctx.callSite = stringOf(se.site);
   if (se.tuPath != kNoString)
-    ctx.tuPath = interner_.resolve(se.tuPath);
+    ctx.tuPath = stringOf(se.tuPath);
   ctx.enclosingTryCatches = scopeSets_[se.scopeSet];
   ctx.enclosingGuards = guardSets_[se.guardSet];
   ctx.callerNoexcept = se.callerNoexcept;
@@ -267,42 +326,242 @@ CallSiteContext ControlFlowIndex::materialize(const StoredContext &se) const {
   const auto &locals = raiiSets_[se.raiiSet];
   ctx.liveRaiiLocals.reserve(locals.size());
   for (const auto &l : locals)
-    ctx.liveRaiiLocals.push_back(RaiiLocal{interner_.resolve(l.typeName),
-                                           interner_.resolve(l.varName),
-                                           interner_.resolve(l.declLocation),
-                                           l.kind});
+    ctx.liveRaiiLocals.push_back(RaiiLocal{stringOf(l.typeName),
+                                           stringOf(l.varName),
+                                           stringOf(l.declLocation), l.kind});
   return ctx;
 }
 
-const std::vector<size_t> *ControlFlowIndex::indicesFor(
-    const std::unordered_map<SId, std::vector<size_t>> &usrMap,
-    const std::unordered_map<SId, std::vector<size_t>> &displayMap,
-    const std::string &name) const {
-  auto id = interner_.find(name);
+// ----------------------------------------------------------------------------
+// The mapped form
+// ----------------------------------------------------------------------------
+
+bool ControlFlowIndex::attachMapped(std::shared_ptr<llvm::MemoryBuffer> buffer,
+                                    const char *strings, size_t stringBytes,
+                                    uint32_t stringCount, const char *&p,
+                                    const char *end) {
+  auto m = std::make_unique<MappedStore>();
+  m->buffer = std::move(buffer);
+  m->strings = strings;
+  m->stringBytes = stringBytes;
+  m->stringCount = stringCount;
+  auto remaining = [&]() { return static_cast<uint64_t>(end - p); };
+  auto takeU32 = [&](uint32_t &v) {
+    if (remaining() < 4)
+      return false;
+    v = ldU32(p);
+    p += 4;
+    return true;
+  };
+  // An array of `n` items of `bytes` each, or null when short.
+  auto takeArray = [&](uint64_t n, uint64_t bytes) -> const char * {
+    if (remaining() < n * bytes)
+      return nullptr;
+    const char *at = p;
+    p += n * bytes;
+    return at;
+  };
+  if (!takeU32(m->recordCount) || remaining() / kRecordBytes < m->recordCount)
+    return false;
+  m->records = takeArray(m->recordCount, kRecordBytes);
+  m->stringOffsets = takeArray(stringCount, 4);
+  m->sortedIds = takeArray(stringCount, 4);
+  m->byCaller = takeArray(m->recordCount, 4);
+  m->byCallee = takeArray(m->recordCount, 4);
+  if (!m->records || !m->stringOffsets || !m->sortedIds || !m->byCaller ||
+      !m->byCallee || !takeU32(m->callerDisplayCount) ||
+      m->callerDisplayCount > m->recordCount)
+    return false;
+  m->byCallerDisplay = takeArray(m->callerDisplayCount, 4);
+  if (!m->byCallerDisplay || !takeU32(m->calleeDisplayCount) ||
+      m->calleeDisplayCount > m->recordCount)
+    return false;
+  m->byCalleeDisplay = takeArray(m->calleeDisplayCount, 4);
+  if (!m->byCalleeDisplay)
+    return false;
+  liveCount_ = m->recordCount;
+  mapped_ = std::move(m);
+  return true;
+}
+
+std::string_view ControlFlowIndex::mappedString(SId id) const {
+  const MappedStore &m = *mapped_;
+  if (id >= m.stringCount)
+    return {};
+  const uint32_t off = ldU32(m.stringOffsets + size_t(id) * 4);
+  if (off > m.stringBytes || m.stringBytes - off < 4)
+    return {};
+  const uint32_t len = ldU32(m.strings + off);
+  if (m.stringBytes - off - 4 < len)
+    return {};
+  return std::string_view(m.strings + off + 4, len);
+}
+
+ControlFlowIndex::StoredContext
+ControlFlowIndex::mappedRecord(uint32_t pos) const {
+  const MappedStore &m = *mapped_;
+  StoredContext se{};
+  se.live = false;
+  if (pos >= m.recordCount)
+    return se;
+  const char *r = m.records + size_t(pos) * kRecordBytes;
+  se.caller = ldU32(r + kFieldCaller);
+  se.callee = ldU32(r + kFieldCallee);
+  se.callerDisplay = ldU32(r + kFieldCallerDisplay);
+  se.calleeDisplay = ldU32(r + kFieldCalleeDisplay);
+  se.site = ldU32(r + kFieldSite);
+  se.tuPath = ldU32(r + kFieldTuPath);
+  se.scopeSet = ldU32(r + kFieldScopeSet);
+  se.guardSet = ldU32(r + kFieldGuardSet);
+  se.raiiSet = ldU32(r + kFieldRaiiSet);
+  se.callerNoexcept =
+      static_cast<NoexceptSpec>(static_cast<uint8_t>(r[kFieldNoexcept]));
+  se.insideCatchBlock = r[kFieldInsideCatch] != 0;
+  auto validId = [&](SId id) { return id < m.stringCount; };
+  se.live = validId(se.caller) && validId(se.callee) &&
+            validId(se.callerDisplay) && validId(se.calleeDisplay) &&
+            validId(se.site) &&
+            (se.tuPath == kNoString || validId(se.tuPath)) &&
+            se.scopeSet < scopeSets_.size() &&
+            se.guardSet < guardSets_.size() && se.raiiSet < raiiSets_.size();
+  return se;
+}
+
+std::pair<uint32_t, uint32_t> ControlFlowIndex::mappedRange(const char *order,
+                                                            uint32_t count,
+                                                            size_t field,
+                                                            SId id) const {
+  const MappedStore &m = *mapped_;
+  // A position out of range sorts after every id, so a corrupt entry can
+  // only shorten a range, never send a read past the records.
+  auto fieldAt = [&](uint32_t i) -> uint64_t {
+    const uint32_t pos = order ? ldU32(order + size_t(i) * 4) : i;
+    if (pos >= m.recordCount)
+      return UINT64_MAX;
+    return ldU32(m.records + size_t(pos) * kRecordBytes + field);
+  };
+  uint32_t lo = 0, hi = count;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    if (fieldAt(mid) < id)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  const uint32_t first = lo;
+  hi = count;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    if (fieldAt(mid) <= id)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return {first, lo};
+}
+
+std::string ControlFlowIndex::stringOf(SId id) const {
+  if (mapped_)
+    return std::string(mappedString(id));
+  if (id >= interner_.size())
+    return std::string();
+  return interner_.resolve(id);
+}
+
+std::optional<ControlFlowIndex::SId>
+ControlFlowIndex::findId(const std::string &s) const {
+  if (!mapped_)
+    return interner_.find(s);
+  const MappedStore &m = *mapped_;
+  const std::string_view key(s);
+  uint32_t lo = 0, hi = m.stringCount;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    const SId id = ldU32(m.sortedIds + size_t(mid) * 4);
+    const int c = mappedString(id).compare(key);
+    if (c == 0)
+      return id;
+    if (c < 0)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return std::nullopt;
+}
+
+ControlFlowIndex::StoredContext ControlFlowIndex::storedAt(size_t pos) const {
+  if (mapped_)
+    return mappedRecord(static_cast<uint32_t>(pos));
+  return contexts_[pos];
+}
+
+std::vector<size_t>
+ControlFlowIndex::sitePositions(const std::string &callSite) const {
+  std::vector<size_t> out;
+  auto id = findId(callSite);
   if (!id)
-    return nullptr;
+    return out;
+  if (mapped_) {
+    auto [first, last] =
+        mappedRange(nullptr, mapped_->recordCount, kFieldSite, *id);
+    for (uint32_t i = first; i < last; ++i)
+      out.push_back(i);
+    return out;
+  }
+  auto it = bySite_.find(*id);
+  if (it != bySite_.end())
+    out.assign(it->second.begin(), it->second.end());
+  return out;
+}
+
+std::vector<size_t>
+ControlFlowIndex::namePositions(Side side, const std::string &name) const {
+  std::vector<size_t> out;
+  auto id = findId(name);
+  if (!id)
+    return out;
+  if (mapped_) {
+    const MappedStore &m = *mapped_;
+    const bool caller = side == Side::Caller;
+    const char *order = caller ? m.byCaller : m.byCallee;
+    auto [first, last] = mappedRange(order, m.recordCount,
+                                     caller ? kFieldCaller : kFieldCallee, *id);
+    if (first == last) {
+      order = caller ? m.byCallerDisplay : m.byCalleeDisplay;
+      std::tie(first, last) = mappedRange(
+          order, caller ? m.callerDisplayCount : m.calleeDisplayCount,
+          caller ? kFieldCallerDisplay : kFieldCalleeDisplay, *id);
+    }
+    for (uint32_t i = first; i < last; ++i)
+      out.push_back(ldU32(order + size_t(i) * 4));
+    return out;
+  }
+  const auto &usrMap = side == Side::Caller ? byCaller_ : byCallee_;
+  const auto &displayMap =
+      side == Side::Caller ? byCallerDisplay_ : byCalleeDisplay_;
   auto it = usrMap.find(*id);
-  if (it != usrMap.end())
-    return &it->second;
+  if (it != usrMap.end()) {
+    out.assign(it->second.begin(), it->second.end());
+    return out;
+  }
   auto dit = displayMap.find(*id);
   if (dit != displayMap.end())
-    return &dit->second;
-  return nullptr;
+    out.assign(dit->second.begin(), dit->second.end());
+  return out;
 }
+
+// ----------------------------------------------------------------------------
+// Queries (both forms)
+// ----------------------------------------------------------------------------
 
 std::optional<CallSiteContext>
 ControlFlowIndex::contextAtSite(const std::string &callSite) const {
-  auto id = interner_.find(callSite);
-  if (!id)
-    return std::nullopt;
-  auto it = bySite_.find(*id);
-  if (it == bySite_.end())
-    return std::nullopt;
   // Several contexts can share a spelling (macro expansion): return the
   // first live one; the caller-qualified overload picks a specific one.
-  for (size_t idx : it->second) {
-    if (contexts_[idx].live)
-      return materialize(contexts_[idx]);
+  for (size_t pos : sitePositions(callSite)) {
+    StoredContext se = storedAt(pos);
+    if (se.live)
+      return materialize(se);
   }
   return std::nullopt;
 }
@@ -310,17 +569,11 @@ ControlFlowIndex::contextAtSite(const std::string &callSite) const {
 std::optional<CallSiteContext>
 ControlFlowIndex::contextAtSite(const std::string &callSite,
                                 const std::string &callerUsrOrName) const {
-  auto id = interner_.find(callSite);
-  if (!id)
-    return std::nullopt;
-  auto callerId = interner_.find(callerUsrOrName);
+  auto callerId = findId(callerUsrOrName);
   if (!callerId)
     return std::nullopt;
-  auto it = bySite_.find(*id);
-  if (it == bySite_.end())
-    return std::nullopt;
-  for (size_t idx : it->second) {
-    const StoredContext &se = contexts_[idx];
+  for (size_t pos : sitePositions(callSite)) {
+    StoredContext se = storedAt(pos);
     if (!se.live)
       continue;
     if (se.caller == *callerId || se.callerDisplay == *callerId)
@@ -363,15 +616,10 @@ ControlFlowIndex::contextForEdge(const std::string &callSite,
 std::vector<CallSiteContext>
 ControlFlowIndex::contextsAtSite(const std::string &callSite) const {
   std::vector<CallSiteContext> result;
-  auto id = interner_.find(callSite);
-  if (!id)
-    return result;
-  auto it = bySite_.find(*id);
-  if (it == bySite_.end())
-    return result;
-  for (size_t idx : it->second) {
-    if (contexts_[idx].live)
-      result.push_back(materialize(contexts_[idx]));
+  for (size_t pos : sitePositions(callSite)) {
+    StoredContext se = storedAt(pos);
+    if (se.live)
+      result.push_back(materialize(se));
   }
   return result;
 }
@@ -379,36 +627,31 @@ ControlFlowIndex::contextsAtSite(const std::string &callSite) const {
 std::vector<CallSiteContext>
 ControlFlowIndex::contextsForCallee(const std::string &calleeName) const {
   std::vector<CallSiteContext> result;
-  const auto *indices = indicesFor(byCallee_, byCalleeDisplay_, calleeName);
-  if (!indices)
-    return result;
-  for (size_t idx : *indices) {
-    if (contexts_[idx].live)
-      result.push_back(materialize(contexts_[idx]));
+  for (size_t pos : namePositions(Side::Callee, calleeName)) {
+    StoredContext se = storedAt(pos);
+    if (se.live)
+      result.push_back(materialize(se));
   }
   return result;
 }
 
 std::optional<NoexceptSpec>
 ControlFlowIndex::callerNoexceptOf(const std::string &caller) const {
-  const auto *indices = indicesFor(byCaller_, byCallerDisplay_, caller);
-  if (!indices)
-    return std::nullopt;
-  for (size_t idx : *indices)
-    if (contexts_[idx].live)
-      return contexts_[idx].callerNoexcept;
+  for (size_t pos : namePositions(Side::Caller, caller)) {
+    StoredContext se = storedAt(pos);
+    if (se.live)
+      return se.callerNoexcept;
+  }
   return std::nullopt;
 }
 
 std::vector<CallSiteContext>
 ControlFlowIndex::contextsForCaller(const std::string &callerName) const {
   std::vector<CallSiteContext> result;
-  const auto *indices = indicesFor(byCaller_, byCallerDisplay_, callerName);
-  if (!indices)
-    return result;
-  for (size_t idx : *indices) {
-    if (contexts_[idx].live)
-      result.push_back(materialize(contexts_[idx]));
+  for (size_t pos : namePositions(Side::Caller, callerName)) {
+    StoredContext se = storedAt(pos);
+    if (se.live)
+      result.push_back(materialize(se));
   }
   return result;
 }
@@ -416,15 +659,10 @@ ControlFlowIndex::contextsForCaller(const std::string &callerName) const {
 std::vector<CallSiteContext>
 ControlFlowIndex::protectedCallsTo(const std::string &calleeName) const {
   std::vector<CallSiteContext> result;
-  const auto *indices = indicesFor(byCallee_, byCalleeDisplay_, calleeName);
-  if (!indices)
-    return result;
-  for (size_t idx : *indices) {
-    const StoredContext &se = contexts_[idx];
-    if (!se.live)
-      continue;
+  for (size_t pos : namePositions(Side::Callee, calleeName)) {
+    StoredContext se = storedAt(pos);
     // scopeSet 0 is the empty set: != 0 <=> enclosingTryCatches non-empty.
-    if (se.scopeSet != 0)
+    if (se.live && se.scopeSet != 0)
       result.push_back(materialize(se));
   }
   return result;
@@ -433,14 +671,9 @@ ControlFlowIndex::protectedCallsTo(const std::string &calleeName) const {
 std::vector<CallSiteContext>
 ControlFlowIndex::unprotectedCallsTo(const std::string &calleeName) const {
   std::vector<CallSiteContext> result;
-  const auto *indices = indicesFor(byCallee_, byCalleeDisplay_, calleeName);
-  if (!indices)
-    return result;
-  for (size_t idx : *indices) {
-    const StoredContext &se = contexts_[idx];
-    if (!se.live)
-      continue;
-    if (se.scopeSet == 0)
+  for (size_t pos : namePositions(Side::Callee, calleeName)) {
+    StoredContext se = storedAt(pos);
+    if (se.live && se.scopeSet == 0)
       result.push_back(materialize(se));
   }
   return result;
@@ -449,6 +682,14 @@ ControlFlowIndex::unprotectedCallsTo(const std::string &calleeName) const {
 void ControlFlowIndex::forEachContext(
     llvm::function_ref<void(const CallSiteContext &)> fn) const {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (mapped_) {
+    for (uint32_t pos = 0; pos < mapped_->recordCount; ++pos) {
+      StoredContext se = mappedRecord(pos);
+      if (se.live)
+        fn(materialize(se));
+    }
+    return;
+  }
   for (const auto &se : contexts_) {
     if (se.live)
       fn(materialize(se));
@@ -465,9 +706,7 @@ bool ControlFlowIndex::ContextShape::operator<(const ContextShape &o) const {
 void ControlFlowIndex::forEachContextRecord(
     llvm::function_ref<void(const ContextRecord &)> fn) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (const auto &se : contexts_) {
-    if (!se.live)
-      continue;
+  auto emit = [&](const StoredContext &se) {
     ContextRecord r;
     r.callSite = se.site;
     r.callerUsr = se.caller;
@@ -477,6 +716,18 @@ void ControlFlowIndex::forEachContextRecord(
     r.shape = {se.scopeSet, se.guardSet, se.raiiSet, se.callerNoexcept,
                se.insideCatchBlock};
     fn(r);
+  };
+  if (mapped_) {
+    for (uint32_t pos = 0; pos < mapped_->recordCount; ++pos) {
+      StoredContext se = mappedRecord(pos);
+      if (se.live)
+        emit(se);
+    }
+    return;
+  }
+  for (const auto &se : contexts_) {
+    if (se.live)
+      emit(se);
   }
 }
 
@@ -484,15 +735,18 @@ CallSiteContext
 ControlFlowIndex::contextOfShape(const ContextShape &shape) const {
   std::lock_guard<std::mutex> lock(mutex_);
   CallSiteContext ctx;
+  if (shape.scopeSet >= scopeSets_.size() ||
+      shape.guardSet >= guardSets_.size() ||
+      shape.raiiSet >= raiiSets_.size())
+    return ctx;
   ctx.enclosingTryCatches = scopeSets_[shape.scopeSet];
   ctx.enclosingGuards = guardSets_[shape.guardSet];
   ctx.callerNoexcept = shape.callerNoexcept;
   ctx.insideCatchBlock = shape.insideCatchBlock;
   for (const auto &l : raiiSets_[shape.raiiSet])
-    ctx.liveRaiiLocals.push_back(RaiiLocal{interner_.resolve(l.typeName),
-                                           interner_.resolve(l.varName),
-                                           interner_.resolve(l.declLocation),
-                                           l.kind});
+    ctx.liveRaiiLocals.push_back(RaiiLocal{stringOf(l.typeName),
+                                           stringOf(l.varName),
+                                           stringOf(l.declLocation), l.kind});
   return ctx;
 }
 
@@ -504,7 +758,9 @@ std::vector<CallSiteContext> ControlFlowIndex::allContexts() const {
 }
 
 void ControlFlowIndex::absorb(const ControlFlowIndex &shard) {
-  if (&shard == this)
+  assert(!mapped_ && !shard.mapped_ &&
+         "mapped control-flow index is read-only");
+  if (&shard == this || mapped_ || shard.mapped_)
     return;
   std::lock_guard<std::mutex> lockThis(mutex_);
   std::lock_guard<std::mutex> lockShard(shard.mutex_);
@@ -556,6 +812,9 @@ size_t ControlFlowIndex::removeTU(const std::string &tuPath) {
 }
 
 size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
+  assert(!mapped_ && "mapped control-flow index is read-only");
+  if (mapped_)
+    return 0;
   std::lock_guard<std::mutex> lock(mutex_);
   size_t removed = 0;
 
@@ -648,6 +907,9 @@ size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
 }
 
 void ControlFlowIndex::compact() {
+  assert(!mapped_ && "mapped control-flow index is read-only");
+  if (mapped_)
+    return;
   std::lock_guard<std::mutex> lock(mutex_);
   std::deque<StoredContext> newCtx;
 

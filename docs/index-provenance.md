@@ -303,7 +303,9 @@ to trust.
 
 Format v11 (package B, `docs/path-analysis.md`) adds one byte per catch
 handler record (`rethrows`, after `isCatchAll`) in the control-flow
-section; the meta section is unchanged.
+section; the meta section is unchanged. Format v12 (package F,
+`docs/control-flow-access.md`) lays the control-flow section out for
+reading in place; the meta section is again unchanged.
 
 ## Measurements
 

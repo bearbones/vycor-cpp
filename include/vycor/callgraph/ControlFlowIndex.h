@@ -28,11 +28,18 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+namespace llvm {
+class MemoryBuffer;
+} // namespace llvm
 
 namespace clang {
 namespace tooling {
@@ -152,6 +159,7 @@ struct CallSiteContext {
 class ControlFlowIndex {
 public:
   ControlFlowIndex();
+  ~ControlFlowIndex();
   ControlFlowIndex(ControlFlowIndex &&other) noexcept;
   ControlFlowIndex &operator=(ControlFlowIndex &&other) noexcept;
   ControlFlowIndex(const ControlFlowIndex &) = delete;
@@ -223,8 +231,10 @@ public:
 
   // Visit every live context, materialized one at a time: `megascope
   // dump` streams a multi-million-site index through this without ever
-  // holding a second copy of it. Insertion order. The callback must not
-  // call back into this index (mutex_ is held for the whole walk).
+  // holding a second copy of it. Stored order: insertion order for a
+  // bake, the file's order (by call-site id) for a loaded snapshot. The
+  // callback must not call back into this index (mutex_ is held for the
+  // whole walk).
   void forEachContext(
       llvm::function_ref<void(const CallSiteContext &)> fn) const;
 
@@ -254,12 +264,24 @@ public:
   // tables are index-stable and left untouched.
   void compact();
 
-  const StringInterner &interner() const { return interner_; }
-
   using SId = StringInterner::Id;
 
   // "no tuPath recorded" sentinel (the interner never assigns UINT32_MAX).
   static constexpr SId kNoString = UINT32_MAX;
+
+  // The string behind an interned id (a ContextRecord field or a stored
+  // RAII local), in either form of the index; "" for an id it does not
+  // hold.
+  std::string stringOf(SId id) const;
+
+  // A read-only index whose contexts stay in the snapshot file
+  // (format v12 loaded with LoadMode::ReadOnly): the load decodes the
+  // set tables and nothing per context; every query reads the records
+  // it needs through the mapping. Answers are identical to the resident
+  // form's — tests/test_mapped_control_flow.cpp checks each query both
+  // ways. Mutation is a contract violation (asserted, ignored in
+  // release). docs/control-flow-access.md.
+  bool isMapped() const { return mapped_ != nullptr; }
 
   // A context's shape: everything but who calls whom, where. Equal shapes
   // mean equal enclosing try/catch scopes, guards, live RAII locals,
@@ -278,7 +300,9 @@ public:
   // pass walks these instead of materializing millions of contexts, and
   // materializes each distinct shape once through contextOfShape() —
   // the semantic diff's context signatures (impact/SemanticDiff.cpp).
-  // Insertion order; the callback must not call back into this index.
+  // Stored order (as forEachContext); the callback must not call back
+  // into this index — resolve shapes through contextOfShape after the
+  // walk.
   struct ContextRecord {
     SId callSite;
     SId callerUsr;
@@ -355,13 +379,39 @@ private:
                     NoexceptSpec callerNoexcept, bool insideCatchBlock,
                     bool trackTu = true);
 
-  // usr-map lookup with display-map fallback: by-name queries accept either
+  // The queries below run over positions — contexts_ indices for the
+  // resident form, record positions for the mapped one — so each is
+  // written once. storedAt decodes a mapped record (live = false when
+  // it fails validation) or copies the resident one.
+  StoredContext storedAt(size_t pos) const;
+  std::optional<SId> findId(const std::string &s) const;
+  // The contexts sharing a spelling, in stored order.
+  std::vector<size_t> sitePositions(const std::string &callSite) const;
+  // usr lookup with display fallback: by-name queries accept either
   // form; the usr key wins when both exist (they coincide for name-only
-  // inserts). Returns nullptr when the name matches neither.
-  const std::vector<size_t> *
-  indicesFor(const std::unordered_map<SId, std::vector<size_t>> &usrMap,
-             const std::unordered_map<SId, std::vector<size_t>> &displayMap,
-             const std::string &name) const;
+  // inserts). Empty when the name matches neither.
+  enum class Side { Caller, Callee };
+  std::vector<size_t> namePositions(Side side, const std::string &name) const;
+
+  // The mapped form (see isMapped). Filled by SnapshotIO::load through
+  // attachMapped, which parses the record region of a v12 control-flow
+  // section — the records sorted by call site followed by the lookup
+  // arrays — at `p` (advanced past it; false when the region is short).
+  // `strings` is the section's interner table body (`stringCount`
+  // length-prefixed entries in id order, `stringBytes` long); `buffer`
+  // keeps the file mapped for the index's lifetime.
+  struct MappedStore;
+  static constexpr size_t kRecordBytes = 38;
+  bool attachMapped(std::shared_ptr<llvm::MemoryBuffer> buffer,
+                    const char *strings, size_t stringBytes,
+                    uint32_t stringCount, const char *&p, const char *end);
+  std::string_view mappedString(SId id) const;
+  StoredContext mappedRecord(uint32_t pos) const;
+  // Order indices [first, last) whose record field equals `id`; `order`
+  // null means the records themselves (sorted by site).
+  std::pair<uint32_t, uint32_t> mappedRange(const char *order, uint32_t count,
+                                            size_t field, SId id) const;
+  std::unique_ptr<MappedStore> mapped_;
 
   mutable std::mutex mutex_;
   StringInterner interner_;

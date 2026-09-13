@@ -345,7 +345,6 @@ void ContextSignatures::offer(Table &table, Key key, const Choice &c) {
 
 ContextSignatures ContextSignatures::build(const ControlFlowIndex &cf) {
   ContextSignatures out;
-  const StringInterner &in = cf.interner();
   // The index's ids map to ours once per distinct string; an unrecorded
   // tuPath is the empty string, as contextForEdge compares it.
   constexpr Id kUnmapped = UINT32_MAX;
@@ -357,7 +356,7 @@ ContextSignatures ContextSignatures::build(const ControlFlowIndex &cf) {
     if (id >= remap.size())
       remap.resize(size_t(id) + 1, kUnmapped);
     if (remap[id] == kUnmapped)
-      remap[id] = out.strings_.intern(in.resolve(id));
+      remap[id] = out.strings_.intern(cf.stringOf(id));
     return remap[id];
   };
   std::map<ControlFlowIndex::ContextShape, uint32_t> shapeIds;

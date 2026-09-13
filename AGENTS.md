@@ -121,7 +121,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `CallGraph.h/.cpp` | Graph data structure: nodes (functions), edges (calls), class hierarchy, virtual overrides |
 | `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges |
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
-| `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes and conditional guards |
+| `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes, conditional guards, and live RAII locals; resident (deduplicated records, set tables, hash maps) for bakes and `serve`, or mapped over a v12 snapshot for the one-shot query verbs (`docs/control-flow-access.md`) |
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
@@ -205,14 +205,22 @@ sections the tool declares (`ToolEntry::needs`, set in
 `query/Registry.cpp`): the snapshot is sectioned (format v8; v9 adds the
 per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
-catch handler: header with
+catch handler, v12 a control-flow section laid out for reading in
+place: header with
 `IndexSummary` counts and a `{kind, offset, length}` table for meta /
 graph / control flow / channels), so a graph-only tool never decodes the
 call-site contexts, `info` reads the meta section alone, and
 `graph_summary` reports the header counts (`ToolContext::summary`).
-`index`/`serve` and worker shards load `Mutable` and everything. The
-bake's `--entry-point` list is recorded in the meta and is the default
-for queries and `serve` runs that pass none.
+A read-only load that needs the control-flow section does not decode
+its records either: the section keeps them sorted by call site with
+by-caller / by-callee orders and a string-sorted id table after them,
+and `ControlFlowIndex` answers every query from the mapped file
+(`isMapped()`; `docs/control-flow-access.md` has the layout, the
+measurements behind it, and the parity tests). `index`/`serve` and
+worker shards load `Mutable` and everything — the records decoded into
+the resident form, the orders skipped. The bake's `--entry-point` list
+is recorded in the meta and is the default for queries and `serve` runs
+that pass none.
 
 `main.cpp` peels the verb off argv before `llvm::cl` runs: query verbs
 never touch `llvm::cl`; `index` and `serve` share the bake option block
@@ -475,7 +483,9 @@ and standard-library versions. Any change to a tool's payload, a verb's
 flags, the ndjson/tsv shapes, or the exit codes shows up there; refresh
 the goldens in the same PR. `scripts/bench.py --cli [--sections]`
 measures the one-shot query latency the CLI model pays per call
-(process start + index load + query), with the per-section load split.
+(process start + index load + query), with the per-section load split;
+`scripts/cf-access-bench.py` is the matched-workload comparison of two
+binaries or index formats behind `docs/control-flow-access.md`.
 
 The order of every list a tool emits is contractual
 (`docs/deterministic-output.md`): the same sources baked in any TU
