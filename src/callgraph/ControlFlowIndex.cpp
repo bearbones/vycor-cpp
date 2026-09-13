@@ -16,6 +16,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 
 #include <algorithm>
+#include <tuple>
 #include <unordered_set>
 
 namespace vycor {
@@ -452,6 +453,47 @@ void ControlFlowIndex::forEachContext(
     if (se.live)
       fn(materialize(se));
   }
+}
+
+bool ControlFlowIndex::ContextShape::operator<(const ContextShape &o) const {
+  return std::tie(scopeSet, guardSet, raiiSet, callerNoexcept,
+                  insideCatchBlock) <
+         std::tie(o.scopeSet, o.guardSet, o.raiiSet, o.callerNoexcept,
+                  o.insideCatchBlock);
+}
+
+void ControlFlowIndex::forEachContextRecord(
+    llvm::function_ref<void(const ContextRecord &)> fn) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto &se : contexts_) {
+    if (!se.live)
+      continue;
+    ContextRecord r;
+    r.callSite = se.site;
+    r.callerUsr = se.caller;
+    r.callerName = se.callerDisplay;
+    r.calleeUsr = se.callee;
+    r.tuPath = se.tuPath;
+    r.shape = {se.scopeSet, se.guardSet, se.raiiSet, se.callerNoexcept,
+               se.insideCatchBlock};
+    fn(r);
+  }
+}
+
+CallSiteContext
+ControlFlowIndex::contextOfShape(const ContextShape &shape) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  CallSiteContext ctx;
+  ctx.enclosingTryCatches = scopeSets_[shape.scopeSet];
+  ctx.enclosingGuards = guardSets_[shape.guardSet];
+  ctx.callerNoexcept = shape.callerNoexcept;
+  ctx.insideCatchBlock = shape.insideCatchBlock;
+  for (const auto &l : raiiSets_[shape.raiiSet])
+    ctx.liveRaiiLocals.push_back(RaiiLocal{interner_.resolve(l.typeName),
+                                           interner_.resolve(l.varName),
+                                           interner_.resolve(l.declLocation),
+                                           l.kind});
+  return ctx;
 }
 
 std::vector<CallSiteContext> ControlFlowIndex::allContexts() const {

@@ -267,7 +267,7 @@ batch on one loaded index) or over MCP.
 ./build/vycor-cpp megascope find-call-chain --to Foo::bar --format ndjson
 ./build/vycor-cpp megascope search-functions --query Foo --format tsv | cut -f4
 ./build/vycor-cpp megascope info            # what the index holds
-./build/vycor-cpp megascope tools           # the 24 tools
+./build/vycor-cpp megascope tools           # the 25 tools
 
 # Many queries, one load: NDJSON requests in, one response per line out.
 printf '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}\n' | \
@@ -321,7 +321,7 @@ line after a `{"_summary":...}` line — or as one JSON document with
 `--format json`; the stream never holds the materialized index, so it
 scales to the largest indexes.
 
-**24 tools**: `search_functions`, `lookup_function`, `get_callees`,
+**25 tools**: `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -330,8 +330,9 @@ scales to the largest indexes.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`reindex_tu` (serve only).
-See `docs/mcp-usage.md`.
+`impact_of_change`, `reindex_tu` (serve only).
+See `docs/mcp-usage.md`. `megascope diff --before A --after B` compares
+two saved indexes (`docs/change-impact.md`).
 
 Bake flags (`index`/`serve`): `--source`/`--source-list`/`--source-re`/
 `--skip-paths` (TU selection; with none, the TUs recorded in the existing

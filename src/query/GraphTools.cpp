@@ -18,6 +18,7 @@
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
+#include "EdgeFilter.h"
 #include "Registry.h"
 #include "Schema.h"
 
@@ -34,82 +35,6 @@
 #include <vector>
 
 namespace vycor {
-
-// ============================================================================
-// Edge filter shared across get_callees, get_callers, find_call_chain
-// ============================================================================
-
-struct EdgeFilter {
-  std::set<EdgeKind> kinds; // empty = allow all
-  std::set<Confidence> includeConfidences; // non-empty overrides minConf
-  bool useIncludeSet = false;
-  Confidence minConf = Confidence::Unknown;
-  std::set<ExecutionContext> execContexts; // empty = allow all
-
-  bool allows(const CallGraphEdge &e) const {
-    return allowsFields(e.kind, e.confidence, e.execContext);
-  }
-
-  // Id-space twin for traversal loops that never materialize strings.
-  bool allowsRef(const CallGraph::EdgeRef &e) const {
-    return allowsFields(e.kind, e.confidence, e.execContext);
-  }
-
-private:
-  bool allowsFields(EdgeKind kind, Confidence conf,
-                    ExecutionContext execCtx) const {
-    if (!kinds.empty() && !kinds.count(kind))
-      return false;
-    if (!execContexts.empty() && !execContexts.count(execCtx))
-      return false;
-    if (useIncludeSet)
-      return includeConfidences.count(conf) > 0;
-    return confidenceRank(conf) >= confidenceRank(minConf);
-  }
-};
-
-// Parse an EdgeFilter from tool args. Returns an error message on invalid
-// input (specifically, unrecognized include_confidences values).
-static std::optional<std::string>
-parseEdgeFilter(const llvm::json::Object &args, EdgeFilter &out) {
-  if (auto *kindsArr = args.getArray("edge_kinds")) {
-    for (auto &v : *kindsArr) {
-      if (auto s = v.getAsString())
-        out.kinds.insert(parseEdgeKind(*s));
-    }
-  }
-  if (auto *confs = args.getArray("include_confidences")) {
-    out.useIncludeSet = true;
-    for (auto &v : *confs) {
-      auto s = v.getAsString();
-      if (!s)
-        continue;
-      if (*s != "Proven" && *s != "Plausible" && *s != "Unknown") {
-        return "Invalid value in include_confidences: '" + s->str() +
-               "' (expected Proven, Plausible, or Unknown)";
-      }
-      out.includeConfidences.insert(parseConfidence(*s));
-    }
-  } else if (auto mc = args.getString("min_confidence")) {
-    out.minConf = parseConfidence(*mc);
-  }
-  if (auto *ctxArr = args.getArray("execution_contexts")) {
-    for (auto &v : *ctxArr) {
-      auto s = v.getAsString();
-      if (!s)
-        continue;
-      auto parsed = parseExecutionContext(*s);
-      if (!parsed) {
-        return "Invalid value in execution_contexts: '" + s->str() +
-               "' (expected Synchronous, ThreadSpawn, AsyncTask, "
-               "PackagedTask, or Invoke)";
-      }
-      out.execContexts.insert(*parsed);
-    }
-  }
-  return std::nullopt;
-}
-
 
 /// allNodes() walks a hash map; every list a tool derives from it is
 /// emitted in usr order (docs/deterministic-output.md).

@@ -674,6 +674,8 @@ void printVerbHelp(llvm::raw_ostream &os) {
         "            stdin, one JSON response per line, on one loaded index\n"
         "  dump      Stream every call-site context and channel site\n"
         "            (--format ndjson, the default, or json)\n"
+        "  diff      Compare two saved indexes: --before A --after B\n"
+        "            [--to NAME] [--impact] (docs/change-impact.md)\n"
         "\n"
         "Query verbs read the index from --index, $VYCOR_INDEX,\n"
         "<build-path>/.vycor/megascope.vycs, or ./.vycor/megascope.vycs.\n"
@@ -1132,7 +1134,7 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
     toolName = canonicalToolName(typed);
     tail = tail.drop_front();
   } else if (verb != "tools" && verb != "info" && verb != "batch" &&
-             verb != "dump") {
+             verb != "dump" && verb != "diff") {
     toolName = canonicalToolName(verb);
   }
 
@@ -1143,8 +1145,8 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
         tool = &t;
     if (!tool) {
       err << "megascope: unknown verb or tool '" << typed
-          << "'. Verbs: index, serve, tools, info, batch, dump, call, "
-             "<tool>; "
+          << "'. Verbs: index, serve, tools, info, batch, dump, diff, "
+             "call, <tool>; "
              "run `vycor-cpp megascope tools` for the tool list.\n";
       return kExitUsage;
     }
@@ -1170,6 +1172,20 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
   }
   if (verb == "tools")
     return runTools(tools, *common, out, err);
+  if (verb == "diff") {
+    if (common->ephemeral() || !common->index.empty()) {
+      err << "megascope diff: takes --before and --after indexes, not "
+             "--index or the ephemeral selection flags\n";
+      return kExitUsage;
+    }
+    auto fmt = parseFormat(common->format.empty() ? "json" : common->format);
+    if (!fmt) {
+      err << "megascope diff: " << llvm::toString(fmt.takeError()) << "\n";
+      return kExitUsage;
+    }
+    return runDiffVerb(common->rest, *fmt, common->pretty,
+                       common->entryPoints, out, err);
+  }
 
   auto format = parseFormat(
       common->format.empty() ? (verb == "dump" ? "ndjson" : "json")
@@ -1196,6 +1212,11 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
         return kExitUsage;
       }
       seed = std::move(*parsed->getAsObject());
+    }
+    if (tool->name == "impact_of_change") {
+      int rc = seedImpactPatch(common->rest, seed, in, err);
+      if (rc != kExitResults)
+        return rc;
     }
     auto parsed = parseToolArgs(*tool, common->rest, std::move(seed));
     if (!parsed) {

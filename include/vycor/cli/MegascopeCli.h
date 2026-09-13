@@ -133,4 +133,22 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
                           llvm::raw_ostream &out, llvm::raw_ostream &err,
                           std::istream &in);
 
+/// `megascope diff --before A --after B ...` (docs/change-impact.md):
+/// the semantic diff of two saved indexes, optionally with a route diff
+/// (--to) and the impact of the changed functions (--impact). `args` are
+/// the flags after the verb with the common query flags already split
+/// out; `entryPoints` is the query's --entry-point list (may be empty).
+/// Returns a MegascopeExit code.
+int runDiffVerb(llvm::ArrayRef<std::string> args, OutputFormat format,
+                bool pretty, const std::vector<std::string> &entryPoints,
+                llvm::raw_ostream &out, llvm::raw_ostream &err);
+
+/// The impact-of-change CLI adapter's own flags: removes `--patch-file F`
+/// (`-` reads `in`), `--git-base A`, `--git-head B`, and `--repo DIR`
+/// from `args` and seeds `seed["patch"]` with the file's text or the
+/// output of `git -C DIR diff -U0 A B`. Returns kExitResults, or the
+/// exit code to fail with (a message was written to `err`).
+int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
+                    std::istream &in, llvm::raw_ostream &err);
+
 } // namespace vycor

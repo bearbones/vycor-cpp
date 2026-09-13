@@ -1,0 +1,19 @@
+--- a/app.cpp
++++ b/app.cpp
+@@ -7 +7,5 @@
+-  return helper(x);
++  try {
++    return helper(x);
++  } catch (const std::exception &) {
++    return -1;
++  }
+@@ -10 +14,3 @@
+-int main() { return process(1); }
++int fresh(int x) { return helper(x) * 2; }
++
++int main() { return process(1) + fresh(2); }
+--- a/ops.cpp
++++ b/ops.cpp
+@@ -5 +5 @@
+-int caller_of_retired() { return retired(1); }
++int caller_of_retired() { return 1; }

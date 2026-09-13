@@ -33,6 +33,7 @@ uses them. A function's cross-index identity is its **comparison key**:
 |---|---|---|
 | a declaration with a USR | the USR string | signature and template arguments are in the USR, so an overload or an instantiation is its own function; a file-local (`static`) function's USR names its file, so moving one between files is a removal and an addition |
 | a lambda (`vycor-lambda:lambda#file:line:col#enclosing`) | `vycor-lambda:<file>#<enclosing>#<ordinal>` | the ordinal is the lambda's rank by (line, col) among the lambdas of the same file and enclosing function **in that index**, so a line shift keeps the identity. When the two indexes hold a different number of lambdas for one (file, enclosing) pair, every lambda of that pair is **ambiguous** (below) |
+| a USR that names an anonymous type by its byte offset (`<file>@<offset>`, chiefly a lambda's closure type as a template argument of the function instantiated with it: `std::function<...>::function<$main.cpp@2118@F@run#@Sa>`, `std::thread::thread<...>`, an algorithm given a comparator) | the USR with every offset replaced by `%<ordinal>` | the ordinal is the offset's rank among the offsets of the same file and enclosing context (up to the anonymous tag) **in that index**, so a line shift keeps the identity. When the two indexes hold a different number of offsets for one such group, every key of the group is **ambiguous**. Files are known by basename here, as the USR spells them |
 | a synthesized identity (`vycor-synth:...`) | the string | as is |
 
 A function is **moved** when its key is on both sides and only its
@@ -45,8 +46,11 @@ one addition. The diff never asserts continuity it cannot see.
 
 **Ambiguous** identities (`identity.ambiguous`) are excluded from every
 change list: their edges and contexts are neither added nor removed,
-and the record says how many were withheld. The one source today is a
-lambda group whose size changed.
+and the record says how many were withheld. The sources are a lambda
+group whose size changed (`lambda_count_changed`) and an anonymous-type
+offset group whose size changed (`anonymous_type_count_changed`): both
+mean a lambda was added or removed in that file and context, and an
+ordinal cannot say which.
 
 ## Relationships
 
@@ -151,27 +155,40 @@ ambiguous on either side returns the `ambiguous` payload for that side.
 | `patch` (unified diff text; `--patch-file F` and `--git-base A --git-head B [--repo DIR]` on the CLI produce it) | see below | `call_site`, `definition`, `extent`, `file` |
 | `diff --impact` | every function on either side of a `call_*` or `context_changed` record's caller, plus added and removed functions | `diff` |
 
-A patch hunk's after-side line range (its before-side range for a pure
-deletion, taken at the hunk's after-side position) is mapped by:
+A patch hunk's after-side line range (for a pure deletion, the two
+after-side lines the deletion sits between) is mapped by:
 
 1. **`call_site`**: an indexed call site (any edge's `file:line:col`)
    lies in the range — its caller changed. Exact.
 2. **`definition`**: a function's recorded location lies in the range.
    Exact for the function whose header changed.
-3. **`extent`**: the range lies between a function's recorded location
-   and the next recorded function location in the same file. The index
-   records where a function starts, not where it ends, so this is an
-   **estimate** (a change to file-scope code after a function's end is
-   attributed to that function).
-4. **`file`**: the file has indexed functions but the range precedes
-   every one of them (file-scope declarations, includes): every
-   function of the file is a candidate, labelled `file`.
+3. **`extent`**: the range lies between two anchors the index holds
+   for the file — a function's recorded location (where it is first
+   declared; for a function declared in a header, that is the header)
+   and its call sites — and the nearest anchor before the range says
+   whose body it is in. The index records where a function starts and
+   where it calls, not where it ends, so this is an **estimate**: when
+   the nearest anchor after the range is a call site of a different
+   function and no declaration lies between, both functions are
+   candidates.
+4. **`file`**: the file has anchors but the range precedes every one
+   of them (file-scope declarations, includes): every function the
+   file declares or calls from is a candidate, labelled `file`.
 
-A file with no indexed function at all is `unmapped` (a header with
-only declarations, a file the index does not hold), and so is a hunk
-the index cannot place. Patch paths are matched to indexed spellings by
-suffix (`patch_root` prepends a directory first). `mapping` counts each
-precision so the reader knows how much of the set is exact.
+Call sites are recorded at their spelling location, so an edit to a
+header that only defines macros attributes, at `file` precision,
+every function with a call spelled inside one of its macros. On the
+llvm-project testbed a one-line change to `llvm/Support/Compiler.h`
+maps to 1003 functions that way: read `mapping.file` as "the patch
+touched no body the index can name" and narrow with `changed`.
+
+A file with no anchor at all is `unmapped` (a header with only
+declarations, a file the index does not hold, a `.cpp` whose functions
+are declared in a header and whose edited lines call nothing), and so
+is a hunk the index cannot place. Patch paths are matched to indexed spellings by
+suffix (`patch_root` prepends a directory first). `mapping` counts the
+changed functions at each precision (a function keeps its most precise
+attribution) so the reader knows how much of the set is exact.
 
 The traversal is a reverse breadth-first walk from every changed
 function at once over caller edges (stored and query-time expansions),
@@ -194,7 +211,8 @@ first (shallowest) reach with the path that reached it:
 (`truncated: true`, `affectedCount` is the full count). `complete`,
 `exhaustive`, `stopReasons`, `skippedHubs` mean what they mean for the
 path tools: `depth_limit` says callers exist beyond `max_depth`;
-`work_budget` and `hub_pruned` (`max_fan_in`) clear `complete`. A
+`work_budget` and `hub_pruned` (`max_fan_in`; a changed function is
+expanded whatever its fan-in) clear `complete`. A
 changed function that is not a known identity is listed under
 `unknown` and searched for nothing.
 
@@ -261,9 +279,43 @@ two indexes; `impact_of_change` is a tool on every transport.
 
 ## Costs
 
-Measured on the llvm-project testbed (`scripts/bench.py` host, 938
-TUs); see the "Measurements" section of the handoff in this page's
-history and `corpus/reports/baseline.json` for the corpus figures.
+Measured on the llvm-project testbed (938 TUs, 94,788 functions,
+352,639 edges, 7.06M call-site contexts, 442 MB index; 12-core host,
+Release build), one-shot CLI runs, wall time and peak RSS:
+
+| Query | Wall | Peak RSS |
+|---|---|---|
+| `get-callers` (one side, graph only; the baseline) | 0.8 s | 0.33 GB |
+| `impact-of-change --changed llvm::errs` (2444 affected at depth 10) | 1.0 s | 0.33 GB |
+| `impact-of-change --git-base HEAD~5 --git-head HEAD` (1003 changed) | 2.0 s | 0.33 GB |
+| `diff --no-context` (two sides, graph only) | 5.1 s | 1.1 GB |
+| `diff` (two sides with contexts; `--impact` adds nothing measurable) | 19.7 s | 2.0 GB |
+
+The after side was a warm refresh of the before side with one TU
+touched (`refreshed: 3`: the touched TU and the two failed/partial
+retries); the diff reports 0 changes, `comparable: true`, and
+`absenceReliable: false` (the two TUs are still failed/partial on both
+sides). It also reports 1295 `moves`: functions whose recorded
+location comes from a different declaring TU after the refresh, most
+of them system-header declarations with `<unknown>` file. Moves are
+off by default and are never changes; after a warm refresh they are
+not signal.
+
+Where the `diff` time goes: 3 s per side to decode the control-flow
+section, then one pass over its stored contexts (`ContextSignatures`,
+`impact/SemanticDiff.cpp`) that keys each context by interned ids and
+materializes each distinct *shape* (scopes, guards, RAII locals,
+noexcept, catch-block flag) once. Each side's control-flow index is
+dropped as soon as its table is built, so the two are never resident
+together (2.0 GB, not 3.3 GB). The first version looked every edge up
+through `contextForEdge`, which materializes every context at the
+site across all TUs: 95 s and 3.3 GB. Package F's selective
+control-flow access would cut the decode per side; the pass itself is
+the floor for a whole-index comparison.
+
+The corpus case (`change_impact`, `corpus/reports/baseline.json`)
+runs the diff and impact queries on a six-TU fixture in well under a
+second each.
 
 ## Follow-ups
 

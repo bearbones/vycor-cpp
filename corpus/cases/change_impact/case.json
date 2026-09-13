@@ -1,0 +1,433 @@
+{
+ "schema": 1,
+ "title": "A patch wraps a call in try/catch, adds a function and its calls, and drops a call: the semantic diff names exactly those relationships, a whitespace-only edit diffs to nothing, and the impact walk lists the callers",
+ "sources": [
+  "app.cpp",
+  "ops.cpp",
+  "pad1.cpp",
+  "pad2.cpp",
+  "pad3.cpp"
+ ],
+ "phases": [
+  {
+   "name": "before",
+   "index": {
+    "mode": "cold"
+   },
+   "save_index_as": "before.vycs",
+   "queries": [
+    {
+     "id": "impact-of-helper-before",
+     "argv": [
+      "impact-of-change",
+      "--changed",
+      "helper"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "complete": true,
+       "exhaustive": true,
+       "affectedCount": 2,
+       "entryPointsAffected": [
+        {
+         "name": "main",
+         "depth": 2
+        }
+       ]
+      },
+      "sequence": [
+       {
+        "in": "affected",
+        "match": [
+         {
+          "name": "process",
+          "depth": 1,
+          "changedName": "helper"
+         },
+         {
+          "name": "main",
+          "depth": 2,
+          "isEntryPoint": true
+         }
+        ]
+       }
+      ],
+      "negatives": [
+       {
+        "in": "affected",
+        "match": {
+         "name": "caller_of_retired"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "whitespace",
+   "overlay": "ws",
+   "save_index_as": "ws.vycs",
+   "index": {
+    "mode": "warm",
+    "refreshed": 1
+   },
+   "queries": [
+    {
+     "id": "whitespace-diffs-to-nothing",
+     "argv": [
+      "diff",
+      "--before",
+      "{saved:before.vycs}",
+      "--after",
+      "{saved:ws.vycs}"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "count": {
+       "changes": 0
+      },
+      "fields": {
+       "summary": {
+        "changeCount": 0,
+        "ambiguousIdentities": 0
+       },
+       "comparability": {
+        "comparable": true,
+        "absenceReliable": true,
+        "contextsCompared": true
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "after",
+   "overlay": "after",
+   "index": {
+    "mode": "warm",
+    "refreshed": 2
+   },
+   "queries": [
+    {
+     "id": "diff-names-the-patch",
+     "argv": [
+      "diff",
+      "--before",
+      "{saved:before.vycs}",
+      "--after",
+      "{index}"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "changes": 5
+      },
+      "fields": {
+       "summary": {
+        "changeCount": 5,
+        "functionsAdded": 1,
+        "functionsRemoved": 0,
+        "callsAdded": 2,
+        "callsRemoved": 1,
+        "contextsChanged": 1,
+        "renameCandidates": 0
+       },
+       "comparability": {
+        "comparable": true,
+        "absenceReliable": true
+       }
+      },
+      "witnesses": [
+       {
+        "in": "changes",
+        "match": {
+         "change": "function_added",
+         "name": "fresh"
+        }
+       },
+       {
+        "in": "changes",
+        "match": {
+         "change": "call_removed",
+         "callerName": "caller_of_retired",
+         "calleeName": "retired"
+        }
+       },
+       {
+        "in": "changes",
+        "match": {
+         "change": "call_added",
+         "callerName": "fresh",
+         "calleeName": "helper",
+         "after": {
+          "siteCount": 1
+         }
+        }
+       },
+       {
+        "in": "changes",
+        "match": {
+         "change": "call_added",
+         "callerName": "main",
+         "calleeName": "fresh"
+        }
+       },
+       {
+        "in": "changes",
+        "match": {
+         "change": "context_changed",
+         "callerName": "process",
+         "calleeName": "helper",
+         "before": {
+          "signatures": [
+           "protected=0;handlers=;noexcept=none;inCatch=0;locks=;guards="
+          ]
+         },
+         "after": {
+          "signatures": [
+           "protected=1;handlers=const std::exception &;noexcept=none;inCatch=0;locks=;guards="
+          ]
+         }
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "changes",
+        "match": {
+         "change": "function_removed"
+        }
+       },
+       {
+        "in": "changes",
+        "match": {
+         "callerName": "helper"
+        }
+       }
+      ],
+      "sequence": [
+       {
+        "in": "changes",
+        "match": [
+         {
+          "change": "function_added"
+         },
+         {
+          "change": "call_removed"
+         },
+         {
+          "change": "call_added"
+         },
+         {
+          "change": "context_changed"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "diff-routes-to-helper",
+     "argv": [
+      "diff",
+      "--before",
+      "{saved:before.vycs}",
+      "--after",
+      "{index}",
+      "--to",
+      "helper"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "routes": {
+        "target": "helper",
+        "unchanged": 1,
+        "removed": [],
+        "complete": true,
+        "exhaustive": true,
+        "added": [
+         [
+          {
+           "from": "main",
+           "to": "fresh"
+          },
+          {
+           "from": "fresh",
+           "to": "helper"
+          }
+         ]
+        ]
+       }
+      }
+     }
+    },
+    {
+     "id": "diff-impact-is-the-changed-callers",
+     "argv": [
+      "diff",
+      "--before",
+      "{saved:before.vycs}",
+      "--after",
+      "{index}",
+      "--impact"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "impact": {
+        "complete": true,
+        "affectedCount": 0,
+        "unknown": [],
+        "changed": [
+         {
+          "name": "caller_of_retired",
+          "via": "diff"
+         },
+         {
+          "name": "fresh",
+          "via": "diff"
+         },
+         {
+          "name": "main",
+          "via": "diff"
+         },
+         {
+          "name": "process",
+          "via": "diff"
+         }
+        ]
+       }
+      }
+     }
+    },
+    {
+     "id": "impact-of-helper-after",
+     "argv": [
+      "impact-of-change",
+      "--changed",
+      "helper"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "complete": true,
+       "affectedCount": 3,
+       "entryPointsAffected": [
+        {
+         "name": "main",
+         "depth": 2
+        }
+       ]
+      },
+      "sequence": [
+       {
+        "in": "affected",
+        "match": [
+         {
+          "name": "fresh",
+          "depth": 1,
+          "path": [
+           {
+            "from": "fresh",
+            "to": "helper"
+           }
+          ]
+         },
+         {
+          "name": "process",
+          "depth": 1
+         },
+         {
+          "name": "main",
+          "depth": 2,
+          "path": [
+           {
+            "from": "main"
+           },
+           {
+            "to": "helper"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "impact-of-patch",
+     "argv": [
+      "impact-of-change",
+      "--patch-file",
+      "{case}/patch.diff"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "fields": {
+       "affectedCount": 0,
+       "complete": true,
+       "mapping": {
+        "call_site": 3,
+        "definition": 0,
+        "extent": 0,
+        "file": 0,
+        "unmapped": 1,
+        "exact": false
+       }
+      },
+      "witnesses": [
+       {
+        "in": "changed",
+        "match": {
+         "name": "process",
+         "via": "call_site"
+        }
+       },
+       {
+        "in": "changed",
+        "match": {
+         "name": "fresh",
+         "via": "call_site"
+        }
+       },
+       {
+        "in": "changed",
+        "match": {
+         "name": "main",
+         "via": "call_site"
+        }
+       },
+       {
+        "in": "unmapped",
+        "match": {
+         "file": "ops.cpp",
+         "firstLine": 5,
+         "reason": "no function or call site indexed in this file"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "changed",
+        "match": {
+         "name": "caller_of_retired"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

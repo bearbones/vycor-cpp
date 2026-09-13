@@ -135,11 +135,25 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
     ("ephemeral-dump",
      ["dump", "--build-path", "{build}", "--source-re",
       "deep_chains/stage5_sink\\.cpp$", "--threads", "1"], None, True),
+    ("impact-of-change",
+     ["impact-of-change", "--changed", "stage5_sink", "--format", "ndjson"],
+     None, True),
+    ("impact-of-change-patch",
+     ["impact-of-change", "--patch-file", "-", "--max-depth", "1"],
+     "--- a/stage5_sink.cpp\n+++ b/stage5_sink.cpp\n"
+     "@@ -17 +17 @@\n-  return reg.invoke(x + 3);\n"
+     "+  return reg.invoke(x + 4);\n"
+     "--- a/not-indexed.cpp\n+++ b/not-indexed.cpp\n@@ -1 +1 @@\n", True),
+    ("diff-self",
+     ["diff", "--before", "{index}", "--after", "{index}", "--impact"],
+     None, True),
 ]
 
 # Keys whose values depend on the host, the run, or the scratch location
 # (`bake` is the environment fingerprint plus the bake's start time).
-VOLATILE_KEYS = {"index", "index_bytes", "dependency_count", "bake"}
+# `analyzer` and `toolchain` (diff's comparability) name the host's LLVM.
+VOLATILE_KEYS = {"index", "index_bytes", "dependency_count", "bake",
+                 "analyzer", "toolchain"}
 PATH_RE = re.compile(r'"/[^"]*"')
 # Standard-library USRs spell out template signatures that shift between
 # standard-library versions; display names do not. Records that name a
@@ -256,7 +270,7 @@ def main() -> int:
                 real.append(a)
             uses_index = not any(
                 a.startswith("--source") or a == "--index" for a in real) \
-                and argv[0] not in ("tools",)
+                and argv[0] not in ("tools", "diff")
             if uses_index:
                 real += ["--index", str(index)]
             code, out, err = run_megascope(binary, real, stdin, build)

@@ -83,6 +83,7 @@ add_executable(vycor_tests
   test_megascope_cli.cpp
   test_result_contract.cpp
   test_determinism.cpp
+  test_change_impact.cpp
   test_source_selection.cpp
   test_deep_chains.cpp
   test_snapshot.cpp

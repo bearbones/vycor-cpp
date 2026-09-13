@@ -54,6 +54,8 @@ applied to a whole edge.
 | `list_channels` | `channels` | channel id |
 | `query_channel`, `query_channels_for_function` | `producers`, `consumers`, `sites` | (call site, channel id, function usr) |
 | `explain_ordering` | — | scalar |
+| `impact_of_change` | `changed`, `unknown`, `affected`, `entryPointsAffected`, `skippedHubs`, `unmapped` | changed and hubs by usr, unknown by name; affected by (depth, usr) — a function's `path` is its shallowest chain, ties by the callers' canonical edge order; entry points in affected order; unmapped ranges by (file, first line) |
+| `diff` | `changes`, `moves`, `identity.ambiguous`, `identity.renameCandidates`, `routes.added`/`removed`/`unchanged`, `impact` | change kind (`function_removed`, `function_added`, `call_removed`, `call_added`, `call_changed`, `context_changed`), then usr, then (caller usr, callee usr); sites within a change by call site; moves and rename candidates by key; ambiguous groups by group; routes in path order (`docs/path-analysis.md`); `impact` as `impact_of_change` |
 | any tool, `ambiguous` | `candidates` | by usr (a name), by caller usr (a call site) |
 | `batch` | response lines | request order |
 | `tools` | tools | registration order (`query/Registry.cpp`) |

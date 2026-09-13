@@ -256,13 +256,46 @@ public:
 
   const StringInterner &interner() const { return interner_; }
 
-private:
-  friend class SnapshotIO;
-
   using SId = StringInterner::Id;
 
   // "no tuPath recorded" sentinel (the interner never assigns UINT32_MAX).
   static constexpr SId kNoString = UINT32_MAX;
+
+  // A context's shape: everything but who calls whom, where. Equal shapes
+  // mean equal enclosing try/catch scopes, guards, live RAII locals,
+  // caller noexcept spec, and catch-block flag.
+  struct ContextShape {
+    uint32_t scopeSet;
+    uint32_t guardSet;
+    uint32_t raiiSet;
+    NoexceptSpec callerNoexcept;
+    bool insideCatchBlock;
+    bool operator<(const ContextShape &o) const;
+  };
+
+  // One live context by interned id (resolve through interner(); tuPath
+  // is kNoString when none was recorded) plus its shape. A whole-index
+  // pass walks these instead of materializing millions of contexts, and
+  // materializes each distinct shape once through contextOfShape() —
+  // the semantic diff's context signatures (impact/SemanticDiff.cpp).
+  // Insertion order; the callback must not call back into this index.
+  struct ContextRecord {
+    SId callSite;
+    SId callerUsr;
+    SId callerName;
+    SId calleeUsr;
+    SId tuPath;
+    ContextShape shape;
+  };
+  void forEachContextRecord(
+      llvm::function_ref<void(const ContextRecord &)> fn) const;
+
+  // A CallSiteContext carrying the shape's fields only (the identity
+  // strings stay empty).
+  CallSiteContext contextOfShape(const ContextShape &shape) const;
+
+private:
+  friend class SnapshotIO;
 
   // Interned form of RaiiLocal: three ids into interner_ plus the kind.
   struct StoredRaiiLocal {
