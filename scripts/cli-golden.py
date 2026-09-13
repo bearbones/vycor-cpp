@@ -152,8 +152,14 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
 # Keys whose values depend on the host, the run, or the scratch location
 # (`bake` is the environment fingerprint plus the bake's start time).
 # `analyzer` and `toolchain` (diff's comparability) name the host's LLVM.
-VOLATILE_KEYS = {"index", "index_bytes", "dependency_count", "bake",
-                 "analyzer", "toolchain"}
+VOLATILE_KEYS = {
+    "index", "index_bytes", "dependency_count", "bake", "analyzer",
+    "toolchain",
+    # The diff summary counts every function of both sides, system
+    # headers included; those vary with the host standard library.
+    "functionsBefore", "functionsAfter", "relationshipsBefore",
+    "relationshipsAfter",
+}
 PATH_RE = re.compile(r'"/[^"]*"')
 # Standard-library USRs spell out template signatures that shift between
 # standard-library versions; display names do not. Records that name a
