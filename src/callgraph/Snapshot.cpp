@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <numeric>
 #include <unordered_map>
 
 namespace vycor {
@@ -417,7 +418,31 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     std::lock_guard<std::mutex> lock(cfIndex.mutex_);
     std::string &data = sections[kControlFlowKind];
 
-    emitInternerTable(data, cfIndex.interner_);
+    // v12: the interner table is length-prefixed so a mapped load can
+    // step over it, and each entry's offset (relative to the first
+    // entry) is written after the records for random access by id.
+    const size_t tableBytesAt = data.size();
+    putU32(data, 0);
+    const size_t tableStart = data.size();
+    putU32(data, static_cast<uint32_t>(cfIndex.interner_.size()));
+    const size_t entriesStart = data.size();
+    std::vector<uint32_t> stringOffsets;
+    std::vector<const std::string *> strings;
+    stringOffsets.reserve(cfIndex.interner_.size());
+    strings.reserve(cfIndex.interner_.size());
+    cfIndex.interner_.forEachString([&](const std::string &s) {
+      stringOffsets.push_back(
+          static_cast<uint32_t>(data.size() - entriesStart));
+      strings.push_back(&s);
+      putLenStr(data, s);
+    });
+    {
+      const uint32_t tableBytes =
+          static_cast<uint32_t>(data.size() - tableStart);
+      for (int i = 0; i < 4; ++i)
+        data[tableBytesAt + i] =
+            static_cast<char>((tableBytes >> (8 * i)) & 0xff);
+    }
 
     // Scope/guard tables hold plain strings (never interned); they are
     // small, so inline strings are fine. Entry 0 (the seeded empty set) is
@@ -464,11 +489,36 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     }
 
     // Live contexts only (tombstones dropped; the loaded index comes back
-    // pre-compacted). The kNoString tuPath sentinel is written verbatim.
-    putU32(data, static_cast<uint32_t>(cfIndex.liveCount_));
-    for (const auto &se : cfIndex.contexts_) {
-      if (!se.live)
-        continue;
+    // pre-compacted), stably sorted by call site id so a mapped reader
+    // bisects for a site and the resident form's insertion order within
+    // a site is kept. The kNoString tuPath sentinel is written verbatim.
+    // Every order here is by an interned id, so a counting sort does it
+    // in one pass over the records and one over the ids (the millions
+    // of records on a large index made comparison sorts the dominant
+    // cost of the save).
+    const uint32_t idCount = static_cast<uint32_t>(strings.size());
+    auto orderBy = [&](const std::vector<uint32_t> &items, auto keyOf) {
+      std::vector<uint32_t> starts(size_t(idCount) + 1, 0);
+      for (uint32_t i : items)
+        ++starts[size_t(keyOf(i)) + 1];
+      for (uint32_t k = 0; k < idCount; ++k)
+        starts[size_t(k) + 1] += starts[k];
+      std::vector<uint32_t> out(items.size());
+      for (uint32_t i : items)
+        out[starts[keyOf(i)]++] = i;
+      return out;
+    };
+    std::vector<uint32_t> live;
+    live.reserve(cfIndex.liveCount_);
+    for (size_t i = 0; i < cfIndex.contexts_.size(); ++i)
+      if (cfIndex.contexts_[i].live)
+        live.push_back(static_cast<uint32_t>(i));
+    const std::vector<uint32_t> order = orderBy(
+        live, [&](uint32_t i) { return cfIndex.contexts_[i].site; });
+    const uint32_t count = static_cast<uint32_t>(order.size());
+    putU32(data, count);
+    for (uint32_t i : order) {
+      const auto &se = cfIndex.contexts_[i];
       putU32(data, se.caller);
       putU32(data, se.callee);
       putU32(data, se.callerDisplay);
@@ -481,6 +531,51 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       putU8(data, static_cast<uint8_t>(se.callerNoexcept));
       putU8(data, se.insideCatchBlock ? 1 : 0);
     }
+
+    // The lookup arrays a mapped load reads in place (a mutable load
+    // skips them): string offsets, ids in string order, then record
+    // positions by caller and by callee — every record under its usr
+    // id, and the records whose display id differs under that too.
+    for (uint32_t off : stringOffsets)
+      putU32(data, off);
+    std::vector<uint32_t> ids(strings.size());
+    std::iota(ids.begin(), ids.end(), 0u);
+    std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
+      return *strings[a] < *strings[b];
+    });
+    for (uint32_t id : ids)
+      putU32(data, id);
+    using Stored = ControlFlowIndex::StoredContext;
+    auto recordAt = [&](uint32_t p) -> const Stored & {
+      return cfIndex.contexts_[order[p]];
+    };
+    std::vector<uint32_t> positions(count);
+    std::iota(positions.begin(), positions.end(), 0u);
+    for (uint32_t p :
+         orderBy(positions, [&](uint32_t p) { return recordAt(p).caller; }))
+      putU32(data, p);
+    for (uint32_t p :
+         orderBy(positions, [&](uint32_t p) { return recordAt(p).callee; }))
+      putU32(data, p);
+    auto displayOrder = [&](auto differs, auto keyOf) {
+      std::vector<uint32_t> subset;
+      for (uint32_t p = 0; p < count; ++p)
+        if (differs(recordAt(p)))
+          subset.push_back(p);
+      return orderBy(subset, keyOf);
+    };
+    auto callerDisplays = displayOrder(
+        [](const Stored &se) { return se.callerDisplay != se.caller; },
+        [&](uint32_t p) { return recordAt(p).callerDisplay; });
+    putU32(data, static_cast<uint32_t>(callerDisplays.size()));
+    for (uint32_t p : callerDisplays)
+      putU32(data, p);
+    auto calleeDisplays = displayOrder(
+        [](const Stored &se) { return se.calleeDisplay != se.callee; },
+        [&](uint32_t p) { return recordAt(p).calleeDisplay; });
+    putU32(data, static_cast<uint32_t>(calleeDisplays.size()));
+    for (uint32_t p : calleeDisplays)
+      putU32(data, p);
   }
 
   // Channel index (v7): not interner-backed by design (ChannelIndex.h), so
@@ -586,7 +681,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
                                               /*RequiresNullTerminator=*/false);
   if (!bufOrErr)
     return std::nullopt;
-  auto &buf = *bufOrErr;
+  // Shared with a mapped control-flow index, which keeps the file mapped.
+  std::shared_ptr<llvm::MemoryBuffer> buf = std::move(*bufOrErr);
 
   Reader r{buf->getBufferStart(), buf->getBufferEnd()};
 
@@ -848,10 +944,30 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
 
   if (needs & kSectionControlFlow) {
     beginSection(kControlFlowKind);
-    // Control flow: interner, set tables (positions preserved verbatim), then
-    // the direct-install context loop — no interning, no key building per
-    // context.
-    if (!readInternerTable(r, out.cfIndex.interner_)) {
+    // Control flow: interner, set tables (positions preserved verbatim),
+    // then the records. A mutable load installs the interner and inserts
+    // every record (no interning, no key building per context); a
+    // read-only load leaves both in the mapped file and attaches the
+    // record region to the index (ControlFlowIndex::attachMapped).
+    const uint32_t tableBytes = r.u32();
+    const char *tableStart = r.p;
+    const uint32_t stringCount = r.u32();
+    const char *strings = r.p;
+    if (r.ok && (tableBytes < 4 ||
+                 tableBytes > static_cast<uint64_t>(r.end - tableStart)))
+      r.ok = false;
+    if (mutableLoad) {
+      r.p = tableStart;
+      if (!r.ok || !readInternerTable(r, out.cfIndex.interner_)) {
+        finish();
+        return std::nullopt;
+      }
+      if (r.p != tableStart + tableBytes)
+        r.ok = false;
+    } else {
+      r.p = r.ok ? tableStart + tableBytes : r.p;
+    }
+    if (!r.ok) {
       finish();
       return std::nullopt;
     }
@@ -859,7 +975,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
 
     {
       ControlFlowIndex &cf = out.cfIndex;
-      const uint32_t internedCount = static_cast<uint32_t>(cf.interner_.size());
+      const uint32_t internedCount = stringCount;
       auto cid = [&](uint32_t id) {
         if (id >= internedCount)
           r.ok = false;
@@ -956,7 +1072,13 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
 
       mark("cf_set_tables");
 
-      uint32_t ctxCount = r.count();
+      if (!mutableLoad) {
+        if (r.ok && !cf.attachMapped(buf, strings, tableBytes - 4, stringCount,
+                                     r.p, r.end))
+          r.ok = false;
+        mark("cf_contexts");
+      }
+      uint32_t ctxCount = mutableLoad ? r.count() : 0;
       // Same pre-sizing reserveContexts does (it locks mutex_, held here).
       cf.byCallee_.reserve(ctxCount);
       cf.byCaller_.reserve(ctxCount);
@@ -984,7 +1106,20 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
                         tuPath, scopeSet, guardSet, raiiSet, noexceptSpec,
                         insideCatch, /*trackTu=*/mutableLoad);
       }
-      mark("cf_contexts");
+      if (mutableLoad) {
+        // Step over the lookup arrays only a mapped load reads.
+        auto skipU32s = [&](uint64_t n) {
+          if (r.ok && n * 4 > static_cast<uint64_t>(r.end - r.p))
+            r.ok = false;
+          if (r.ok)
+            r.p += n * 4;
+        };
+        skipU32s(2 * static_cast<uint64_t>(stringCount));
+        skipU32s(2 * static_cast<uint64_t>(ctxCount));
+        skipU32s(r.count());
+        skipU32s(r.count());
+        mark("cf_contexts");
+      }
     }
     sectionDone();
     if (!r.ok) {

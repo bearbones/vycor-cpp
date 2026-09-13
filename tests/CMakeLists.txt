@@ -87,6 +87,7 @@ add_executable(vycor_tests
   test_source_selection.cpp
   test_deep_chains.cpp
   test_snapshot.cpp
+  test_mapped_control_flow.cpp
   test_input_fingerprint.cpp
   test_worker_pool.cpp
   test_extensions.cpp

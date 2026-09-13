@@ -230,10 +230,12 @@ verdicts on `indexScope.complete`.
 ## Snapshot format v11
 
 The catch handler record gains a `rethrows` byte after `isCatchAll`.
-`SnapshotIO::kFormatVersion` is 11; older files are rebuilt. This is
-the one semantic fact the propagation order needed that the index did
-not carry. Coordinated with package A (same owner); `docs/index-provenance.md`
-notes the version.
+`SnapshotIO::kFormatVersion` became 11; older files are rebuilt. This
+is the one semantic fact the propagation order needed that the index
+did not carry. Coordinated with package A (same owner);
+`docs/index-provenance.md` notes the version. (Format v12, package F,
+re-lays the control-flow section without changing what it records:
+`docs/control-flow-access.md`.)
 
 ## Limits of the model
 

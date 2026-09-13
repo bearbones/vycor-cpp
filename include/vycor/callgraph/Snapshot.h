@@ -202,7 +202,15 @@ public:
   ///     (CatchHandlerInfo::rethrows), and calls inside a handler body no
   ///     longer list the try whose handler they are in as protecting them
   ///     (the exception oracle's propagation order depends on both).
-  static constexpr uint32_t kFormatVersion = 11;
+  /// v12: the control-flow section is laid out for reading in place —
+  ///     its interner table is length-prefixed, the records are sorted
+  ///     by call site, and string offsets, string-sorted ids, and
+  ///     by-caller / by-callee position orders follow them — so a
+  ///     ReadOnly load keeps the contexts in the mapped file
+  ///     (ControlFlowIndex::isMapped; docs/control-flow-access.md). A
+  ///     Mutable load decodes the records as before and skips the
+  ///     orders.
+  static constexpr uint32_t kFormatVersion = 12;
   /// Bytes before the first section: magic(4) + version(4) + summary(32) +
   /// table count(4) + 4 entries of kind(1) + offset(8) + length(8).
   static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 17;

@@ -68,10 +68,12 @@ object keys are sorted by the serializer on every transport.
 These outputs are complete but their order is **not** a contract; a
 consumer that compares them compares as multisets:
 
-- `megascope dump`: every call-site context and channel site in index
-  insertion order (`ControlFlowIndex::forEachContext`). A warm-refreshed
-  index and a clean rebuild hold the same records in different orders;
-  `scripts/warm-refresh-check.py` compares them sorted.
+- `megascope dump`: every call-site context and channel site in stored
+  order (`ControlFlowIndex::forEachContext`: a loaded index walks its
+  file's records, which a v12 snapshot keeps by call-site id, insertion
+  order within a site). A warm-refreshed index and a clean rebuild hold
+  the same records in different orders; `scripts/warm-refresh-check.py`
+  compares them sorted.
 - `megascope info --files`: the requested TUs in the selection's
   canonical order (absolute paths, deduped, sorted), which is stable,
   but the per-file rows are provenance, not a query answer.
