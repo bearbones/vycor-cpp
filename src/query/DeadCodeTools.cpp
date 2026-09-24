@@ -219,9 +219,14 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
   std::sort(optimisticAll.begin(), optimisticAll.end(), byLocation);
   std::sort(deadAll.begin(), deadAll.end(), byLocation);
 
+  // The same offset/limit window pages the optimistically-alive list;
+  // optimisticTotal is its full filtered count.
+  const int64_t totalOptimistic = static_cast<int64_t>(optimisticAll.size());
+  const int64_t optStart = std::min(offset, totalOptimistic);
+  const int64_t optEnd = std::min(optStart + limit, totalOptimistic);
   llvm::json::Array optimistic;
-  for (const Entry &e : optimisticAll)
-    optimistic.push_back(toJson(e));
+  for (int64_t i = optStart; i < optEnd; ++i)
+    optimistic.push_back(toJson(optimisticAll[i]));
 
   const int64_t totalDead = static_cast<int64_t>(deadAll.size());
   const int64_t start = std::min(offset, totalDead);
@@ -239,6 +244,12 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
   obj["offset"] = offset;
   obj["limit"] = limit;
   obj["truncated"] = end < totalDead;
+  obj["total"] = totalDead;
+  obj["returned"] = static_cast<int64_t>(end - start);
+  if (end < totalDead)
+    obj["nextOffset"] = end;
+  obj["optimisticTotal"] = totalOptimistic;
+  obj["optimisticTruncated"] = optEnd < totalOptimistic;
   obj["dead"] = std::move(dead);
   obj["optimisticallyAlive"] = std::move(optimistic);
   // Omit alive list to keep response size down — caller usually wants dead.
@@ -272,10 +283,11 @@ void registerDeadCodeTools(std::vector<ToolEntry> &tools) {
         "this prefix.");
     props["limit"] = intProp(
         "Maximum number of dead entries to return after filtering "
-        "(default: 500).");
+        "(default: 500). The same window pages optimisticallyAlive "
+        "(optimisticTotal, optimisticTruncated).");
     props["offset"] = intProp(
         "Number of filtered dead entries to skip before returning "
-        "(default: 0). Use with limit to paginate.");
+        "(default: 0). Use with limit to paginate; nextOffset continues.");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);

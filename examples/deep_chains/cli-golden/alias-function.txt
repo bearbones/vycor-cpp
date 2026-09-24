@@ -1,0 +1,2 @@
+# megascope call get_callers --args {"function":"stage5_sink"} -> exit 0
+{"callerCount":1,"callers":[{"callSite":"{fixture}/stage4_dispatch.cpp:24:10","calleeName":"stage5_sink","callerName":"stage4_dispatch","confidence":"Proven","kind":"DirectCall"}],"function":"stage5_sink","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"limit":200,"offset":0,"returned":1,"status":"ok","total":1,"truncated":false,"usr":"c:@F@stage5_sink#&$@S@Registry#I#"}

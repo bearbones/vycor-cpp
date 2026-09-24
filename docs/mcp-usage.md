@@ -492,15 +492,25 @@ is hidden.
 
 ## Known gotchas
 
-**`lookup_function` is exact-match only.** Partial names, namespaces
+**Function names are exact-match only.** Partial names, namespaces
 without the full path, and operator spellings all answer `not_found`
-(`isError: true` over MCP, exit 1 on the CLI). Mine real names from
-`search_functions` or a `megascope dump` first.
+(`isError: true` over MCP, exit 1 on the CLI) on every tool that takes
+a function, with up to five `didYouMean` suggestions (the
+`search_functions` ranking, then near spellings). Re-query with a
+suggestion's `usr`, or mine real names from `search_functions` or a
+`megascope dump` first. An empty `ok` answer means the function is in
+the index and the list really is empty.
 
 **Duplicate edges in `get_callers`/`get_callees`.** The same function can
-appear multiple times with different `callSite` values. Deduplicate on
-`callerName`/`calleeName` in client code when you only need unique
-caller/callee relationships rather than site-level detail.
+appear multiple times with different `callSite` values. Pass
+`distinct: true` (`--distinct`) when you only need unique caller/callee
+relationships: one record per function, with `siteCount`.
+
+**List tools are paged.** `get_callers`, `get_callees`,
+`list_callback_sites`, `list_concurrency_entry_points`, and the other
+list tools return at most their default `limit` (200 for callers and
+callees) and say `truncated: true` with a `nextOffset` when there is
+more; pass `offset` to continue (`docs/result-contract.md`, "Paging").
 
 **Graph scope is limited to the selected TUs.** If `get_callers` returns
 fewer callers than expected, the missing callers are in TUs you didn't

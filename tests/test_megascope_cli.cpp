@@ -671,9 +671,12 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     auto second = parseObject(ls[1]);
     CHECK(second.getString("id") == "two");
     CHECK(second.getString("tool") == "get_callers");
-    // An unknown callee is an empty caller list, not an error.
+    // An unknown callee is not_found (exit 1), not an empty caller list
+    // that would read as "nothing calls it".
     CHECK(second.getInteger("exit") == kExitEmpty);
-    CHECK(second.getObject("result")->getArray("callers")->empty());
+    CHECK(second.getString("status") == "not_found");
+    CHECK(second.getObject("result")->getArray("callers") == nullptr);
+    CHECK(second.getObject("result")->getArray("didYouMean") != nullptr);
 
     auto third = parseObject(ls[2]);
     CHECK(third.getInteger("id") == 3);

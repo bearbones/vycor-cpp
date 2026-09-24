@@ -119,7 +119,7 @@
      }
     },
     {
-     "id": "gamma-has-no-callers",
+     "id": "gamma-callers-not-found",
      "argv": [
       "get-callers",
       "--name",
@@ -127,9 +127,10 @@
      ],
      "expect": {
       "exit": 1,
-      "status": "ok",
-      "count": {
-       "callers": 0
+      "status": "not_found",
+      "fields": {
+       "parameter": "name",
+       "name": "gamma"
       }
      }
     },
@@ -142,11 +143,10 @@
      ],
      "expect": {
       "exit": 1,
-      "status": "ok",
+      "status": "not_found",
       "fields": {
-       "pathCount": 0,
-       "complete": false,
-       "exhaustive": false
+       "parameter": "to",
+       "name": "gamma"
       }
      }
     },

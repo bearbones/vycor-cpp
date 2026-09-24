@@ -406,7 +406,11 @@ llvm::json::Value handleImpactOfChange(const llvm::json::Object &args,
   if (auto mw = args.getInteger("max_work"))
     limits.maxWork = static_cast<size_t>(std::max<int64_t>(0, *mw));
   size_t maxResults = 200;
-  if (auto mr = args.getInteger("max_results")) {
+  // `limit` is an alias (docs/result-contract.md); max_results wins.
+  auto mr = args.getInteger("max_results");
+  if (!mr)
+    mr = args.getInteger("limit");
+  if (mr) {
     if (*mr < 0)
       return usageError("Invalid max_results: must be non-negative");
     maxResults = static_cast<size_t>(*mr);
@@ -470,7 +474,7 @@ void registerImpactTools(std::vector<ToolEntry> &tools) {
   props["max_results"] = intProp(
       "Maximum affected functions to list, after ordering by (depth, usr) "
       "(default: 200; 0 = all). affectedCount is the full count and "
-      "truncated says whether the list was cut.");
+      "truncated says whether the list was cut. Alias: 'limit'.");
   props["max_fan_in"] = intProp(
       "Do not expand the callers of an affected function with more "
       "stored callers than this (high-fan-in hubs; the changed functions "

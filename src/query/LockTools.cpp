@@ -205,7 +205,7 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
                                  entryPoints, maxDepth, maxFanIn);
 
   llvm::json::Object out;
-  auto fn = args.getString("function");
+  auto fn = identityName(args, "function");
   out["function"] = fn ? fn->str() : *ident;
   attachUsr(out, ctx, *ident);
   llvm::json::Array arr;
@@ -339,7 +339,7 @@ void registerLockTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["function"] = stringProp(
         "Qualified name of the target function. Provide 'function' or "
-        "'usr' (usr wins when both are present).");
+        "'usr' (usr wins when both are present). Alias: 'name'.");
     props["usr"] = stringProp(
         "Exact USR of the target function. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "

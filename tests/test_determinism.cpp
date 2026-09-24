@@ -320,10 +320,10 @@ TEST_CASE("ties break the same way whatever the insertion order",
   }
 
   SECTION("a name only a removed TU knew is unknown, as in a clean bake") {
-    // The interner never forgets a string; the search must not take
-    // "interned" for "known", or the warm index claims a complete,
+    // The interner never forgets a string; identity resolution must not
+    // take "interned" for "known", or the warm index claims a complete,
     // exhaustive answer (no callers) for a function that no longer
-    // exists, where the clean bake says the target is unknown.
+    // exists, where the clean bake says the target is not_found.
     for (auto &h : {&a, &b}) {
       h->graph.addNode({"gone", "gone.cpp", 1, false, false, "",
                         "c:@F@gone#"},
@@ -340,7 +340,7 @@ TEST_CASE("ties break the same way whatever the insertion order",
       std::string ra = a.run("find_call_chain", args);
       CHECK(ra == b.run("find_call_chain", args));
       CHECK(ra == fresh.run("find_call_chain", args));
-      CHECK(ra.find("\"complete\":false") != std::string::npos);
+      CHECK(ra.find("\"status\":\"not_found\"") != std::string::npos);
     }
     // A declared-only callee (edge end, no node) stays a known target.
     llvm::json::Object declared{{"to", "c:@F@g#"}};
