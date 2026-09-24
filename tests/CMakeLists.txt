@@ -100,6 +100,7 @@ add_executable(vycor_tests
   test_anneal_header_static.cpp
   test_anneal_exception_spec.cpp
   test_check_set.cpp
+  test_crash_containment.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
 )
@@ -150,6 +151,15 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/corpus-run.py
                    --binary $<TARGET_FILE:vycor-cpp> --reps 1 --self-check)
   set_tests_properties(corpus_selfcheck PROPERTIES LABELS "cli;corpus")
+  # Crash/hang containment end to end (scripts/interrupt-check.py): a
+  # worker killed by --worker-timeout is recorded `timeout`, and SIGINT /
+  # SIGTERM mid-bake leave no worker process and no worker directory.
+  add_test(NAME interrupt_cleanup
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/interrupt-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(interrupt_cleanup PROPERTIES LABELS "cli;containment"
+                       TIMEOUT 600)
 else()
   message(STATUS "python3 not found: the cli_golden test is not registered")
 endif()

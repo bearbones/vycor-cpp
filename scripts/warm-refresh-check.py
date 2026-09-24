@@ -156,8 +156,12 @@ class Check:
                 "--threads", "2", *extra]
         if force:
             argv.append("--force")
+        # Worker isolation is the default at --threads 2; the in-process
+        # leg opts out explicitly.
         if self.isolate:
             argv += ["--isolate-workers", "--workers", "2"]
+        else:
+            argv.append("--isolate-workers=false")
         code, out, err = self.megascope(argv, d)
         if code != 0:
             raise RuntimeError(f"index failed ({code}): {err}")

@@ -222,7 +222,11 @@ exactly the affected entries, and a TU whose parse fatally died twice is
 skipped with a warning instead of re-killing every resume.
 `--isolate-workers` (with `--workers N`) additionally runs the parses in
 subprocess workers, megascope-style: a TU that crashes its worker costs
-only that TU, and the parent survives. All three flags compose.
+only that TU, and the parent survives. `--worker-timeout <s>` (default
+600, 0 = off) kills a worker that starts no new TU for that long and
+drops the TU it was parsing; `--worker-memory-limit <MiB>` caps each
+worker's heap. Ctrl-C or SIGTERM kills the workers and removes their
+scratch directory. All of these compose.
 
 ```bash
 ./build/vycor-cpp anneal \
@@ -343,7 +347,11 @@ the old spelling), `--force` (rebuild regardless), `--retry-failed`
 (re-parse the TUs whose last parse failed even when nothing changed;
 see `docs/index-provenance.md`), `--threads`,
 `--pch-dir`, `--isolate-workers`/`--workers` (subprocess baking: a
-crashing TU costs only that TU), `--stats-json` (bake timings plus the
+crashing or hanging TU costs only that TU; the default whenever
+`--threads` is not 1 and `--pch-dir` is unset, `--isolate-workers=false`
+bakes in-process), `--worker-timeout <s>` (default 600: a worker that
+starts no new TU for that long is killed and the TU recorded `timeout`;
+0 = off), `--worker-memory-limit <MiB>`, `--stats-json` (bake timings plus the
 per-section index load split), `-v`. Query verbs also take `-v`, which
 reports the load time section by section.
 

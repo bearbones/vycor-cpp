@@ -16,6 +16,7 @@
 // impact_of_change (docs/change-impact.md) and the JSON shapes shared
 // with the CLI `diff` verb.
 
+#include "vycor/query/Limits.h"
 #include "vycor/query/ChangeImpact.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
@@ -396,21 +397,17 @@ llvm::json::Value handleImpactOfChange(const llvm::json::Object &args,
                       "'changed_usrs', or 'patch'");
 
   ImpactLimits limits;
-  if (auto md = args.getInteger("max_depth")) {
-    if (*md < 0)
-      return usageError("Invalid max_depth: must be non-negative");
-    limits.maxDepth = static_cast<unsigned>(*md);
-  }
-  if (auto mf = args.getInteger("max_fan_in"))
-    limits.maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
-  if (auto mw = args.getInteger("max_work"))
-    limits.maxWork = static_cast<size_t>(std::max<int64_t>(0, *mw));
+  if (auto err = readLimitAs(args, "max_depth", 0, kMaxSearchDepth,
+                             BelowMin::Reject, limits.maxDepth))
+    return usageError(*err);
+  readLimitAs(args, "max_fan_in", 0, kMaxFanInLimit, BelowMin::Clamp,
+              limits.maxFanIn);
+  readLimitAs(args, "max_work", 0, kMaxWorkLimit, BelowMin::Clamp,
+              limits.maxWork);
   size_t maxResults = 200;
-  if (auto mr = args.getInteger("max_results")) {
-    if (*mr < 0)
-      return usageError("Invalid max_results: must be non-negative");
-    maxResults = static_cast<size_t>(*mr);
-  }
+  if (auto err = readLimitAs(args, "max_results", 0, kMaxResultsLimit,
+                             BelowMin::Reject, maxResults))
+    return usageError(*err);
   bool includePaths = true;
   if (auto ip = args.getBoolean("include_paths"))
     includePaths = *ip;

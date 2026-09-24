@@ -15,6 +15,7 @@
 
 
 #include "vycor/callgraph/PathSearch.h"
+#include "vycor/query/Limits.h"
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
@@ -182,8 +183,8 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
     return usageError("Missing required parameter 'function' (or 'usr')");
 
   unsigned maxDepth = kDefaultMaxDepth;
-  if (auto md = args.getInteger("max_depth"))
-    maxDepth = static_cast<unsigned>(std::max<int64_t>(1, *md));
+  readLimitAs(args, "max_depth", 1, kMaxSearchDepth, BelowMin::Clamp,
+              maxDepth);
 
   std::vector<std::string> entryPoints;
   if (auto *epsArr = args.getArray("entry_points")) {
@@ -196,8 +197,8 @@ static llvm::json::Value handleQueryLocksHeld(const llvm::json::Object &args,
     entryPoints = ctx.entryPoints;
 
   size_t maxFanIn = kDefaultMaxFanIn;
-  if (auto mf = args.getInteger("max_fan_in"))
-    maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
+  readLimitAs(args, "max_fan_in", 0, kMaxFanInLimit, BelowMin::Clamp,
+              maxFanIn);
 
   // The lock walk resolves the target through the interner: a USR string
   // works verbatim (usrs ARE the interned identities).
@@ -240,8 +241,8 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
         "twins)");
 
   unsigned maxDepth = kDefaultMaxDepth;
-  if (auto md = args.getInteger("max_depth"))
-    maxDepth = static_cast<unsigned>(std::max<int64_t>(1, *md));
+  readLimitAs(args, "max_depth", 1, kMaxSearchDepth, BelowMin::Clamp,
+              maxDepth);
 
   std::vector<std::string> entryPoints;
   if (auto *epsArr = args.getArray("entry_points")) {
@@ -254,8 +255,8 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
     entryPoints = ctx.entryPoints;
 
   size_t maxFanIn = kDefaultMaxFanIn;
-  if (auto mf = args.getInteger("max_fan_in"))
-    maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
+  readLimitAs(args, "max_fan_in", 0, kMaxFanInLimit, BelowMin::Clamp,
+              maxFanIn);
 
   auto resA = collectLocksHeld(ctx.graph, ctx.cfIndex, *a, entryPoints,
                                maxDepth, maxFanIn);

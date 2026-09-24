@@ -21,6 +21,8 @@ add_library(vycor_lib
   callgraph/PathSearch.cpp
   callgraph/Snapshot.cpp
   callgraph/WorkerPool.cpp
+  callgraph/Interrupt.cpp
+  callgraph/CrashGuard.cpp
   mcp/McpProtocol.cpp
   mcp/McpServer.cpp
   query/Serialize.cpp
@@ -31,6 +33,7 @@ add_library(vycor_lib
   query/DeadCodeTools.cpp
   query/ChannelTools.cpp
   query/Registry.cpp
+  query/Limits.cpp
   query/ImpactTools.cpp
   impact/SemanticDiff.cpp
   impact/ImpactSearch.cpp

@@ -258,7 +258,7 @@ bool readMeta(Reader &r, SnapshotMeta &meta) {
   for (size_t i = 0; r.ok && i < meta.files.size(); ++i) {
     meta.fingerprints[i] = r.lenStr();
     uint8_t status = r.u8();
-    if (status > static_cast<uint8_t>(TuStatus::Skipped)) {
+    if (status > static_cast<uint8_t>(TuStatus::TimedOut)) {
       r.ok = false;
       break;
     }
@@ -1253,6 +1253,8 @@ const char *tuStatusName(TuStatus status) {
     return "poisoned";
   case TuStatus::Skipped:
     return "skipped";
+  case TuStatus::TimedOut:
+    return "timeout";
   }
   return "skipped";
 }

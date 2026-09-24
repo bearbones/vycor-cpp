@@ -182,8 +182,9 @@ rewrites the index.
 |---|---|---|
 | `indexed` | clean parse: facts complete | `ClangTool::run` returned 0 |
 | `partial` | parse reported errors: facts from a partial AST | run returned 1 (`detail` = `parse errors`) |
-| `crashed` | the in-process crash guard fired: no facts | signal in the guard (`detail` = `signal N`) |
-| `poisoned` | its worker died under `--isolate-workers`: no facts | worker poison marker (`detail` = `worker crashed`) |
+| `crashed` | the in-process crash guard fired: no facts (the TU's partial facts are discarded) | signal in the guard (`detail` = `signal N`) |
+| `poisoned` | its worker died under worker isolation: no facts | worker poison marker (`detail` = `worker crashed`) |
+| `timeout` | its worker made no progress for `--worker-timeout` seconds and was killed: no facts | worker poison marker after the kill (`detail` = `worker timed out`) |
 | `skipped` | never parsed | run returned 2 (`no compile command`), or nothing reported (`no outcome recorded`) |
 
 Outcomes travel every bake path: the serial and pooled in-process bakes
@@ -250,7 +251,8 @@ IndexCoverage coverageOf(const SnapshotMeta &);   // from meta.outcomes
 TuOutcomes SnapshotIO::outcomesOf(const SnapshotMeta &); // per TU path
 ```
 
-`failed` counts `crashed` + `poisoned` + `skipped` (no facts at all);
+`failed` counts `crashed` + `poisoned` + `timeout` + `skipped` (no facts
+at all; `timeout` is a worker killed by `--worker-timeout`);
 `partial` has facts from an errored parse. `requested` is the recorded
 TU set, i.e. the selection at the last save. Invariant: `requested ==
 indexed + partial + failed`.

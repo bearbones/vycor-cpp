@@ -15,6 +15,7 @@
 
 #include "vycor/callgraph/WorkerPool.h"
 
+#include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/Snapshot.h"
 
 #include "llvm/ADT/SmallString.h"
@@ -28,11 +29,17 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cerrno>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_map>
+
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 namespace vycor {
 
@@ -72,7 +79,145 @@ std::optional<std::string> lastWorkerTuMarker(const std::string &stderrPath) {
   return last;
 }
 
+/// Incremental scan of a worker's log for new `WORKER-TU ` line prefixes:
+/// the worker's progress signal for the timeout.
+class MarkerWatch {
+public:
+  explicit MarkerWatch(std::string path) : path_(std::move(path)) {}
+
+  /// True when at least one marker started since the last call.
+  bool advanced() {
+    uint64_t size = 0;
+    if (llvm::sys::fs::file_size(path_, size) || size <= offset_)
+      return false;
+    std::FILE *f = std::fopen(path_.c_str(), "rb");
+    if (!f)
+      return false;
+    bool found = false;
+    if (std::fseek(f, static_cast<long>(offset_), SEEK_SET) == 0) {
+      char buf[4096];
+      size_t n;
+      while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
+        offset_ += n;
+        for (size_t i = 0; i < n; ++i)
+          found |= step(buf[i]);
+      }
+    }
+    std::fclose(f);
+    return found;
+  }
+
+private:
+  bool step(char c) {
+    static constexpr llvm::StringLiteral kPrefix("WORKER-TU ");
+    if (c == '\n') {
+      state_ = 0;
+      return false;
+    }
+    if (state_ < 0)
+      return false;
+    if (c != kPrefix[static_cast<size_t>(state_)]) {
+      state_ = -1;
+      return false;
+    }
+    if (static_cast<size_t>(++state_) == kPrefix.size()) {
+      state_ = -1;
+      return true;
+    }
+    return false;
+  }
+
+  std::string path_;
+  uint64_t offset_ = 0;
+  int state_ = 0; // prefix chars matched at line start; -1 mid-line
+};
+
+/// llvm::sys::Wait's exit-code convention for a reaped status.
+int exitCodeOf(int status) {
+  if (WIFEXITED(status))
+    return WEXITSTATUS(status);
+  return -2; // killed by a signal
+}
+
 } // namespace
+
+int runWorkerProcess(const std::vector<std::string> &argv,
+                     const std::string &logPath, const WorkerLimits &limits,
+                     const char *tool) {
+  if (argv.empty())
+    return -1;
+  std::vector<llvm::StringRef> args(argv.begin(), argv.end());
+  // stdin from the null device (empty redirect path = null device); stdout
+  // joins the stderr log — the parent's own stdout may be an MCP channel
+  // and must never see worker output (identical stdout/stderr paths are
+  // dup'd onto one descriptor).
+  std::optional<llvm::StringRef> redirects[3] = {
+      llvm::StringRef(""), llvm::StringRef(logPath), llvm::StringRef(logPath)};
+  std::string errMsg;
+  bool execFailed = false;
+  llvm::sys::ProcessInfo pi;
+  long pid = detail::spawnTrackedChild([&]() -> long {
+    pi = llvm::sys::ExecuteNoWait(argv.front(), args, /*Env=*/std::nullopt,
+                                  redirects, limits.memoryLimitMB, &errMsg,
+                                  &execFailed);
+    return static_cast<long>(pi.Pid);
+  });
+  if (pid <= 0) {
+    if (interruptRequested())
+      return kWorkerInterrupted;
+    llvm::errs() << tool << ": worker: failed to spawn " << argv.front()
+                 << ": " << errMsg << "\n";
+    return -1;
+  }
+
+  // waitpid directly rather than llvm::sys::Wait: its timeout is a
+  // process-wide alarm(), which concurrent dispatch threads would steal
+  // from one another.
+  const pid_t child = static_cast<pid_t>(pid);
+  int status = 0;
+  int rc;
+  if (limits.timeoutSeconds == 0) {
+    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    rc = exitCodeOf(status);
+  } else {
+    using Clock = std::chrono::steady_clock;
+    const auto window = std::chrono::seconds(limits.timeoutSeconds);
+    auto deadline = Clock::now() + window;
+    auto nap = std::chrono::milliseconds(2);
+    MarkerWatch progress(logPath);
+    for (;;) {
+      pid_t r = ::waitpid(child, &status, WNOHANG);
+      if (r == child) {
+        rc = exitCodeOf(status);
+        break;
+      }
+      if (r < 0 && errno != EINTR) {
+        rc = -1;
+        break;
+      }
+      auto now = Clock::now();
+      if (progress.advanced())
+        deadline = now + window;
+      else if (now >= deadline) {
+        ::kill(child, SIGKILL);
+        while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+        }
+        llvm::errs() << tool << ": worker: no progress for "
+                     << limits.timeoutSeconds
+                     << "s (--worker-timeout) — killed\n";
+        rc = kWorkerTimedOut;
+        break;
+      }
+      std::this_thread::sleep_for(nap);
+      nap = std::min(nap * 2, std::chrono::milliseconds(100));
+    }
+  }
+  detail::untrackChild(pid);
+  if (rc != 0 && rc != kWorkerTimedOut && interruptRequested())
+    return kWorkerInterrupted;
+  return rc;
+}
 
 void dispatchIsolated(
     const WorkerRunner &runner, const std::vector<std::string> &files,
@@ -80,7 +225,8 @@ void dispatchIsolated(
     const std::function<bool(const std::string &shardPath,
                              const std::vector<std::string> &batchTus,
                              double wallMs)> &consumeShard,
-    const std::function<void(const std::string &tu)> &onPoison,
+    const std::function<void(const std::string &tu, WorkerFailure why)>
+        &onPoison,
     unsigned batchSizeOverride) {
   if (files.empty())
     return;
@@ -135,7 +281,11 @@ void dispatchIsolated(
       res.shardPath = shardDir + "/shard-" + std::to_string(seq) + ".snap";
       res.stderrPath = shardDir + "/worker-" + std::to_string(seq) + ".stderr";
       auto t0 = std::chrono::steady_clock::now();
-      res.exitCode = runner(b.tus, res.shardPath, res.stderrPath);
+      // Stop dispatching once interrupted: the watcher is tearing the
+      // process down (callgraph/Interrupt.h).
+      res.exitCode = interruptRequested()
+                         ? kWorkerInterrupted
+                         : runner(b.tus, res.shardPath, res.stderrPath);
       res.wallMs = std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - t0)
                        .count();
@@ -159,11 +309,11 @@ void dispatchIsolated(
 
   // Re-enqueue the given TUs as one batch, dropping (and poisoning) any TU
   // already re-dispatched kMaxTuRetries times.
-  auto requeue = [&](std::vector<std::string> tus) {
+  auto requeue = [&](std::vector<std::string> tus, WorkerFailure why) {
     tus.erase(std::remove_if(tus.begin(), tus.end(),
                              [&](const std::string &tu) {
                                if (++retries[tu] > kMaxTuRetries) {
-                                 poison(tu);
+                                 poison(tu, why);
                                  return true;
                                }
                                return false;
@@ -180,6 +330,11 @@ void dispatchIsolated(
   };
 
   auto handleFailure = [&](BatchResult &res) {
+    // A timeout is handled exactly like a crash; only the recorded reason
+    // differs.
+    const WorkerFailure why = res.exitCode == kWorkerTimedOut
+                                  ? WorkerFailure::TimedOut
+                                  : WorkerFailure::Crashed;
     auto marker = lastWorkerTuMarker(res.stderrPath);
     bool markerInBatch =
         marker && std::find(res.batch.tus.begin(), res.batch.tus.end(),
@@ -188,21 +343,21 @@ void dispatchIsolated(
       // The TU whose parse was in flight when the worker died is presumed
       // poisoned; everything else in the batch is re-dispatched (the shard
       // was never written, so already-parsed TUs are re-baked too).
-      poison(*marker);
+      poison(*marker, why);
       std::vector<std::string> rest;
       rest.reserve(res.batch.tus.size() - 1);
       for (auto &tu : res.batch.tus)
         if (tu != *marker)
           rest.push_back(std::move(tu));
-      requeue(std::move(rest));
+      requeue(std::move(rest), WorkerFailure::Crashed);
     } else if (res.batch.tus.size() == 1) {
-      poison(res.batch.tus.front());
+      poison(res.batch.tus.front(), why);
     } else {
       // No marker (spawn failure, or death before the first parse): split
       // in half and re-dispatch both halves.
       size_t mid = res.batch.tus.size() / 2;
-      requeue({res.batch.tus.begin(), res.batch.tus.begin() + mid});
-      requeue({res.batch.tus.begin() + mid, res.batch.tus.end()});
+      requeue({res.batch.tus.begin(), res.batch.tus.begin() + mid}, why);
+      requeue({res.batch.tus.begin() + mid, res.batch.tus.end()}, why);
     }
   };
 
@@ -229,7 +384,9 @@ void dispatchIsolated(
         res.exitCode = -1;
       }
     }
-    if (res.exitCode != 0)
+    // An interrupted batch is abandoned, not bisected: the process is
+    // going down.
+    if (res.exitCode != 0 && res.exitCode != kWorkerInterrupted)
       handleFailure(res);
 
     llvm::sys::fs::remove(res.shardPath);
@@ -282,11 +439,15 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
         }
         return true;
       },
-      [&](const std::string &tu) {
+      [&](const std::string &tu, WorkerFailure why) {
         ++poisonedCount;
-        out.outcomes[tu] = TuOutcome{TuStatus::Poisoned, "worker crashed"};
-        llvm::errs() << "megascope: worker: TU poisoned (crashed worker): "
-                     << tu << "\n";
+        const bool timedOut = why == WorkerFailure::TimedOut;
+        out.outcomes[tu] =
+            timedOut ? TuOutcome{TuStatus::TimedOut, "worker timed out"}
+                     : TuOutcome{TuStatus::Poisoned, "worker crashed"};
+        llvm::errs() << "megascope: worker: TU poisoned ("
+                     << (timedOut ? "timed out" : "crashed worker")
+                     << "): " << tu << "\n";
         if (stats)
           stats->addTuStat({tu, 0, 0.0, -1});
       },
@@ -294,7 +455,8 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
 
   if (poisonedCount > 0)
     llvm::errs() << "megascope: " << poisonedCount
-                 << " TU(s) poisoned (crashed their worker) and were skipped ("
+                 << " TU(s) poisoned (crashed or timed out their worker) and "
+                    "were skipped ("
                  << files.size() << " TUs total)\n";
   return out;
 }
@@ -302,8 +464,9 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
 namespace {
 
 WorkerRunner makeSubprocessRunner(const std::string &selfExe,
-                                  const McpBakeConfig &cfg) {
-  return [selfExe, cfg](const std::vector<std::string> &batch,
+                                  const McpBakeConfig &cfg,
+                                  const WorkerLimits &limits) {
+  return [selfExe, cfg, limits](const std::vector<std::string> &batch,
                         const std::string &shardPath,
                         const std::string &stderrPath) -> int {
     std::vector<std::string> argv;
@@ -346,47 +509,57 @@ WorkerRunner makeSubprocessRunner(const std::string &selfExe,
       argv.push_back(f);
     }
 
-    std::vector<llvm::StringRef> args(argv.begin(), argv.end());
-    // stdin from the null device (empty redirect path = null device); stdout
-    // joins the stderr log — the parent's own stdout may be an MCP channel
-    // and must never see worker output (ExecuteAndWait dups identical
-    // stdout/stderr paths onto one descriptor).
-    std::optional<llvm::StringRef> redirects[3] = {
-        llvm::StringRef(""), llvm::StringRef(stderrPath),
-        llvm::StringRef(stderrPath)};
-    std::string errMsg;
-    bool execFailed = false;
-    int rc = llvm::sys::ExecuteAndWait(selfExe, args, /*Env=*/std::nullopt,
-                                       redirects, /*SecondsToWait=*/0,
-                                       /*MemoryLimit=*/0, &errMsg, &execFailed);
-    if (execFailed)
-      llvm::errs() << "megascope: worker: failed to spawn " << selfExe << ": "
-                   << errMsg << "\n";
-    return rc;
+    return runWorkerProcess(argv, stderrPath, limits, "megascope");
   };
 }
 
 } // namespace
 
+std::error_code createWorkerShardDir(llvm::StringRef base,
+                                     llvm::SmallVectorImpl<char> &out) {
+  llvm::SmallString<128> prefix;
+  llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, prefix);
+  llvm::sys::path::append(prefix, base);
+  // Creates <prefix>-XXXXXX.
+  if (auto ec = llvm::sys::fs::createUniqueDirectory(prefix, out)) {
+    out.assign(prefix.begin(), prefix.end());
+    return ec;
+  }
+  return {};
+}
+
+void removeWorkerShardDir(llvm::StringRef dir) {
+  llvm::sys::fs::remove_directories(dir, /*IgnoreErrors=*/true);
+}
+
 BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
                           const std::vector<std::string> &files,
-                          unsigned workers, BuildStats *stats) {
-  llvm::SmallString<128> tmpBase;
-  llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmpBase);
-  llvm::sys::path::append(tmpBase, "vycor-workers");
+                          unsigned workers, BuildStats *stats,
+                          const WorkerLimits &limits) {
   llvm::SmallString<128> shardDir;
-  if (auto ec = llvm::sys::fs::createUniqueDirectory(tmpBase, shardDir)) {
+  if (auto ec = createWorkerShardDir("vycor-workers", shardDir)) {
     llvm::errs() << "megascope: ERROR: cannot create worker shard directory "
                     "under "
-                 << tmpBase << ": " << ec.message()
+                 << shardDir << ": " << ec.message()
                  << " — isolated bake aborted (indexes will be empty)\n";
     return {};
   }
+  InterruptCleanup cleanup{std::string(shardDir)};
 
-  auto out =
-      bakeIsolatedWithRunner(makeSubprocessRunner(selfExe, cfg), files,
-                             workers, stats, std::string(shardDir), &cfg);
-  llvm::sys::fs::remove_directories(shardDir);
+  auto out = bakeIsolatedWithRunner(makeSubprocessRunner(selfExe, cfg, limits),
+                                    files, workers, stats,
+                                    std::string(shardDir), &cfg);
+  removeWorkerShardDir(shardDir);
+  return out;
+}
+
+BakedIndexes bakeTUIsolated(const std::string &selfExe,
+                            const McpBakeConfig &cfg, const std::string &file,
+                            const WorkerLimits &limits) {
+  auto out = bakeIsolated(selfExe, cfg, {file}, 1, nullptr, limits);
+  // A shard directory that could not be created leaves no outcome at all.
+  if (!out.outcomes.count(file))
+    out.outcomes[file] = TuOutcome{TuStatus::Skipped, "worker not run"};
   return out;
 }
 

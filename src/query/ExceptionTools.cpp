@@ -14,6 +14,7 @@
 // limitations under the License.
 
 
+#include "vycor/query/Limits.h"
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
@@ -45,19 +46,14 @@ namespace vycor {
 // max_paths/max_depth.
 static std::optional<std::string>
 parseSearchLimits(const llvm::json::Object &args, SearchLimits &out) {
-  if (auto mp = args.getInteger("max_paths")) {
-    if (*mp <= 0)
-      return "Invalid max_paths: must be positive";
-    out.maxPaths = static_cast<unsigned>(*mp);
-  }
-  if (auto md = args.getInteger("max_depth")) {
-    if (*md <= 0)
-      return "Invalid max_depth: must be positive";
-    out.maxDepth = static_cast<unsigned>(*md);
-  }
-  if (auto mf = args.getInteger("max_fan_in"))
-    out.maxFanIn = static_cast<size_t>(std::max<int64_t>(0, *mf));
-  return std::nullopt;
+  if (auto err = readLimitAs(args, "max_paths", 1, kMaxSearchPaths,
+                             BelowMin::Reject, out.maxPaths))
+    return err;
+  if (auto err = readLimitAs(args, "max_depth", 1, kMaxSearchDepth,
+                             BelowMin::Reject, out.maxDepth))
+    return err;
+  return readLimitAs(args, "max_fan_in", 0, kMaxFanInLimit, BelowMin::Clamp,
+                     out.maxFanIn);
 }
 
 static void attachFacts(llvm::json::Object &obj, const PathSearchFacts &f) {
@@ -471,11 +467,9 @@ handleQueryNearestCatches(const llvm::json::Object &args,
     return usageError("Missing required parameter 'function' (or 'usr')");
 
   unsigned maxDepth = 20;
-  if (auto md = args.getInteger("max_depth")) {
-    if (*md <= 0)
-      return usageError("Invalid max_depth: must be positive");
-    maxDepth = static_cast<unsigned>(*md);
-  }
+  if (auto err = readLimitAs(args, "max_depth", 1, kMaxSearchDepth,
+                             BelowMin::Reject, maxDepth))
+    return usageError(*err);
 
   auto result = ctx.oracle.queryNearestCatches(*ident, maxDepth);
 

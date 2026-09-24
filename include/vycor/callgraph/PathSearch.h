@@ -57,11 +57,17 @@ const char *stopReasonName(StopReason r);
 // The names of every reason set in `stops`, in enum order.
 std::vector<std::string> stopReasonNames(unsigned stops);
 
+// Hard cap on path length in edges. The reverse walk recurses once per
+// edge, so this also bounds its stack depth: a maxDepth of 0 ("no limit")
+// or above the cap searches to the cap and reports DepthLimit beyond it.
+constexpr unsigned kPathSearchDepthCap = 1000;
+
 struct SearchLimits {
   // Maximum number of paths to collect. 0 means no limit.
   unsigned maxPaths = 100;
   // Maximum path length in EDGES (a chain of N functions has N-1 edges;
-  // "frames above the target" for a reverse walk). 0 means no limit.
+  // "frames above the target" for a reverse walk). 0 means no limit other
+  // than kPathSearchDepthCap.
   unsigned maxDepth = 20;
   // Do not expand the ancestry of a non-target node whose stored in-degree
   // exceeds this; record it in skippedHubs instead. 0 disables.

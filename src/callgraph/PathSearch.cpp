@@ -282,10 +282,17 @@ void sortCallerRefsCanonically(const CallGraph &graph,
 PathSearchResult findCallerPaths(const CallGraph &graph,
                                  const std::string &target,
                                  const std::vector<std::string> &starts,
-                                 const SearchLimits &limits, CycleRule cycles,
+                                 const SearchLimits &limitsIn,
+                                 CycleRule cycles,
                                  EdgePredicate filter) {
   PathSearchResult result;
   const auto &interner = graph.interner();
+  // The walk below recurses once per edge: cap the depth so no request
+  // (a 0 "no limit", a huge value) can overflow the stack.
+  SearchLimits capped = limitsIn;
+  if (capped.maxDepth == 0 || capped.maxDepth > kPathSearchDepthCap)
+    capped.maxDepth = kPathSearchDepthCap;
+  const SearchLimits &limits = capped;
 
   const auto targetIds = resolveIds(graph, target);
   result.targetKnown = !targetIds.empty();

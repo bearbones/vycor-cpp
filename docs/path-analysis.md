@@ -205,6 +205,32 @@ stop when callers remained beyond it. Previously a global visited set
 skipped the check on later edges into an already-seen caller, so the
 set of catches depended on edge order.
 
+## Limits
+
+Every user-supplied limit is read through `readLimit` / `readLimitAs`
+(`include/vycor/query/Limits.h`), which clamps a value above its maximum
+to the maximum *before* narrowing it to the handler's integer type (a
+plain `static_cast<unsigned>` of `4294967296` is 0, which the searches
+read as "no limit"). Values below the minimum keep their existing
+behaviour: a usage error where the tool rejected them, the minimum where
+it raised them.
+
+| Argument | Tools | Range |
+|---|---|---|
+| `max_depth` | path tools, `query_nearest_catches`, lock tools | 1 – 1000 (`kMaxSearchDepth`) |
+| `max_depth` | `impact_of_change` (0 = no limit) | 0 – 1000 |
+| `max_paths` | path tools | 1 – 100000 |
+| `max_fan_in` | path tools, lock tools, `impact_of_change` | 0 – 10^8 |
+| `max_work` | `impact_of_change` | 0 – 10^9 |
+| `max_results` | `impact_of_change` | 0 – 10^7 |
+
+The reverse walk in `findCallerPaths` recurses once per edge, so it caps
+its own depth as well: `SearchLimits::maxDepth` 0 ("no limit") or above
+`kPathSearchDepthCap` (1000) searches to the cap and reports
+`depth_limit` beyond it. No request, from a tool or a library caller, can
+overflow the stack. (`tests/test_crash_containment.cpp` walks a
+100000-edge chain.)
+
 ## Payload changes
 
 Common to every path tool (`attachSearchFacts`): `complete`,

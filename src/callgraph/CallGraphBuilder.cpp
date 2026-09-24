@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/CrashGuard.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -22,68 +23,34 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
-#include <csignal>
-#include <csetjmp>
+#include <memory>
 
 namespace {
 
-// Per-thread crash recovery using setjmp/longjmp + signal handler.
-// When a TU triggers SIGSEGV/SIGBUS during AST traversal, the signal
-// handler longjmps back to the setjmp point, skipping that TU.
-thread_local sigjmp_buf tl_jumpBuf;
-thread_local volatile sig_atomic_t tl_guardActive = 0;
-
 std::atomic<unsigned> g_crashCount{0};
 
-void crashSignalHandler(int sig) {
-  if (tl_guardActive) {
-    tl_guardActive = 0;
-    g_crashCount.fetch_add(1, std::memory_order_relaxed);
-    siglongjmp(tl_jumpBuf, sig);
-  }
-  // Not in a guarded region — re-raise to get default behavior.
-  std::signal(sig, SIG_DFL);
-  std::raise(sig);
-}
-
-/// Install crash signal handlers. Returns previous handlers for restoration.
-struct SavedHandlers {
-  void (*segv)(int);
-  void (*bus)(int);
-};
-
-SavedHandlers installCrashGuard() {
-  SavedHandlers saved;
-  saved.segv = std::signal(SIGSEGV, crashSignalHandler);
-  saved.bus = std::signal(SIGBUS, crashSignalHandler);
-  return saved;
-}
-
-void restoreCrashGuard(const SavedHandlers &saved) {
-  std::signal(SIGSEGV, saved.segv);
-  std::signal(SIGBUS, saved.bus);
-}
-
-/// Run a ClangTool on a single file with crash recovery.
-/// Returns the ClangTool::run() status (0 = success, 1 = errors occurred —
-/// the AST may be partial, 2 = no compile command), or -1 if the TU crashed
-/// and was skipped by the crash guard.
+/// Run a ClangTool on a single file under the in-process crash guard
+/// (callgraph/CrashGuard.h). Returns the ClangTool::run() status (0 =
+/// success, 1 = errors occurred — the AST may be partial, 2 = no compile
+/// command), or -1 if the TU crashed and was skipped.
 int runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                    const std::string &file,
                    clang::tooling::FrontendActionFactory &factory,
                    const vycor::PchCache *pchCache,
                    const std::string &sysroot = "") {
-  tl_guardActive = 1;
-  int sig = sigsetjmp(tl_jumpBuf, 1);
-  if (sig != 0) {
+  int status = -1;
+  int sig = 0;
+  if (!vycor::runCrashGuarded(
+          [&] {
+            auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
+            status = tool.run(&factory);
+          },
+          &sig)) {
+    g_crashCount.fetch_add(1, std::memory_order_relaxed);
     llvm::errs() << "CRASH (signal " << sig << ") processing " << file
                  << " — skipping\n";
     return -1;
   }
-
-  auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
-  int status = tool.run(&factory);
-  tl_guardActive = 0;
   return status;
 }
 
@@ -91,14 +58,6 @@ int runToolGuarded(const clang::tooling::CompilationDatabase &compDb,
 // failed parses looks superficially plausible (headers index partially
 // before the fatal error), so surfacing this loudly is load-bearing.
 std::atomic<unsigned> g_parseErrorCount{0};
-
-void notedRun(const clang::tooling::CompilationDatabase &compDb,
-              const std::string &file,
-              clang::tooling::FrontendActionFactory &factory,
-              const vycor::PchCache *pchCache, const std::string &sysroot) {
-  if (runToolGuarded(compDb, file, factory, pchCache, sysroot) == 1)
-    g_parseErrorCount.fetch_add(1, std::memory_order_relaxed);
-}
 
 } // anonymous namespace
 
@@ -1083,6 +1042,27 @@ private:
   std::string tuPath_;
 };
 
+// Index one TU into a TU-local graph under the crash guard and absorb it
+// into `graph` only after the parse returned. A crashed parse's local
+// graph may be torn (its lock held), so it is leaked, never merged: the TU
+// adds no partial facts and no shared lock is held by a crashed thread.
+int indexTuLocally(CallGraph &graph,
+                   const clang::tooling::CompilationDatabase &compDb,
+                   const std::string &file, const CollapseFilter *collapse,
+                   const PchCache *pchCache, const std::string &sysroot) {
+  auto local = std::make_unique<CallGraph>();
+  IndexEdgeFactory factory(*local, collapse, file);
+  int status = runToolGuarded(compDb, file, factory, pchCache, sysroot);
+  if (status == -1) {
+    (void)local.release();
+    return status;
+  }
+  if (status == 1)
+    g_parseErrorCount.fetch_add(1, std::memory_order_relaxed);
+  graph.absorb(*local);
+  return status;
+}
+
 } // anonymous namespace
 
 CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
@@ -1096,7 +1076,7 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
 
-  auto saved = installCrashGuard();
+  CrashGuardScope crashGuard;
   g_crashCount.store(0, std::memory_order_relaxed);
   g_parseErrorCount.store(0, std::memory_order_relaxed);
 
@@ -1116,16 +1096,14 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
     // joins are query-time), so no phase barrier is needed.
     for (const auto &file : files) {
       pool.async([&compDb, &graph, collapsePtr, pchCache, &sysroot, file]() {
-        IndexEdgeFactory factory(graph, collapsePtr, file);
-        notedRun(compDb, file, factory, pchCache, sysroot);
+        indexTuLocally(graph, compDb, file, collapsePtr, pchCache, sysroot);
       });
     }
     pool.wait();
   } else {
     // Serial path — process per-file for crash isolation.
     for (const auto &file : files) {
-      IndexEdgeFactory factory(graph, collapsePtr, file);
-      notedRun(compDb, file, factory, pchCache, sysroot);
+      indexTuLocally(graph, compDb, file, collapsePtr, pchCache, sysroot);
     }
   }
 
@@ -1142,7 +1120,6 @@ CallGraph buildCallGraph(const clang::tooling::CompilationDatabase &compDb,
                  << "(--extra-arg can inject e.g. --gcc-install-dir=...)\n";
   }
 
-  restoreCrashGuard(saved);
   return graph;
 }
 
@@ -1156,13 +1133,10 @@ void indexTU(CallGraph &graph,
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
 
-  auto saved = installCrashGuard();
+  CrashGuardScope crashGuard;
   g_crashCount.store(0, std::memory_order_relaxed);
 
-  IndexEdgeFactory factory(graph, collapsePtr, file);
-  runToolGuarded(compDb, file, factory, pchCache, sysroot);
-
-  restoreCrashGuard(saved);
+  indexTuLocally(graph, compDb, file, collapsePtr, pchCache, sysroot);
 }
 
 } // namespace vycor

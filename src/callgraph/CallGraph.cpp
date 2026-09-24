@@ -15,8 +15,11 @@
 
 #include "vycor/callgraph/CallGraph.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include <algorithm>
-#include <cassert>
+#include <atomic>
+#include <mutex>
 #include <unordered_set>
 
 namespace vycor {
@@ -75,9 +78,31 @@ void CallGraph::reserveEdges(size_t n) {
   edgeIndex_.reserve(n);
 }
 
+namespace {
+// A LoadMode::ReadOnly graph never mutates: it skipped the provenance maps
+// every mutator relies on. Reachable only through a programming error, so
+// the mutator returns unchanged — in Release too — and says so once.
+void warnReadOnlyMutation() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    llvm::errs() << "vycor: WARNING: ignored a mutation of a read-only "
+                    "call graph (LoadMode::ReadOnly snapshot load)\n";
+  });
+}
+
+std::atomic<CallGraph::EdgeInsertHook> g_edgeInsertHook{nullptr};
+} // namespace
+
+void CallGraph::setEdgeInsertHookForTesting(EdgeInsertHook hook) {
+  g_edgeInsertHook.store(hook);
+}
+
 void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
-  assert(!readOnly_ && "mutating a read-only snapshot load");
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   // Name-only callers (hand-built graphs, tests) get usr == display, which
   // keeps their edges — also name-keyed — consistent with the node key.
   if (node.usr.empty())
@@ -155,7 +180,12 @@ CallGraphEdge CallGraph::materialize(const EdgeRef &r) const {
 
 void CallGraph::addEdge(CallGraphEdge edge, const std::string &tuPath) {
   std::lock_guard<std::mutex> lock(mutex_);
-  assert(!readOnly_ && "mutating a read-only snapshot load");
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
+  if (auto hook = g_edgeInsertHook.load(std::memory_order_relaxed))
+    hook(edge);
   StoredEdge se;
   se.caller = interner_.intern(edge.callerName);
   se.callee = interner_.intern(edge.calleeName);
@@ -419,6 +449,10 @@ void CallGraph::addDerivedClass(const std::string &baseClass,
                                 const std::string &derivedClass,
                                 const std::string & /*tuPath*/) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   SId baseId = interner_.intern(baseClass);
   SId derivedId = interner_.intern(derivedClass);
   auto &vec = derivedClasses_[baseId];
@@ -472,6 +506,10 @@ void CallGraph::addMethodOverride(const std::string &baseMethod,
                                   const std::string &overrideMethod,
                                   const std::string & /*tuPath*/) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   SId baseId = interner_.intern(baseMethod);
   SId overrideId = interner_.intern(overrideMethod);
   auto &vec = methodOverrides_[baseId];
@@ -527,6 +565,10 @@ void CallGraph::addEffectiveImpl(const std::string &concreteClass,
                                  const std::string &implMethod,
                                  const std::string & /*tuPath*/) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   SId implId = interner_.intern(implMethod);
   SId classId = interner_.intern(concreteClass);
   effectiveImplClasses_[implId].insert(classId);
@@ -555,6 +597,10 @@ void CallGraph::addFunctionReturn(const std::string &funcName,
                                   const std::string &returnedFunc,
                                   const std::string & /*tuPath*/) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   SId funcId = interner_.intern(funcName);
   SId retId = interner_.intern(returnedFunc);
   if (functionReturns_[funcId].insert(retId).second)
@@ -580,7 +626,10 @@ void CallGraph::absorb(const CallGraph &shard) {
   if (&shard == this)
     return;
   std::lock_guard<std::mutex> lockThis(mutex_);
-  assert(!readOnly_ && "mutating a read-only snapshot load");
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   std::lock_guard<std::mutex> lockShard(shard.mutex_);
 
   // Shard string id -> master string id, by position (the shard interner is
@@ -707,7 +756,10 @@ size_t CallGraph::removeTU(const std::string &tuPath) {
 
 size_t CallGraph::removeTUs(const std::vector<std::string> &tuPaths) {
   std::lock_guard<std::mutex> lock(mutex_);
-  assert(!readOnly_ && "mutating a read-only snapshot load");
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return 0;
+  }
   std::vector<SId> tuIds;
   for (const auto &tuPath : tuPaths)
     if (auto tuId = interner_.find(tuPath))
@@ -793,7 +845,10 @@ size_t CallGraph::removeTUs(const std::vector<std::string> &tuPaths) {
 
 void CallGraph::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
-  assert(!readOnly_ && "mutating a read-only snapshot load");
+  if (readOnly_) {
+    warnReadOnlyMutation();
+    return;
+  }
   std::deque<StoredEdge> newEdges;
   std::unordered_map<EdgeKey, size_t, EdgeKeyHash> newIndex;
   std::unordered_map<SId, std::vector<size_t>> newOut;

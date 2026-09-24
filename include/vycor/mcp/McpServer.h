@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/WorkerPool.h"
 #include "vycor/mcp/McpProtocol.h"
 #include "vycor/query/Tools.h"
 
@@ -53,6 +54,13 @@ struct McpBuildParams {
   // state (possibly empty) the initial build left it in. See
   // ChannelIndex.h's design note.
   ChannelTypeConfig channelCfg;
+  // Set (non-empty workerExe) when the server's bake ran in worker
+  // processes: reindex_tu then re-parses in one worker as well
+  // (bakeTUIsolated — a crashing or hanging TU cannot take the server
+  // down). Empty: in-process bakeTU under the in-process crash guard.
+  std::string workerExe;
+  McpBakeConfig workerCfg;
+  WorkerLimits workerLimits;
 };
 
 class McpServer {

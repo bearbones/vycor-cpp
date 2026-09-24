@@ -18,6 +18,7 @@
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/UsrIdent.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
@@ -31,46 +32,37 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
-#include <csetjmp>
 #include <functional>
+#include <memory>
 #include <mutex>
 
-// Crash guard — same mechanism as CallGraphBuilder.cpp.
-// These are defined there and shared via the signal handler table.
 namespace {
-thread_local sigjmp_buf tl_cfJumpBuf;
-thread_local volatile sig_atomic_t tl_cfGuardActive = 0;
 std::atomic<unsigned> g_cfCrashCount{0};
 
-void cfCrashHandler(int sig) {
-  if (tl_cfGuardActive) {
-    tl_cfGuardActive = 0;
-    g_cfCrashCount.fetch_add(1, std::memory_order_relaxed);
-    siglongjmp(tl_cfJumpBuf, sig);
-  }
-  std::signal(sig, SIG_DFL);
-  std::raise(sig);
-}
-
+// One TU parse under the in-process crash guard (callgraph/CrashGuard.h).
+// Returns ClangTool::run's status, or -1 when the parse crashed (signal in
+// *crashSignal).
 int runCfToolGuarded(const clang::tooling::CompilationDatabase &compDb,
                      const std::string &file,
                      clang::tooling::FrontendActionFactory &factory,
                      const vycor::PchCache *pchCache,
                      const std::string &sysroot = "",
                      int *crashSignal = nullptr) {
-  tl_cfGuardActive = 1;
-  int sig = sigsetjmp(tl_cfJumpBuf, 1);
-  if (sig != 0) {
+  int status = -1;
+  int sig = 0;
+  if (!vycor::runCrashGuarded(
+          [&] {
+            auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
+            status = tool.run(&factory);
+          },
+          &sig)) {
+    g_cfCrashCount.fetch_add(1, std::memory_order_relaxed);
     llvm::errs() << "CRASH (signal " << sig << ") in CF index for " << file
                  << " — skipping\n";
     if (crashSignal)
       *crashSignal = sig;
     return -1;
   }
-  auto tool = vycor::makeClangTool(compDb, {file}, pchCache, sysroot);
-  int status = tool.run(&factory);
-  tl_cfGuardActive = 0;
   return status;
 }
 
@@ -103,23 +95,21 @@ vycor::TuOutcome outcomeFor(int status, int crashSignal) {
   }
 }
 
-// Run one guarded parse, timing it and recording the outcome. `stats` may
-// be null (timing skipped); the parse-error counter always advances.
-// `preTu`, when set, fires before the parse (worker-mode WORKER-TU marker).
-// `outcomeSink`, when set, receives the TU's TuOutcome.
-void bakeRun(const clang::tooling::CompilationDatabase &compDb,
-             const std::string &file,
-             clang::tooling::FrontendActionFactory &factory,
-             const vycor::PchCache *pchCache, const std::string &sysroot,
-             int phase, vycor::BuildStats *stats,
+// Run one guarded parse (`parse` returns the run status, -1 = crashed with
+// the signal in its argument), timing it and recording the outcome.
+// `stats` may be null (timing skipped); the parse-error counter always
+// advances. `preTu`, when set, fires before the parse (worker-mode
+// WORKER-TU marker). `outcomeSink`, when set, receives the TU's TuOutcome.
+void bakeRun(const std::string &file,
+             const std::function<int(int *crashSignal)> &parse, int phase,
+             vycor::BuildStats *stats,
              const std::function<void(const std::string &)> &preTu,
              OutcomeSink *outcomeSink = nullptr) {
   if (preTu)
     preTu(file);
   auto t0 = std::chrono::steady_clock::now();
   int crashSignal = 0;
-  int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot,
-                                &crashSignal);
+  int status = parse(&crashSignal);
   if (status == 1)
     g_cfParseErrorCount.fetch_add(1, std::memory_order_relaxed);
   if (outcomeSink && outcomeSink->outcomes) {
@@ -864,6 +854,35 @@ private:
   std::string tuPath_;
 };
 
+// CF-only counterpart of bakeTuLocally (below): parse into a local index,
+// absorb it only after a clean return, leak a crashed one.
+int indexCfLocally(ControlFlowIndex &index, ChannelIndex *channels,
+                   const CallGraph &graph,
+                   const clang::tooling::CompilationDatabase &compDb,
+                   const std::string &file, const CollapseFilter *collapse,
+                   const LockTypeConfig *lockCfg,
+                   const ChannelTypeConfig *channelCfg,
+                   const PchCache *pchCache, const std::string &sysroot) {
+  struct Local {
+    ControlFlowIndex index;
+    ChannelIndex channels;
+  };
+  auto local = std::make_unique<Local>();
+  ControlFlowContextFactory factory(local->index, graph, collapse, lockCfg,
+                                    channelCfg,
+                                    channels ? &local->channels : nullptr,
+                                    file);
+  int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+  if (status == -1) {
+    (void)local.release();
+    return status;
+  }
+  index.absorb(local->index);
+  if (channels)
+    channels->absorb(local->channels);
+  return status;
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -888,8 +907,7 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
   const LockTypeConfig *lockCfgPtr = &lockCfg;
   const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
-  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
-  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
+  CrashGuardScope crashGuard;
   g_cfCrashCount.store(0, std::memory_order_relaxed);
 
   bool parallel = threadCount != 1 && files.size() > 1;
@@ -905,19 +923,15 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
     for (const auto &file : files) {
       pool.async([&compDb, &index, &graph, collapsePtr, lockCfgPtr,
                   channelCfgPtr, channelsOut, pchCache, &sysroot, file]() {
-        ControlFlowContextFactory factory(index, graph, collapsePtr,
-                                          lockCfgPtr, channelCfgPtr,
-                                          channelsOut, file);
-        runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+        indexCfLocally(index, channelsOut, graph, compDb, file, collapsePtr,
+                       lockCfgPtr, channelCfgPtr, pchCache, sysroot);
       });
     }
     pool.wait();
   } else {
-    for (const auto &file : files) {
-      ControlFlowContextFactory factory(index, graph, collapsePtr, lockCfgPtr,
-                                        channelCfgPtr, channelsOut, file);
-      runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
-    }
+    for (const auto &file : files)
+      indexCfLocally(index, channelsOut, graph, compDb, file, collapsePtr,
+                     lockCfgPtr, channelCfgPtr, pchCache, sysroot);
   }
 
   unsigned crashes = g_cfCrashCount.load(std::memory_order_relaxed);
@@ -925,8 +939,6 @@ buildControlFlowIndex(const clang::tooling::CompilationDatabase &compDb,
     llvm::errs() << "cfindex: " << crashes << " TU(s) crashed and were skipped\n";
   }
 
-  std::signal(SIGSEGV, prevSegv);
-  std::signal(SIGBUS, prevBus);
   return index;
 }
 
@@ -945,16 +957,12 @@ void indexTUControlFlow(ControlFlowIndex &index,
       collapseFilter.empty() ? nullptr : &collapseFilter;
   const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
-  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
-  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
+  CrashGuardScope crashGuard;
   g_cfCrashCount.store(0, std::memory_order_relaxed);
 
-  ControlFlowContextFactory factory(index, graph, collapsePtr, &lockCfg,
-                                    channelCfgPtr, channelsOut, file);
-  runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
+  indexCfLocally(index, channelsOut, graph, compDb, file, collapsePtr,
+                 &lockCfg, channelCfgPtr, pchCache, sysroot);
 
-  std::signal(SIGSEGV, prevSegv);
-  std::signal(SIGBUS, prevBus);
 }
 
 // ============================================================================
@@ -1122,6 +1130,44 @@ private:
   DependencySink *depSink_;
 };
 
+// Parse `file` into TU-local indexes under the crash guard and absorb them
+// into the shared ones only after the parse returned. A crashed parse's
+// local indexes may be torn (and a local lock held), so they are leaked,
+// never merged or destroyed: the TU contributes no partial facts, and no
+// lock the other threads use is ever held by a crashed thread.
+int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
+                  ChannelIndex *channels,
+                  const clang::tooling::CompilationDatabase &compDb,
+                  const std::string &file, const CollapseFilter *collapse,
+                  const LockTypeConfig *lockCfg,
+                  const ChannelTypeConfig *channelCfg,
+                  const PchCache *pchCache, const std::string &sysroot,
+                  DependencySink *depSink, int *crashSignal) {
+  auto local = std::make_unique<BakedIndexes>();
+  DependencySink localDeps;
+  localDeps.deps = &local->deps;
+  BakeEdgeAndContextFactory factory(local->graph, local->cfIndex, collapse,
+                                    lockCfg, channelCfg,
+                                    channels ? &local->channels : nullptr,
+                                    file, depSink ? &localDeps : nullptr);
+  int status =
+      runCfToolGuarded(compDb, file, factory, pchCache, sysroot, crashSignal);
+  if (status == -1) {
+    (void)local.release(); // torn: see above
+    return status;
+  }
+  graph.absorb(local->graph);
+  cfIndex.absorb(local->cfIndex);
+  if (channels)
+    channels->absorb(local->channels);
+  if (depSink && depSink->deps) {
+    std::lock_guard<std::mutex> lock(depSink->mutex);
+    for (auto &kv : local->deps)
+      (*depSink->deps)[kv.first] = std::move(kv.second);
+  }
+  return status;
+}
+
 } // anonymous namespace
 
 BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
@@ -1141,8 +1187,7 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   const ChannelTypeConfig *channelCfgPtr =
       channelCfg.registeredTypes.empty() ? nullptr : &channelCfg;
 
-  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
-  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
+  CrashGuardScope crashGuard;
   g_cfCrashCount.store(0, std::memory_order_relaxed);
   g_cfParseErrorCount.store(0, std::memory_order_relaxed);
   if (stats)
@@ -1168,21 +1213,28 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
       pool.async([&compDb, &out, collapsePtr, &lockCfg, channelCfgPtr,
                   pchCache, &sysroot, stats, &preTu, &depSink, &outcomeSink,
                   file]() {
-        BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
-                                          &lockCfg, channelCfgPtr,
-                                          &out.channels, file, &depSink);
-        bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu,
-                &outcomeSink);
+        bakeRun(
+            file,
+            [&](int *sig) {
+              return bakeTuLocally(out.graph, out.cfIndex, &out.channels,
+                                   compDb, file, collapsePtr, &lockCfg,
+                                   channelCfgPtr, pchCache, sysroot, &depSink,
+                                   sig);
+            },
+            0, stats, preTu, &outcomeSink);
       });
     }
     pool.wait();
   } else {
     for (const auto &file : files) {
-      BakeEdgeAndContextFactory factory(out.graph, out.cfIndex, collapsePtr,
-                                        &lockCfg, channelCfgPtr,
-                                        &out.channels, file, &depSink);
-      bakeRun(compDb, file, factory, pchCache, sysroot, 0, stats, preTu,
-              &outcomeSink);
+      bakeRun(
+          file,
+          [&](int *sig) {
+            return bakeTuLocally(out.graph, out.cfIndex, &out.channels, compDb,
+                                 file, collapsePtr, &lockCfg, channelCfgPtr,
+                                 pchCache, sysroot, &depSink, sig);
+          },
+          0, stats, preTu, &outcomeSink);
     }
   }
   if (stats)
@@ -1204,12 +1256,10 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                  << "--gcc-install-dir=/usr/lib/gcc/<triple>/<ver>)\n";
   }
 
-  std::signal(SIGSEGV, prevSegv);
-  std::signal(SIGBUS, prevBus);
   return out;
 }
 
-void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
+TuOutcome bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
             const clang::tooling::CompilationDatabase &compDb,
             const std::string &file,
             const std::vector<std::string> &collapsePaths,
@@ -1223,16 +1273,12 @@ void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
       collapseFilter.empty() ? nullptr : &collapseFilter;
   const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
 
-  auto prevSegv = std::signal(SIGSEGV, cfCrashHandler);
-  auto prevBus = std::signal(SIGBUS, cfCrashHandler);
-
-  BakeEdgeAndContextFactory combinedFactory(graph, cfIndex, collapsePtr,
-                                            &lockCfg, channelCfgPtr,
-                                            channelsOut, file);
-  runCfToolGuarded(compDb, file, combinedFactory, pchCache, sysroot);
-
-  std::signal(SIGSEGV, prevSegv);
-  std::signal(SIGBUS, prevBus);
+  CrashGuardScope crashGuard;
+  int crashSignal = 0;
+  int status = bakeTuLocally(graph, cfIndex, channelsOut, compDb, file,
+                             collapsePtr, &lockCfg, channelCfgPtr, pchCache,
+                             sysroot, /*depSink=*/nullptr, &crashSignal);
+  return outcomeFor(status, crashSignal);
 }
 
 } // namespace vycor

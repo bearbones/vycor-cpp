@@ -18,6 +18,7 @@
 #include "vycor/anneal/Indexer.h"
 #include "vycor/anneal/TypeNormalize.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
@@ -46,6 +47,7 @@
 #include <map>
 #include <tuple>
 #include <memory>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -1323,16 +1325,18 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   if (workers == 0)
     workers = std::thread::hardware_concurrency();
   llvm::SmallString<128> shardDir;
+  std::optional<InterruptCleanup> shardDirCleanup;
   if (isolate) {
-    llvm::SmallString<128> tmpBase;
-    llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmpBase);
-    llvm::sys::path::append(tmpBase, "vycor-anneal-workers");
-    if (auto ec = llvm::sys::fs::createUniqueDirectory(tmpBase, shardDir)) {
+    if (auto ec = createWorkerShardDir("vycor-anneal-workers", shardDir)) {
       llvm::errs() << "anneal: WARNING: cannot create worker shard "
-                      "directory under "
-                   << tmpBase << ": " << ec.message()
+                      "directory "
+                   << shardDir << "-*: " << ec.message()
                    << " — running in-process instead\n";
+      shardDir.clear();
       isolate = false;
+    } else {
+      // Removed on SIGINT/SIGTERM too (callgraph/Interrupt.h).
+      shardDirCleanup.emplace(std::string(shardDir));
     }
   }
 
@@ -1387,9 +1391,11 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                 payload.applyTo(index);
               });
         },
-        [&](const std::string &tu) {
-          llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
-                       << tu << "\n";
+        [&](const std::string &tu, WorkerFailure why) {
+          llvm::errs() << "anneal: worker: TU poisoned ("
+                       << (why == WorkerFailure::TimedOut ? "timed out"
+                                                          : "crashed worker")
+                       << "): " << tu << "\n";
           poisoned.insert(tu);
         });
   } else {
@@ -1519,9 +1525,11 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                   perFile[slot->second] = std::move(diags);
                 });
           },
-          [&](const std::string &tu) {
-            llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
-                         << tu << "\n";
+          [&](const std::string &tu, WorkerFailure why) {
+            llvm::errs() << "anneal: worker: TU poisoned ("
+                         << (why == WorkerFailure::TimedOut ? "timed out"
+                                                            : "crashed worker")
+                         << "): " << tu << "\n";
           });
     }
   }
@@ -1545,7 +1553,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                  << " TU(s) restored without re-parsing (phase 2)\n";
 
   if (!shardDir.empty())
-    llvm::sys::fs::remove_directories(shardDir);
+    removeWorkerShardDir(shardDir);
 
   for (auto &slot : perFile)
     diagnostics.insert(diagnostics.end(),
