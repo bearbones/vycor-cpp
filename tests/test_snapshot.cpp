@@ -20,6 +20,8 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/Snapshot.h"
 
+#include "SnapshotBytes.h"
+
 #include "llvm/ADT/SmallString.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/FileSystem.h"
@@ -864,8 +866,13 @@ TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
     auto pos = bytes.find("fp-a");
     REQUIRE(pos != std::string::npos);
     bytes[pos + 4] = 9;
+    // Sealed with fresh checksums: the meta decoder itself must refuse it.
+    testing::resealSnapshot(bytes);
     std::ofstream(path, std::ios::binary) << bytes;
-    CHECK(!SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, 0));
+    SnapshotLoadStats stats;
+    CHECK(!SnapshotIO::load(path, &stats, LoadMode::ReadOnly, 0));
+    CHECK(stats.error.find("section 'meta' does not decode") !=
+          std::string::npos);
   }
 
   llvm::sys::fs::remove_directories(dir);

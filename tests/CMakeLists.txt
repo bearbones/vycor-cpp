@@ -92,6 +92,7 @@ add_executable(vycor_tests
   test_worker_pool.cpp
   test_extensions.cpp
   test_anneal_checkpoint.cpp
+  test_write_integrity.cpp
   test_anneal_odr.cpp
   test_anneal_specialization.cpp
   test_anneal_default_args.cpp
@@ -136,6 +137,14 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/warm-refresh-check.py
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(warm_refresh PROPERTIES LABELS "cli;refresh")
+  # Index write integrity (scripts/write-integrity-check.py): a bake that
+  # could not run never replaces the index, concurrent writers serialize
+  # on <index>.lock, and a damaged section is refused by name.
+  add_test(NAME write_integrity
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/write-integrity-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(write_integrity PROPERTIES LABELS "cli;integrity")
   # The validation corpus (scripts/corpus-run.py, docs/validation.md):
   # every case under corpus/cases/ baked and queried, expectations
   # checked. corpus_selfcheck proves the checks can fail: the corpus

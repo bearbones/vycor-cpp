@@ -157,11 +157,12 @@ int loadSide(const std::string &path, unsigned needs,
     err << "megascope diff: no index at " << path << " (" << label << ")\n";
     return kExitIndex;
   }
+  SnapshotLoadStats stats;
   auto *holder = new std::optional<SnapshotData>(
-      SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, needs));
+      SnapshotIO::load(path, &stats, LoadMode::ReadOnly, needs));
   if (!*holder) {
     err << "megascope diff: cannot load index " << path << " (" << label
-        << "; wrong format version or unreadable)\n";
+        << "): " << stats.error << "\n";
     return kExitIndex;
   }
   side.snap = &**holder;

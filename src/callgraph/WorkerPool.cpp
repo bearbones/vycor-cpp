@@ -379,8 +379,14 @@ BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
     llvm::errs() << "megascope: ERROR: cannot create worker shard directory "
                     "under "
                  << tmpBase << ": " << ec.message()
-                 << " — isolated bake aborted (indexes will be empty)\n";
-    return {};
+                 << " — isolated bake aborted\n";
+    // Never an empty success: every TU reads as never parsed, which the
+    // caller refuses to publish (SnapshotIO::unpublishableBake).
+    BakedIndexes aborted;
+    for (const auto &f : files)
+      aborted.outcomes[f] = TuOutcome{
+          TuStatus::Skipped, "isolated bake aborted: no shard directory"};
+    return aborted;
   }
 
   auto out =

@@ -341,7 +341,9 @@ index, else the whole compilation database),
 compile command changed are re-indexed, in parallel; `--snapshot` is
 the old spelling), `--force` (rebuild regardless), `--retry-failed`
 (re-parse the TUs whose last parse failed even when nothing changed;
-see `docs/index-provenance.md`), `--threads`,
+see `docs/index-provenance.md`), `--no-wait` (fail instead of waiting
+when another `index`/`serve` holds the index's write lock,
+`<index>.lock`), `--threads`,
 `--pch-dir`, `--isolate-workers`/`--workers` (subprocess baking: a
 crashing TU costs only that TU), `--stats-json` (bake timings plus the
 per-section index load split), `-v`. Query verbs also take `-v`, which

@@ -59,8 +59,12 @@ namespace vycor {
 // Crash-safety model: each record is length-prefixed and checksummed, and
 // the journal is flushed after every append. A record cut short by a kill
 // fails the length/checksum check on load; the loader keeps everything
-// before it and discards the tail. (Flush-to-OS survives SIGKILL; only
-// power loss can drop tail records, which then simply re-run.)
+// before it, and open() truncates the file to the end of the last valid
+// record before appending, so a torn or damaged record never hides the
+// records written after it. (Flush-to-OS survives SIGKILL; only power
+// loss can drop tail records, which then simply re-run.) A fresh journal
+// is published atomically; an append that fails (full disk) stops
+// journaling for the rest of the run instead of aborting it.
 //
 // Like snapshots, the journal is a cache, never a source of truth: a
 // version/fingerprint mismatch or any decode doubt discards it and the
@@ -170,7 +174,9 @@ private:
   };
 
   // Parses the journal byte stream (past the header) into the maps above.
-  void loadRecords(const char *data, size_t size);
+  // Returns the length of the prefix that holds whole, valid records:
+  // open() truncates the file there before appending.
+  size_t loadRecords(const char *data, size_t size);
   void appendRecord(uint8_t kind, const std::string &payload);
 
   std::string path_;

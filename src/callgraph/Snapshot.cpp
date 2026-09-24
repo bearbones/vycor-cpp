@@ -15,10 +15,12 @@
 
 #include "vycor/callgraph/Snapshot.h"
 
+#include "vycor/callgraph/AtomicFile.h"
+
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/xxhash.h"
 
 #include <algorithm>
 #include <cassert>
@@ -292,6 +294,113 @@ bool readInternerTable(Reader &r, StringInterner &interner) {
   return r.ok && interner.installStrings(std::move(table));
 }
 
+const char *sectionName(uint8_t kind) {
+  switch (kind) {
+  case kMetaKind:
+    return "meta";
+  case kGraphKind:
+    return "graph";
+  case kControlFlowKind:
+    return "control_flow";
+  case kChannelsKind:
+    return "channels";
+  }
+  return "unknown";
+}
+
+/// v13 integrity checksum of a byte range (header or section): xxh3-64,
+/// which runs at memory bandwidth, so verifying a section costs little
+/// next to decoding it (docs/index-provenance.md has the measurement).
+uint64_t checksumOf(const char *p, uint64_t n) {
+  return llvm::xxh3_64bits(
+      llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(p), n));
+}
+
+/// The fixed header: summary counts and the section table.
+struct Header {
+  IndexSummary summary;
+  struct Range {
+    const char *begin = nullptr;
+    uint64_t length = 0;
+    uint64_t checksum = 0;
+    bool present = false;
+  } ranges[kSectionKinds];
+};
+
+/// Parse and check the header of a snapshot file: magic, format version,
+/// header checksum, and a section table with every kind exactly once and
+/// inside the file. On failure `error` says what is wrong.
+bool parseHeader(const llvm::MemoryBuffer &buf, Header &h,
+                 std::string &error) {
+  Reader r{buf.getBufferStart(), buf.getBufferEnd()};
+  std::string magic = r.bytes(4);
+  if (!r.ok || magic != std::string(kMagic, 4)) {
+    error = "not a megascope index (bad magic)";
+    return false;
+  }
+  const uint32_t version = r.u32();
+  if (!r.ok) {
+    error = "truncated header";
+    return false;
+  }
+  if (version != SnapshotIO::kFormatVersion) {
+    error = "format version " + std::to_string(version) + ", expected " +
+            std::to_string(SnapshotIO::kFormatVersion);
+    return false;
+  }
+  const uint64_t fileSize = buf.getBufferSize();
+  if (fileSize < SnapshotIO::kHeaderBytes) {
+    error = "truncated header";
+    return false;
+  }
+  const uint64_t covered = SnapshotIO::kHeaderBytes - 8;
+  Reader tail{buf.getBufferStart() + covered,
+              buf.getBufferStart() + SnapshotIO::kHeaderBytes};
+  if (tail.u64() != checksumOf(buf.getBufferStart(), covered)) {
+    error = "header checksum mismatch";
+    return false;
+  }
+  h.summary.nodes = r.u64();
+  h.summary.edges = r.u64();
+  h.summary.callSites = r.u64();
+  h.summary.channelSites = r.u64();
+  const uint32_t tableCount = r.u32();
+  if (tableCount != kSectionKinds) {
+    error = "section table has " + std::to_string(tableCount) +
+            " entries, expected " + std::to_string(kSectionKinds);
+    return false;
+  }
+  for (uint32_t i = 0; i < tableCount; ++i) {
+    uint8_t kind = r.u8();
+    uint64_t offset = r.u64();
+    uint64_t length = r.u64();
+    uint64_t checksum = r.u64();
+    if (kind >= kSectionKinds || h.ranges[kind].present) {
+      error = "section table is malformed";
+      return false;
+    }
+    if (offset < SnapshotIO::kHeaderBytes || offset > fileSize ||
+        length > fileSize - offset) {
+      error = std::string("section '") + sectionName(kind) +
+              "' lies outside the file (truncated?)";
+      return false;
+    }
+    h.ranges[kind] =
+        Header::Range{buf.getBufferStart() + offset, length, checksum, true};
+  }
+  return r.ok;
+}
+
+/// Whether the stored checksum of a section matches its bytes.
+bool verifySection(const Header &h, uint8_t kind, std::string &error) {
+  const auto &range = h.ranges[kind];
+  if (checksumOf(range.begin, range.length) == range.checksum)
+    return true;
+  error = std::string("section '") + sectionName(kind) +
+          "' checksum mismatch (the file is damaged)";
+  return false;
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------------------
@@ -300,7 +409,8 @@ bool readInternerTable(Reader &r, StringInterner &interner) {
 
 bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
                       const ControlFlowIndex &cfIndex,
-                      const SnapshotMeta &meta, const ChannelIndex &channels) {
+                      const SnapshotMeta &meta, const ChannelIndex &channels,
+                      std::string *error) {
   using SId = StringInterner::Id;
   // One buffer per v8 section, concatenated behind the header below.
   std::string sections[kSectionKinds];
@@ -625,48 +735,55 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     }
   }
 
-  // Assemble the file: header (version, summary counts, section table),
-  // then the sections. Write to a temp file and rename so a crash
-  // mid-write never leaves a torn snapshot.
-  std::string tmpPath = path + ".tmp";
-  {
-    // The default index location lives in a directory that may not exist
-    // yet (<build-path>/.vycor/); the rename below needs it to.
-    llvm::sys::fs::create_directories(llvm::sys::path::parent_path(path));
-    std::error_code ec;
-    llvm::raw_fd_ostream os(tmpPath, ec, llvm::sys::fs::OF_None);
-    if (ec)
-      return false;
+  // Assemble the file: header (version, summary counts, section table
+  // with a checksum per section, header checksum), then the sections.
+  // Published atomically (unique temp file, fsync, rename): a crash or a
+  // concurrent writer never leaves a torn or mixed index.
+  std::string header;
+  header.append(kMagic, 4);
+  putU32(header, kFormatVersion);
+  putU64(header, graph.nodeCount());
+  putU64(header, graph.edgeCount());
+  putU64(header, cfIndex.size());
+  putU64(header, channels.size());
+  putU32(header, kSectionKinds);
+  uint64_t offset = kHeaderBytes;
+  for (uint32_t kind = 0; kind < kSectionKinds; ++kind) {
+    putU8(header, static_cast<uint8_t>(kind));
+    putU64(header, offset);
+    putU64(header, sections[kind].size());
+    putU64(header, checksumOf(sections[kind].data(), sections[kind].size()));
+    offset += sections[kind].size();
+  }
+  putU64(header, checksumOf(header.data(), header.size()));
+  assert(header.size() == kHeaderBytes);
+  return writeFileAtomically(
+      path,
+      [&](llvm::raw_ostream &os) {
+        os << header;
+        for (const auto &section : sections)
+          os << section;
+      },
+      error);
+}
 
-    os.write(kMagic, 4);
-    std::string header;
-    putU32(header, kFormatVersion);
-    putU64(header, graph.nodeCount());
-    putU64(header, graph.edgeCount());
-    putU64(header, cfIndex.size());
-    putU64(header, channels.size());
-    putU32(header, kSectionKinds);
-    uint64_t offset = kHeaderBytes;
-    for (uint32_t kind = 0; kind < kSectionKinds; ++kind) {
-      putU8(header, static_cast<uint8_t>(kind));
-      putU64(header, offset);
-      putU64(header, sections[kind].size());
-      offset += sections[kind].size();
+bool SnapshotIO::verify(const std::string &path, std::string *error) {
+  std::string why;
+  auto bufOrErr = llvm::MemoryBuffer::getFile(path, /*IsText=*/false,
+                                              /*RequiresNullTerminator=*/false);
+  if (!bufOrErr) {
+    why = bufOrErr.getError().message();
+  } else {
+    Header h;
+    if (parseHeader(**bufOrErr, h, why)) {
+      for (uint8_t kind = 0; kind < kSectionKinds; ++kind)
+        if (!verifySection(h, kind, why))
+          break;
     }
-    assert(header.size() + 4 == kHeaderBytes);
-    os << header;
-    for (const auto &section : sections)
-      os << section;
-    os.flush();
-    if (os.has_error())
-      return false;
   }
-
-  if (llvm::sys::fs::rename(tmpPath, path)) {
-    llvm::sys::fs::remove(tmpPath);
-    return false;
-  }
-  return true;
+  if (error)
+    *error = why;
+  return why.empty();
 }
 
 std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
@@ -679,8 +796,11 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
   const auto loadStart = Clock::now();
   auto bufOrErr = llvm::MemoryBuffer::getFile(path, /*IsText=*/false,
                                               /*RequiresNullTerminator=*/false);
-  if (!bufOrErr)
+  if (!bufOrErr) {
+    if (stats)
+      stats->error = bufOrErr.getError().message();
     return std::nullopt;
+  }
   // Shared with a mapped control-flow index, which keeps the file mapped.
   std::shared_ptr<llvm::MemoryBuffer> buf = std::move(*bufOrErr);
 
@@ -711,58 +831,41 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
               .count();
     }
   };
+  // The section being decoded, for the failure message.
+  const char *current = "header";
+  auto fail = [&](const std::string &why) -> std::optional<SnapshotData> {
+    if (stats && stats->error.empty())
+      stats->error = why;
+    finish();
+    return std::nullopt;
+  };
+  auto malformed = [&]() {
+    return fail(std::string("section '") + current +
+                "' does not decode (the file is damaged or from an "
+                "incompatible build)");
+  };
 
-  std::string magic = r.bytes(4);
-  if (!r.ok || magic != std::string(kMagic, 4)) {
-    finish();
-    return std::nullopt;
-  }
-  if (r.u32() != kFormatVersion) {
-    finish();
-    return std::nullopt;
-  }
+  Header header;
+  std::string headerError;
+  if (!parseHeader(*buf, header, headerError))
+    return fail(headerError);
 
   SnapshotData out;
-  out.summary.nodes = r.u64();
-  out.summary.edges = r.u64();
-  out.summary.callSites = r.u64();
-  out.summary.channelSites = r.u64();
-
-  // Section table: every kind must be present exactly once and lie within
-  // the file. Each section is decoded through its own bounded Reader, so
-  // a record overrunning its section is caught as corruption.
-  struct Range {
-    const char *begin = nullptr;
-    uint64_t length = 0;
-    bool present = false;
-  };
-  Range ranges[kSectionKinds];
-  const uint64_t fileSize = buf->getBufferSize();
-  uint32_t tableCount = r.u32();
-  if (!r.ok || tableCount != kSectionKinds) {
-    finish();
-    return std::nullopt;
-  }
-  for (uint32_t i = 0; r.ok && i < tableCount; ++i) {
-    uint8_t kind = r.u8();
-    uint64_t offset = r.u64();
-    uint64_t length = r.u64();
-    if (!r.ok || kind >= kSectionKinds || ranges[kind].present ||
-        offset > fileSize || length > fileSize - offset) {
-      r.ok = false;
-      break;
-    }
-    ranges[kind] = Range{buf->getBufferStart() + offset, length, true};
-  }
-  if (!r.ok || static_cast<uint64_t>(r.p - buf->getBufferStart()) !=
-                   kHeaderBytes) {
-    finish();
-    return std::nullopt;
-  }
+  out.summary = header.summary;
+  const auto &ranges = header.ranges;
+  // Each section is checksummed before it is decoded, then decoded
+  // through its own bounded Reader, so a record overrunning its section
+  // is caught as corruption. Returns why the section is refused (empty
+  // when it checks out).
   auto beginSection = [&](uint8_t kind) {
+    current = sectionName(kind);
     r = Reader{ranges[kind].begin, ranges[kind].begin + ranges[kind].length};
     sectionStart = r.p;
     sectionClock = Clock::now();
+    std::string why;
+    if (!verifySection(header, kind, why))
+      r.ok = false;
+    return why;
   };
   // A section must be consumed exactly; a short read is layout drift.
   auto sectionDone = [&]() {
@@ -779,25 +882,24 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     }
   };
 
-  beginSection(kMetaKind);
+  if (std::string why = beginSection(kMetaKind); !why.empty())
+    return fail(why);
   if (!readMeta(r, out.meta)) {
-    finish();
-    return std::nullopt;
+    return malformed();
   }
   sectionDone();
   if (!r.ok) {
-    finish();
-    return std::nullopt;
+    return malformed();
   }
   mark("meta");
 
   if (needs & kSectionGraph) {
-    beginSection(kGraphKind);
+    if (std::string why = beginSection(kGraphKind); !why.empty())
+      return fail(why);
     // Graph interner table: installed ids match the saved ids by position, so
     // every raw id below is valid verbatim — no interning per record.
     if (!readInternerTable(r, out.graph.interner_)) {
-      finish();
-      return std::nullopt;
+      return malformed();
     }
     mark("graph_interner");
 
@@ -934,8 +1036,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     }
     sectionDone();
     if (!r.ok) {
-      finish();
-      return std::nullopt;
+      return malformed();
     }
     out.loaded |= kSectionGraph;
   } else {
@@ -943,7 +1044,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
   }
 
   if (needs & kSectionControlFlow) {
-    beginSection(kControlFlowKind);
+    if (std::string why = beginSection(kControlFlowKind); !why.empty())
+      return fail(why);
     // Control flow: interner, set tables (positions preserved verbatim),
     // then the records. A mutable load installs the interner and inserts
     // every record (no interning, no key building per context); a
@@ -959,8 +1061,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     if (mutableLoad) {
       r.p = tableStart;
       if (!r.ok || !readInternerTable(r, out.cfIndex.interner_)) {
-        finish();
-        return std::nullopt;
+        return malformed();
       }
       if (r.p != tableStart + tableBytes)
         r.ok = false;
@@ -968,8 +1069,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
       r.p = r.ok ? tableStart + tableBytes : r.p;
     }
     if (!r.ok) {
-      finish();
-      return std::nullopt;
+      return malformed();
     }
     mark("cf_interner");
 
@@ -1123,8 +1223,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     }
     sectionDone();
     if (!r.ok) {
-      finish();
-      return std::nullopt;
+      return malformed();
     }
     out.loaded |= kSectionControlFlow;
   } else {
@@ -1132,7 +1231,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
   }
 
   if (needs & kSectionChannels) {
-    beginSection(kChannelsKind);
+    if (std::string why = beginSection(kChannelsKind); !why.empty())
+      return fail(why);
     {
       ChannelIndex &ch = out.channels;
       std::lock_guard<std::mutex> lock(ch.mutex_);
@@ -1194,10 +1294,9 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     skipSection("channels", kChannelsKind);
   }
 
-  finish();
   if (!r.ok)
-    return std::nullopt;
-
+    return malformed();
+  finish();
   return out;
 }
 
@@ -1419,6 +1518,36 @@ void SnapshotIO::recordDependencies(SnapshotMeta &meta,
       meta.tuDeps[i].push_back(pos->second);
     }
   }
+}
+
+std::string
+SnapshotIO::unpublishableBake(const std::vector<std::string> &requested,
+                              const TuOutcomes &outcomes) {
+  if (requested.empty())
+    return std::string();
+  size_t missing = 0;
+  std::string firstDetail;
+  for (const auto &tu : requested) {
+    auto it = outcomes.find(tu);
+    if (it == outcomes.end()) {
+      ++missing;
+      continue;
+    }
+    if (it->second.status != TuStatus::Skipped)
+      return std::string();
+    if (firstDetail.empty())
+      firstDetail = it->second.detail;
+  }
+  std::string why = "the bake parsed none of the " +
+                    std::to_string(requested.size()) + " selected TU(s) (";
+  if (missing == requested.size())
+    why += "no TU reported an outcome";
+  else
+    why += std::to_string(requested.size() - missing) + " skipped" +
+           (firstDetail.empty() ? std::string() : ": " + firstDetail) +
+           (missing ? ", " + std::to_string(missing) + " without an outcome"
+                    : std::string());
+  return why + ")";
 }
 
 TuOutcomes SnapshotIO::outcomesOf(const SnapshotMeta &meta) {

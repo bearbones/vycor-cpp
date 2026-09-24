@@ -154,6 +154,10 @@ struct SnapshotLoadStats {
   std::vector<SnapshotLoadSection> sections;
   uint64_t fileBytes = 0;
   double totalMs = 0;
+  /// Why the load failed, naming the header or section at fault ("section
+  /// 'graph' checksum mismatch ...", "format version 12, expected 13");
+  /// empty on success.
+  std::string error;
 };
 
 /// What the loaded indexes will be used for. ReadOnly skips the state that
@@ -210,28 +214,44 @@ public:
   ///     (ControlFlowIndex::isMapped; docs/control-flow-access.md). A
   ///     Mutable load decodes the records as before and skips the
   ///     orders.
-  static constexpr uint32_t kFormatVersion = 12;
+  /// v13: integrity — each section table entry carries an xxh3-64
+  ///     checksum of its section and the header ends with a checksum of
+  ///     itself; a load verifies the header and every section it decodes
+  ///     and refuses a mismatch, naming the section (SnapshotLoadStats::
+  ///     error). Section contents are unchanged from v12.
+  static constexpr uint32_t kFormatVersion = 13;
   /// Bytes before the first section: magic(4) + version(4) + summary(32) +
-  /// table count(4) + 4 entries of kind(1) + offset(8) + length(8).
-  static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 17;
+  /// table count(4) + 4 entries of kind(1) + offset(8) + length(8) +
+  /// checksum(8), then the header checksum(8).
+  static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 25 + 8;
 
-  /// Serialize graph + cfIndex + channels + meta to `path` (atomically, via
-  /// a temp file and rename). `channels` defaults to empty so callers that
-  /// don't use --channel-types-json are unaffected.
-  /// Returns false on I/O failure.
+  /// Serialize graph + cfIndex + channels + meta to `path`, atomically:
+  /// through a uniquely named temp file in the same directory, fsync'ed
+  /// and renamed over `path` (writeFileAtomically), so concurrent saves
+  /// and crashes never publish a torn or mixed file. `channels` defaults
+  /// to empty so callers that don't use --channel-types-json are
+  /// unaffected. Returns false on I/O failure (`path` untouched, no temp
+  /// file left), with `error` saying what failed.
   static bool save(const std::string &path, const CallGraph &graph,
                    const ControlFlowIndex &cfIndex, const SnapshotMeta &meta,
-                   const ChannelIndex &channels = ChannelIndex());
+                   const ChannelIndex &channels = ChannelIndex(),
+                   std::string *error = nullptr);
 
   /// Load a snapshot. Returns nullopt if the file is missing, has a
-  /// different format version, or fails to decode. `stats`, when given,
-  /// receives the per-section decode timing (filled even on failure, up
-  /// to the section that failed). `needs` selects the sections to decode
-  /// (meta and the summary always are); a section left out stays empty
-  /// and is absent from SnapshotData::loaded.
+  /// different format version, fails a checksum, or fails to decode;
+  /// `stats->error` then says which. `stats`, when given, receives the
+  /// per-section decode timing (filled even on failure, up to the
+  /// section that failed). `needs` selects the sections to decode (meta
+  /// and the summary always are); a section left out stays empty, is
+  /// absent from SnapshotData::loaded, and is not checksummed.
   static std::optional<SnapshotData>
   load(const std::string &path, SnapshotLoadStats *stats = nullptr,
        LoadMode mode = LoadMode::Mutable, unsigned needs = kSectionAll);
+
+  /// Check the header and every section checksum of the index at `path`
+  /// without decoding anything (`megascope info`). Returns false with
+  /// `error` naming the header or section at fault.
+  static bool verify(const std::string &path, std::string *error = nullptr);
 
   /// Stat the given files into stamps. Files that cannot be stat'ed get
   /// mtimeNs = 0 and size = 0 (which never matches a real stamp, forcing a
@@ -299,6 +319,16 @@ public:
   /// version is still dirtied.
   static void recordDependencies(SnapshotMeta &meta,
                                  const TuDependencies &deps);
+
+  /// Why a bake of `requested` TUs must not be published over an index
+  /// (empty when it may be): the selection is non-empty and not one TU
+  /// was parsed — no outcome reported at all (the bake never ran, e.g.
+  /// an isolated bake that could not create its shard directory) or
+  /// every outcome Skipped. Saving such a bake would replace a good index
+  /// with an empty one. A TU that was parsed and failed (Partial,
+  /// Crashed, Poisoned) is a real result and does not count.
+  static std::string unpublishableBake(const std::vector<std::string> &requested,
+                                       const TuOutcomes &outcomes);
 
   /// meta.outcomes keyed by TU path (a TU without a recorded outcome is
   /// absent).

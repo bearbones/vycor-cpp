@@ -118,6 +118,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 
 | File | Purpose |
 |---|---|
+| `AtomicFile.h/.cpp` | `writeFileAtomically` (unique temp, fsync, rename, directory fsync — every index, journal header, and shard write), `IndexWriteLock` (`flock` on `<index>.lock` for `index`/`serve`), stale temp cleanup |
 | `CallGraph.h/.cpp` | Graph data structure: nodes (functions), edges (calls), class hierarchy, virtual overrides |
 | `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges |
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
@@ -206,9 +207,10 @@ sections the tool declares (`ToolEntry::needs`, set in
 per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
-place: header with
-`IndexSummary` counts and a `{kind, offset, length}` table for meta /
-graph / control flow / channels), so a graph-only tool never decodes the
+place, v13 a checksum per section and for the header: header with
+`IndexSummary` counts and a `{kind, offset, length, checksum}` table
+for meta / graph / control flow / channels), so a graph-only tool never
+decodes (or checksums) the
 call-site contexts, `info` reads the meta section alone, and
 `graph_summary` reports the header counts (`ToolContext::summary`).
 A read-only load that needs the control-flow section does not decode
@@ -263,6 +265,22 @@ and the drop + dirty set is removed in one `removeTUs` call per index
 (one scrub per affected adjacency vector for the whole set).
 `scripts/warm-refresh-check.py` (ctest `warm_refresh`) checks that every
 kind of refresh equals a clean rebuild, in-process and isolated.
+
+Write integrity (`docs/index-provenance.md`, format v13): every index,
+anneal journal header, and worker shard is published through
+`writeFileAtomically` (`callgraph/AtomicFile.h`: unique temp file in the
+target directory, fsync, rename, directory fsync; temp removed and
+stream error cleared on failure). `index`/`serve` hold an advisory
+`flock` on `<index>.lock` (`IndexWriteLock`) from the meta load to the
+save (`--no-wait` fails instead of waiting; readers never lock). A load
+verifies the header checksum and each decoded section's xxh3 checksum
+and names the damaged section in `SnapshotLoadStats::error`; `info`
+verifies all sections (`SnapshotIO::verify`). A bake that parsed none of
+its TUs is never saved (`SnapshotIO::unpublishableBake`; `index` exits
+1). The anneal journal is truncated to its last valid record before
+appending. `scripts/write-integrity-check.py` (ctest
+`write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
+failure mode.
 
 ### `mcp` — MCP Server (adapter)
 
@@ -347,7 +365,7 @@ equivalents and exits 2):
 ```
 vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers]
+vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin
