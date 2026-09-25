@@ -50,6 +50,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -314,6 +315,13 @@ TEST_CASE("A damaged index is refused on load", "[write-integrity]") {
     CHECK(SnapshotIO::verify(path));
   }
 
+  SECTION("trailing bytes after the last section") {
+    writeBytes(path, original + "junk");
+    SnapshotLoadStats stats;
+    CHECK_FALSE(SnapshotIO::load(path, &stats, LoadMode::ReadOnly, 0));
+    CHECK(stats.error == "4 trailing byte(s) after the last section");
+  }
+
   SECTION("truncated at any length") {
     for (size_t len = 0; len < original.size(); len += 7) {
       writeBytes(path, original.substr(0, len));
@@ -355,6 +363,29 @@ TEST_CASE("The index write lock admits one writer at a time",
   waiter.join();
   CHECK(acquired);
 }
+
+#ifndef _WIN32
+TEST_CASE("A lock file another user created still excludes a second "
+          "writer",
+          "[write-integrity]") {
+  ScratchDir dir;
+  const std::string path = dir.file("index.vycs");
+  // Another user's lock file in a shared build directory: readable, not
+  // writable (as root the write open still succeeds, so this checks the
+  // exclusion, and on CI the read-only fallback too).
+  writeBytes(path + ".lock", "");
+  REQUIRE(::chmod((path + ".lock").c_str(), 0444) == 0);
+  std::string error;
+  bool busy = false;
+  auto first = IndexWriteLock::acquire(path, /*wait=*/false, &error, &busy);
+  REQUIRE(first);
+  auto second = IndexWriteLock::acquire(path, /*wait=*/false, &error, &busy);
+  CHECK_FALSE(second);
+  CHECK(busy);
+  first.reset();
+  CHECK(IndexWriteLock::acquire(path, /*wait=*/false, &error, &busy));
+}
+#endif
 
 TEST_CASE("Stale temp files of killed writers are recognized",
           "[write-integrity]") {
@@ -475,6 +506,18 @@ TEST_CASE("A corrupt journal record does not swallow later progress",
   CHECK(ckpt->attempts(AnnealCheckpoint::kPhaseIndex, a.path, a) == 2);
   GlobalIndex into;
   CHECK(ckpt->replayPhase1(b.path, b, into));
+}
+
+TEST_CASE("A journal another run has open is refused",
+          "[write-integrity][AnnealCheckpoint]") {
+  ScratchDir dir;
+  const std::string path = dir.file("anneal.vycj");
+  auto first = AnnealCheckpoint::open(path, 0x1234);
+  REQUIRE(first);
+  // A second run would truncate records the first is still appending.
+  CHECK_FALSE(AnnealCheckpoint::open(path, 0x1234));
+  first.reset();
+  CHECK(AnnealCheckpoint::open(path, 0x1234));
 }
 
 TEST_CASE("A journal record length near 4 GiB cannot read past the file",

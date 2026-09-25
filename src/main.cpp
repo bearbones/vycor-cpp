@@ -1110,7 +1110,8 @@ int main(int argc, const char **argv) {
       vycor::SnapshotIO::recordOutcomes(meta, baked.outcomes);
       std::string saveError;
       if (!vycor::SnapshotIO::save(McpWorkerOut, baked.graph, baked.cfIndex,
-                                   meta, baked.channels, &saveError)) {
+                                   meta, baked.channels, &saveError,
+                                   /*durable=*/false)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
                      << McpWorkerOut << ": " << saveError << "\n";
         return 1;

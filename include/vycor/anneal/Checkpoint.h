@@ -33,6 +33,8 @@ class raw_fd_ostream;
 
 namespace vycor {
 
+class IndexWriteLock;
+
 // ============================================================================
 // Anneal checkpoint journal (--checkpoint <file>)
 //
@@ -112,11 +114,14 @@ public:
   // poisoned and skipped on resume.
   static constexpr unsigned kMaxAttempts = 2;
 
-  // Opens the journal at `path`, creating it if absent. An existing journal
-  // whose header (magic/version/fingerprint) doesn't match is discarded and
-  // restarted fresh; a corrupt/truncated tail is dropped and everything
-  // before it kept. Returns nullptr only when the file cannot be opened for
-  // appending (caller should warn and continue without a checkpoint).
+  // Opens the journal at `path`, creating it if absent. An existing
+  // journal whose header (magic/version/fingerprint) doesn't match is
+  // discarded and restarted fresh; a corrupt/truncated tail is dropped and
+  // everything before it kept. `<path>.lock` is held while the checkpoint
+  // is open. Returns nullptr when another run has the journal open
+  // (truncating its tail could cut off a record that run is still
+  // appending) or the file cannot be opened for appending; the caller
+  // should warn and continue without a checkpoint.
   static std::unique_ptr<AnnealCheckpoint>
   open(const std::string &path, uint64_t optionsFingerprint);
 
@@ -180,6 +185,9 @@ private:
   void appendRecord(uint8_t kind, const std::string &payload);
 
   std::string path_;
+  // `<journal>.lock`, held while this checkpoint is open (one run per
+  // journal).
+  std::unique_ptr<IndexWriteLock> lock_;
   mutable std::mutex mutex_;
   std::unique_ptr<llvm::raw_fd_ostream> out_;
 

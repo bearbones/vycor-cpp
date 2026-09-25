@@ -370,6 +370,7 @@ bool parseHeader(const llvm::MemoryBuffer &buf, Header &h,
             " entries, expected " + std::to_string(kSectionKinds);
     return false;
   }
+  uint64_t end = SnapshotIO::kHeaderBytes;
   for (uint32_t i = 0; i < tableCount; ++i) {
     uint8_t kind = r.u8();
     uint64_t offset = r.u64();
@@ -387,6 +388,14 @@ bool parseHeader(const llvm::MemoryBuffer &buf, Header &h,
     }
     h.ranges[kind] =
         Header::Range{buf.getBufferStart() + offset, length, checksum, true};
+    end = std::max(end, offset + length);
+  }
+  // Sections are written back to back behind the header: anything after
+  // the last one is not part of any save.
+  if (r.ok && end != fileSize) {
+    error = std::to_string(fileSize - end) +
+            " trailing byte(s) after the last section";
+    return false;
   }
   return r.ok;
 }
@@ -410,7 +419,7 @@ bool verifySection(const Header &h, uint8_t kind, std::string &error) {
 bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
                       const ControlFlowIndex &cfIndex,
                       const SnapshotMeta &meta, const ChannelIndex &channels,
-                      std::string *error) {
+                      std::string *error, bool durable) {
   using SId = StringInterner::Id;
   // One buffer per v8 section, concatenated behind the header below.
   std::string sections[kSectionKinds];
@@ -764,7 +773,7 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
         for (const auto &section : sections)
           os << section;
       },
-      error);
+      error, durable);
 }
 
 bool SnapshotIO::verify(const std::string &path, std::string *error) {

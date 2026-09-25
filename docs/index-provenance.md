@@ -332,10 +332,15 @@ and refused when there is nothing to publish.
   <index>.lock` and blocks, or with `--no-wait` exits 1 at once.
   Readers never lock: the rename is atomic for them. Under the lock any
   `<index>.tmp-XXXXXX` left by a killed writer is removed. The lock file
-  stays in place (deleting it would race a waiter).
+  stays in place (deleting it would race a waiter). A lock file another
+  user created and this one cannot write (a shared build directory) is
+  locked through a read-only descriptor, so it still excludes; only a
+  lock file that cannot be opened at all (a read-only index directory)
+  lets `index`/`serve` continue unlocked, with a warning.
 - **Checksums.** v13 extends each section table entry with an xxh3-64
   checksum of its section and ends the header with a checksum of the
-  header itself (`kHeaderBytes` 152, was 112). A load verifies the
+  header itself (`kHeaderBytes` 152, was 112). The sections must end
+  exactly at the end of the file; trailing bytes are refused. A load verifies the
   header and every section it decodes, before decoding it; a mismatch
   fails the load with `SnapshotLoadStats::error` naming the section
   (`section 'graph' checksum mismatch (the file is damaged)`), and the
@@ -361,7 +366,13 @@ and refused when there is nothing to publish.
   shard lengths are bounds-checked in `size_t` (`len + 4` wrapped in
   `uint32_t` for lengths near 4 GiB and read past the buffer). A failed
   append clears the stream error and stops journaling for the rest of
-  the run instead of aborting it at exit.
+  the run instead of aborting it at exit. A journal is locked through
+  `<journal>.lock` while a run has it open; a second run given the same
+  `--checkpoint` continues without one (truncating could otherwise cut
+  off a record the first run is still appending).
+- **Throwaway files** (worker shards, the anneal handoff file) are
+  published atomically but without the two fsyncs
+  (`writeFileAtomically(..., durable=false)`).
 
 Checksum cost, measured on a synthetic 200-TU project (80,200 nodes,
 239,600 edges and call sites; a 130 MB index: 44 MB graph, 81 MB

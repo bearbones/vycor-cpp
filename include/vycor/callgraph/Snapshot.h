@@ -231,11 +231,12 @@ public:
   /// and crashes never publish a torn or mixed file. `channels` defaults
   /// to empty so callers that don't use --channel-types-json are
   /// unaffected. Returns false on I/O failure (`path` untouched, no temp
-  /// file left), with `error` saying what failed.
+  /// file left), with `error` saying what failed. `durable` false skips
+  /// the fsyncs (worker shards: throwaway files the parent reads at once).
   static bool save(const std::string &path, const CallGraph &graph,
                    const ControlFlowIndex &cfIndex, const SnapshotMeta &meta,
                    const ChannelIndex &channels = ChannelIndex(),
-                   std::string *error = nullptr);
+                   std::string *error = nullptr, bool durable = true);
 
   /// Load a snapshot. Returns nullopt if the file is missing, has a
   /// different format version, fails a checksum, or fails to decode;

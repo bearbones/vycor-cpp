@@ -618,6 +618,20 @@ AnnealCheckpoint::open(const std::string &path, uint64_t optionsFingerprint) {
   std::unique_ptr<AnnealCheckpoint> ckpt(new AnnealCheckpoint());
   ckpt->path_ = path;
 
+  // One run per journal: a second run would truncate records the first
+  // is still appending (see below). Held for the checkpoint's lifetime.
+  // A lock file that cannot be created (read-only directory) is no
+  // reason to refuse: the journal itself would fail to open then.
+  std::string lockError;
+  bool busy = false;
+  ckpt->lock_ =
+      IndexWriteLock::acquire(path, /*wait=*/false, &lockError, &busy);
+  if (!ckpt->lock_ && busy) {
+    llvm::errs() << "anneal: checkpoint " << path
+                 << " is in use by another run (" << lockError << ")\n";
+    return nullptr;
+  }
+
   // Where appends continue: the end of the last record that loaded
   // cleanly. Anything after it (a record cut short by a kill, a damaged
   // one, garbage) is truncated away before appending, or new records
@@ -915,9 +929,12 @@ bool writeShardFile(const std::string &path, const char magic[4],
     buf.append(payload);
     putU32(buf, fnv32(payload.data(), payload.size()));
   }
+  // Shards and the handoff file live in a temp directory and are read
+  // back at once: atomic, but not worth two fsyncs per batch.
   std::string error;
   if (!writeFileAtomically(
-          path, [&](llvm::raw_ostream &os) { os << buf; }, &error)) {
+          path, [&](llvm::raw_ostream &os) { os << buf; }, &error,
+          /*durable=*/false)) {
     llvm::errs() << "anneal: " << error << "\n";
     return false;
   }

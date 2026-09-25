@@ -69,7 +69,7 @@ std::string atomicTempPrefix(const std::string &path) {
 
 bool writeFileAtomically(const std::string &path,
                          llvm::function_ref<void(llvm::raw_ostream &)> body,
-                         std::string *error) {
+                         std::string *error, bool durable) {
   const std::string dir = parentDir(path);
   if (std::error_code ec = llvm::sys::fs::create_directories(dir)) {
     setError(error, "cannot create " + dir + ": " + ec.message());
@@ -101,7 +101,7 @@ bool writeFileAtomically(const std::string &path,
       return fail(msg);
     }
 #ifndef _WIN32
-    if (::fsync(fd) != 0) {
+    if (durable && ::fsync(fd) != 0) {
       std::string msg = "cannot sync " + tmp + ": " + std::strerror(errno);
       return fail(msg);
     }
@@ -116,7 +116,8 @@ bool writeFileAtomically(const std::string &path,
 
   if (std::error_code ec = llvm::sys::fs::rename(tmp, path))
     return fail("cannot rename " + tmp + " to " + path + ": " + ec.message());
-  syncDirectory(dir);
+  if (durable)
+    syncDirectory(dir);
   return true;
 }
 
@@ -171,8 +172,16 @@ std::unique_ptr<IndexWriteLock> IndexWriteLock::acquire(
   if (std::error_code ec = llvm::sys::fs::openFileForReadWrite(
           lock->lockPath_, lock->fd_, llvm::sys::fs::CD_OpenAlways,
           llvm::sys::fs::OF_None)) {
-    setError(error, "cannot open " + lock->lockPath_ + ": " + ec.message());
-    return nullptr;
+    // A lock file another user created (0644 under a usual umask, in a
+    // shared build directory) cannot be opened for writing, but flock
+    // needs no write access: lock it through a read-only descriptor.
+    // Only a lock file that cannot be opened at all is an error.
+    lock->fd_ = -1;
+    if (llvm::sys::fs::openFileForRead(lock->lockPath_, lock->fd_)) {
+      lock->fd_ = -1;
+      setError(error, "cannot open " + lock->lockPath_ + ": " + ec.message());
+      return nullptr;
+    }
   }
 #ifndef _WIN32
   if (::flock(lock->fd_, LOCK_EX | LOCK_NB) == 0)

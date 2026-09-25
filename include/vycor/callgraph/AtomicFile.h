@@ -40,10 +40,13 @@ namespace vycor {
 /// created when missing. On any failure (the stream reported a write
 /// error, fsync or rename failed) the temp file is removed, `path` is left
 /// as it was, the stream error is cleared, `error` (when given) says what
-/// failed, and false is returned.
+/// failed, and false is returned. With `durable` false the two fsyncs are
+/// skipped: the publication is still atomic for readers, but may not
+/// survive power loss (throwaway files, e.g. worker shards in a temp
+/// directory).
 bool writeFileAtomically(const std::string &path,
                          llvm::function_ref<void(llvm::raw_ostream &)> body,
-                         std::string *error = nullptr);
+                         std::string *error = nullptr, bool durable = true);
 
 /// The temp-file prefix writeFileAtomically uses for `path`
 /// (`<path>.tmp-`): a writer holding the path's IndexWriteLock may remove
@@ -72,7 +75,9 @@ public:
   /// Returns null on failure, with `error` saying why; `busy` is false
   /// when the lock file itself could not be created or locked (a
   /// read-only index directory), which callers may treat as "no other
-  /// writer can exist either".
+  /// writer can exist either". A lock file that exists but is not
+  /// writable (another user's, in a shared build directory) is locked
+  /// through a read-only descriptor, so it still excludes.
   static std::unique_ptr<IndexWriteLock>
   acquire(const std::string &path, bool wait, std::string *error,
           bool *busy = nullptr,
