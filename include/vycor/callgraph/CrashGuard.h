@@ -50,6 +50,15 @@ public:
   CrashGuardScope &operator=(const CrashGuardScope &) = delete;
 };
 
+/// Turn the guard off for the rest of the process: later scopes enable
+/// nothing, so a crash takes the process down. Worker processes call this
+/// first, because in a worker the parent's WORKER-TU marker, poison and
+/// bisect protocol is the containment. Recovering in the worker would
+/// instead record the TU `crashed` and carry on (and an RLIMIT_DATA abort
+/// under --worker-memory-limit would leave the rest of the batch parsing
+/// next to the leaked AST, exiting 0).
+void disableCrashGuard();
+
 /// Run `fn` on the calling thread under the crash guard. Returns true when
 /// `fn` returned normally; false when it crashed, with the signal number
 /// in `*signalOut` (when non-null).

@@ -65,7 +65,11 @@ named a function, a search for that name must say unknown, as a clean
 bake of the same sources does, not "no callers". `targetKnown` /
 `startKnown` say whether anything resolved; a result with either false
 has no paths and no stop reasons, because nothing was searched, and is
-neither `complete` nor `exhaustive`.
+neither `complete` nor `exhaustive`. The tools never get that far with
+an unknown name: `resolveIdentity` applies the same test first and
+answers `not_found` with `didYouMean` suggestions
+(`docs/result-contract.md`, "Unknown identities"); the engine's own
+check covers entry points and direct callers of `findCallerPaths`.
 
 **Hops.** Every path is a sequence of `PathHop`s in call direction, each
 carrying the exact edge: `callerUsr`, `calleeUsr`, the display names,

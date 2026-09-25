@@ -126,6 +126,16 @@ void installInterruptHandler() {
 
 bool interruptRequested() { return g_interrupted.load(); }
 
+void exitIfInterrupted() {
+  if (!interruptRequested())
+    return;
+  // The signals stay blocked in this thread; the watcher unblocks and
+  // re-raises in its own thread once cleanup is done, which ends the
+  // process. Sleep until then.
+  for (;;)
+    std::this_thread::sleep_for(std::chrono::seconds(60));
+}
+
 void bindWorkerToParent() {
   sigset_t set;
   blockedSet(set);

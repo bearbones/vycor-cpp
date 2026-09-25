@@ -1,0 +1,2 @@
+# megascope get-callers --name cbs::finalFormat --limit 1 --offset 1 -> exit 0
+{"callerCount":3,"callers":[{"callSite":"{fixture}/stage5_sink.cpp:13:21","calleeName":"cbs::finalFormat","callerName":"stage5_sink","confidence":"Plausible","kind":"FunctionPointer"}],"function":"cbs::finalFormat","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"limit":1,"nextOffset":2,"offset":1,"returned":1,"status":"ok","total":3,"truncated":true,"usr":"c:@N@cbs@F@finalFormat#I#"}

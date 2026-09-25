@@ -883,13 +883,16 @@ TEST_CASE("find_call_chain reports the search facts and display names",
   args["max_depth"] = -1;
   CHECK(isErrorResult(handler(args, ctx)));
 
-  SECTION("an unknown target is not a complete search") {
+  SECTION("an unknown target is not_found, not an empty search") {
     llvm::json::Object none;
     none["to"] = "nope";
-    auto obj = payloadOf(handler(none, ctx));
-    CHECK(obj.getInteger("pathCount") == 0);
-    CHECK(obj.getBoolean("complete") == false);
-    CHECK(obj.getBoolean("exhaustive") == false);
+    auto result = handler(none, ctx);
+    CHECK(statusOf(result) == ResultStatus::NotFound);
+    auto *obj = result.getAsObject();
+    REQUIRE(obj != nullptr);
+    CHECK(obj->getString("parameter") == "to");
+    CHECK(obj->getArray("didYouMean") != nullptr);
+    CHECK(obj->get("pathCount") == nullptr);
   }
 }
 

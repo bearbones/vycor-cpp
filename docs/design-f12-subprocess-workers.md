@@ -166,12 +166,12 @@ and the in-process `siglongjmp` guard is replaced.
 
 | Failure | Isolated (default for index/serve at `--threads` ≠ 1) | In-process (`--threads 1`, ephemeral queries, library callers) |
 |---|---|---|
-| Frontend or visitor crash (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) | The worker dies; its last `WORKER-TU` marker names the TU, recorded `poisoned`; the rest of the batch is re-dispatched. | `CrashGuard.h`: `llvm::CrashRecoveryContext` unwinds to the guard; the TU is recorded `crashed` (`signal N`). |
+| Frontend or visitor crash (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) | The worker dies (workers turn the in-process guard off, `disableCrashGuard`, so they never recover and carry on); its last `WORKER-TU` marker names the TU, recorded `poisoned`; the rest of the batch is re-dispatched. | `CrashGuard.h`: `llvm::CrashRecoveryContext` unwinds to the guard; the TU is recorded `crashed` (`signal N`). |
 | Stack overflow (deep templates) | As a crash. | Recovered: the guard's handlers run on a per-thread `sigaltstack` (`SA_ONSTACK` added to CrashRecoveryContext's handlers). |
 | Crash while holding a lock | Contained: the lock dies with the worker. | Our locks: contained. Each TU parses into TU-local indexes that are absorbed into the shared ones only after a clean return; a crashed TU's local indexes are leaked, never merged or destroyed, so no partial facts survive and no shared lock is ever held by a crashed thread. Locks inside the frontend or the C runtime (the allocator) are not contained; that is why whole-project bakes default to workers. |
 | Hang (infinite loop, pathological template) | `--worker-timeout` (default 600 s, 0 = off): a worker that starts no new TU for that long is SIGKILLed and the batch handled as a crash; the TU is recorded `timeout`. The deadline restarts at every marker, so a batch of N TUs may run up to N × timeout but one hung TU is caught after one. | Not contained. |
 | Memory blow-up | `--worker-memory-limit <MiB>` sets the worker's `RLIMIT_DATA`; the failed allocation kills it, handled as a crash. | Not contained. |
-| SIGINT / SIGTERM | The parent's watcher thread (`Interrupt.h`) stops dispatch, SIGKILLs every worker, removes the `vycor-workers-*` / `vycor-anneal-workers-*` directory and any `RemoveFileOnSignal` file (`llvm::sys::fs::TempFile`), then dies by the same signal (shell status 130 / 143). The anneal checkpoint needs no flush: every record is flushed as written. | Same, minus the workers. |
+| SIGINT / SIGTERM | The parent's watcher thread (`Interrupt.h`) stops dispatch, SIGKILLs every worker, removes the `vycor-workers-*` / `vycor-anneal-workers-*` directory and any `RemoveFileOnSignal` file (`llvm::sys::fs::TempFile`), then dies by the same signal (shell status 130 / 143). Nothing partial is published: an interrupted dispatch never returns to its caller, and the index save and anneal's report check `exitIfInterrupted()` first, so the previous index is left as it was. The anneal checkpoint needs no flush: every record is flushed as written. | Same, minus the workers. |
 | Parent killed by SIGKILL | Workers die with it (`PR_SET_PDEATHSIG` on Linux; a parent-pid poll elsewhere); the scratch directory stays behind. | — |
 
 A `timeout` or `poisoned` TU is retried under the index's existing
@@ -179,6 +179,9 @@ policy (with the next refresh that rewrites the index, or on
 `--retry-failed`), and within one dispatch it is dropped after the same
 number of failures as a crash: at once when its marker names it, after
 the markerless split otherwise (each TU re-dispatched at most twice).
+Under anneal `--checkpoint`, a TU the dispatcher poisons is journaled as
+having used up its attempts, so a resume skips it instead of dispatching
+it (and waiting out a hang) again.
 
 Reproductions: `tests/test_crash_containment.cpp` (a fake worker that
 sleeps forever, through `WorkerRunner`, `bakeIsolated`, and anneal's
@@ -186,7 +189,8 @@ sleeps forever, through `WorkerRunner`, `bakeIsolated`, and anneal's
 `setEdgeInsertHookForTesting` while another thread bakes; a stack
 overflow under the guard) and `scripts/interrupt-check.py` (ctest
 `interrupt_cleanup`: a real worker killed by the timeout, and SIGINT /
-SIGTERM mid-bake leaving no worker and no directory).
+SIGTERM mid-bake leaving no worker, no directory, and the previous
+index byte-identical).
 
 ## Non-goals (this round)
 

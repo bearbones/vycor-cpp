@@ -119,6 +119,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 
 | File | Purpose |
 |---|---|
+| `AtomicFile.h/.cpp` | `writeFileAtomically` (unique temp, fsync, rename, directory fsync — every index, journal header, and shard write), `IndexWriteLock` (`flock` on `<index>.lock` for `index`/`serve`), stale temp cleanup |
 | `CallGraph.h/.cpp` | Graph data structure: nodes (functions), edges (calls), class hierarchy, virtual overrides |
 | `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges |
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
@@ -178,7 +179,8 @@ handlers directly.
 | File | Purpose |
 |---|---|
 | `Tools.h` | `ToolContext` (indexes, entry points, cache, header summary, and `facts` — the `IndexFacts` every payload cites), `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract (`docs/result-contract.md`): success = payload object; error = `{"error": msg, "status": kind}` built with `usageError` / `notFoundError` / `unavailableError`; ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`); `runTool` runs a handler and `completeResult` stamps `status` (`statusOf`) and `indexScope` onto the payload — what every adapter calls |
-| `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR), the disambiguation payload, `attachUsr` |
+| `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR; an identity that names no node and no edge endpoint is `not_found` with `didYouMean`), the disambiguation payload, `attachUsr` (`resolvedAs: "name"` for a node-less endpoint), the `name`/`function` alias, `rankFunctionMatches` (the `search_functions` ranking) and `suggestFunctions` |
+| `Paging.h` | The shared paging contract of the list tools: `parsePage` (`limit` ≥ 1 with a per-tool default cap, `offset`), `attachPage` (`total`, `offset`, `limit`, `returned`, `truncated`, `nextOffset`), `addPagingProps` for the schemas (`docs/result-contract.md`, "Paging") |
 | `Serialize.h/.cpp` | Enum spellings (`EdgeKind`, `Confidence`, `ExecutionContext`, `ChannelOperation`) and JSON serializers for edges, guards, channel sites — part of the output contract |
 | `GraphTools.cpp` | lookup, search, callers, callees, call chain, class hierarchy, entry points, graph summary, callback/concurrency sites |
 | `ExceptionTools.cpp` | exception safety, call-site context, RAII scopes, throw propagation, all-path contexts, nearest catches |
@@ -225,9 +227,10 @@ sections the tool declares (`ToolEntry::needs`, set in
 per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
-place: header with
-`IndexSummary` counts and a `{kind, offset, length}` table for meta /
-graph / control flow / channels), so a graph-only tool never decodes the
+place, v13 a checksum per section and for the header: header with
+`IndexSummary` counts and a `{kind, offset, length, checksum}` table
+for meta / graph / control flow / channels), so a graph-only tool never
+decodes (or checksums) the
 call-site contexts, `info` reads the meta section alone, and
 `graph_summary` reports the header counts (`ToolContext::summary`).
 A read-only load that needs the control-flow section does not decode
@@ -283,6 +286,22 @@ and the drop + dirty set is removed in one `removeTUs` call per index
 `scripts/warm-refresh-check.py` (ctest `warm_refresh`) checks that every
 kind of refresh equals a clean rebuild, in-process and isolated.
 
+Write integrity (`docs/index-provenance.md`, format v13): every index,
+anneal journal header, and worker shard is published through
+`writeFileAtomically` (`callgraph/AtomicFile.h`: unique temp file in the
+target directory, fsync, rename, directory fsync; temp removed and
+stream error cleared on failure). `index`/`serve` hold an advisory
+`flock` on `<index>.lock` (`IndexWriteLock`) from the meta load to the
+save (`--no-wait` fails instead of waiting; readers never lock). A load
+verifies the header checksum and each decoded section's xxh3 checksum
+and names the damaged section in `SnapshotLoadStats::error`; `info`
+verifies all sections (`SnapshotIO::verify`). A bake that parsed none of
+its TUs is never saved (`SnapshotIO::unpublishableBake`; `index` exits
+1). The anneal journal is truncated to its last valid record before
+appending. `scripts/write-integrity-check.py` (ctest
+`write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
+failure mode.
+
 ### `mcp` — MCP Server (adapter)
 
 **Headers:** `include/vycor/mcp/`
@@ -320,7 +339,11 @@ Every tool payload, on every transport, carries `status` (`ok`,
 indexed / partial / failed TU counts of the index answered from). Exit
 codes and MCP `isError` derive from `status`, never from message text;
 a universal exception verdict needs an exhaustive search and complete
-coverage (`docs/result-contract.md`).
+coverage (`docs/result-contract.md`). A function identity the index
+does not hold (no node, no edge endpoint) is `not_found` with
+`didYouMean` suggestions, never an empty `ok`; the list tools without
+their own bound page through `limit` / `offset` with a default cap
+and report `total` / `truncated` / `nextOffset`.
 
 ### `ext` — Organization Extension Points
 
@@ -366,7 +389,7 @@ equivalents and exits 2):
 ```
 vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
+vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin

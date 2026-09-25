@@ -1366,6 +1366,20 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
     toIndex.push_back(file);
   }
+  // A TU the isolated dispatcher poisoned (its worker crashed on it, or
+  // timed out) is journaled as having used up its attempts, so a resume
+  // skips it like an in-process parse that died kMaxAttempts times instead
+  // of dispatching it again (and, for a hang, waiting out the timeout
+  // again).
+  auto recordPoisoned = [&](uint8_t phase, const std::string &tu) {
+    if (!ckpt)
+      return;
+    auto it = stampFor.find(tu);
+    if (it == stampFor.end())
+      return;
+    for (unsigned i = 0; i < AnnealCheckpoint::kMaxAttempts; ++i)
+      ckpt->recordAttempt(phase, tu, *it->second);
+  };
   if (isolate) {
     // Parses run in worker subprocesses; a crashing TU costs only itself
     // (bisect protocol), so no attempt records are needed — a parent kill
@@ -1397,6 +1411,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                                                           : "crashed worker")
                        << "): " << tu << "\n";
           poisoned.insert(tu);
+          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu);
         });
   } else {
     runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
@@ -1530,6 +1545,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                          << (why == WorkerFailure::TimedOut ? "timed out"
                                                             : "crashed worker")
                          << "): " << tu << "\n";
+            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu);
           });
     }
   }

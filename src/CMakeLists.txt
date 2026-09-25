@@ -10,6 +10,7 @@ add_library(vycor_lib
   morph/RulesParser.cpp
   morph/TransformPipeline.cpp
   compat/PchCache.cpp
+  callgraph/AtomicFile.cpp
   callgraph/CallGraph.cpp
   callgraph/CallGraphBuilder.cpp
   callgraph/CollapseFilter.cpp

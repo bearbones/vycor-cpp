@@ -36,6 +36,7 @@ constexpr size_t kAltStackSize = 256 * 1024;
 
 std::mutex g_scopeMutex;
 unsigned g_scopeCount = 0;
+bool g_disabled = false;
 
 /// CrashRecoveryContext installs its handlers without SA_ONSTACK, so a
 /// stack overflow would fault again inside the handler. Re-install the
@@ -90,9 +91,16 @@ thread_local AltStack tl_altStack;
 
 } // namespace
 
+void disableCrashGuard() {
+  std::lock_guard<std::mutex> lock(g_scopeMutex);
+  g_disabled = true;
+  if (g_scopeCount > 0)
+    llvm::CrashRecoveryContext::Disable();
+}
+
 CrashGuardScope::CrashGuardScope() {
   std::lock_guard<std::mutex> lock(g_scopeMutex);
-  if (g_scopeCount++ == 0) {
+  if (g_scopeCount++ == 0 && !g_disabled) {
     llvm::CrashRecoveryContext::Enable();
     runHandlersOnAltStack();
   }
@@ -100,7 +108,7 @@ CrashGuardScope::CrashGuardScope() {
 
 CrashGuardScope::~CrashGuardScope() {
   std::lock_guard<std::mutex> lock(g_scopeMutex);
-  if (--g_scopeCount == 0)
+  if (--g_scopeCount == 0 && !g_disabled)
     llvm::CrashRecoveryContext::Disable();
 }
 

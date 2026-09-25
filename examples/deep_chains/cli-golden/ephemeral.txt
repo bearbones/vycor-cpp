@@ -1,5 +1,5 @@
 # megascope get-callees --build-path {build} --source {fixture}/main.cpp --name main --threads 1 --format ndjson -> exit 0
-{"_summary":{"function":"main","indexScope":{"complete":true,"failed":0,"freshness":"baked","indexed":1,"partial":0,"requested":1},"status":"ok","usr":"c:@F@main#"}}
+{"_summary":{"function":"main","indexScope":{"complete":true,"failed":0,"freshness":"baked","indexed":1,"partial":0,"requested":1},"status":"ok","truncated":false,"usr":"c:@F@main#"}}
 {"callSite":"{fixture}/main.cpp:79:22","calleeName":"cbs::startupHook","callerName":"main","confidence":"Plausible","kind":"FunctionPointer"}
 {"callSite":"{fixture}/main.cpp:85:11","calleeName":"Pipeline::run","callerName":"main","confidence":"Proven","kind":"DirectCall"}
 {"callSite":"{fixture}/main.cpp:88:11","calleeName":"Pipeline::runAsync","callerName":"main","confidence":"Proven","kind":"DirectCall"}

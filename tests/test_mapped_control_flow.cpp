@@ -25,6 +25,8 @@
 #include "vycor/impact/SemanticDiff.h"
 #include "vycor/query/Tools.h"
 
+#include "SnapshotBytes.h"
+
 #include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
@@ -242,12 +244,12 @@ struct Layout {
 Layout layoutOf(const std::string &bytes, const ControlFlowIndex &eager) {
   Layout l{};
   // magic(4) version(4) summary(32) table count(4), then
-  // {kind u8, offset u64, length u64} entries.
+  // {kind u8, offset u64, length u64, checksum u64} entries.
   REQUIRE(u32At(bytes, 4) == SnapshotIO::kFormatVersion);
   const uint32_t entries = u32At(bytes, 40);
   bool found = false;
   for (uint32_t i = 0; i < entries; ++i) {
-    const size_t at = 44 + i * 17;
+    const size_t at = 44 + i * 25;
     if (static_cast<uint8_t>(bytes[at]) != 2)
       continue;
     l.sectionStart = static_cast<size_t>(u64At(bytes, at + 1));
@@ -562,7 +564,10 @@ TEST_CASE("a damaged v12 control-flow section is refused or read safely",
     ~Cleanup() { std::remove(p.c_str()); }
   } cleanup{path};
 
-  auto loadMapped = [&](const std::string &bytes) {
+  // The damage is sealed with fresh checksums, so what is exercised is
+  // the mapped reader's own validation, not the v13 integrity check.
+  auto loadMapped = [&](std::string bytes) {
+    testing::resealSnapshot(bytes);
     writeFile(path, bytes);
     return SnapshotIO::load(path, nullptr, LoadMode::ReadOnly);
   };

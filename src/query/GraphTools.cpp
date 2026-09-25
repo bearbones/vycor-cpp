@@ -20,12 +20,14 @@
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
 #include "EdgeFilter.h"
+#include "Paging.h"
 #include "Registry.h"
 #include "Schema.h"
 
 #include "llvm/ADT/StringRef.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -88,89 +90,22 @@ handleSearchFunctions(const llvm::json::Object &args,
   if (!query || query->empty())
     return usageError("Missing required parameter 'query'");
 
-  int64_t limit = 25;
-  if (auto l = args.getInteger("limit"))
-    limit = std::max<int64_t>(1, *l);
+  Page page;
+  if (auto err = parsePage(args, kDefaultSearchLimit, page))
+    return usageError(*err);
 
-  std::string needle = query->lower();
-
-  // Lowercased name index, built once per graph state and cached — the
-  // per-query lowering of every node name was 14 ms on a 57k-node graph.
-  // Node pointers are stable (nodes live in a node-based map) and the
-  // cache is cleared whenever the graph mutates.
-  struct SearchEntry {
-    std::string lowerQualified;
-    size_t unqualifiedOffset; // offset of the unqualified name within it
-    const CallGraphNode *node;
-  };
-  using SearchIndex = std::vector<SearchEntry>;
-  std::shared_ptr<const SearchIndex> index;
-  if (ctx.cache) {
-    auto it = ctx.cache->objects.find("search_index");
-    if (it != ctx.cache->objects.end())
-      index = std::static_pointer_cast<const SearchIndex>(it->second);
-  }
-  if (!index) {
-    auto built = std::make_shared<SearchIndex>();
-    auto nodes = ctx.graph.allNodes();
-    built->reserve(nodes.size());
-    for (auto *node : nodes) {
-      llvm::StringRef qn(node->qualifiedName);
-      size_t off = 0;
-      auto sep = qn.rfind("::");
-      if (sep != llvm::StringRef::npos)
-        off = sep + 2;
-      built->push_back({qn.lower(), off, node});
-    }
-    if (ctx.cache)
-      ctx.cache->objects["search_index"] = built;
-    index = std::move(built);
-  }
-
-  // Rank: exact name match, then prefix of the unqualified name, then any
-  // substring. Within a tier, shorter qualified names first (closer match).
-  struct Hit {
-    const CallGraphNode *node;
-    int tier;
-  };
-  std::vector<Hit> hits;
-  for (const auto &entry : *index) {
-    llvm::StringRef lower(entry.lowerQualified);
-    if (lower.find(needle) == llvm::StringRef::npos)
-      continue;
-    int tier = 2;
-    llvm::StringRef unqLower = lower.substr(entry.unqualifiedOffset);
-    if (unqLower == needle)
-      tier = 0;
-    else if (unqLower.starts_with(needle))
-      tier = 1;
-    hits.push_back({entry.node, tier});
-  }
-
-  std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
-    if (a.tier != b.tier)
-      return a.tier < b.tier;
-    if (a.node->qualifiedName.size() != b.node->qualifiedName.size())
-      return a.node->qualifiedName.size() < b.node->qualifiedName.size();
-    if (a.node->qualifiedName != b.node->qualifiedName)
-      return a.node->qualifiedName < b.node->qualifiedName;
-    // Overloads share a name: the usr decides, so a `limit` cut falls
-    // in the same place whatever order the nodes were indexed in.
-    return a.node->usr < b.node->usr;
-  });
-
+  auto hits = rankFunctionMatches(ctx, *query);
   llvm::json::Array results;
-  for (const auto &hit : hits) {
-    if (static_cast<int64_t>(results.size()) >= limit)
-      break;
+  for (size_t i = page.begin(hits.size()); i < page.end(hits.size()); ++i) {
+    const CallGraphNode *node = hits[i];
     llvm::json::Object entry;
-    entry["qualifiedName"] = hit.node->qualifiedName;
-    entry["usr"] = hit.node->usr;
-    entry["file"] = hit.node->file;
-    entry["line"] = static_cast<int64_t>(hit.node->line);
-    if (!hit.node->enclosingClass.empty())
-      entry["enclosingClass"] = hit.node->enclosingClass;
-    if (hit.node->isVirtual)
+    entry["qualifiedName"] = node->qualifiedName;
+    entry["usr"] = node->usr;
+    entry["file"] = node->file;
+    entry["line"] = static_cast<int64_t>(node->line);
+    if (!node->enclosingClass.empty())
+      entry["enclosingClass"] = node->enclosingClass;
+    if (node->isVirtual)
       entry["isVirtual"] = true;
     results.push_back(llvm::json::Value(std::move(entry)));
   }
@@ -178,18 +113,21 @@ handleSearchFunctions(const llvm::json::Object &args,
   llvm::json::Object obj;
   obj["query"] = query->str();
   obj["totalMatches"] = static_cast<int64_t>(hits.size());
-  obj["returned"] = static_cast<int64_t>(results.size());
-  obj["truncated"] = static_cast<int64_t>(hits.size()) > limit;
+  attachPage(obj, page, hits.size());
   obj["matches"] = std::move(results);
   return llvm::json::Value(std::move(obj));
 }
 
 // ============================================================================
-// Tool 2: get_callees
+// Tools 2-3: get_callees / get_callers
 // ============================================================================
 
-static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
-                                          const ToolContext &ctx) {
+// The shared body of get_callees and get_callers: resolve, filter, sort
+// canonically, optionally collapse to one record per function at the
+// other end (`distinct`, with `siteCount`), then page.
+static llvm::json::Value handleEdgeList(const llvm::json::Object &args,
+                                        const ToolContext &ctx,
+                                        bool callees) {
   std::optional<llvm::json::Value> ambiguous;
   auto ident = resolveIdentity(args, ctx, "name", "usr", ambiguous);
   if (ambiguous)
@@ -200,64 +138,78 @@ static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
     return usageError(*err);
+  Page page;
+  if (auto err = parsePage(args, kDefaultEdgeListLimit, page))
+    return usageError(*err);
+  bool distinct = false;
+  if (auto d = args.getBoolean("distinct"))
+    distinct = *d;
 
   // Query by the resolved USR: the by-name union path is never taken.
-  auto edges = ctx.graph.calleesOf(*ident);
-  // Canonical order (callee usr, call site, ...): storage order follows
-  // the bake's TU order (docs/deterministic-output.md).
+  auto edges = callees ? ctx.graph.calleesOf(*ident)
+                       : ctx.graph.callersOf(*ident);
+  // Canonical order (other end's usr, call site, ...): storage order
+  // follows the bake's TU order (docs/deterministic-output.md).
   sortEdgesCanonically(edges);
+  std::vector<const CallGraphEdge *> kept;
+  for (const auto &e : edges)
+    if (filter.allows(e))
+      kept.push_back(&e);
+
+  // Distinct: the first site in canonical order stands for the function;
+  // the rest of its sites are counted. The other end's usr is the sort's
+  // leading key, so each function's sites are contiguous.
+  std::vector<size_t> siteCounts;
+  if (distinct) {
+    std::vector<const CallGraphEdge *> firsts;
+    auto otherEnd = [&](const CallGraphEdge *e) -> const std::string & {
+      return callees ? e->calleeUsr : e->callerUsr;
+    };
+    for (const auto *e : kept) {
+      if (!firsts.empty() && otherEnd(firsts.back()) == otherEnd(e)) {
+        ++siteCounts.back();
+        continue;
+      }
+      firsts.push_back(e);
+      siteCounts.push_back(1);
+    }
+    kept = std::move(firsts);
+  }
+
   llvm::json::Array results;
-  for (const auto &e : edges) {
-    if (!filter.allows(e))
-      continue;
-    results.push_back(edgeToJson(e));
+  for (size_t i = page.begin(kept.size()); i < page.end(kept.size()); ++i) {
+    auto record = edgeToJson(*kept[i]);
+    if (distinct)
+      (*record.getAsObject())["siteCount"] =
+          static_cast<int64_t>(siteCounts[i]);
+    results.push_back(std::move(record));
   }
 
   llvm::json::Object obj;
   // Display the name the caller asked for; the precise identity rides in
   // "usr".
-  auto name = args.getString("name");
+  auto name = identityName(args, "name");
   obj["function"] = name ? name->str() : *ident;
   attachUsr(obj, ctx, *ident);
-  obj["calleeCount"] = static_cast<int64_t>(results.size());
-  obj["callees"] = std::move(results);
+  if (distinct)
+    obj["distinct"] = true;
+  // The count is the whole filtered list (records, or functions under
+  // distinct), not the page.
+  obj[callees ? "calleeCount" : "callerCount"] =
+      static_cast<int64_t>(kept.size());
+  attachPage(obj, page, kept.size());
+  obj[callees ? "callees" : "callers"] = std::move(results);
   return llvm::json::Value(std::move(obj));
 }
 
-// ============================================================================
-// Tool 3: get_callers
-// ============================================================================
+static llvm::json::Value handleGetCallees(const llvm::json::Object &args,
+                                          const ToolContext &ctx) {
+  return handleEdgeList(args, ctx, /*callees=*/true);
+}
 
 static llvm::json::Value handleGetCallers(const llvm::json::Object &args,
                                           const ToolContext &ctx) {
-  std::optional<llvm::json::Value> ambiguous;
-  auto ident = resolveIdentity(args, ctx, "name", "usr", ambiguous);
-  if (ambiguous)
-    return std::move(*ambiguous);
-  if (!ident)
-    return usageError("Missing required parameter 'name' (or 'usr')");
-
-  EdgeFilter filter;
-  if (auto err = parseEdgeFilter(args, filter))
-    return usageError(*err);
-
-  // Query by the resolved USR: the by-name union path is never taken.
-  auto edges = ctx.graph.callersOf(*ident);
-  sortEdgesCanonically(edges); // caller usr, call site, ...
-  llvm::json::Array results;
-  for (const auto &e : edges) {
-    if (!filter.allows(e))
-      continue;
-    results.push_back(edgeToJson(e));
-  }
-
-  llvm::json::Object obj;
-  auto name = args.getString("name");
-  obj["function"] = name ? name->str() : *ident;
-  attachUsr(obj, ctx, *ident);
-  obj["callerCount"] = static_cast<int64_t>(results.size());
-  obj["callers"] = std::move(results);
-  return llvm::json::Value(std::move(obj));
+  return handleEdgeList(args, ctx, /*callees=*/false);
 }
 
 // ============================================================================
@@ -373,18 +325,24 @@ handleGetClassHierarchy(const llvm::json::Object &args,
   if (auto o = args.getBoolean("include_overrides"))
     includeOverrides = *o;
 
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
+
   auto derived = transitive ? ctx.graph.getAllDerivedClasses(className->str())
                             : ctx.graph.getDerivedClasses(className->str());
   // Name order: the hierarchy maps follow insertion order.
   std::sort(derived.begin(), derived.end());
 
   llvm::json::Array derivedArr;
-  for (auto &cls : derived)
-    derivedArr.push_back(cls);
+  for (size_t i = page.begin(derived.size()); i < page.end(derived.size());
+       ++i)
+    derivedArr.push_back(derived[i]);
 
   llvm::json::Object obj;
   obj["className"] = className->str();
   obj["derivedClassCount"] = static_cast<int64_t>(derived.size());
+  attachPage(obj, page, derived.size());
   obj["derivedClasses"] = std::move(derivedArr);
 
   if (includeOverrides) {
@@ -419,10 +377,15 @@ handleGetClassHierarchy(const llvm::json::Object &args,
 // ============================================================================
 
 static llvm::json::Value
-handleListEntryPoints(const llvm::json::Object & /*args*/,
+handleListEntryPoints(const llvm::json::Object &args,
                       const ToolContext &ctx) {
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
+  const size_t total = ctx.entryPoints.size();
   llvm::json::Array entries;
-  for (auto &ep : ctx.entryPoints) {
+  for (size_t i = page.begin(total); i < page.end(total); ++i) {
+    const std::string &ep = ctx.entryPoints[i];
     llvm::json::Object entry;
     entry["name"] = ep;
     if (auto *node = ctx.graph.findNode(ep)) {
@@ -435,7 +398,8 @@ handleListEntryPoints(const llvm::json::Object & /*args*/,
   }
 
   llvm::json::Object obj;
-  obj["count"] = static_cast<int64_t>(entries.size());
+  obj["count"] = static_cast<int64_t>(total);
+  attachPage(obj, page, total);
   obj["entryPoints"] = std::move(entries);
   return llvm::json::Value(std::move(obj));
 }
@@ -537,6 +501,15 @@ static llvm::json::Value
 handleListCallbackSites(const llvm::json::Object &args,
                         const ToolContext &ctx) {
   auto targetFilter = args.getString("target_prefix");
+  Page page;
+  if (auto err = parsePage(args, kDefaultCallbackTargetLimit, page))
+    return usageError(*err);
+  size_t siteLimit = kDefaultSitesPerTarget;
+  if (auto sl = args.getInteger("site_limit")) {
+    if (*sl < 1)
+      return usageError("Invalid site_limit: must be at least 1");
+    siteLimit = static_cast<size_t>(*sl);
+  }
 
   // Group callback-like edges by calleeName (copies — calleesOf returns a
   // temporary vector per node).
@@ -553,13 +526,22 @@ handleListCallbackSites(const llvm::json::Object &args,
     }
   }
 
+  // Targets are in name order (std::map); the page is a window of them.
+  const size_t total = byTarget.size();
+  auto first = byTarget.begin();
+  std::advance(first, page.begin(total));
+  auto last = first;
+  std::advance(last, page.end(total) - page.begin(total));
   llvm::json::Array targets;
-  for (auto &kv : byTarget) {
-    // Targets are in name order (std::map); sites within a target in
-    // canonical edge order rather than the hash-map walk's.
+  for (auto it = first; it != last; ++it) {
+    auto &kv = *it;
+    // Sites within a target in canonical edge order rather than the
+    // hash-map walk's, cut at site_limit.
     sortEdgesCanonically(kv.second);
     llvm::json::Array sites;
     for (const auto &e : kv.second) {
+      if (sites.size() >= siteLimit)
+        break;
       llvm::json::Object site;
       site["caller"] = e.callerName;
       site["callSite"] = e.callSite;
@@ -574,12 +556,15 @@ handleListCallbackSites(const llvm::json::Object &args,
     llvm::json::Object entry;
     entry["target"] = kv.first;
     entry["siteCount"] = static_cast<int64_t>(kv.second.size());
+    entry["sitesTruncated"] = kv.second.size() > siteLimit;
     entry["sites"] = std::move(sites);
     targets.push_back(llvm::json::Value(std::move(entry)));
   }
 
   llvm::json::Object obj;
-  obj["targetCount"] = static_cast<int64_t>(targets.size());
+  obj["targetCount"] = static_cast<int64_t>(total);
+  obj["siteLimit"] = static_cast<int64_t>(siteLimit);
+  attachPage(obj, page, total);
   obj["targets"] = std::move(targets);
   return llvm::json::Value(std::move(obj));
 }
@@ -608,6 +593,10 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
     }
   }
 
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
+
   std::vector<CallGraphEdge> spawns;
   for (auto *node : ctx.graph.allNodes()) {
     for (const auto &e : ctx.graph.calleesOf(node->usr)) {
@@ -622,7 +611,9 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
   // node walk above is a hash-map walk.
   sortEdgesCanonically(spawns);
   llvm::json::Array entries;
-  for (const auto &e : spawns) {
+  for (size_t i = page.begin(spawns.size()); i < page.end(spawns.size());
+       ++i) {
+    const CallGraphEdge &e = spawns[i];
     llvm::json::Object entry;
     entry["spawner"] = e.callerName;
     entry["target"] = e.calleeName;
@@ -634,6 +625,7 @@ handleListConcurrencyEntryPoints(const llvm::json::Object &args,
 
   llvm::json::Object obj;
   obj["count"] = static_cast<int64_t>(spawns.size());
+  attachPage(obj, page, spawns.size());
   obj["entries"] = std::move(entries);
   return llvm::json::Value(std::move(obj));
 }
@@ -644,7 +636,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["name"] = stringProp(
         "Qualified function name (e.g. 'MyClass::process'). Provide 'name' "
-        "or 'usr' (usr wins when both are present).");
+        "or 'usr' (usr wins when both are present). Alias: 'function'.");
     props["usr"] = stringProp(
         "Exact function USR (from search_functions results or a prior "
         "disambiguation response). Bypasses name resolution entirely — use "
@@ -670,7 +662,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["name"] = stringProp(
         "Qualified name of the caller function. Provide 'name' or 'usr' "
-        "(usr wins when both are present).");
+        "(usr wins when both are present). Alias: 'function'.");
     props["usr"] = stringProp(
         "Exact function USR of the caller. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
@@ -690,15 +682,22 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     props["execution_contexts"] = stringArrayProp(
         "Filter by execution context: Synchronous, ThreadSpawn, AsyncTask, "
         "PackagedTask, Invoke. Default: all contexts.");
+    props["distinct"] = boolProp(
+        "One record per callee function instead of one per call site: the "
+        "first site in canonical order, with siteCount (default: false).");
+    addPagingProps(props, kDefaultEdgeListLimit, "callees");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
 
     tools.push_back({"get_callees",
-                     "List all functions called by a given function. "
-                     "Supports filtering by edge kind and confidence level. "
-                     "An ambiguous name returns {ambiguous:true, "
-                     "candidates:[...]} — re-query with 'usr'.",
+                     "List the functions called by a given function, one "
+                     "record per call site (or per callee with distinct), "
+                     "paged by limit/offset. Supports filtering by edge "
+                     "kind and confidence level. An ambiguous name returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with "
+                     "'usr'; an unknown name is not_found with didYouMean "
+                     "suggestions.",
                      llvm::json::Value(std::move(schema)),
                      handleGetCallees});
   }
@@ -708,7 +707,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["name"] = stringProp(
         "Qualified name of the callee function. Provide 'name' or 'usr' "
-        "(usr wins when both are present).");
+        "(usr wins when both are present). Alias: 'function'.");
     props["usr"] = stringProp(
         "Exact function USR of the callee. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
@@ -727,15 +726,22 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     props["execution_contexts"] = stringArrayProp(
         "Filter by execution context: Synchronous, ThreadSpawn, AsyncTask, "
         "PackagedTask, Invoke. Default: all contexts.");
+    props["distinct"] = boolProp(
+        "One record per caller function instead of one per call site: the "
+        "first site in canonical order, with siteCount (default: false).");
+    addPagingProps(props, kDefaultEdgeListLimit, "callers");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
 
     tools.push_back({"get_callers",
-                     "List all functions that call a given function. "
-                     "Supports filtering by edge kind and confidence level. "
-                     "An ambiguous name returns {ambiguous:true, "
-                     "candidates:[...]} — re-query with 'usr'.",
+                     "List the functions that call a given function, one "
+                     "record per call site (or per caller with distinct), "
+                     "paged by limit/offset. Supports filtering by edge "
+                     "kind and confidence level. An ambiguous name returns "
+                     "{ambiguous:true, candidates:[...]} — re-query with "
+                     "'usr'; an unknown name is not_found with didYouMean "
+                     "suggestions.",
                      llvm::json::Value(std::move(schema)),
                      handleGetCallers});
   }
@@ -795,7 +801,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     props["query"] = stringProp(
         "Case-insensitive substring to match against qualified function "
         "names (e.g. 'execute' or 'TransformPipeline').");
-    props["limit"] = intProp("Maximum matches to return (default: 25)");
+    addPagingProps(props, kDefaultSearchLimit, "matches");
     llvm::json::Array req;
     req.push_back("query");
     llvm::json::Object schema;
@@ -821,6 +827,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
         "Include all descendants, not just direct (default: false)");
     props["include_overrides"] = boolProp(
         "Include virtual method override info (default: false)");
+    addPagingProps(props, kDefaultListLimit, "derived classes");
     llvm::json::Array req;
     req.push_back("class_name");
     llvm::json::Object schema;
@@ -838,9 +845,11 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
 
   // 9. list_entry_points
   {
+    llvm::json::Object props;
+    addPagingProps(props, kDefaultListLimit, "entry points");
     llvm::json::Object schema;
     schema["type"] = "object";
-    schema["properties"] = llvm::json::Object{};
+    schema["properties"] = std::move(props);
 
     tools.push_back({"list_entry_points",
                      "List the configured entry-point functions with their "
@@ -872,6 +881,11 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     props["target_prefix"] = stringProp(
         "Optional qualified-name prefix; only targets whose name starts "
         "with this prefix are returned.");
+    props["site_limit"] = intProp(
+        "Maximum sites listed per target, at least 1 (default: 50). "
+        "siteCount stays the full count; sitesTruncated says whether the "
+        "list was cut.");
+    addPagingProps(props, kDefaultCallbackTargetLimit, "targets");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
@@ -881,9 +895,10 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
                      "grouped by target. Covers FunctionPointer and "
                      "LambdaCall edges, including synthetic lambda "
                      "targets named 'lambda#file:line:col#enclosing'. "
-                     "Returns {target, siteCount, sites:[{caller, callSite, "
-                     "kind, confidence, indirectionDepth?, "
-                     "executionContext?}]}.",
+                     "Returns {target, siteCount, sitesTruncated, "
+                     "sites:[{caller, callSite, kind, confidence, "
+                     "indirectionDepth?, executionContext?}]}, targets "
+                     "paged by limit/offset.",
                      llvm::json::Value(std::move(schema)),
                      handleListCallbackSites});
   }
@@ -894,6 +909,7 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
     props["execution_contexts"] = stringArrayProp(
         "Filter by execution context: ThreadSpawn, AsyncTask, "
         "PackagedTask, Invoke. Default: all ThreadEntry contexts.");
+    addPagingProps(props, kDefaultListLimit, "entries");
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
@@ -904,7 +920,8 @@ void registerGraphTools(std::vector<ToolEntry> &tools) {
                      "std::thread, std::jthread, std::async, "
                      "std::packaged_task, std::invoke, or std::bind. "
                      "Returns {count, entries:[{spawner, target, "
-                     "executionContext, callSite, confidence}]}.",
+                     "executionContext, callSite, confidence}]}, paged by "
+                     "limit/offset.",
                      llvm::json::Value(std::move(schema)),
                      handleListConcurrencyEntryPoints});
   }

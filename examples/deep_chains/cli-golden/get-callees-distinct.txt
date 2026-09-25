@@ -1,0 +1,4 @@
+# megascope get-callees --name Pipeline::run --distinct --format ndjson -> exit 0
+{"_summary":{"distinct":true,"function":"Pipeline::run","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok","truncated":false,"usr":"c:@S@Pipeline@F@run#I#"}}
+{"callSite":"{fixture}/pipeline.cpp:19:18","calleeName":"cbs::startupHook","callerName":"Pipeline::run","confidence":"Plausible","kind":"FunctionPointer","siteCount":1}
+{"callSite":"{fixture}/pipeline.cpp:22:10","calleeName":"stage1_ingest","callerName":"Pipeline::run","confidence":"Proven","kind":"DirectCall","siteCount":1}

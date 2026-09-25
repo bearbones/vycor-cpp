@@ -151,6 +151,11 @@ def check_signal(binary: Path, root: Path, argv: list[str], sig: int,
     proj = make_project(root, ["slow1.cpp", "slow2.cpp"])
     full = [str(binary)] + [a.replace("@PROJ@", str(proj))
                             .replace("@ROOT@", str(root)) for a in argv]
+    # An index already in place must come through the interrupt untouched:
+    # a partial bake is never saved over it.
+    sentinel = b"previous index (not a snapshot)\n"
+    index = root / "i.vycs"
+    index.write_bytes(sentinel)
     proc = subprocess.Popen(full, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True,
                             env=env_with_tmp(tmp))
@@ -191,6 +196,8 @@ def check_signal(binary: Path, root: Path, argv: list[str], sig: int,
                 pass
     if worker_dirs(tmp):
         errors.append(f"{name}: left {worker_dirs(tmp)}")
+    if index.read_bytes() != sentinel:
+        errors.append(f"{name}: the interrupted run replaced {index.name}")
     return errors
 
 

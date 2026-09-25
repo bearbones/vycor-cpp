@@ -1279,9 +1279,16 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
     auto *snapHolder = new std::optional<SnapshotData>(
         SnapshotIO::load(indexPath, &loadStats, LoadMode::ReadOnly, needs));
     if (!*snapHolder) {
-      err << "megascope: cannot load index " << indexPath
-          << " (wrong format version or unreadable; re-run `megascope "
-             "index`)\n";
+      err << "megascope: cannot load index " << indexPath << ": "
+          << loadStats.error << " (re-run `megascope index`)\n";
+      return kExitIndex;
+    }
+    // info decodes the meta alone but vouches for the whole file: every
+    // section's checksum is verified.
+    std::string damaged;
+    if (verb == "info" && !SnapshotIO::verify(indexPath, &damaged)) {
+      err << "megascope: cannot load index " << indexPath << ": " << damaged
+          << " (re-run `megascope index`)\n";
       return kExitIndex;
     }
     snap = &**snapHolder;

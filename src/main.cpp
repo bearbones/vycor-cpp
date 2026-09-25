@@ -27,6 +27,8 @@
 #include "vycor/morph/TransformPipeline.h"
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/InputFingerprint.h"
+#include "vycor/callgraph/AtomicFile.h"
+#include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/callgraph/WorkerPool.h"
@@ -184,6 +186,14 @@ static llvm::cl::opt<bool>
                                        "resolved overload on every argument "
                                        "position"),
                         llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    McpNoWait("no-wait",
+        llvm::cl::desc("Fail at once when another index/serve process "
+                       "holds the index's write lock (<index>.lock) "
+                       "instead of waiting for it"),
+        llvm::cl::init(false),
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
     AnnealThreads("threads",
@@ -596,9 +606,13 @@ int main(int argc, const char **argv) {
   // SIGINT/SIGTERM: a parent kills its workers and removes its scratch
   // files; a worker dies with its parent (callgraph/Interrupt.h). Before
   // any thread exists, so every later thread inherits the blocked mask.
-  if (McpBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker)
+  if (McpBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker) {
     vycor::bindWorkerToParent();
-  else if (AnnealCmd || MegascopeCmd)
+    // A worker that crashes (or aborts at --worker-memory-limit) must die,
+    // so the parent's marker/poison/bisect path handles the TU
+    // (callgraph/CrashGuard.h).
+    vycor::disableCrashGuard();
+  } else if (AnnealCmd || MegascopeCmd)
     vycor::installInterruptHandler();
 
   // ---- anneal ---------------------------------------------------------------
@@ -887,6 +901,8 @@ int main(int argc, const char **argv) {
         vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
     }
 
+    // Never report on a run an interrupt cut short (callgraph/Interrupt.h).
+    vycor::exitIfInterrupted();
     if (diagnostics.empty()) {
       llvm::outs() << "anneal: no issues found.\n";
       return 0;
@@ -992,6 +1008,37 @@ int main(int argc, const char **argv) {
     std::optional<vycor::SnapshotData> snap;
     vycor::SnapshotLoadStats snapLoadStats;
     double snapLoadMs = 0;
+    // The whole load → dirty check → bake → save sequence runs under the
+    // index's write lock, so two writers (two `index` runs, or `serve`
+    // starting next to one) serialize instead of racing; readers never
+    // lock. Held until the save (serve releases it before serving).
+    std::unique_ptr<vycor::IndexWriteLock> writeLock;
+    if (!indexPath.empty() && !McpBakeWorker) {
+      std::string lockError;
+      bool busy = false;
+      writeLock = vycor::IndexWriteLock::acquire(
+          indexPath, !McpNoWait, &lockError, &busy,
+          [](const std::string &lock) {
+            llvm::errs() << "megascope: waiting for another writer holding "
+                         << lock << " (pass --no-wait to fail instead)...\n";
+          });
+      if (!writeLock && busy) {
+        llvm::errs() << "megascope: " << lockError << "\n";
+        return 1;
+      }
+      if (!writeLock) {
+        // A directory we cannot create the lock file in is one no other
+        // writer can save to either (an unchanged `serve` over a
+        // read-only index still works; a save would fail and say so).
+        llvm::errs() << "megascope: WARNING: " << lockError
+                     << " — continuing without the write lock\n";
+      } else if (size_t stale = vycor::removeStaleAtomicTemps(indexPath)) {
+        // Under the lock no other writer is mid-save: any temp file next
+        // to the index was left by a killed one.
+        llvm::errs() << "megascope: removed " << stale
+                     << " temp file(s) left by an interrupted save\n";
+      }
+    }
     if (!indexPath.empty() && !McpBakeWorker) {
       auto t0 = StatsClock::now();
       // Meta and header counts only: enough for TU selection and the
@@ -1103,10 +1150,12 @@ int main(int argc, const char **argv) {
       meta.files = vycor::SnapshotIO::stampFiles(files);
       vycor::SnapshotIO::recordDependencies(meta, baked.deps);
       vycor::SnapshotIO::recordOutcomes(meta, baked.outcomes);
+      std::string saveError;
       if (!vycor::SnapshotIO::save(McpWorkerOut, baked.graph, baked.cfIndex,
-                                   meta, baked.channels)) {
+                                   meta, baked.channels, &saveError,
+                                   /*durable=*/false)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
-                     << McpWorkerOut << "\n";
+                     << McpWorkerOut << ": " << saveError << "\n";
         return 1;
       }
       return 0;
@@ -1116,6 +1165,9 @@ int main(int argc, const char **argv) {
     vycor::ControlFlowIndex cfIndex;
     vycor::ChannelIndex channels;
     bool needFullBuild = true;
+    // Set when a bake parsed nothing it was asked to: its result must not
+    // replace the index (SnapshotIO::unpublishableBake).
+    std::string bakeRefusal;
 
     // Efficiency stats, dumped to --stats-json once the server is ready.
     vycor::BuildStats buildStats;
@@ -1312,7 +1364,8 @@ int main(int argc, const char **argv) {
             snapLoadMs = msSince(t0);
             if (!full) {
               llvm::errs() << "megascope: cannot decode index " << indexPath
-                           << " — full build\n";
+                           << " (" << snapLoadStats.error
+                           << ") — full build\n";
               needFullBuild = true;
               snapLoaded = false;
             } else {
@@ -1361,6 +1414,9 @@ int main(int argc, const char **argv) {
                 auto bakeStart = StatsClock::now();
                 auto fresh = runBake(toBake);
                 warmBakeMs = msSince(bakeStart);
+                bakeRefusal =
+                    vycor::SnapshotIO::unpublishableBake(toBake,
+                                                         fresh.outcomes);
                 auto absorbStart = StatsClock::now();
                 graph.absorb(fresh.graph);
                 cfIndex.absorb(fresh.cfIndex);
@@ -1388,9 +1444,8 @@ int main(int argc, const char **argv) {
           }
         }
       } else if (llvm::sys::fs::exists(indexPath)) {
-        llvm::errs() << "megascope: cannot load index " << indexPath
-                     << " (wrong format version or unreadable) — full "
-                        "build\n";
+        llvm::errs() << "megascope: cannot load index " << indexPath << " ("
+                     << snapLoadStats.error << ") — full build\n";
       } else {
         llvm::errs() << "megascope: no index yet at " << indexPath
                      << " — full build\n";
@@ -1404,6 +1459,8 @@ int main(int argc, const char **argv) {
       auto bakeStart = StatsClock::now();
       vycor::BakedIndexes baked = runBake(files);
       bakeMs = msSince(bakeStart);
+      bakeRefusal =
+          vycor::SnapshotIO::unpublishableBake(files, baked.outcomes);
       graph = std::move(baked.graph);
       cfIndex = std::move(baked.cfIndex);
       channels = std::move(baked.channels);
@@ -1464,15 +1521,23 @@ int main(int argc, const char **argv) {
                      << " failed); the rest are retried with the next "
                         "refresh that rewrites the index, or "
                         "--retry-failed\n";
+      // An interrupted bake is partial: never let it replace the index.
+      vycor::exitIfInterrupted();
       auto snapSaveStart = StatsClock::now();
-      if (vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
-                                  channels)) {
+      std::string saveError;
+      if (!bakeRefusal.empty()) {
+        saveFailed = true;
+        llvm::errs() << "megascope: ERROR: " << bakeRefusal << " — "
+                     << indexPath << " is left as it was\n";
+      } else if (vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
+                                         channels, &saveError)) {
         snapSaveMs = msSince(snapSaveStart);
         llvm::errs() << "megascope: index saved to " << indexPath << "\n";
       } else {
         saveFailed = true;
         llvm::errs() << "megascope: WARNING: could not save index to "
-                     << indexPath << "\n";
+                     << indexPath << ": " << saveError
+                     << " (the previous index is left as it was)\n";
       }
     } else {
       // No index file: the coverage of this in-memory bake, with no
@@ -1645,6 +1710,8 @@ int main(int argc, const char **argv) {
       buildParams.workerLimits = workerLimits;
     }
 
+    // Serving only reads: let the next writer in.
+    writeLock.reset();
     vycor::McpServer server(std::move(graph), std::move(cfIndex),
                                  std::move(channels), std::move(entryPoints),
                                  std::move(buildParams));

@@ -1,6 +1,7 @@
 # Index freshness and provenance
 
-Status: implemented on `main` (snapshot format v10). Owner: package A of
+Status: implemented on `main` (snapshot format v10; write integrity
+and checksums in v13). Owner: package A of
 `docs/plans/2026-09-next/`. This page is the contract the warm start
 keeps and the interface the shared result contract (package C) and the
 selective control-flow storage (package F) build on.
@@ -308,6 +309,97 @@ handler record (`rethrows`, after `isCatchAll`) in the control-flow
 section; the meta section is unchanged. Format v12 (package F,
 `docs/control-flow-access.md`) lays the control-flow section out for
 reading in place; the meta section is again unchanged.
+
+## Write integrity (format v13)
+
+Package H of `docs/plans/2026-09-hardening/`. The index is a cache, but
+a torn, mixed, or emptied one answers queries wrongly without saying
+so, so every write that publishes one is atomic, serialized, checked,
+and refused when there is nothing to publish.
+
+- **Atomic save.** `SnapshotIO::save` (and every anneal journal header,
+  worker shard, and handoff file) goes through `writeFileAtomically`
+  (`callgraph/AtomicFile.h`): a uniquely named temp file in the target
+  directory (`<index>.tmp-XXXXXX`), flushed and `fsync`ed, renamed over
+  the index, then the directory `fsync`ed. Concurrent writers never
+  share a temp file (the old fixed `<index>.tmp` let one writer's
+  remaining bytes land inside the file another had just renamed into
+  place). A write error (full disk) clears the stream error, removes
+  the temp file, leaves the previous index as it was, and returns the
+  reason; `megascope index` then exits 1.
+- **Write lock.** `index` and `serve` hold an advisory `flock` on
+  `<index>.lock` (`IndexWriteLock`) for the whole meta load → dirty
+  check → bake → save sequence; `serve` releases it before answering
+  requests. A second writer prints `waiting for another writer holding
+  <index>.lock` and blocks, or with `--no-wait` exits 1 at once.
+  Readers never lock: the rename is atomic for them. Under the lock any
+  `<index>.tmp-XXXXXX` left by a killed writer is removed. The lock file
+  stays in place (deleting it would race a waiter). A lock file another
+  user created and this one cannot write (a shared build directory) is
+  locked through a read-only descriptor, so it still excludes; only a
+  lock file that cannot be opened at all (a read-only index directory)
+  lets `index`/`serve` continue unlocked, with a warning.
+- **Checksums.** v13 extends each section table entry with an xxh3-64
+  checksum of its section and ends the header with a checksum of the
+  header itself (`kHeaderBytes` 152, was 112). The sections must end
+  exactly at the end of the file; trailing bytes are refused. A load verifies the
+  header and every section it decodes, before decoding it; a mismatch
+  fails the load with `SnapshotLoadStats::error` naming the section
+  (`section 'graph' checksum mismatch (the file is damaged)`), and the
+  CLI prints it with exit 3. `megascope info` decodes only the meta but
+  verifies every section (`SnapshotIO::verify`). A decoder that rejects
+  a checksummed section now also says which section (`section
+  'control_flow' does not decode ...`). Section contents are unchanged
+  from v12; a v12 index is rejected with `format version 12, expected
+  13` and rebuilt by the next `index`.
+- **No empty publication.** A bake that parsed none of the TUs it was
+  asked for — no outcome at all, or every TU `Skipped` — is never saved
+  (`SnapshotIO::unpublishableBake`); the index is left as it was and
+  `index` exits 1. This covers an `--isolate-workers` bake that cannot
+  create its shard directory (full or read-only temp dir): it used to
+  return an empty result that was saved over the index with exit 0;
+  `bakeIsolated` now reports every TU `Skipped` with the reason. A TU
+  that was parsed and failed (`Partial`, `Crashed`, `Poisoned`) is a
+  real result and is published as before.
+- **anneal journal.** Loading records where the last valid record ends;
+  `AnnealCheckpoint::open` truncates the file there before appending, so
+  a torn or damaged record no longer hides every record written after it
+  (the attempt records poison detection counts included). Record and
+  shard lengths are bounds-checked in `size_t` (`len + 4` wrapped in
+  `uint32_t` for lengths near 4 GiB and read past the buffer). A failed
+  append clears the stream error and stops journaling for the rest of
+  the run instead of aborting it at exit. A journal is locked through
+  `<journal>.lock` while a run has it open; a second run given the same
+  `--checkpoint` continues without one (truncating could otherwise cut
+  off a record the first run is still appending).
+- **Throwaway files** (worker shards, the anneal handoff file) are
+  published atomically but without the two fsyncs
+  (`writeFileAtomically(..., durable=false)`).
+
+Checksum cost, measured on a synthetic 200-TU project (80,200 nodes,
+239,600 edges and call sites; a 130 MB index: 44 MB graph, 81 MB
+control-flow section), Debug build of this repo against the system LLVM
+18 (xxh3 itself is in the optimized LLVM library), 4 cores, warm page
+cache, median of 7 one-shot runs, v12 binary from `main` vs v13:
+
+| Query (sections loaded) | v12 load | v13 load | v12 wall | v13 wall |
+|---|---|---|---|---|
+| `info` (meta; v13 verifies all 130 MB) | 0.2 ms | 0.2 ms | 17 ms | 46 ms |
+| `get-callers` (graph) | 540 ms | 532 ms | 796 ms | 799 ms |
+| `query-call-site-context` (graph + mapped control flow) | 669 ms | 707 ms | 929 ms | 965 ms |
+| `dump` (mapped control flow + channels) | 155 ms | 172 ms | 3,362 ms | 3,396 ms |
+
+Verifying runs at about 4.6 GB/s here (page faults of the mapped file
+included): 17–18 ms for the 81 MB control-flow section, lost in the
+noise of the graph decode. That is not material next to decoding, so
+every decoded section is verified on every load; there is no lazy mode.
+
+Reproducing tests: `tests/test_write_integrity.cpp` (tear, concurrent
+saves, full disk via `RLIMIT_FSIZE`, flipped bytes and truncation,
+lock, journal truncation and overflow) and
+`scripts/write-integrity-check.py` (ctest `write_integrity`: the
+empty-bake overwrite, concurrent `index` runs, `--no-wait` and waiting,
+damaged sections through `info` and the query verbs).
 
 ## Measurements
 

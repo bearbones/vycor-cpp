@@ -219,7 +219,10 @@ semantics as megascope). For long runs, `--checkpoint <file>`
 journals per-TU progress: a run killed partway (OOM, Ctrl-C, CI timeout)
 resumes where it left off instead of restarting, source edits invalidate
 exactly the affected entries, and a TU whose parse fatally died twice is
-skipped with a warning instead of re-killing every resume.
+skipped with a warning instead of re-killing every resume. One run per
+journal: a second run given the same `--checkpoint` while the first is
+running continues without it (the journal is locked through
+`<file>.lock`).
 `--isolate-workers` (with `--workers N`) additionally runs the parses in
 subprocess workers, megascope-style: a TU that crashes its worker costs
 only that TU, and the parent survives. `--worker-timeout <s>` (default
@@ -345,7 +348,9 @@ index, else the whole compilation database),
 compile command changed are re-indexed, in parallel; `--snapshot` is
 the old spelling), `--force` (rebuild regardless), `--retry-failed`
 (re-parse the TUs whose last parse failed even when nothing changed;
-see `docs/index-provenance.md`), `--threads`,
+see `docs/index-provenance.md`), `--no-wait` (fail instead of waiting
+when another `index`/`serve` holds the index's write lock,
+`<index>.lock`), `--threads`,
 `--pch-dir`, `--isolate-workers`/`--workers` (subprocess baking: a
 crashing or hanging TU costs only that TU; the default whenever
 `--threads` is not 1 and `--pch-dir` is unset, `--isolate-workers=false`

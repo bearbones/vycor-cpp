@@ -405,9 +405,21 @@ llvm::json::Value handleImpactOfChange(const llvm::json::Object &args,
   readLimitAs(args, "max_work", 0, kMaxWorkLimit, BelowMin::Clamp,
               limits.maxWork);
   size_t maxResults = 200;
-  if (auto err = readLimitAs(args, "max_results", 0, kMaxResultsLimit,
-                             BelowMin::Reject, maxResults))
-    return usageError(*err);
+  // `limit` is an alias (docs/result-contract.md); max_results wins.
+  // Errors name the spelling the request used.
+  llvm::StringRef resultsKey =
+      args.get("max_results") || !args.get("limit") ? "max_results"
+                                                     : "limit";
+  if (args.get(resultsKey)) {
+    auto mr = args.getInteger(resultsKey);
+    if (!mr)
+      return usageError("Invalid " + resultsKey.str() +
+                        ": must be an integer");
+    if (*mr < 0)
+      return usageError("Invalid " + resultsKey.str() +
+                        ": must be non-negative");
+    maxResults = static_cast<size_t>(std::min<int64_t>(*mr, kMaxResultsLimit));
+  }
   bool includePaths = true;
   if (auto ip = args.getBoolean("include_paths"))
     includePaths = *ip;
@@ -467,7 +479,7 @@ void registerImpactTools(std::vector<ToolEntry> &tools) {
   props["max_results"] = intProp(
       "Maximum affected functions to list, after ordering by (depth, usr) "
       "(default: 200; 0 = all). affectedCount is the full count and "
-      "truncated says whether the list was cut.");
+      "truncated says whether the list was cut. Alias: 'limit'.");
   props["max_fan_in"] = intProp(
       "Do not expand the callers of an affected function with more "
       "stored callers than this (high-fan-in hubs; the changed functions "

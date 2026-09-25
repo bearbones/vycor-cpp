@@ -16,10 +16,12 @@
 #include "vycor/anneal/Checkpoint.h"
 
 #include "vycor/Version.h"
+#include "vycor/callgraph/AtomicFile.h"
 #include "vycor/ext/Extensions.h"
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -616,17 +618,38 @@ AnnealCheckpoint::open(const std::string &path, uint64_t optionsFingerprint) {
   std::unique_ptr<AnnealCheckpoint> ckpt(new AnnealCheckpoint());
   ckpt->path_ = path;
 
+  // One run per journal: a second run would truncate records the first
+  // is still appending (see below). Held for the checkpoint's lifetime.
+  // A lock file that cannot be created (read-only directory) is no
+  // reason to refuse: the journal itself would fail to open then.
+  std::string lockError;
+  bool busy = false;
+  ckpt->lock_ =
+      IndexWriteLock::acquire(path, /*wait=*/false, &lockError, &busy);
+  if (!ckpt->lock_ && busy) {
+    llvm::errs() << "anneal: checkpoint " << path
+                 << " is in use by another run (" << lockError << ")\n";
+    return nullptr;
+  }
+
+  // Where appends continue: the end of the last record that loaded
+  // cleanly. Anything after it (a record cut short by a kill, a damaged
+  // one, garbage) is truncated away before appending, or new records
+  // would land behind it where no later load could reach them.
   bool reuse = false;
+  uint64_t validEnd = 0, fileSize = 0;
   if (auto bufOrErr = llvm::MemoryBuffer::getFile(path)) {
     const auto &buf = *bufOrErr.get();
+    fileSize = buf.getBufferSize();
     if (buf.getBufferSize() >= kHeaderSize &&
         std::memcmp(buf.getBufferStart(), kMagic, 4) == 0) {
       Reader header{buf.getBufferStart() + 4, kHeaderSize - 4};
       uint32_t version = header.u32();
       uint64_t fingerprint = header.u64();
       if (version == kVersion && fingerprint == optionsFingerprint) {
-        ckpt->loadRecords(buf.getBufferStart() + kHeaderSize,
-                          buf.getBufferSize() - kHeaderSize);
+        validEnd = kHeaderSize +
+                   ckpt->loadRecords(buf.getBufferStart() + kHeaderSize,
+                                     buf.getBufferSize() - kHeaderSize);
         reuse = true;
       } else {
         llvm::errs() << "anneal: checkpoint " << path
@@ -636,41 +659,64 @@ AnnealCheckpoint::open(const std::string &path, uint64_t optionsFingerprint) {
     }
   }
 
-  std::error_code ec;
-  if (reuse) {
-    ckpt->out_ = std::make_unique<llvm::raw_fd_ostream>(
-        path, ec, llvm::sys::fs::OF_Append);
-  } else {
-    ckpt->out_ =
-        std::make_unique<llvm::raw_fd_ostream>(path, ec, llvm::sys::fs::OF_None);
-    if (!ec) {
-      std::string header;
-      header.append(kMagic, 4);
-      putU32(header, kVersion);
-      putU64(header, optionsFingerprint);
-      *ckpt->out_ << header;
-      ckpt->out_->flush();
+  if (!reuse) {
+    // A fresh journal is published whole (header only), so a kill here
+    // never leaves a headerless file behind.
+    std::string header;
+    header.append(kMagic, 4);
+    putU32(header, kVersion);
+    putU64(header, optionsFingerprint);
+    std::string error;
+    if (!writeFileAtomically(
+            path, [&](llvm::raw_ostream &os) { os << header; }, &error)) {
+      llvm::errs() << "anneal: checkpoint: " << error << "\n";
+      return nullptr;
     }
+    validEnd = fileSize = kHeaderSize;
   }
-  if (ec)
+
+  int fd = -1;
+  if (std::error_code ec = llvm::sys::fs::openFileForWrite(
+          path, fd, llvm::sys::fs::CD_OpenExisting,
+          llvm::sys::fs::OF_Append)) {
+    llvm::errs() << "anneal: checkpoint: cannot open " << path << ": "
+                 << ec.message() << "\n";
     return nullptr;
+  }
+  if (validEnd < fileSize) {
+    if (std::error_code ec = llvm::sys::fs::resize_file(fd, validEnd)) {
+      llvm::errs() << "anneal: checkpoint: cannot truncate the damaged "
+                      "tail of "
+                   << path << ": " << ec.message() << "\n";
+      llvm::sys::Process::SafelyCloseFileDescriptor(fd);
+      return nullptr;
+    }
+    llvm::errs() << "anneal: checkpoint " << path << ": dropped "
+                 << (fileSize - validEnd)
+                 << " byte(s) of truncated or damaged records at the end\n";
+  }
+  ckpt->out_ = std::make_unique<llvm::raw_fd_ostream>(fd,
+                                                      /*shouldClose=*/true);
   return ckpt;
 }
 
 AnnealCheckpoint::~AnnealCheckpoint() = default;
 
-void AnnealCheckpoint::loadRecords(const char *data, size_t size) {
+size_t AnnealCheckpoint::loadRecords(const char *data, size_t size) {
   Reader stream{data, size};
+  size_t validEnd = 0;
   while (stream.ok && stream.pos < stream.size) {
     uint8_t kind = stream.u8();
     uint32_t len = stream.u32();
-    if (!stream.need(len + 4))
+    // Widened: `len + 4` in uint32_t wraps for len >= 0xFFFFFFFC.
+    if (!stream.need(static_cast<size_t>(len) + 4))
       break; // truncated tail (killed mid-append) — keep what we have
     const char *payload = stream.data + stream.pos;
     stream.pos += len;
     uint32_t checksum = stream.u32();
     if (checksum != fnv32(payload, len))
       break; // corrupt tail
+    validEnd = stream.pos;
 
     Reader r{payload, len};
     switch (kind) {
@@ -724,6 +770,7 @@ void AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       break;
     }
   }
+  return validEnd;
 }
 
 // ---------------------------------------------------------------------------
@@ -787,6 +834,16 @@ void AnnealCheckpoint::appendRecord(uint8_t kind, const std::string &payload) {
     return;
   *out_ << framed;
   out_->flush(); // one syscall per record: survives SIGKILL from here on
+  if (out_->has_error()) {
+    // A full disk or I/O error: the record may be partly written, so
+    // stop journaling (the next resume truncates the torn record) rather
+    // than append behind it. The run itself goes on.
+    llvm::errs() << "anneal: checkpoint: cannot append to " << path_ << ": "
+                 << out_->error().message()
+                 << " — continuing without the checkpoint\n";
+    out_->clear_error();
+    out_.reset();
+  }
 }
 
 void AnnealCheckpoint::recordAttempt(uint8_t phase, const std::string &tu,
@@ -862,10 +919,6 @@ constexpr uint32_t kShardVersion = 8;
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>
                         &tuPayloads) {
-  std::error_code ec;
-  llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_None);
-  if (ec)
-    return false;
   std::string buf;
   buf.append(magic, 4);
   putU32(buf, kShardVersion);
@@ -876,9 +929,16 @@ bool writeShardFile(const std::string &path, const char magic[4],
     buf.append(payload);
     putU32(buf, fnv32(payload.data(), payload.size()));
   }
-  out << buf;
-  out.flush();
-  return !out.has_error();
+  // Shards and the handoff file live in a temp directory and are read
+  // back at once: atomic, but not worth two fsyncs per batch.
+  std::string error;
+  if (!writeFileAtomically(
+          path, [&](llvm::raw_ostream &os) { os << buf; }, &error,
+          /*durable=*/false)) {
+    llvm::errs() << "anneal: " << error << "\n";
+    return false;
+  }
+  return true;
 }
 
 bool readShardFile(
@@ -898,7 +958,8 @@ bool readShardFile(
   for (uint32_t i = 0; i < count; ++i) {
     std::string tu = stream.str();
     uint32_t len = stream.u32();
-    if (!stream.need(len + 4))
+    // Widened: `len + 4` in uint32_t wraps for len >= 0xFFFFFFFC.
+    if (!stream.need(static_cast<size_t>(len) + 4))
       return false;
     const char *payload = stream.data + stream.pos;
     stream.pos += len;

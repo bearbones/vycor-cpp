@@ -35,28 +35,29 @@ applied to a whole edge.
 
 | Tool | List | Order |
 |---|---|---|
-| `search_functions` | `results` | tier (exact unqualified name, prefix, substring), qualified-name length, qualified name, usr; `limit` cuts after ordering |
+| `search_functions` | `matches` | tier (exact unqualified name, prefix, substring), qualified-name length, qualified name, usr; `offset` / `limit` page over that order |
 | `lookup_function` | — | scalar |
-| `get_callees` | `callees` | canonical edge order (callee usr, call site, ...) |
-| `get_callers` | `callers` | canonical edge order (caller usr, call site, ...) |
+| `get_callees` | `callees` | canonical edge order (callee usr, call site, ...); `distinct` keeps each callee's first site; `offset` / `limit` page over that order |
+| `get_callers` | `callers` | canonical edge order (caller usr, call site, ...); `distinct` keeps each caller's first site; `offset` / `limit` page over that order |
 | `find_call_chain` | `paths` | engine canonical order; under `max_paths` the kept subset is the canonical prefix (`docs/path-analysis.md`) |
 | `query_exception_safety`, `query_throw_propagation`, `query_all_path_contexts` | `paths` | engine canonical order; `catches` by (frames from target, path segment, call site) |
 | `query_nearest_catches` | `catches` | (frames from target, path segment, call site) |
 | `query_call_site_context` | `enclosingScopes`, `guards` | innermost first, as recorded at the site |
 | `query_raii_scopes_at_callsite` | `locals` | as recorded at the site: enclosing scopes innermost first, locals in declaration order |
 | `query_locks_held`, `query_same_lock` | `paths` | engine canonical order; locks on a path innermost frame first; `skippedHubs` by usr |
-| `analyze_dead_code` | `dead`, `optimistic` | (file, line, usr); `offset` / `limit` page over that order |
-| `get_class_hierarchy` | `derivedClasses`, `overrides` | class names in name order; base methods in usr order, each method's overrides in name order |
-| `list_entry_points` | `entryPoints` | as recorded by the bake (`--entry-point` order) or as passed to `serve` |
+| `analyze_dead_code` | `dead`, `optimisticallyAlive` | (file, line, usr); one `offset` / `limit` window pages both over that order |
+| `get_class_hierarchy` | `derivedClasses`, `overrides` | class names in name order (`offset` / `limit` page `derivedClasses`); base methods in usr order, each method's overrides in name order |
+| `list_entry_points` | `entryPoints` | as recorded by the bake (`--entry-point` order) or as passed to `serve`; `offset` / `limit` page over that order |
 | `graph_summary` | `topFanoutCallers`, `topFanoutCallees` | count descending, then name; the histograms are objects |
-| `list_callback_sites` | `targets`, `sites` | target name; sites within a target in canonical edge order |
-| `list_concurrency_entry_points` | `entries` | canonical edge order (spawner usr, target usr, call site, ...) |
-| `list_channels` | `channels` | channel id |
-| `query_channel`, `query_channels_for_function` | `producers`, `consumers`, `sites` | (call site, channel id, function usr) |
+| `list_callback_sites` | `targets`, `sites` | target name (`offset` / `limit` page the targets); sites within a target in canonical edge order, the first `site_limit` kept |
+| `list_concurrency_entry_points` | `entries` | canonical edge order (spawner usr, target usr, call site, ...); `offset` / `limit` page over that order |
+| `list_channels` | `channels` | channel id; `offset` / `limit` page over that order |
+| `query_channel`, `query_channels_for_function` | `producers`, `consumers`, `sites` | (call site, channel id, function usr); `offset` / `limit` page each list over that order |
 | `explain_ordering` | — | scalar |
 | `impact_of_change` | `changed`, `unknown`, `affected`, `entryPointsAffected`, `skippedHubs`, `unmapped` | changed and hubs by usr, unknown by name; affected by (depth, usr) — a function's `path` is its shallowest chain, ties by the callers' canonical edge order; entry points in affected order; unmapped ranges by (file, first line) |
 | `diff` | `changes`, `moves`, `identity.ambiguous`, `identity.renameCandidates`, `routes.added`/`removed`/`unchanged`, `impact` | change kind (`function_removed`, `function_added`, `call_removed`, `call_added`, `call_changed`, `context_changed`), then usr, then (caller usr, callee usr); sites within a change by call site; moves and rename candidates by key; ambiguous groups by group; routes in path order (`docs/path-analysis.md`); `impact` as `impact_of_change` |
 | any tool, `ambiguous` | `candidates` | by usr (a name), by caller usr (a call site) |
+| any tool, unknown identity | `didYouMean` | `search_functions` order of the value, then of its unqualified tail, then (edit distance, qualified-name length, qualified name, usr) |
 | `batch` | response lines | request order |
 | `tools` | tools | registration order (`query/Registry.cpp`) |
 
