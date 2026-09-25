@@ -216,8 +216,11 @@ def normalize(text: str, subs: list[tuple[str, str]]) -> list[str]:
             continue
         if isinstance(v, dict) and "_summary" in v:
             # Counts here may include toolchain records dropped below.
+            # (bool is an int subclass; flags such as truncated and
+            # distinct are not counts and stay.)
             v["_summary"] = {k: x for k, x in v["_summary"].items()
-                             if not isinstance(x, int)}
+                             if not isinstance(x, int)
+                             or isinstance(x, bool)}
         line = json.dumps(scrub(v), sort_keys=True, separators=(",", ":"))
         # Fixture paths are placeholders now; any absolute path left names
         # a system header, and the record is host-dependent.

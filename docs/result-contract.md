@@ -146,12 +146,16 @@ it before any handler runs:
   callers reads as "nothing calls this"; a typo became a dead-code or
   attack-surface conclusion. The exit code is 1 either way; the
   `status` is what changed.
-- An **endpoint known only by name** (an external or unresolved callee:
-  some edge names it, no node does) still resolves, and the payload
-  says so with `resolvedAs: "name"` where a node's `usr` would be
-  (`targetResolvedAs` beside `targetUsr`, `fn_a_resolvedAs` beside
-  `fn_a_usr`). `lookup_function` still answers `not_found` for one,
-  since it reports node metadata.
+- An **edge endpoint without a node** (an external or unresolved
+  callee: some edge names it, no node does) still resolves. Its
+  identity string is all the index holds for it, and in a real bake
+  that string is a USR (`c:@F@ext_write#I#`), so it is reached by
+  that USR, as `usr` or spelled as the name; a display name nothing
+  recorded for it is `not_found`. The payload says the identity
+  resolved to a bare endpoint with `resolvedAs: "name"` where a
+  node's `usr` would be (`targetResolvedAs` beside `targetUsr`,
+  `fn_a_resolvedAs` beside `fn_a_usr`). `lookup_function` still
+  answers `not_found` for one, since it reports node metadata.
 - The string table is not the test: it never forgets a string, and call
   sites and file paths live in it too. A name only a removed TU knew
   is `not_found`, as it is to a clean bake.
@@ -201,7 +205,7 @@ whole list, not the page.
 | `list_channels` | `channels` | 200 | |
 | `query_channels_for_function` | `sites` | 200 | |
 | `query_channel` | `producers`, `consumers` | 200 | one window pages both lists: `producerTotal` and `consumerTotal` replace `total` and `returned`, and `truncated` is set when either list continues |
-| `analyze_dead_code` | `dead` | 500 | already paged (`totalDead`, `deadCount`, `offset`, `limit`, `truncated`); gains `total`, `returned`, `nextOffset`, and the same window now pages `optimisticallyAlive` too (`optimisticTotal`, `optimisticTruncated`). Its `limit` keeps its historical range (0 = counts only) |
+| `analyze_dead_code` | `dead`, `optimisticallyAlive` | 500 | already paged (`totalDead`, `deadCount`, `offset`, `limit`); the same window now pages `optimisticallyAlive` too (`optimisticTotal`, `optimisticTruncated`). `total` and `returned` describe `dead`; `truncated` and `nextOffset` cover both lists, so following `nextOffset` reaches every record of either. Its `limit` keeps its historical range: 0 is counts only, which returns no records and no `nextOffset` (`truncated` still says whether records exist) |
 
 Not paged, because another argument bounds them: the path tools
 (`find_call_chain`, the exception path tools, `query_locks_held`,
@@ -226,7 +230,11 @@ The canonical spelling wins when both are present. An error names the
 spelling the request used (`parameter`). Aliases are argument names,
 not schema properties: they work wherever arguments are JSON (MCP,
 `batch`, `call --args`), while the CLI's `--flags` are derived from
-the schema and take the canonical names.
+the schema and take the canonical names. No schema lists an aliased
+parameter as `required` (`query_channels_for_function` reports a
+missing `function` itself), because the CLI's flag check and MCP
+clients that enforce `required` would reject the alias before the
+handler runs.
 
 ### Exit codes
 
@@ -338,8 +346,11 @@ exception tools pass `ctx.facts.coversRequested()`.
 `tests/test_answer_bounds.cpp`: an unknown name (and usr, and each
 identity of a two-identity tool) is `not_found` with a suggestion that
 includes the intended function on every identity-taking tool; an
-endpoint known only by name resolves with `resolvedAs`; the aliases;
-every paged tool's pages stitched back together equal one uncut page;
+edge endpoint without a node resolves by its USR with `resolvedAs`;
+the aliases, and no schema requiring an aliased parameter;
+every paged tool's pages stitched back together equal one uncut page,
+`analyze_dead_code`'s two lists included, and its counts-only `limit: 0`
+without a next page;
 `distinct`; the per-target site cap; the validation errors.
 
 `tests/test_result_contract.cpp`: one case per acceptance row (success,

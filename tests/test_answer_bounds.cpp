@@ -257,6 +257,50 @@ TEST_CASE("an endpoint known only by name still resolves, marked",
   CHECK(objectOf(chain).getInteger("pathCount") == 1);
 }
 
+TEST_CASE("an endpoint without a node resolves by its USR",
+          "[identity][tools]") {
+  // Real node-less endpoints carry a USR-shaped identity string, not a
+  // display name: the usr is the only handle the index has on them.
+  Fixture f;
+  f.graph.addEdge(edge("Server::handle", "c:@F@ext_write#I#",
+                       EdgeKind::DirectCall, "s.cpp:4:3"));
+  auto viaUsr = f.run("get_callers", {{"usr", "c:@F@ext_write#I#"}});
+  REQUIRE(statusOf(viaUsr) == ResultStatus::Ok);
+  CHECK(objectOf(viaUsr).getInteger("callerCount") == 1);
+  CHECK(objectOf(viaUsr).getString("resolvedAs") == "name");
+  CHECK(objectOf(viaUsr).get("usr") == nullptr);
+  // The USR spelled as a name resolves the same way.
+  auto viaName = f.run("get_callers", {{"name", "c:@F@ext_write#I#"}});
+  CHECK(objectOf(viaName).getInteger("callerCount") == 1);
+  // A display name the index never recorded for it does not.
+  CHECK(statusOf(f.run("get_callers", {{"name", "ext_write"}})) ==
+        ResultStatus::NotFound);
+  // lookup_function reports node metadata, and there is no node.
+  CHECK(statusOf(f.run("lookup_function", {{"usr", "c:@F@ext_write#I#"}})) ==
+        ResultStatus::NotFound);
+}
+
+TEST_CASE("no tool requires a parameter that has an alias",
+          "[identity][tools]") {
+  // A schema requirement on the canonical spelling makes the CLI's flag
+  // check and strict MCP clients reject the alias before the handler runs.
+  for (const auto &tool : getRegisteredTools()) {
+    INFO(tool.name);
+    const auto *schema = tool.inputSchema.getAsObject();
+    REQUIRE(schema != nullptr);
+    const auto *required = schema->getArray("required");
+    if (!required)
+      continue;
+    for (const auto &r : *required) {
+      auto s = r.getAsString();
+      REQUIRE(s);
+      CHECK(identityAlias(*s).empty());
+      CHECK(*s != "limit");
+      CHECK(*s != "max_results");
+    }
+  }
+}
+
 TEST_CASE("name and function are aliases of the target parameter",
           "[identity][tools]") {
   Fixture f;
@@ -471,6 +515,20 @@ TEST_CASE("paging details", "[paging][tools]") {
     CHECK(t->getArray("sites")->size() == 2);
   }
 
+  SECTION("impact_of_change's alias errors name the spelling used") {
+    auto neg = f.run("impact_of_change",
+                     {{"changed", llvm::json::Array{"hub"}}, {"limit", -1}});
+    CHECK(statusOf(neg) == ResultStatus::UsageError);
+    CHECK(objectOf(neg).getString("error")->contains("limit"));
+    auto text = f.run("impact_of_change", {{"changed", llvm::json::Array{"hub"}},
+                                           {"limit", "ten"}});
+    CHECK(statusOf(text) == ResultStatus::UsageError);
+    auto bad = f.run("impact_of_change", {{"changed", llvm::json::Array{"hub"}},
+                                          {"max_results", "ten"}});
+    CHECK(statusOf(bad) == ResultStatus::UsageError);
+    CHECK(objectOf(bad).getString("error")->contains("max_results"));
+  }
+
   SECTION("impact_of_change accepts limit for max_results") {
     auto viaLimit =
         f.run("impact_of_change",
@@ -481,5 +539,80 @@ TEST_CASE("paging details", "[paging][tools]") {
     REQUIRE(statusOf(viaLimit) == ResultStatus::Ok);
     CHECK(viaLimit == viaMax);
     CHECK(objectOf(viaLimit).getArray("affected")->size() == 2);
+  }
+}
+
+TEST_CASE("analyze_dead_code pages dead and optimistically-alive together",
+          "[paging][tools]") {
+  // main takes the address of seven callbacks (Plausible FunctionPointer
+  // edges), so they are optimistically alive; one function is dead. The
+  // optimistic list is the longer one.
+  CallGraph graph;
+  graph.addNode({"main", "a.cpp", 1, true, false, ""});
+  graph.addNode({"orphan", "z.cpp", 1, false, false, ""});
+  for (int i = 0; i < kN; ++i) {
+    std::string n = std::to_string(i);
+    graph.addNode({"cb_" + n, "c.cpp", 10u + i, false, false, ""});
+    graph.addEdge({"main", "cb_" + n, EdgeKind::FunctionPointer,
+                   Confidence::Plausible, "a.cpp:" + n + ":3", 0});
+  }
+  ControlFlowIndex cfIndex;
+  ControlFlowOracle oracle(graph, cfIndex);
+  std::vector<std::string> eps = {"main"};
+  ToolContext ctx{graph, oracle, cfIndex, eps};
+  auto handler = findHandler("analyze_dead_code");
+  REQUIRE(handler);
+
+  auto uncut = handler(llvm::json::Object{{"limit", 1000}}, ctx);
+  const auto &all = objectOf(uncut);
+  const int64_t optimisticTotal = *all.getInteger("optimisticTotal");
+  const int64_t deadTotal = *all.getInteger("totalDead");
+  REQUIRE(optimisticTotal > deadTotal);
+  REQUIRE(optimisticTotal >= 3);
+  CHECK(all.getBoolean("truncated") == false);
+
+  SECTION("following nextOffset sees every record of both lists") {
+    llvm::json::Array dead, optimistic;
+    int64_t offset = 0;
+    for (int pages = 0;; ++pages) {
+      REQUIRE(pages < 100);
+      auto page = handler(
+          llvm::json::Object{{"limit", 2}, {"offset", offset}}, ctx);
+      const auto &obj = objectOf(page);
+      for (const auto &v : *obj.getArray("dead"))
+        dead.push_back(v);
+      for (const auto &v : *obj.getArray("optimisticallyAlive"))
+        optimistic.push_back(v);
+      if (!*obj.getBoolean("truncated")) {
+        CHECK(obj.get("nextOffset") == nullptr);
+        break;
+      }
+      offset = *obj.getInteger("nextOffset");
+    }
+    CHECK(llvm::json::Value(std::move(dead)) ==
+          llvm::json::Value(llvm::json::Array(*all.getArray("dead"))));
+    CHECK(llvm::json::Value(std::move(optimistic)) ==
+          llvm::json::Value(
+              llvm::json::Array(*all.getArray("optimisticallyAlive"))));
+  }
+
+  SECTION("a page that cuts only the optimistic list is truncated") {
+    auto page = handler(llvm::json::Object{{"limit", 1}, {"offset", deadTotal}},
+                        ctx);
+    const auto &obj = objectOf(page);
+    CHECK(obj.getArray("dead")->empty());
+    CHECK(obj.getBoolean("optimisticTruncated") == true);
+    CHECK(obj.getBoolean("truncated") == true);
+    CHECK(obj.getInteger("nextOffset") == deadTotal + 1);
+  }
+
+  SECTION("limit 0 is counts only and has no next page") {
+    auto page = handler(llvm::json::Object{{"limit", 0}}, ctx);
+    const auto &obj = objectOf(page);
+    CHECK(obj.getArray("dead")->empty());
+    CHECK(obj.getArray("optimisticallyAlive")->empty());
+    CHECK(obj.getInteger("totalDead") == deadTotal);
+    CHECK(obj.getInteger("optimisticTotal") == optimisticTotal);
+    CHECK(obj.get("nextOffset") == nullptr);
   }
 }

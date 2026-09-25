@@ -243,13 +243,20 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
   obj["deadCount"] = static_cast<int64_t>(dead.size());
   obj["offset"] = offset;
   obj["limit"] = limit;
-  obj["truncated"] = end < totalDead;
+  // One window pages both lists, so the paging members cover both: a
+  // client that follows nextOffset sees every record of either list.
+  // limit 0 is the counts-only mode: nothing is paged, so there is no
+  // next page to point at (a nextOffset equal to offset would never
+  // advance).
+  const bool deadTruncated = end < totalDead;
+  const bool optimisticTruncated = optEnd < totalOptimistic;
+  obj["truncated"] = deadTruncated || optimisticTruncated;
   obj["total"] = totalDead;
   obj["returned"] = static_cast<int64_t>(end - start);
-  if (end < totalDead)
-    obj["nextOffset"] = end;
+  if (limit > 0 && (deadTruncated || optimisticTruncated))
+    obj["nextOffset"] = offset + limit;
   obj["optimisticTotal"] = totalOptimistic;
-  obj["optimisticTruncated"] = optEnd < totalOptimistic;
+  obj["optimisticTruncated"] = optimisticTruncated;
   obj["dead"] = std::move(dead);
   obj["optimisticallyAlive"] = std::move(optimistic);
   // Omit alive list to keep response size down — caller usually wants dead.
@@ -283,8 +290,9 @@ void registerDeadCodeTools(std::vector<ToolEntry> &tools) {
         "this prefix.");
     props["limit"] = intProp(
         "Maximum number of dead entries to return after filtering "
-        "(default: 500). The same window pages optimisticallyAlive "
-        "(optimisticTotal, optimisticTruncated).");
+        "(default: 500; 0 returns the counts only). The same window "
+        "pages optimisticallyAlive (optimisticTotal, optimisticTruncated); "
+        "truncated and nextOffset cover both lists.");
     props["offset"] = intProp(
         "Number of filtered dead entries to skip before returning "
         "(default: 0). Use with limit to paginate; nextOffset continues.");

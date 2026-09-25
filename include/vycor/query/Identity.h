@@ -99,8 +99,9 @@ resolveIdentity(const llvm::json::Object &args, const ToolContext &ctx,
                 std::optional<llvm::json::Value> &ambiguous);
 
 /// Adds the resolved node usr to a response object when the identity names
-/// a registered node. An identity with no node (an edge endpoint known only
-/// by name) has no usr to cite; the response says so instead with
+/// a registered node. An identity with no node (an edge endpoint whose
+/// identity string, usually a USR, is all the index holds) has no usr to
+/// cite; the response says so instead with
 /// `resolvedAs: "name"` (key "usr"; "targetUsr" -> "targetResolvedAs",
 /// "fn_a_usr" -> "fn_a_resolvedAs").
 void attachUsr(llvm::json::Object &obj, const ToolContext &ctx,

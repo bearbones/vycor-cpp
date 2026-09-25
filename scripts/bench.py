@@ -116,6 +116,9 @@ def select_sources(build_path: Path, source_re: str, max_tus: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 READY_MARKER = b"server started, waiting for requests"
+# get_callers / get_callees page at 200 records by default
+# (docs/result-contract.md, "Paging"); a limit this large asks for all.
+ALL_RECORDS = 1_000_000_000
 
 
 def launch_megascope(binary: Path, build_path: Path, files: list[str],
@@ -209,8 +212,9 @@ def run_query_benchmark(client: McpClient, reps: int) -> dict:
     hub = None
     hub_callers = -1
     for name in candidates[:20]:
-        res = client.tool("get_callers", {"name": name})
-        n = len(res.get("callers", []))
+        # callerCount is the full count; the callers list is paged.
+        res = client.tool("get_callers", {"name": name, "limit": 1})
+        n = res.get("callerCount", -1)
         if n > hub_callers:
             hub, hub_callers = name, n
     target = hub or candidates[0]
@@ -222,10 +226,14 @@ def run_query_benchmark(client: McpClient, reps: int) -> dict:
         reps)
     out["lookup_function"] = timed(
         lambda: client.tool("lookup_function", {"name": target}), reps)
+    # The hub timings ask for the whole list (the default page is 200),
+    # so they stay comparable with measurements taken before paging.
     out["get_callers_hub"] = timed(
-        lambda: client.tool("get_callers", {"name": target}), reps)
+        lambda: client.tool("get_callers",
+                            {"name": target, "limit": ALL_RECORDS}), reps)
     out["get_callees_hub"] = timed(
-        lambda: client.tool("get_callees", {"name": target}), reps)
+        lambda: client.tool("get_callees",
+                            {"name": target, "limit": ALL_RECORDS}), reps)
     out["find_call_chain"] = timed(
         lambda: client.tool("find_call_chain",
                             {"from": "main", "to": target,
@@ -302,8 +310,10 @@ def run_cli_benchmark(binary: Path, index: Path, reps: int,
         "search_functions": ("search_functions", {"query": "run",
                                                   "limit": 50}),
         "lookup_function": ("lookup_function", {"name": target}),
-        "get_callers_hub": ("get_callers", {"name": target}),
-        "get_callees_hub": ("get_callees", {"name": target}),
+        "get_callers_hub": ("get_callers",
+                            {"name": target, "limit": ALL_RECORDS}),
+        "get_callees_hub": ("get_callees",
+                            {"name": target, "limit": ALL_RECORDS}),
         "find_call_chain": ("find_call_chain",
                             {"from": "main", "to": target,
                              "max_depth": 10, "max_paths": 5}),

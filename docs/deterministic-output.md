@@ -45,7 +45,7 @@ applied to a whole edge.
 | `query_call_site_context` | `enclosingScopes`, `guards` | innermost first, as recorded at the site |
 | `query_raii_scopes_at_callsite` | `locals` | as recorded at the site: enclosing scopes innermost first, locals in declaration order |
 | `query_locks_held`, `query_same_lock` | `paths` | engine canonical order; locks on a path innermost frame first; `skippedHubs` by usr |
-| `analyze_dead_code` | `dead`, `optimisticallyAlive` | (file, line, usr); `offset` / `limit` page both over that order |
+| `analyze_dead_code` | `dead`, `optimisticallyAlive` | (file, line, usr); one `offset` / `limit` window pages both over that order |
 | `get_class_hierarchy` | `derivedClasses`, `overrides` | class names in name order (`offset` / `limit` page `derivedClasses`); base methods in usr order, each method's overrides in name order |
 | `list_entry_points` | `entryPoints` | as recorded by the bake (`--entry-point` order) or as passed to `serve`; `offset` / `limit` page over that order |
 | `graph_summary` | `topFanoutCallers`, `topFanoutCallees` | count descending, then name; the histograms are objects |

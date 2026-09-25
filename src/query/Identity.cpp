@@ -486,7 +486,8 @@ resolveIdentity(const llvm::json::Object &args, const ToolContext &ctx,
 }
 
 // Adds the resolved node usr to a response object when the identity names a
-// registered node. An endpoint known only by name has no node to cite; the
+// registered node. An edge endpoint without a node (its identity string,
+// usually a USR, is all the index holds) has no node to cite; the
 // response marks it `resolvedAs: "name"` under the key's own prefix.
 void attachUsr(llvm::json::Object &obj, const ToolContext &ctx,
                       const std::string &ident,

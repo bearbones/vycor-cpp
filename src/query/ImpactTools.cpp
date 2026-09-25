@@ -407,12 +407,18 @@ llvm::json::Value handleImpactOfChange(const llvm::json::Object &args,
     limits.maxWork = static_cast<size_t>(std::max<int64_t>(0, *mw));
   size_t maxResults = 200;
   // `limit` is an alias (docs/result-contract.md); max_results wins.
-  auto mr = args.getInteger("max_results");
-  if (!mr)
-    mr = args.getInteger("limit");
-  if (mr) {
+  // Errors name the spelling the request used.
+  llvm::StringRef resultsKey =
+      args.get("max_results") || !args.get("limit") ? "max_results"
+                                                     : "limit";
+  if (args.get(resultsKey)) {
+    auto mr = args.getInteger(resultsKey);
+    if (!mr)
+      return usageError("Invalid " + resultsKey.str() +
+                        ": must be an integer");
     if (*mr < 0)
-      return usageError("Invalid max_results: must be non-negative");
+      return usageError("Invalid " + resultsKey.str() +
+                        ": must be non-negative");
     maxResults = static_cast<size_t>(*mr);
   }
   bool includePaths = true;

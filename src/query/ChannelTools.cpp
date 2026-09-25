@@ -161,7 +161,8 @@ handleQueryChannelsForFunction(const llvm::json::Object &args,
                               const ToolContext &ctx) {
   auto function = identityName(args, "function");
   if (!function)
-    return usageError("Requires 'function' (qualified name or usr)");
+    return usageError(
+        "Requires 'function' (qualified name or usr; alias 'name')");
 
   if (auto err = channelsUnavailable(ctx))
     return std::move(*err);
@@ -352,12 +353,12 @@ void registerChannelTools(std::vector<ToolEntry> &tools) {
         "Qualified function name or USR whose channel producer/consumer "
         "call sites to list. Alias: 'name'.");
     addPagingProps(props, kDefaultListLimit, "sites");
-    llvm::json::Array req;
-    req.push_back("function");
+    // Not "required": the handler accepts the 'name' alias, and a schema
+    // requirement on the canonical spelling would make the CLI and strict
+    // MCP clients reject it. The handler reports a missing identity itself.
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"query_channels_for_function",
                      "List the channel sites (producer or consumer) inside "
