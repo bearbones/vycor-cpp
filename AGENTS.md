@@ -162,7 +162,8 @@ handlers directly.
 | File | Purpose |
 |---|---|
 | `Tools.h` | `ToolContext` (indexes, entry points, cache, header summary, and `facts` — the `IndexFacts` every payload cites), `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract (`docs/result-contract.md`): success = payload object; error = `{"error": msg, "status": kind}` built with `usageError` / `notFoundError` / `unavailableError`; ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`); `runTool` runs a handler and `completeResult` stamps `status` (`statusOf`) and `indexScope` onto the payload — what every adapter calls |
-| `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR), the disambiguation payload, `attachUsr` |
+| `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR; an identity that names no node and no edge endpoint is `not_found` with `didYouMean`), the disambiguation payload, `attachUsr` (`resolvedAs: "name"` for a node-less endpoint), the `name`/`function` alias, `rankFunctionMatches` (the `search_functions` ranking) and `suggestFunctions` |
+| `Paging.h` | The shared paging contract of the list tools: `parsePage` (`limit` ≥ 1 with a per-tool default cap, `offset`), `attachPage` (`total`, `offset`, `limit`, `returned`, `truncated`, `nextOffset`), `addPagingProps` for the schemas (`docs/result-contract.md`, "Paging") |
 | `Serialize.h/.cpp` | Enum spellings (`EdgeKind`, `Confidence`, `ExecutionContext`, `ChannelOperation`) and JSON serializers for edges, guards, channel sites — part of the output contract |
 | `GraphTools.cpp` | lookup, search, callers, callees, call chain, class hierarchy, entry points, graph summary, callback/concurrency sites |
 | `ExceptionTools.cpp` | exception safety, call-site context, RAII scopes, throw propagation, all-path contexts, nearest catches |
@@ -319,7 +320,11 @@ Every tool payload, on every transport, carries `status` (`ok`,
 indexed / partial / failed TU counts of the index answered from). Exit
 codes and MCP `isError` derive from `status`, never from message text;
 a universal exception verdict needs an exhaustive search and complete
-coverage (`docs/result-contract.md`).
+coverage (`docs/result-contract.md`). A function identity the index
+does not hold (no node, no edge endpoint) is `not_found` with
+`didYouMean` suggestions, never an empty `ok`; the list tools without
+their own bound page through `limit` / `offset` with a default cap
+and report `total` / `truncated` / `nextOffset`.
 
 ### `ext` — Organization Extension Points
 

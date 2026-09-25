@@ -1,0 +1,2 @@
+# megascope get-callers --name stage3_transfrom -> exit 1
+{"didYouMean":[{"file":"{fixture}/stage3_transform.hpp","line":15,"qualifiedName":"stage3_transform","usr":"c:@F@stage3_transform#&$@S@Registry#I#"}],"error":"Function not found: 'stage3_transfrom' names no function and no call-graph edge in this index (did you mean 'stage3_transform'?). Use search_functions to find the indexed name.","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"name":"stage3_transfrom","parameter":"name","status":"not_found"}

@@ -17,7 +17,12 @@
   "callers": [
   "function": "stage5_sink",
   "indexScope": {
+  "limit": 200,
+  "offset": 0,
+  "returned": 1,
   "status": "ok",
+  "total": 1,
+  "truncated": false,
   "usr": "c:@F@stage5_sink#&$@S@Registry#I#"
   ],
   },

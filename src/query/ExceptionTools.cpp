@@ -114,7 +114,7 @@ handleQueryExceptionSafety(const llvm::json::Object &args,
       ctx.facts.coversRequested());
 
   llvm::json::Object obj;
-  auto function = args.getString("function");
+  auto function = identityName(args, "function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
   obj["protection"] = protectionName(result.protection);
@@ -415,7 +415,7 @@ handleQueryThrowPropagation(const llvm::json::Object &args,
       ctx.facts.coversRequested());
 
   llvm::json::Object obj;
-  auto function = args.getString("function");
+  auto function = identityName(args, "function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
   obj["exceptionType"] = exceptionType;
@@ -449,7 +449,7 @@ handleQueryAllPathContexts(const llvm::json::Object &args,
       *ident, entryPointsArg(args, ctx), limits);
 
   llvm::json::Object obj;
-  auto function = args.getString("function");
+  auto function = identityName(args, "function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
   obj["totalPaths"] = static_cast<int64_t>(result.paths.size());
@@ -480,7 +480,7 @@ handleQueryNearestCatches(const llvm::json::Object &args,
   auto result = ctx.oracle.queryNearestCatches(*ident, maxDepth);
 
   llvm::json::Object obj;
-  auto function = args.getString("function");
+  auto function = identityName(args, "function");
   obj["function"] = function ? function->str() : *ident;
   attachUsr(obj, ctx, *ident);
   obj["maxDepth"] = static_cast<int64_t>(result.maxDepth);
@@ -512,7 +512,7 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["function"] = stringProp(
         "Target function qualified name. Provide 'function' or 'usr' (usr "
-        "wins when both are present).");
+        "wins when both are present). Alias: 'name'.");
     props["usr"] = stringProp(
         "Exact USR of the target function. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "
@@ -611,7 +611,7 @@ void registerExceptionTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["function"] = stringProp(
         "Target function qualified name. Provide 'function' or 'usr' (usr "
-        "wins when both are present).");
+        "wins when both are present). Alias: 'name'.");
     props["usr"] = stringProp(
         "Exact USR of the target function. Bypasses name resolution — use "
         "it to pick one overload/specialization when the name is "

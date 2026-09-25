@@ -124,6 +124,17 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
      '{"id":2,"tool":"lookup_function","args":{"name":"nope"}}\n'
      '{"id":3,"tool":"no_such_tool","args":{}}\n', True),
     ("not-found", ["get-callers", "--name", "does_not_exist"], None, True),
+    ("not-found-suggests",
+     ["get-callers", "--name", "stage3_transfrom"], None, True),
+    ("get-callers-page",
+     ["get-callers", "--name", "cbs::finalFormat", "--limit", "1",
+      "--offset", "1"], None, True),
+    ("get-callees-distinct",
+     ["get-callees", "--name", "Pipeline::run", "--distinct",
+      "--format", "ndjson"], None, True),
+    ("alias-function",
+     ["call", "get_callers", "--args", '{"function":"stage5_sink"}'],
+     None, True),
     ("usage-unknown-flag", ["get-callers", "--bogus", "x"], None, True),
     ("usage-missing-arg", ["get-callers"], None, True),
     ("no-index", ["get-callers", "--index", "{build}/none.vycs",
@@ -205,8 +216,11 @@ def normalize(text: str, subs: list[tuple[str, str]]) -> list[str]:
             continue
         if isinstance(v, dict) and "_summary" in v:
             # Counts here may include toolchain records dropped below.
+            # (bool is an int subclass; flags such as truncated and
+            # distinct are not counts and stay.)
             v["_summary"] = {k: x for k, x in v["_summary"].items()
-                             if not isinstance(x, int)}
+                             if not isinstance(x, int)
+                             or isinstance(x, bool)}
         line = json.dumps(scrub(v), sort_keys=True, separators=(",", ":"))
         # Fixture paths are placeholders now; any absolute path left names
         # a system header, and the record is host-dependent.

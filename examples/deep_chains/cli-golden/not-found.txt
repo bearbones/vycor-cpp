@@ -1,2 +1,2 @@
 # megascope get-callers --name does_not_exist -> exit 1
-{"callerCount":0,"callers":[],"function":"does_not_exist","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok"}
+{"didYouMean":[],"error":"Function not found: 'does_not_exist' names no function and no call-graph edge in this index. Use search_functions to find the indexed name.","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"name":"does_not_exist","parameter":"name","status":"not_found"}

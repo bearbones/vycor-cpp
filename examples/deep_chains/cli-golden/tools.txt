@@ -2,8 +2,8 @@
   analyze-dead-code              Run dead code analysis via call graph reachability.
   explain-ordering               Compare two channel call sites for the evidence needed to explain an ordering assumption between them: whether they're the same channel, each site's enclosing guard conditions (e.g. only reachable when some flag is true), and which ThreadEntry/AsyncTask/PackagedTask/Invoke boundaries reach each site's enclosing function.
   find-call-chain                Find call chains from a source function (or entry points) to a target function.
-  get-callees                    List all functions called by a given function.
-  get-callers                    List all functions that call a given function.
+  get-callees                    List the functions called by a given function, one record per call site (or per callee with distinct), paged by limit/offset.
+  get-callers                    List the functions that call a given function, one record per call site (or per caller with distinct), paged by limit/offset.
   get-class-hierarchy            Query class inheritance relationships and virtual method overrides.
   graph-summary                  Return aggregate statistics about the call graph: node and edge counts, call-site count, entry-point count, top-5 fan-out callers and callees, and histograms by confidence and edge kind.
   impact-of-change               Callers affected by a change: the functions with a call chain to any changed function within max_depth, each at its shallowest depth with a witness path, plus the entry points among them.

@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "title": "Four routes from main to target: an unbounded search is exhaustive, max_paths keeps the canonical prefix and says so, max_depth is not exhaustive, and an unknown target is not complete",
+ "title": "Four routes from main to target: an unbounded search is exhaustive, max_paths keeps the canonical prefix and says so, max_depth is not exhaustive, an unknown target is not_found, and a misspelled one suggests the real name",
  "sources": [
   "target.cpp",
   "main.cpp"
@@ -171,7 +171,7 @@
    }
   },
   {
-   "id": "unknown-target-is-not-complete",
+   "id": "unknown-target-is-not-found",
    "argv": [
     "find-call-chain",
     "--to",
@@ -179,13 +179,38 @@
    ],
    "expect": {
     "exit": 1,
-    "status": "ok",
+    "status": "not_found",
     "fields": {
-     "pathCount": 0,
-     "complete": false,
-     "exhaustive": false,
-     "stopReasons": []
+     "parameter": "to",
+     "name": "nonesuch"
+    },
+    "count": {
+     "didYouMean": 0
     }
+   }
+  },
+  {
+   "id": "misspelled-target-suggests-target",
+   "argv": [
+    "find-call-chain",
+    "--to",
+    "targt"
+   ],
+   "expect": {
+    "exit": 1,
+    "status": "not_found",
+    "fields": {
+     "parameter": "to",
+     "name": "targt"
+    },
+    "witnesses": [
+     {
+      "in": "didYouMean",
+      "match": {
+       "qualifiedName": "target"
+      }
+     }
+    ]
    }
   },
   {

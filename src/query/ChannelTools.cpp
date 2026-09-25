@@ -17,6 +17,7 @@
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
+#include "Paging.h"
 #include "Registry.h"
 #include "Schema.h"
 
@@ -65,16 +66,22 @@ channelsUnavailable(const ToolContext &ctx) {
 // Tool 13: list_channels
 // ----------------------------------------------------------------------------
 
-static llvm::json::Value handleListChannels(const llvm::json::Object &,
+static llvm::json::Value handleListChannels(const llvm::json::Object &args,
                                             const ToolContext &ctx) {
   if (auto err = channelsUnavailable(ctx))
     return std::move(*err);
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
   llvm::json::Array channelsArr;
+  size_t total = 0;
   if (ctx.channels) {
     // Id order: the channel map is a hash map.
     auto ids = ctx.channels->allChannelIds();
     std::sort(ids.begin(), ids.end());
-    for (const auto &id : ids) {
+    total = ids.size();
+    for (size_t i = page.begin(total); i < page.end(total); ++i) {
+      const auto &id = ids[i];
       auto producers = ctx.channels->producersOf(id);
       auto consumers = ctx.channels->consumersOf(id);
       llvm::json::Object entry;
@@ -93,7 +100,8 @@ static llvm::json::Value handleListChannels(const llvm::json::Object &,
     }
   }
   llvm::json::Object obj;
-  obj["count"] = static_cast<int64_t>(channelsArr.size());
+  obj["count"] = static_cast<int64_t>(total);
+  attachPage(obj, page, total);
   obj["channels"] = std::move(channelsArr);
   return llvm::json::Value(std::move(obj));
 }
@@ -109,6 +117,9 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
     return usageError("Requires 'channel_id' (from list_channels)");
   if (auto err = channelsUnavailable(ctx))
     return std::move(*err);
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
 
   auto producers = ctx.channels->producersOf(channelId->str());
   auto consumers = ctx.channels->consumersOf(channelId->str());
@@ -120,14 +131,22 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
   // TU order).
   sortChannelSites(producers);
   sortChannelSites(consumers);
+  // One window pages both lists; each keeps its own total.
   llvm::json::Array producersArr, consumersArr;
-  for (const auto &s : producers)
-    producersArr.push_back(serializeChannelSite(s));
-  for (const auto &s : consumers)
-    consumersArr.push_back(serializeChannelSite(s));
+  for (size_t i = page.begin(producers.size());
+       i < page.end(producers.size()); ++i)
+    producersArr.push_back(serializeChannelSite(producers[i]));
+  for (size_t i = page.begin(consumers.size());
+       i < page.end(consumers.size()); ++i)
+    consumersArr.push_back(serializeChannelSite(consumers[i]));
 
   llvm::json::Object obj;
   obj["channelId"] = channelId->str();
+  obj["producerTotal"] = static_cast<int64_t>(producers.size());
+  obj["consumerTotal"] = static_cast<int64_t>(consumers.size());
+  attachPageWindow(obj, page,
+                   page.truncated(producers.size()) ||
+                       page.truncated(consumers.size()));
   obj["producers"] = std::move(producersArr);
   obj["consumers"] = std::move(consumersArr);
   return llvm::json::Value(std::move(obj));
@@ -140,23 +159,30 @@ static llvm::json::Value handleQueryChannel(const llvm::json::Object &args,
 static llvm::json::Value
 handleQueryChannelsForFunction(const llvm::json::Object &args,
                               const ToolContext &ctx) {
-  auto function = args.getString("function");
+  auto function = identityName(args, "function");
   if (!function)
-    return usageError("Requires 'function' (qualified name or usr)");
+    return usageError(
+        "Requires 'function' (qualified name or usr; alias 'name')");
 
   if (auto err = channelsUnavailable(ctx))
     return std::move(*err);
+  Page page;
+  if (auto err = parsePage(args, kDefaultListLimit, page))
+    return usageError(*err);
 
+  auto sites = ctx.channels->sitesForFunction(function->str());
+  // No sites is an answer only for a function the index holds; for a
+  // name it does not, "no channel sites" would be a false negative.
+  if (sites.empty() && !isKnownIdentity(ctx, function->str()))
+    return unknownFunctionResult(ctx, "function", *function);
+  sortChannelSites(sites);
   llvm::json::Array arr;
-  {
-    auto sites = ctx.channels->sitesForFunction(function->str());
-    sortChannelSites(sites);
-    for (const auto &s : sites)
-      arr.push_back(serializeChannelSite(s));
-  }
+  for (size_t i = page.begin(sites.size()); i < page.end(sites.size()); ++i)
+    arr.push_back(serializeChannelSite(sites[i]));
   llvm::json::Object obj;
   obj["function"] = function->str();
-  obj["count"] = static_cast<int64_t>(arr.size());
+  obj["count"] = static_cast<int64_t>(sites.size());
+  attachPage(obj, page, sites.size());
   obj["sites"] = std::move(arr);
   return llvm::json::Value(std::move(obj));
 }
@@ -274,9 +300,11 @@ static llvm::json::Value handleExplainOrdering(const llvm::json::Object &args,
 void registerChannelTools(std::vector<ToolEntry> &tools) {
   // 13. list_channels
   {
+    llvm::json::Object props;
+    addPagingProps(props, kDefaultListLimit, "channels");
     llvm::json::Object schema;
     schema["type"] = "object";
-    schema["properties"] = llvm::json::Object{};
+    schema["properties"] = std::move(props);
 
     tools.push_back({"list_channels",
                      "List every tracked channel (queue/map/event-bus "
@@ -295,6 +323,8 @@ void registerChannelTools(std::vector<ToolEntry> &tools) {
     props["channel_id"] = stringProp(
         "Channel identity from list_channels or a channelId in another "
         "channel tool's response.");
+    addPagingProps(props, kDefaultListLimit,
+                   "producers and consumers (each list)");
     llvm::json::Array req;
     req.push_back("channel_id");
     llvm::json::Object schema;
@@ -309,7 +339,9 @@ void registerChannelTools(std::vector<ToolEntry> &tools) {
                      "functionUsr, callSite, guards:[{conditionText, "
                      "location, inTrueBranch, isAssertion}]}. A channel "
                      "with multiple producers/consumers lists all of them — "
-                     "there is no single caller/callee edge to name.",
+                     "there is no single caller/callee edge to name. One "
+                     "limit/offset window pages both lists; producerTotal "
+                     "and consumerTotal are the full counts.",
                      llvm::json::Value(std::move(schema)),
                      handleQueryChannel});
   }
@@ -319,13 +351,14 @@ void registerChannelTools(std::vector<ToolEntry> &tools) {
     llvm::json::Object props;
     props["function"] = stringProp(
         "Qualified function name or USR whose channel producer/consumer "
-        "call sites to list.");
-    llvm::json::Array req;
-    req.push_back("function");
+        "call sites to list. Alias: 'name'.");
+    addPagingProps(props, kDefaultListLimit, "sites");
+    // Not "required": the handler accepts the 'name' alias, and a schema
+    // requirement on the canonical spelling would make the CLI and strict
+    // MCP clients reject it. The handler reports a missing identity itself.
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);
-    schema["required"] = std::move(req);
 
     tools.push_back({"query_channels_for_function",
                      "List the channel sites (producer or consumer) inside "

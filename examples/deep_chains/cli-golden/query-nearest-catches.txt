@@ -1,2 +1,2 @@
 # megascope query-nearest-catches --function stage5_sink --format ndjson -> exit 1
-{"_summary":{"function":"stage5_sink","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok","stopReasons":[],"usr":"c:@F@stage5_sink#&$@S@Registry#I#"}}
+{"_summary":{"complete":true,"exhaustive":true,"function":"stage5_sink","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"ok","stopReasons":[],"usr":"c:@F@stage5_sink#&$@S@Registry#I#"}}

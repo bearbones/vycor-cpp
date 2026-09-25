@@ -82,6 +82,7 @@ add_executable(vycor_tests
   test_mcp_server.cpp
   test_megascope_cli.cpp
   test_result_contract.cpp
+  test_answer_bounds.cpp
   test_determinism.cpp
   test_change_impact.cpp
   test_source_selection.cpp

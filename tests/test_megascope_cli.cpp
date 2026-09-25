@@ -645,6 +645,17 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     CHECK(parseObject(ls[2]).getInteger("size") == 4);
   }
 
+  SECTION("an alias passes the schema's required check") {
+    // query_channels_for_function takes 'name' for 'function'. A schema
+    // that required 'function' made the CLI reject the alias before the
+    // handler ran (exit 2); the index has no channel types, so the
+    // handler's answer is unavailable (exit 3).
+    auto r = run({"call", "query_channels_for_function", "--index",
+                  idx.path, "--args", R"({"name":"helper"})"});
+    CHECK(r.code == kExitIndex);
+    CHECK(parseObject(r.out).getString("status") == "unavailable");
+  }
+
   SECTION("batch answers NDJSON requests in order on one index") {
     std::string requests =
         R"({"id":1,"tool":"lookup_function","args":{"name":"helper"}})"
@@ -671,9 +682,12 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     auto second = parseObject(ls[1]);
     CHECK(second.getString("id") == "two");
     CHECK(second.getString("tool") == "get_callers");
-    // An unknown callee is an empty caller list, not an error.
+    // An unknown callee is not_found (exit 1), not an empty caller list
+    // that would read as "nothing calls it".
     CHECK(second.getInteger("exit") == kExitEmpty);
-    CHECK(second.getObject("result")->getArray("callers")->empty());
+    CHECK(second.getString("status") == "not_found");
+    CHECK(second.getObject("result")->getArray("callers") == nullptr);
+    CHECK(second.getObject("result")->getArray("didYouMean") != nullptr);
 
     auto third = parseObject(ls[2]);
     CHECK(third.getInteger("id") == 3);
