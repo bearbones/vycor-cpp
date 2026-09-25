@@ -529,7 +529,9 @@ paths for older protocol versions. Exception safety audits must include them.
 
 **Build completeness matters.** TUs that include missing generated headers
 (OpenAPI stubs, Protobuf outputs, reflection registration) will crash
-ClangTool during parsing. The crash guard skips them and reports
+ClangTool during parsing. Under the default worker isolation such a TU is
+recorded `poisoned` (or `timeout` if it hangs past `--worker-timeout`);
+with `--threads 1` the in-process crash guard skips it and reports
 `N TU(s) crashed and were skipped` to stderr. A `megascope dump
 --source-re ...` pass over a sample confirms your crash count before a
 long `megascope index` run.

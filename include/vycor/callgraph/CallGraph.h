@@ -131,6 +131,12 @@ public:
   void addNode(CallGraphNode node, const std::string &tuPath = "");
   void addEdge(CallGraphEdge edge, const std::string &tuPath = "");
 
+  /// Test seam (crash-guard fault injection): when set, every addEdge on
+  /// any graph calls `hook` with the edge while holding that graph's lock.
+  /// Never set in production. Pass nullptr to clear.
+  using EdgeInsertHook = void (*)(const CallGraphEdge &edge);
+  static void setEdgeInsertHookForTesting(EdgeInsertHook hook);
+
   // ------------------------------------------------------------------
   // By-name resolution (F8). Nodes are keyed by USR; public by-name
   // queries accept either a usr or a display name and resolve:
@@ -375,8 +381,8 @@ private:
   std::unordered_map<SId, std::vector<SId>> tuNodes_;
   size_t liveEdgeCount_ = 0;
   // Set by a LoadMode::ReadOnly snapshot load: the provenance maps above
-  // were skipped, so mutation would corrupt the graph. The mutators
-  // assert on it.
+  // were skipped, so mutation would corrupt the graph. Every mutator
+  // returns unchanged on it (Release too) and warns once.
   bool readOnly_ = false;
 
   // Transitive closure helpers over the override relation (callers must

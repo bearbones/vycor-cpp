@@ -97,7 +97,8 @@ per-TU index shards, and phase-2 workers read the merged index from a
 handoff file (`--global-index`) and write diagnostics shards. Composes
 with `--checkpoint`: shard results are journaled per TU as they land.
 `AnalysisOptions::isolatedRunner` is the test seam (in-process fake
-workers, no spawning).
+workers, no spawning). `--worker-timeout`/`--worker-memory-limit` apply
+to these workers too (`runWorkerProcess`, below).
 
 ### `morph` — AST-Based Transformations
 
@@ -126,6 +127,9 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
+| `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), `bakeIsolated`, and `bakeTUIsolated` — the crash- and hang-safe single-TU parse `reindex_tu` uses |
+| `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
+| `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -148,6 +152,19 @@ Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
 are preserved. This reduces noise from utility/math headers while keeping entry points visible.
+
+**Crash and hang containment** (`docs/design-f12-subprocess-workers.md`,
+"Failure modes"): `megascope index`/`serve` bake in subprocess workers
+by default whenever `--threads` is not 1 and `--pch-dir` is unset
+(`--isolate-workers=false` opts out), and `serve`'s `reindex_tu` then
+re-parses through `bakeTUIsolated`. A worker that starts no new TU for
+`--worker-timeout` seconds (default 600) is killed and handled as a
+crash; its TU is recorded `timeout`. In-process parses (`--threads 1`,
+ephemeral queries, tests) run under `CrashGuard.h` into TU-local
+indexes absorbed only on a clean return. The fault-injection seam is
+`CallGraph::setEdgeInsertHookForTesting`; the reproductions live in
+`tests/test_crash_containment.cpp` and `scripts/interrupt-check.py`
+(ctest `interrupt_cleanup`).
 
 ### `query` — Transport-Neutral Query Tools
 
@@ -173,6 +190,7 @@ handlers directly.
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
 | `Schema.h` | JSON Schema property builders shared by the registrations |
+| `Limits.h/.cpp` | `readLimit`/`readLimitAs`: every user-supplied search limit is clamped to a documented maximum (`kMaxSearchDepth`, ...) before it is narrowed; `docs/path-analysis.md` "Limits" |
 
 ### `impact` — Semantic Diff and Change Impact
 
@@ -201,7 +219,8 @@ Contract and worked examples: `docs/change-impact.md`.
 The query verbs load the index with `LoadMode::ReadOnly`
 (`callgraph/Snapshot.h`): the edge dedup map and per-TU provenance that
 only `removeTU`/`absorb` read are skipped (halves the load on the 938-TU
-testbed), the graph asserts on any later mutation, and the loaded
+testbed), the graph ignores (and warns once about) any later mutation
+in every build type, and the loaded
 indexes are deliberately leaked at exit. They also decode only the
 sections the tool declares (`ToolEntry::needs`, set in
 `query/Registry.cpp`): the snapshot is sectioned (format v8; v9 adds the
@@ -368,9 +387,9 @@ objects (`prism` is gone; `vycor-cpp prism ...` prints the megascope
 equivalents and exits 2):
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>]] [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
-vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers]
+vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin

@@ -18,6 +18,7 @@
 #include "vycor/anneal/Indexer.h"
 #include "vycor/anneal/TypeNormalize.h"
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
@@ -46,6 +47,7 @@
 #include <map>
 #include <tuple>
 #include <memory>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -1323,16 +1325,18 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   if (workers == 0)
     workers = std::thread::hardware_concurrency();
   llvm::SmallString<128> shardDir;
+  std::optional<InterruptCleanup> shardDirCleanup;
   if (isolate) {
-    llvm::SmallString<128> tmpBase;
-    llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmpBase);
-    llvm::sys::path::append(tmpBase, "vycor-anneal-workers");
-    if (auto ec = llvm::sys::fs::createUniqueDirectory(tmpBase, shardDir)) {
+    if (auto ec = createWorkerShardDir("vycor-anneal-workers", shardDir)) {
       llvm::errs() << "anneal: WARNING: cannot create worker shard "
-                      "directory under "
-                   << tmpBase << ": " << ec.message()
+                      "directory "
+                   << shardDir << "-*: " << ec.message()
                    << " — running in-process instead\n";
+      shardDir.clear();
       isolate = false;
+    } else {
+      // Removed on SIGINT/SIGTERM too (callgraph/Interrupt.h).
+      shardDirCleanup.emplace(std::string(shardDir));
     }
   }
 
@@ -1362,6 +1366,20 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
     toIndex.push_back(file);
   }
+  // A TU the isolated dispatcher poisoned (its worker crashed on it, or
+  // timed out) is journaled as having used up its attempts, so a resume
+  // skips it like an in-process parse that died kMaxAttempts times instead
+  // of dispatching it again (and, for a hang, waiting out the timeout
+  // again).
+  auto recordPoisoned = [&](uint8_t phase, const std::string &tu) {
+    if (!ckpt)
+      return;
+    auto it = stampFor.find(tu);
+    if (it == stampFor.end())
+      return;
+    for (unsigned i = 0; i < AnnealCheckpoint::kMaxAttempts; ++i)
+      ckpt->recordAttempt(phase, tu, *it->second);
+  };
   if (isolate) {
     // Parses run in worker subprocesses; a crashing TU costs only itself
     // (bisect protocol), so no attempt records are needed — a parent kill
@@ -1387,10 +1405,13 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                 payload.applyTo(index);
               });
         },
-        [&](const std::string &tu) {
-          llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
-                       << tu << "\n";
+        [&](const std::string &tu, WorkerFailure why) {
+          llvm::errs() << "anneal: worker: TU poisoned ("
+                       << (why == WorkerFailure::TimedOut ? "timed out"
+                                                          : "crashed worker")
+                       << "): " << tu << "\n";
           poisoned.insert(tu);
+          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu);
         });
   } else {
     runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
@@ -1519,9 +1540,12 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                   perFile[slot->second] = std::move(diags);
                 });
           },
-          [&](const std::string &tu) {
-            llvm::errs() << "anneal: worker: TU poisoned (crashed worker): "
-                         << tu << "\n";
+          [&](const std::string &tu, WorkerFailure why) {
+            llvm::errs() << "anneal: worker: TU poisoned ("
+                         << (why == WorkerFailure::TimedOut ? "timed out"
+                                                            : "crashed worker")
+                         << "): " << tu << "\n";
+            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu);
           });
     }
   }
@@ -1545,7 +1569,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                  << " TU(s) restored without re-parsing (phase 2)\n";
 
   if (!shardDir.empty())
-    llvm::sys::fs::remove_directories(shardDir);
+    removeWorkerShardDir(shardDir);
 
   for (auto &slot : perFile)
     diagnostics.insert(diagnostics.end(),

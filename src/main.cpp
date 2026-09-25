@@ -28,6 +28,8 @@
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/InputFingerprint.h"
 #include "vycor/callgraph/AtomicFile.h"
+#include "vycor/callgraph/CrashGuard.h"
+#include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/cli/BakeConfig.h"
@@ -212,6 +214,24 @@ static llvm::cl::opt<unsigned>
     AnnealWorkers("workers",
         llvm::cl::desc("Number of worker processes for --isolate-workers "
                        "(0 = the --threads value)"),
+        llvm::cl::init(0),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<unsigned>
+    AnnealWorkerTimeout("worker-timeout",
+        llvm::cl::desc("With --isolate-workers: kill a worker that starts "
+                       "no new TU for this many seconds and record the TU "
+                       "it was parsing as timed out (0 = no timeout)"),
+        llvm::cl::value_desc("seconds"),
+        llvm::cl::init(vycor::WorkerLimits{}.timeoutSeconds),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<unsigned>
+    AnnealWorkerMemoryLimit("worker-memory-limit",
+        llvm::cl::desc("With --isolate-workers: per-worker data-segment "
+                       "limit in MiB; a worker that exceeds it dies and its "
+                       "TU is poisoned (0 = no limit)"),
+        llvm::cl::value_desc("MiB"),
         llvm::cl::init(0),
         llvm::cl::sub(AnnealCmd));
 
@@ -432,7 +452,10 @@ static llvm::cl::opt<bool>
 static llvm::cl::opt<bool>
     McpIsolateWorkers("isolate-workers",
         llvm::cl::desc("Bake the indexes in subprocess workers (a crashing "
-                       "TU costs only that TU; parent RSS stays bounded)"),
+                       "or hanging TU costs only that TU; parent RSS stays "
+                       "bounded). Default: on for index/serve when "
+                       "--threads is not 1 and --pch-dir is unset; "
+                       "--isolate-workers=false bakes in-process"),
         llvm::cl::init(false),
         llvm::cl::sub(MegascopeCmd));
 
@@ -457,6 +480,24 @@ static llvm::cl::opt<unsigned>
     McpWorkers("workers",
         llvm::cl::desc("Number of worker processes for --isolate-workers "
                        "(0 = the --threads value)"),
+        llvm::cl::init(0),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<unsigned>
+    McpWorkerTimeout("worker-timeout",
+        llvm::cl::desc("Under worker isolation: kill a worker that starts "
+                       "no new TU for this many seconds and record the TU "
+                       "it was parsing as timed out (0 = no timeout)"),
+        llvm::cl::value_desc("seconds"),
+        llvm::cl::init(vycor::WorkerLimits{}.timeoutSeconds),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<unsigned>
+    McpWorkerMemoryLimit("worker-memory-limit",
+        llvm::cl::desc("Under worker isolation: per-worker data-segment "
+                       "limit in MiB; a worker that exceeds it dies and its "
+                       "TU is poisoned (0 = no limit)"),
+        llvm::cl::value_desc("MiB"),
         llvm::cl::init(0),
         llvm::cl::sub(MegascopeCmd));
 
@@ -561,6 +602,18 @@ int main(int argc, const char **argv) {
       "(`megascope help`)\n");
 
   vycor::appendGlobalExtraArgs({ExtraArgs.begin(), ExtraArgs.end()});
+
+  // SIGINT/SIGTERM: a parent kills its workers and removes its scratch
+  // files; a worker dies with its parent (callgraph/Interrupt.h). Before
+  // any thread exists, so every later thread inherits the blocked mask.
+  if (McpBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker) {
+    vycor::bindWorkerToParent();
+    // A worker that crashes (or aborts at --worker-memory-limit) must die,
+    // so the parent's marker/poison/bisect path handles the TU
+    // (callgraph/CrashGuard.h).
+    vycor::disableCrashGuard();
+  } else if (AnnealCmd || MegascopeCmd)
+    vycor::installInterruptHandler();
 
   // ---- anneal ---------------------------------------------------------------
   if (AnnealCmd) {
@@ -773,7 +826,10 @@ int main(int argc, const char **argv) {
       std::string workerChecks = "-all";
       for (const auto &name : enabledChecks)
         workerChecks += "," + name;
-      opts.isolatedRunner = [selfExe, workerChecks](uint8_t phase,
+      vycor::WorkerLimits limits;
+      limits.timeoutSeconds = AnnealWorkerTimeout;
+      limits.memoryLimitMB = AnnealWorkerMemoryLimit;
+      opts.isolatedRunner = [selfExe, workerChecks, limits](uint8_t phase,
                                       const std::string &globalIndexPath,
                                       const std::vector<std::string> &batch,
                                       const std::string &shardPath,
@@ -809,24 +865,8 @@ int main(int argc, const char **argv) {
           workerArgv.push_back(f);
         }
 
-        std::vector<llvm::StringRef> args(workerArgv.begin(),
-                                          workerArgv.end());
-        // stdin from the null device; stdout joins the stderr log (same
-        // rationale as megascope's runner: keep worker output off the
-        // parent's stdout).
-        std::optional<llvm::StringRef> redirects[3] = {
-            llvm::StringRef(""), llvm::StringRef(stderrPath),
-            llvm::StringRef(stderrPath)};
-        std::string errMsg;
-        bool execFailed = false;
-        int rc = llvm::sys::ExecuteAndWait(selfExe, args, /*Env=*/std::nullopt,
-                                           redirects, /*SecondsToWait=*/0,
-                                           /*MemoryLimit=*/0, &errMsg,
-                                           &execFailed);
-        if (execFailed)
-          llvm::errs() << "anneal: worker: failed to spawn " << selfExe
-                       << ": " << errMsg << "\n";
-        return rc;
+        return vycor::runWorkerProcess(workerArgv, stderrPath, limits,
+                                       "anneal");
       };
     }
 
@@ -861,6 +901,8 @@ int main(int argc, const char **argv) {
         vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
     }
 
+    // Never report on a run an interrupt cut short (callgraph/Interrupt.h).
+    vycor::exitIfInterrupted();
     if (diagnostics.empty()) {
       llvm::outs() << "anneal: no issues found.\n";
       return 0;
@@ -1169,28 +1211,39 @@ int main(int argc, const char **argv) {
     // Every requested TU's outcome, from this bake or kept from the index.
     vycor::TuOutcomes outcomes;
 
+    // Worker isolation is the default for the whole-project bakes: a TU
+    // that crashes or hangs the frontend costs only itself. In-process
+    // stays for --threads 1 (the in-process crash guard, docs/
+    // design-f12-subprocess-workers.md "Failure modes") and for --pch-dir,
+    // which workers do not receive.
+    const bool isolate = McpIsolateWorkers.getNumOccurrences()
+                             ? McpIsolateWorkers.getValue()
+                             : McpThreads != 1 && McpPchDir.empty();
+    vycor::WorkerLimits workerLimits;
+    workerLimits.timeoutSeconds = McpWorkerTimeout;
+    workerLimits.memoryLimitMB = McpWorkerMemoryLimit;
+    static int selfExeAnchor; // address anchors getMainExecutable
+    const std::string selfExe =
+        llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
+    vycor::McpBakeConfig bakeCfg;
+    bakeCfg.buildPath = McpBuildPath;
+    bakeCfg.collapsePaths = collapsePaths;
+    bakeCfg.extraArgs = vycor::globalExtraArgs();
+    bakeCfg.sysroot = sysroot;
+    bakeCfg.lockTypes = lockCfg.userAllowlist;
+    bakeCfg.channelTypesJson = McpChannelTypesJson;
+    bakeCfg.orgConfig = McpOrgConfig;
+
     // One bake for the cold build and the warm refresh alike: the
-    // in-process parallel pipeline, or subprocess workers under
-    // --isolate-workers.
+    // in-process parallel pipeline, or subprocess workers.
     auto runBake = [&](const std::vector<std::string> &toBake) {
-      if (McpIsolateWorkers) {
+      if (isolate) {
         unsigned workerCount =
             McpWorkers ? McpWorkers.getValue() : McpThreads.getValue();
         if (workerCount == 0)
           workerCount = std::thread::hardware_concurrency();
-        static int selfExeAnchor; // address anchors getMainExecutable
-        std::string selfExe =
-            llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
-        vycor::McpBakeConfig bakeCfg;
-        bakeCfg.buildPath = McpBuildPath;
-        bakeCfg.collapsePaths = collapsePaths;
-        bakeCfg.extraArgs = vycor::globalExtraArgs();
-        bakeCfg.sysroot = sysroot;
-        bakeCfg.lockTypes = lockCfg.userAllowlist;
-        bakeCfg.channelTypesJson = McpChannelTypesJson;
-        bakeCfg.orgConfig = McpOrgConfig;
         return vycor::bakeIsolated(selfExe, bakeCfg, toBake, workerCount,
-                                   &buildStats);
+                                   &buildStats, workerLimits);
       }
       return vycor::bakeIndexes(*compDb, toBake, collapsePaths, McpThreads,
                                 pchPtr, sysroot, lockCfg, &buildStats,
@@ -1468,6 +1521,8 @@ int main(int argc, const char **argv) {
                      << " failed); the rest are retried with the next "
                         "refresh that rewrites the index, or "
                         "--retry-failed\n";
+      // An interrupted bake is partial: never let it replace the index.
+      vycor::exitIfInterrupted();
       auto snapSaveStart = StatsClock::now();
       std::string saveError;
       if (!bakeRefusal.empty()) {
@@ -1648,6 +1703,12 @@ int main(int argc, const char **argv) {
     buildParams.sysroot = sysroot;
     buildParams.lockCfg = std::move(lockCfg);
     buildParams.channelCfg = std::move(channelCfg);
+    if (isolate) {
+      // reindex_tu re-parses in a worker too (bakeTUIsolated).
+      buildParams.workerExe = selfExe;
+      buildParams.workerCfg = bakeCfg;
+      buildParams.workerLimits = workerLimits;
+    }
 
     // Serving only reads: let the next writer in.
     writeLock.reset();

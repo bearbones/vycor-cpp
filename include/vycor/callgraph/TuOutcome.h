@@ -32,10 +32,11 @@ enum class TuStatus : uint8_t {
   Crashed = 2,  // the in-process crash guard fired: no facts
   Poisoned = 3, // its worker died (--isolate-workers): no facts
   Skipped = 4,  // never parsed (no compile command, no outcome reported)
+  TimedOut = 5, // its worker made no progress for --worker-timeout: no facts
 };
 
 /// The lowercase spelling used in JSON payloads ("indexed", "partial",
-/// "crashed", "poisoned", "skipped").
+/// "crashed", "poisoned", "skipped", "timeout").
 const char *tuStatusName(TuStatus status);
 
 struct TuOutcome {

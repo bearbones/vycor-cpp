@@ -599,3 +599,34 @@ TEST_CASE("A TU that crashes its worker is poisoned; the rest complete",
   CHECK(sortedKeys(got) ==
         sortedKeys(runAnalysis(compDb, {files[0], files[1]}, plain)));
 }
+
+TEST_CASE("A TU the isolated dispatcher poisoned is skipped on resume",
+          "[AnnealIsolated]") {
+  // Without an attempt record, every resume dispatched the poisoned TU
+  // again (and, for a hung TU, waited out the worker timeout again).
+  CheckpointFileGuard ckpt("anneal_ckpt_isolated_poison.vycj");
+  ScratchFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.files();
+
+  AnalysisOptions plain;
+  plain.threadCount = 1;
+
+  std::atomic<unsigned> invocations{0};
+  AnalysisOptions isolated;
+  isolated.threadCount = 1;
+  isolated.workerCount = 2;
+  isolated.checkpointPath = ckpt.path;
+  isolated.isolatedRunner = makeInProcessRunner(compDb, plain, &invocations,
+                                                /*crashOn=*/files[2]);
+
+  auto cold = runAnalysis(compDb, files, isolated);
+  REQUIRE(invocations.load() > 0);
+
+  // Resume: user_a and user_b replay from the journal, user_c is skipped
+  // as poisoned — no worker runs at all.
+  invocations = 0;
+  auto warm = runAnalysis(compDb, files, isolated);
+  CHECK(invocations.load() == 0);
+  CHECK(sortedKeys(warm) == sortedKeys(cold));
+}

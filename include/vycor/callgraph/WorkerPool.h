@@ -18,7 +18,11 @@
 #include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+
 #include <functional>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -53,11 +57,50 @@ struct McpBakeConfig {
   std::string orgConfig;
 };
 
+/// Resource limits for one worker process (--worker-timeout,
+/// --worker-memory-limit). Shared by the megascope bake and anneal.
+struct WorkerLimits {
+  /// Seconds a worker may go without starting its next TU (a new
+  /// `WORKER-TU` stderr marker) before it is killed and its batch handled
+  /// as a crash, with the in-flight TU recorded as timed out. The deadline
+  /// restarts at every marker, so a batch of N TUs may run up to
+  /// N x timeoutSeconds, but a single hung TU is caught after one. 0 = no
+  /// timeout.
+  unsigned timeoutSeconds = 600;
+  /// Per-worker data-segment limit in MiB (RLIMIT_DATA, applied in the
+  /// child by llvm::sys::ExecuteNoWait); an allocation past it fails and
+  /// the worker dies, which the crash protocol handles. 0 = no limit.
+  unsigned memoryLimitMB = 0;
+};
+
+/// Exit code runWorkerProcess reports for a worker it killed on timeout.
+constexpr int kWorkerTimedOut = -124;
+/// Exit code runWorkerProcess reports when an interrupt (SIGINT/SIGTERM)
+/// stopped the spawn or killed the worker.
+constexpr int kWorkerInterrupted = -130;
+
+/// Spawn `argv` (argv[0] is the program), stdin from the null device,
+/// stdout and stderr appended to `logPath`, under `limits`, and wait for
+/// it. Returns the exit code; -1 when it could not be spawned; -2 when a
+/// signal killed it (llvm::sys::Wait's convention); kWorkerTimedOut when
+/// it was killed for making no progress. The child is tracked for the
+/// interrupt handler (callgraph/Interrupt.h). `tool` prefixes messages.
+int runWorkerProcess(const std::vector<std::string> &argv,
+                     const std::string &logPath, const WorkerLimits &limits,
+                     const char *tool);
+
+/// Why the dispatcher dropped a TU.
+enum class WorkerFailure {
+  Crashed,  // its worker exited nonzero or died by a signal
+  TimedOut, // its worker was killed by the timeout while parsing it
+};
+
 /// Test seam: run one worker over `batch`, writing its snapshot shard to
 /// `shardPath` and its stderr (WORKER-TU markers + diagnostics) to
 /// `stderrPath`. Returns the process exit code; any nonzero value
 /// (including the negative codes llvm::sys::ExecuteAndWait reports for
-/// spawn failure or death by signal) triggers the crash/bisect protocol.
+/// spawn failure or death by signal) triggers the crash/bisect protocol;
+/// kWorkerTimedOut marks the failure as a timeout.
 using WorkerRunner = std::function<int(const std::vector<std::string> &batch,
                                        const std::string &shardPath,
                                        const std::string &stderrPath)>;
@@ -69,7 +112,8 @@ using WorkerRunner = std::function<int(const std::vector<std::string> &batch,
 /// treat the batch as failed anyway (unreadable/torn shard), which
 /// retries it like a markerless crash. The crash/bisect protocol is as
 /// documented on bakeIsolatedWithRunner; `onPoison` is invoked (calling
-/// thread) for each TU the protocol drops. Shard and stderr files are
+/// thread) for each TU the protocol drops, with the failure that dropped
+/// it. Once an interrupt was requested no new batch is started. Shard and stderr files are
 /// created inside `shardDir` (which must exist) and removed as consumed.
 void dispatchIsolated(
     const WorkerRunner &runner, const std::vector<std::string> &files,
@@ -77,7 +121,8 @@ void dispatchIsolated(
     const std::function<bool(const std::string &shardPath,
                              const std::vector<std::string> &batchTus,
                              double wallMs)> &consumeShard,
-    const std::function<void(const std::string &tu)> &onPoison,
+    const std::function<void(const std::string &tu, WorkerFailure why)>
+        &onPoison,
     unsigned batchSizeOverride = 0);
 
 /// Dispatcher core: batches `files`, keeps <= `workers` runner invocations
@@ -86,7 +131,8 @@ void dispatchIsolated(
 /// protocol to failed batches (marker TU poisoned + batch re-dispatched
 /// without it; markerless failures split in half; a markerless single-TU
 /// batch is poisoned; each TU re-dispatched at most twice). Poisoned TUs
-/// are recorded in `stats` with toolStatus -1; clean TUs with toolStatus 0
+/// are recorded in `stats` with toolStatus -1 and in the outcomes as
+/// Poisoned, or TimedOut when the timeout killed their worker; clean TUs with toolStatus 0
 /// and the batch wall time divided evenly. `shardDir` must exist; shard and
 /// stderr files are created inside it and removed as they are consumed.
 /// `expected`, when non-null, sanity-checks each shard's recorded build
@@ -103,11 +149,30 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
 /// Production entry: spawn `selfExe megascope --bake-worker ...` workers
 /// over `files` (selfExe from llvm::sys::fs::getMainExecutable) and merge
 /// their shards. Creates — and removes on return — a unique shard directory
-/// under the system temp dir. Workers run single-threaded so the last
-/// WORKER-TU marker is an exact poison identifier; parallelism comes from
-/// the worker count.
+/// under the system temp dir (also removed on SIGINT/SIGTERM). Workers run
+/// single-threaded so the last WORKER-TU marker is an exact poison
+/// identifier; parallelism comes from the worker count.
 BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
                           const std::vector<std::string> &files,
-                          unsigned workers, BuildStats *stats);
+                          unsigned workers, BuildStats *stats,
+                          const WorkerLimits &limits = {});
+
+/// Crash- and hang-safe single-TU parse (reindex_tu): bakes `file` in one
+/// worker process under `limits` and returns that TU's indexes without
+/// touching any live index. `outcomes[file]` says how the parse ended; on
+/// a crash (Poisoned) or timeout (TimedOut) the indexes are empty, so the
+/// caller can keep, drop, or replace the TU's old facts as it chooses.
+BakedIndexes bakeTUIsolated(const std::string &selfExe,
+                            const McpBakeConfig &cfg, const std::string &file,
+                            const WorkerLimits &limits = {});
+
+/// Create a unique directory <system temp>/<base>-XXXXXX (base
+/// vycor-workers, vycor-anneal-workers) for one dispatch run. On failure
+/// returns the error and `out` names the attempted prefix.
+std::error_code createWorkerShardDir(llvm::StringRef base,
+                                     llvm::SmallVectorImpl<char> &out);
+
+/// Remove a directory made by createWorkerShardDir and everything in it.
+void removeWorkerShardDir(llvm::StringRef dir);
 
 } // namespace vycor

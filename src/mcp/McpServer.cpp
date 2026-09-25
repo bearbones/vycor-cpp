@@ -21,6 +21,7 @@
 
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
 #include <unordered_map>
 
 namespace vycor {
@@ -60,11 +61,24 @@ McpServer::McpServer(CallGraph &&graph, ControlFlowIndex &&cfIndex,
 McpServer::ReindexResult McpServer::reindexTU(const std::string &filePath) {
   ReindexResult r{};
   queryCache_.clear(); // graph is about to mutate
+
+  // Under worker isolation the parse runs in a subprocess first; a crash
+  // or hang there costs only the TU, which ends up dropped exactly as an
+  // in-process crash leaves it.
+  std::optional<BakedIndexes> fresh;
+  if (buildParams_.compDb && !buildParams_.workerExe.empty())
+    fresh = bakeTUIsolated(buildParams_.workerExe, buildParams_.workerCfg,
+                           filePath, buildParams_.workerLimits);
+
   r.edgesRemoved = graph_.removeTU(filePath);
   r.contextsRemoved = cfIndex_.removeTU(filePath);
   channels_.removeTU(filePath);
 
-  if (buildParams_.compDb) {
+  if (fresh) {
+    graph_.absorb(fresh->graph);
+    cfIndex_.absorb(fresh->cfIndex);
+    channels_.absorb(fresh->channels);
+  } else if (buildParams_.compDb) {
     bakeTU(graph_, cfIndex_, *buildParams_.compDb, filePath,
            buildParams_.collapsePaths, buildParams_.pchCache,
            buildParams_.sysroot, buildParams_.lockCfg,

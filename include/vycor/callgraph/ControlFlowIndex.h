@@ -535,8 +535,11 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 // Single-TU variant for incremental reindex (one parse). Call
 // graph.removeTU(file) and cfIndex.removeTU(file) first when re-indexing a
 // changed file. channelsOut, if non-null, gets channel.removeTU(file) called
-// by the caller first too, for the same reason.
-void bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
+// by the caller first too, for the same reason. Runs under the in-process
+// crash guard: the TU's facts land only when its parse returns, so a crash
+// adds nothing (the returned outcome is Crashed). For a parse that must not
+// share the caller's process at all, see bakeTUIsolated (WorkerPool.h).
+TuOutcome bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
             const clang::tooling::CompilationDatabase &compDb,
             const std::string &file,
             const std::vector<std::string> &collapsePaths = {},

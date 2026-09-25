@@ -15,6 +15,7 @@
 
 
 #include "vycor/callgraph/PathSearch.h"
+#include "vycor/query/Limits.h"
 #include "vycor/query/Tools.h"
 #include "vycor/query/Identity.h"
 #include "vycor/query/Serialize.h"
@@ -225,25 +226,20 @@ static llvm::json::Value handleFindCallChain(const llvm::json::Object &args,
     return usageError("Missing required parameter 'to' (or 'to_usr')");
 
   int64_t maxPaths = 10;
-  if (auto mp = args.getInteger("max_paths")) {
-    if (*mp <= 0)
-      return usageError("Invalid max_paths: must be positive");
-    maxPaths = *mp;
-  }
+  if (auto err = readLimit(args, "max_paths", 1, kMaxSearchPaths,
+                           BelowMin::Reject, maxPaths))
+    return usageError(*err);
 
   int64_t maxDepth = 20;
-  if (auto md = args.getInteger("max_depth")) {
-    if (*md <= 0)
-      return usageError("Invalid max_depth: must be positive");
-    maxDepth = *md;
-  }
+  if (auto err = readLimit(args, "max_depth", 1, kMaxSearchDepth,
+                           BelowMin::Reject, maxDepth))
+    return usageError(*err);
 
   // Hub cutoff: skip expanding nodes whose stored in-degree exceeds this,
   // reporting them instead. Bounds DFS work on graphs with high-fan-in
   // utility functions (loggers, allocators). 0 disables.
   int64_t maxFanIn = 1000;
-  if (auto mf = args.getInteger("max_fan_in"))
-    maxFanIn = std::max<int64_t>(0, *mf);
+  readLimit(args, "max_fan_in", 0, kMaxFanInLimit, BelowMin::Clamp, maxFanIn);
 
   EdgeFilter filter;
   if (auto err = parseEdgeFilter(args, filter))
