@@ -33,6 +33,8 @@ class raw_fd_ostream;
 
 namespace vycor {
 
+class IndexWriteLock;
+
 // ============================================================================
 // Anneal checkpoint journal (--checkpoint <file>)
 //
@@ -59,8 +61,12 @@ namespace vycor {
 // Crash-safety model: each record is length-prefixed and checksummed, and
 // the journal is flushed after every append. A record cut short by a kill
 // fails the length/checksum check on load; the loader keeps everything
-// before it and discards the tail. (Flush-to-OS survives SIGKILL; only
-// power loss can drop tail records, which then simply re-run.)
+// before it, and open() truncates the file to the end of the last valid
+// record before appending, so a torn or damaged record never hides the
+// records written after it. (Flush-to-OS survives SIGKILL; only power
+// loss can drop tail records, which then simply re-run.) A fresh journal
+// is published atomically; an append that fails (full disk) stops
+// journaling for the rest of the run instead of aborting it.
 //
 // Like snapshots, the journal is a cache, never a source of truth: a
 // version/fingerprint mismatch or any decode doubt discards it and the
@@ -108,11 +114,14 @@ public:
   // poisoned and skipped on resume.
   static constexpr unsigned kMaxAttempts = 2;
 
-  // Opens the journal at `path`, creating it if absent. An existing journal
-  // whose header (magic/version/fingerprint) doesn't match is discarded and
-  // restarted fresh; a corrupt/truncated tail is dropped and everything
-  // before it kept. Returns nullptr only when the file cannot be opened for
-  // appending (caller should warn and continue without a checkpoint).
+  // Opens the journal at `path`, creating it if absent. An existing
+  // journal whose header (magic/version/fingerprint) doesn't match is
+  // discarded and restarted fresh; a corrupt/truncated tail is dropped and
+  // everything before it kept. `<path>.lock` is held while the checkpoint
+  // is open. Returns nullptr when another run has the journal open
+  // (truncating its tail could cut off a record that run is still
+  // appending) or the file cannot be opened for appending; the caller
+  // should warn and continue without a checkpoint.
   static std::unique_ptr<AnnealCheckpoint>
   open(const std::string &path, uint64_t optionsFingerprint);
 
@@ -170,10 +179,15 @@ private:
   };
 
   // Parses the journal byte stream (past the header) into the maps above.
-  void loadRecords(const char *data, size_t size);
+  // Returns the length of the prefix that holds whole, valid records:
+  // open() truncates the file there before appending.
+  size_t loadRecords(const char *data, size_t size);
   void appendRecord(uint8_t kind, const std::string &payload);
 
   std::string path_;
+  // `<journal>.lock`, held while this checkpoint is open (one run per
+  // journal).
+  std::unique_ptr<IndexWriteLock> lock_;
   mutable std::mutex mutex_;
   std::unique_ptr<llvm::raw_fd_ostream> out_;
 

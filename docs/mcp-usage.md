@@ -160,7 +160,12 @@ megascope: server started, waiting for requests...
 ```
 
 Do not send requests until "server started" appears — the index is not
-ready before that point. Per-request logging is off unless `-v`.
+ready before that point. `serve` takes the index's write lock
+(`<index>.lock`) for its startup load, refresh, and save: when an
+`index` run holds it, `serve` prints `waiting for another writer
+holding ...` and answers nothing (not even `initialize`) until that run
+finishes; pass `--no-wait` to exit instead. The lock is released before
+serving. Per-request logging is off unless `-v`.
 `reindex_tu` is only available here (it mutates the live indexes).
 
 The pre-verb form `megascope --build-path ... --source ... [--snapshot F]`
