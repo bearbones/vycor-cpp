@@ -41,24 +41,31 @@ namespace vycor {
 namespace fuzz {
 
 /// A scratch directory private to this process (tmpfs when available),
-/// removed at exit only if empty: a crash leaves its input behind on
-/// purpose, but libFuzzer saves the input itself anyway.
+/// removed with everything in it when the process exits normally
+/// (libFuzzer's -max_total_time and -runs end with exit()). A crash leaves
+/// it behind (libFuzzer dies through _Exit, which runs no destructors);
+/// libFuzzer saves the crashing input itself anyway.
 inline const std::string &scratchDir() {
-  static const std::string dir = [] {
-    std::string base = "/dev/shm";
-    if (!llvm::sys::fs::is_directory(base)) {
-      llvm::SmallString<128> tmp;
-      llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmp);
-      base = std::string(tmp);
+  struct Dir {
+    std::string path;
+    Dir() {
+      std::string base = "/dev/shm";
+      if (!llvm::sys::fs::is_directory(base)) {
+        llvm::SmallString<128> tmp;
+        llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, tmp);
+        base = std::string(tmp);
+      }
+      llvm::SmallString<128> made;
+      if (llvm::sys::fs::createUniqueDirectory(base + "/vycor-fuzz", made)) {
+        std::fprintf(stderr, "fuzz: cannot create a scratch directory\n");
+        std::abort();
+      }
+      path = std::string(made);
     }
-    llvm::SmallString<128> made;
-    if (llvm::sys::fs::createUniqueDirectory(base + "/vycor-fuzz", made)) {
-      std::fprintf(stderr, "fuzz: cannot create a scratch directory\n");
-      std::abort();
-    }
-    return std::string(made);
-  }();
-  return dir;
+    ~Dir() { llvm::sys::fs::remove_directories(path); }
+  };
+  static const Dir dir;
+  return dir.path;
 }
 
 inline std::string scratchPath(const char *name) {

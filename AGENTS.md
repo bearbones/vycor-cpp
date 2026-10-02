@@ -581,9 +581,14 @@ every supported LLVM: on the newest LLVM only, `release` (the shipped
 Release configuration, full ctest including `cli_golden` and `corpus`),
 `asan-ubsan` (full ctest), and `tsan` (the thread-pool tests by label, a
 4-thread in-process bake of `examples/deep_chains` with queries, and one
-corpus case). `.github/workflows/fuzz.yml` fuzzes, 60 s per target on a pull
-request that touches that target's parser and 20 min each nightly, and
-uploads failing inputs. A sanitizer or fuzz finding is fixed with a unit
+corpus case). The sanitizer jobs set `log_path` in `*SAN_OPTIONS` and
+end with a step that fails if any report file exists, so a report from a
+subprocess worker (which the parent absorbs as a crashed TU) fails the
+job too; filtered ctest runs pass `--no-tests=error`.
+`.github/workflows/fuzz.yml` fuzzes, 60 s per target on a pull request
+that touches code the target executes (the path lists in the workflow)
+and 20 min each nightly, minimizes the nightly corpora (`-merge=1`)
+before caching them, and uploads failing inputs. A sanitizer or fuzz finding is fixed with a unit
 test that reproduces it; a suppression is only for a third-party (LLVM)
 issue, scoped as narrowly as the tool allows, with a comment saying why.
 

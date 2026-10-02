@@ -59,11 +59,15 @@ clang in use (Debian/Ubuntu: `libclang-rt-<N>-dev`).
 
 ## In CI
 
-`.github/workflows/fuzz.yml`: on a pull request, each target whose parser
-the change touches (the path lists in the workflow) runs for 60 seconds;
-nightly, every target runs for 20 minutes and the grown corpora are kept in
-the Actions cache. A failing input fails the job and is uploaded as an
-artifact.
+`.github/workflows/fuzz.yml`: on a pull request, each target whose code
+the change touches runs for 60 seconds. The path lists in the workflow
+cover what each target executes, not only its parser: the snapshot and
+batch targets run every tool (`src/query/`, `src/impact/`, the path
+search and oracle), the anneal targets run every index-only check
+(`src/anneal/Analyzer.cpp`) and write through `AtomicFile.cpp`.
+Nightly, every target runs for 20 minutes; the grown corpora are
+minimized (`-merge=1`) and kept in the Actions cache. A failing input
+fails the job and is uploaded as an artifact.
 
 ## Findings
 

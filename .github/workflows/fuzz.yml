@@ -17,10 +17,16 @@ on:
         description: "Seconds per target"
         default: "1200"
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
     name: Fuzz (LLVM 21)
+    # Four targets at the nightly 20 min, plus the build and the corpus
+    # merge; a pull request's run is 60 s per target.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 180 }}
     env:
       LLVM_VERSION: "21"
       PR_SECONDS: "60"
@@ -41,12 +47,19 @@ jobs:
           DISPATCH_SECONDS: ${{ github.event.inputs.seconds }}
         run: |
           set -euo pipefail
-          common='^(fuzz/(CMakeLists\.txt|FuzzCommon\.h|fuzz_seeds\.cpp)|\.github/workflows/fuzz\.yml|CMakeLists\.txt)$'
+          common='^(fuzz/(CMakeLists\.txt|FuzzCommon\.h|fuzz_seeds\.cpp)|\.github/workflows/fuzz\.yml|(src/)?CMakeLists\.txt)$'
+          # Code a target executes, beyond its parser: the snapshot target
+          # runs every tool, dump and save over what it loads; the anneal
+          # targets run every index-only check and write back; batch loads a
+          # real index and answers every tool.
+          index='src/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile)\.cpp|include/vycor/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile|StringInterner|Utf8)\.h'
+          tools='src/(query|impact)/.*|include/vycor/(query|impact)/.*'
+          anneal='src/anneal/(Checkpoint|GlobalIndex|Analyzer)\.cpp|include/vycor/anneal/(Checkpoint|GlobalIndex|Analyzer)\.h|src/callgraph/AtomicFile\.cpp|include/vycor/callgraph/AtomicFile\.h'
           declare -A paths=(
-            [snapshot]='^(src/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex)\.cpp|include/vycor/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|StringInterner|Utf8)\.h|tests/SnapshotBytes\.h|fuzz/fuzz_snapshot\.cpp)$'
-            [checkpoint]='^(src/anneal/(Checkpoint|GlobalIndex)\.cpp|include/vycor/anneal/(Checkpoint|GlobalIndex)\.h|fuzz/fuzz_checkpoint\.cpp)$'
-            [shard]='^(src/anneal/(Checkpoint|GlobalIndex)\.cpp|include/vycor/anneal/(Checkpoint|GlobalIndex)\.h|fuzz/fuzz_shard\.cpp)$'
-            [batch]='^(src/cli/MegascopeCli\.cpp|include/vycor/cli/MegascopeCli\.h|src/query/.*|include/vycor/query/.*|fuzz/fuzz_batch\.cpp)$'
+            [snapshot]="^(${index}|${tools}|tests/SnapshotBytes\.h|fuzz/fuzz_snapshot\.cpp)\$"
+            [checkpoint]="^(${anneal}|fuzz/fuzz_checkpoint\.cpp)\$"
+            [shard]="^(${anneal}|fuzz/fuzz_shard\.cpp)\$"
+            [batch]="^(${index}|${tools}|src/cli/MegascopeCli\.cpp|include/vycor/cli/MegascopeCli\.h|fuzz/fuzz_batch\.cpp)\$"
           )
           targets=""
           if [ "$EVENT" = "pull_request" ]; then
@@ -109,7 +122,7 @@ jobs:
           TARGETS: ${{ steps.select.outputs.targets }}
           SECONDS_EACH: ${{ steps.select.outputs.seconds }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           build/fuzz/fuzz_seeds fuzz-seeds > /dev/null
           export VYCOR_FUZZ_INDEX="$PWD/fuzz-seeds/batch.vycs"
           mkdir -p fuzz-artifacts
@@ -140,7 +153,33 @@ jobs:
           if-no-files-found: ignore
 
       # Only the nightly and manual runs grow the shared corpora; a pull
-      # request's short run reads them but does not write.
+      # request's short run reads them but does not write. Each corpus is
+      # first minimized (-merge=1 keeps the smallest set of inputs with the
+      # same coverage), so the cache does not grow without bound. A merge
+      # that fails keeps the corpus as it was.
+      - name: Minimize corpora
+        if: always() && steps.select.outputs.targets != '' && github.event_name != 'pull_request'
+        env:
+          TARGETS: ${{ steps.select.outputs.targets }}
+        run: |
+          set -euo pipefail
+          export VYCOR_FUZZ_INDEX="$PWD/fuzz-seeds/batch.vycs"
+          for t in $TARGETS; do
+            [ -d "fuzz-corpus/$t" ] || continue
+            rm -rf "fuzz-corpus-min/$t"
+            mkdir -p "fuzz-corpus-min/$t"
+            before="$(ls "fuzz-corpus/$t" | wc -l)"
+            if "build/fuzz/fuzz_$t" -merge=1 -timeout=30 -rss_limit_mb=4096 \
+                "fuzz-corpus-min/$t" "fuzz-corpus/$t" > "merge-$t.log" 2>&1; then
+              rm -rf "fuzz-corpus/$t"
+              mv "fuzz-corpus-min/$t" "fuzz-corpus/$t"
+              echo "fuzz_$t: corpus $before -> $(ls "fuzz-corpus/$t" | wc -l) inputs"
+            else
+              echo "::warning::fuzz_$t: corpus merge failed; kept as is"
+              tail -n 20 "merge-$t.log"
+            fi
+          done
+
       - name: Save corpora
         if: always() && steps.select.outputs.targets != '' && github.event_name != 'pull_request'
         uses: actions/cache/save@v4

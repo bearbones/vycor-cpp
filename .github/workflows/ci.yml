@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -60,6 +63,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     name: Release (LLVM 21)
+    timeout-minutes: 60
     env:
       LLVM_VERSION: "21"
     steps:
@@ -95,7 +99,9 @@ jobs:
       # Already part of the full run above; repeated by name so the
       # end-to-end contract checks read as their own step in the log.
       - name: CLI goldens and validation corpus
-        run: cd build && ctest --output-on-failure -R '^(cli_golden|corpus)$'
+        run: |
+          cd build && ctest --output-on-failure --no-tests=error \
+            -R '^(cli_golden|corpus)$'
 
   # Debug + AddressSanitizer + UndefinedBehaviorSanitizer (a UB report
   # aborts), full suite. LeakSanitizer is on (the ASan default on Linux):
@@ -104,10 +110,14 @@ jobs:
   asan-ubsan:
     runs-on: ubuntu-24.04
     name: ASan + UBSan (LLVM 21)
+    timeout-minutes: 90
     env:
       LLVM_VERSION: "21"
-      ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1"
-      UBSAN_OPTIONS: "print_stacktrace=1"
+      # log_path: every report, from a test or from a subprocess worker
+      # whose abort the parent absorbs as a crashed TU, lands in a file
+      # that the last step fails on.
+      ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:log_path=/tmp/sanitizer-logs/asan"
+      UBSAN_OPTIONS: "print_stacktrace=1:log_path=/tmp/sanitizer-logs/ubsan"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,6 +142,9 @@ jobs:
       - name: Narrow mmap randomization for the sanitizers
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
+      - name: Create the sanitizer log directory
+        run: mkdir -p /tmp/sanitizer-logs
+
       - name: Configure
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
@@ -147,6 +160,25 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure
 
+      # A sanitizer report anywhere (a test, the CLI, an isolated worker)
+      # fails the job, whatever the steps above concluded.
+      - name: Sanitizer reports
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(/tmp/sanitizer-logs/*)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "No sanitizer reports."
+            exit 0
+          fi
+          for f in "${logs[@]}"; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+          echo "::error::${#logs[@]} sanitizer report file(s)"
+          exit 1
+
   # ThreadSanitizer over what runs on more than one thread: the per-TU
   # thread pool (determinism bakes at 1 and 4 threads, the worker-pool and
   # shard-merge tests, parallel anneal), an in-process 4-thread bake of
@@ -155,9 +187,11 @@ jobs:
   tsan:
     runs-on: ubuntu-24.04
     name: TSan (LLVM 21)
+    timeout-minutes: 60
     env:
       LLVM_VERSION: "21"
-      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+      # log_path: see asan-ubsan.
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:log_path=/tmp/sanitizer-logs/tsan"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,6 +214,9 @@ jobs:
       - name: Narrow mmap randomization for the sanitizers
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
+      - name: Create the sanitizer log directory
+        run: mkdir -p /tmp/sanitizer-logs
+
       - name: Configure
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
@@ -194,7 +231,7 @@ jobs:
 
       - name: Thread-pool tests
         run: |
-          cd build && ctest --output-on-failure \
+          cd build && ctest --output-on-failure --no-tests=error \
             -L '^(worker_pool|determinism|AnnealCheckpoint|AnnealIsolated)$'
 
       - name: Multi-threaded bake of examples/deep_chains
@@ -217,3 +254,22 @@ jobs:
         run: |
           python3 scripts/corpus-run.py --binary build/src/vycor-cpp \
             --reps 1 --case mixed_exception_protection
+
+      # A sanitizer report anywhere (a test, the CLI, an isolated worker)
+      # fails the job, whatever the steps above concluded.
+      - name: Sanitizer reports
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(/tmp/sanitizer-logs/*)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "No sanitizer reports."
+            exit 0
+          fi
+          for f in "${logs[@]}"; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+          echo "::error::${#logs[@]} sanitizer report file(s)"
+          exit 1
