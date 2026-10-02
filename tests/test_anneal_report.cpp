@@ -163,9 +163,26 @@ TEST_CASE("Fingerprints ignore line numbers and follow the entities",
     moved.message = "bad call to g() declared at b.hpp:99:4";
     CHECK(fp(org) != fp(moved));
   }
+  SECTION("with no entity field, paths under the root in the message are "
+          "relative") {
+    Diagnostic org;
+    org.kind = Diagnostic::Custom;
+    org.checkName = "myorg-check";
+    org.callLocation = kRoot + "/a.cpp:3:1";
+    org.message = "bad call to f() declared at " + kRoot + "/b.hpp:12:4";
+    Diagnostic moved = org;
+    moved.callLocation = "/elsewhere/proj/a.cpp:3:1";
+    moved.message = "bad call to f() declared at /elsewhere/proj/b.hpp:12:4";
+    auto here = buildFindings({org}, kRoot);
+    auto there = buildFindings({moved}, "/elsewhere/proj");
+    REQUIRE(here.size() == 1);
+    REQUIRE(there.size() == 1);
+    CHECK(here[0].fingerprint == there[0].fingerprint);
+  }
 }
 
-TEST_CASE("buildFindings sorts, merges duplicates, and numbers collisions",
+TEST_CASE("buildFindings sorts and merges duplicates; identical findings "
+          "share a fingerprint",
           "[AnnealReport]") {
   std::vector<Diagnostic> diags = {
       adlAt(kRoot + "/src/use.cpp:20:3"),
@@ -191,8 +208,10 @@ TEST_CASE("buildFindings sorts, merges duplicates, and numbers collisions",
   CHECK(findings[2].line == 4);
   CHECK(findings[2].column == 3);
   CHECK(findings[3].line == 20);
-  // The two calls in use.cpp share an identity: the second gets "-1".
-  CHECK(findings[3].fingerprint == findings[2].fingerprint + "-1");
+  // The two calls in use.cpp share an identity, so a fingerprint: it names
+  // a kind of finding, and the baseline counts how many carry it (no
+  // line-ordered suffix that an insertion above would renumber).
+  CHECK(findings[3].fingerprint == findings[2].fingerprint);
   CHECK(findings[2].severity == Severity::Warning);
   CHECK(findings[2].kind == "ADL_Fallback");
 }
@@ -292,7 +311,7 @@ TEST_CASE("Baseline: round trip, new findings, and stale entries",
   }
   SECTION("malformed baselines are refused") {
     CHECK_FALSE(parseBaseline("[]", baseline, error));
-    CHECK_FALSE(parseBaseline("{\"version\": 2, \"findings\": []}", baseline,
+    CHECK_FALSE(parseBaseline("{\"version\": 3, \"findings\": []}", baseline,
                               error));
     CHECK_FALSE(parseBaseline("{\"version\": 1}", baseline, error));
     CHECK_FALSE(parseBaseline("{\"version\": 1, \"findings\": [{}]}",
@@ -509,4 +528,91 @@ TEST_CASE("Organization checks inherit check name, fingerprint, and SARIF "
   REQUIRE(renamed.size() == 1);
   CHECK(renamed[0].check == "myorg-renamed");
   CHECK(renamed[0].fingerprint != finding.fingerprint);
+}
+
+// ---- review follow-ups -------------------------------------------------------
+
+TEST_CASE("The enclosing function is part of a call-site finding's identity",
+          "[AnnealReport]") {
+  auto fp = [](const std::string &loc, const std::string &scope) {
+    Diagnostic d = adlAt(kRoot + "/src/use.cpp" + loc);
+    d.scope = scope;
+    auto findings = buildFindings({d}, kRoot);
+    REQUIRE(findings.size() == 1);
+    return findings[0].fingerprint;
+  };
+  CHECK(fp(":4:3", "c:@F@use#") == fp(":40:3", "c:@F@use#"));
+  CHECK(fp(":4:3", "c:@F@use#") != fp(":4:3", "c:@F@use_too#"));
+  CHECK(fp(":4:3", "c:@F@use#") != fp(":4:3", ""));
+}
+
+TEST_CASE("The baseline is a multiset of fingerprints", "[AnnealReport]") {
+  // Two identical findings (the same fragile call twice in one function).
+  auto twice = buildFindings({adlAt(kRoot + "/use.cpp:6:3"),
+                              adlAt(kRoot + "/use.cpp:7:3")},
+                             kRoot);
+  REQUIRE(twice.size() == 2);
+  const std::string fp = twice[0].fingerprint;
+
+  std::string path = "anneal_report_baseline.json";
+  std::string error;
+  REQUIRE(writeBaselineFile(path, twice, error));
+  std::vector<BaselineEntry> baseline;
+  REQUIRE(readBaselineFile(path, baseline, error));
+  std::remove(path.c_str());
+  REQUIRE(baseline.size() == 1);
+  CHECK(baseline[0].fingerprint == fp);
+  CHECK(baseline[0].count == 2);
+
+  SECTION("a third copy above the baselined two is new") {
+    auto current = buildFindings({adlAt(kRoot + "/use.cpp:4:3"),
+                                  adlAt(kRoot + "/use.cpp:7:3"),
+                                  adlAt(kRoot + "/use.cpp:8:3")},
+                                 kRoot);
+    std::vector<BaselineEntry> stale;
+    CHECK(applyBaseline(current, baseline, stale) == 2);
+    CHECK(current.size() == 1);
+    CHECK(stale.empty());
+  }
+  SECTION("under a changed-lines filter, the copy on a changed line is the "
+          "one reported") {
+    auto ranges = parseUnifiedDiff("--- a/use.cpp\n+++ b/use.cpp\n"
+                                   "@@ -3,0 +4,1 @@\n+  scale(v, 2.5);\n");
+    auto current = buildFindings({adlAt(kRoot + "/use.cpp:4:3"),
+                                  adlAt(kRoot + "/use.cpp:7:3"),
+                                  adlAt(kRoot + "/use.cpp:8:3")},
+                                 kRoot);
+    std::vector<BaselineEntry> stale;
+    CHECK(applyBaseline(current, baseline, stale, &ranges) == 2);
+    CHECK(filterToChangedLines(current, ranges) == 0);
+    REQUIRE(current.size() == 1);
+    CHECK(current[0].line == 4);
+  }
+  SECTION("one copy removed: one stale occurrence") {
+    auto current = buildFindings({adlAt(kRoot + "/use.cpp:6:3")}, kRoot);
+    std::vector<BaselineEntry> stale;
+    CHECK(applyBaseline(current, baseline, stale) == 1);
+    CHECK(current.empty());
+    REQUIRE(stale.size() == 1);
+    CHECK(stale[0].count == 1);
+    CHECK(staleBaselineCount(stale) == 1);
+  }
+  SECTION("a version-1 baseline: suffixes dropped, entries counted") {
+    std::string v1 = "{\"version\": 1, \"findings\": ["
+                     "{\"fingerprint\": \"" + fp + "\"},"
+                     "{\"fingerprint\": \"" + fp + "-1\"}]}";
+    std::vector<BaselineEntry> old;
+    REQUIRE(parseBaseline(v1, old, error));
+    REQUIRE(old.size() == 1);
+    CHECK(old[0].fingerprint == fp);
+    CHECK(old[0].count == 2);
+  }
+  SECTION("a count below 1 or an unknown version is refused") {
+    std::vector<BaselineEntry> bad;
+    CHECK_FALSE(parseBaseline("{\"version\": 2, \"findings\": "
+                              "[{\"fingerprint\": \"x\", \"count\": 0}]}",
+                              bad, error));
+    CHECK_FALSE(parseBaseline("{\"version\": 3, \"findings\": []}", bad,
+                              error));
+  }
 }

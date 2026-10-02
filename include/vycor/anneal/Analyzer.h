@@ -178,6 +178,8 @@ private:
   bool isFileIncluded(const std::string &path) const;
   std::string formatLocation(clang::SourceLocation loc) const;
   std::string getFilePath(clang::SourceLocation loc) const;
+  std::string enclosingScope(const clang::Expr *expr) const;
+  std::string enclosingScope(const clang::VarDecl *decl) const;
 };
 
 // ASTConsumer that drives the AnalyzerVisitor, then any organization

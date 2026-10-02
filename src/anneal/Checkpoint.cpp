@@ -37,8 +37,9 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // v2: AnnealIndexPayload gained odrEntries. v3: specializations.
 // v4: defaultArgs. v5: staticInits. v6: functionSummaries.
 // v7: headerStatics. v8: exceptionSpecs. v9: phase records carry the
-// TU's parse outcome; diagnostics carry entities. v10: an attempt record
-// may carry the outcome that used it up (a worker crash or timeout).
+// TU's parse outcome; diagnostics carry entities. v10: diagnostics carry
+// their enclosing scope; an attempt record may carry the outcome that
+// used it up (a worker crash or timeout).
 constexpr uint32_t kVersion = 10;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
@@ -607,6 +608,7 @@ void encodeDiagnostics(std::string &out,
     putU32(out, static_cast<uint32_t>(d.entities.size()));
     for (const auto &e : d.entities)
       putStr(out, e);
+    putStr(out, d.scope);
   }
 }
 
@@ -624,6 +626,7 @@ bool decodeDiagnostics(Reader &r, std::vector<Diagnostic> &out) {
     uint32_t nEntities = r.u32();
     for (uint32_t k = 0; k < nEntities && r.ok; ++k)
       d.entities.push_back(r.str());
+    d.scope = r.str();
     out.push_back(std::move(d));
   }
   return r.ok;
@@ -957,7 +960,8 @@ namespace {
 // v4: defaultArgs. v5: staticInits. v6: functionSummaries.
 // v7: headerStatics. v8: exceptionSpecs. v9: index and diagnostics
 // entries lead with the TU's parse outcome; diagnostics carry entities.
-constexpr uint32_t kShardVersion = 9;
+// v10: diagnostics carry their enclosing scope.
+constexpr uint32_t kShardVersion = 10;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

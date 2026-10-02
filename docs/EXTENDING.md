@@ -170,7 +170,9 @@ Semantics:
   fingerprint, `Diagnostic::entities` (qualified names or USRs of what
   the finding is about, never a line number). Without entities the
   fingerprint falls back to the message with `:<line>[:<col>]`
-  references removed.
+  references removed and paths under the project root made relative;
+  any other varying text in the message (a path outside the root, a
+  count) changes the fingerprint, so set `entities`.
 
 ### Cross-TU checks over the merged index
 

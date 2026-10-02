@@ -504,6 +504,7 @@ TEST_CASE("Shard files round-trip index payloads, diagnostics, and the "
     d.kind = Diagnostic::ADL_Fallback;
     d.callLocation = "a.cpp:1:1";
     d.message = "msg";
+    d.scope = "c:@F@use#";
     REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}},
                                  {AnnealCheckpoint::kCleanParse}));
 
@@ -514,6 +515,7 @@ TEST_CASE("Shard files round-trip index payloads, diagnostics, and the "
           REQUIRE(diags.size() == 1);
           CHECK(diags[0].kind == Diagnostic::ADL_Fallback);
           CHECK(diags[0].message == "msg");
+          CHECK(diags[0].scope == "c:@F@use#");
           ++seen;
         }));
     CHECK(seen == 1);

@@ -40,6 +40,9 @@ Scenarios, each over a scratch project written by this script:
                   a TU that failed under --checkpoint is parsed again on
                   the next run, so creating its missing header clears exit
                   3 (and the declarations it gains reach the other TUs);
+  baseline_counts identical findings are counted, not numbered: a new
+                  copy of a baselined call is reported (on the changed
+                  line under --git-base), distinct callers do not collide;
   relative_compile_dir
                   a compile command whose file is relative to its
                   directory (Meson's `../src/x.cpp`): the finding's file,
@@ -92,6 +95,15 @@ OTHER = """#include "ext.hpp"
 void other() {}
 """
 CLEAN = """int clean() { return 0; }
+"""
+# Two fragile calls to the same overload pair in one function: the same
+# identity, so the same fingerprint.
+USE_TWICE = """#include "core.hpp"
+void use() {
+  M::V v;
+  scale(v, 3.14);
+  scale(v, 3.14);
+}
 """
 BROKEN = """#include "no-such-header.hpp"
 int broken() { return 0; }
@@ -692,6 +704,65 @@ class Check:
         self.expect(name, code == 1 and again == fresh,
                     f"second resume: exit {code}")
 
+    def baseline_counts(self) -> None:
+        name = "baseline_counts"
+        d = self.adl_project(name, {"use.cpp": USE_TWICE})
+        srcs = ["use.cpp", "other.cpp"]
+        bl = d / "baseline.json"
+        code, _, err = self.anneal(d, "--write-baseline", str(bl),
+                                   sources=srcs)
+        doc = json.loads(bl.read_text()) if bl.exists() else {}
+        entries = doc.get("findings", [])
+        self.expect(name, code == 0 and doc.get("version") == 2 and
+                    len(entries) == 1 and entries[0].get("count") == 2,
+                    f"baseline of two identical findings: exit {code}, "
+                    f"{doc}")
+        code, _, _ = self.anneal(d, "--baseline", str(bl), sources=srcs)
+        self.expect(name, code == 0, f"rerun over the baseline: exit {code}")
+
+        git = shutil.which("git")
+        if not git:
+            print(f"skip {name} --git-base: no git", file=sys.stderr)
+            return
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t",
+               "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@example.com"}
+        for argv in (["init", "-q"], ["add", "-A"],
+                     ["commit", "-q", "-m", "base"]):
+            subprocess.run([git, *argv], cwd=d, env=env, check=True,
+                           capture_output=True)
+        # A third copy of the call, above the baselined two.
+        (d / "use.cpp").write_text(USE_TWICE.replace(
+            "  M::V v;\n", "  M::V v;\n  scale(v, 2.5);\n"))
+        code, doc = self.json_run(name, d, "--baseline", str(bl),
+                                  "--git-base", "HEAD", sources=srcs)
+        lines = [(f["file"], f["line"]) for f in doc.get("findings", [])]
+        self.expect(name, code == 1 and lines == [("use.cpp", 4)],
+                    f"a new copy under --baseline --git-base: exit {code}, "
+                    f"reported {lines} (expected the new line 4)")
+        code, doc = self.json_run(name, d, "--baseline", str(bl),
+                                  sources=srcs)
+        self.expect(name, code == 1 and len(doc.get("findings", [])) == 1
+                    and doc.get("summary", {}).get("baselined") == 2,
+                    f"a new copy under --baseline: exit {code}, "
+                    f"{doc.get('summary')}")
+        # Removing one of the copies leaves one stale occurrence.
+        (d / "use.cpp").write_text(USE)
+        code, doc = self.json_run(name, d, "--baseline", str(bl),
+                                  sources=srcs)
+        self.expect(name, code == 0 and
+                    doc.get("summary", {}).get("staleBaseline") == 1,
+                    f"one copy removed: exit {code}, {doc.get('summary')}")
+
+        # The same call in two functions: two fingerprints.
+        d2 = self.adl_project(name + "_callers", {
+            "use.cpp": USE + "void use_too() {\n  M::V v;\n"
+                             "  scale(v, 3.14);\n}\n"})
+        _, doc = self.json_run(name, d2, sources=srcs)
+        fps = [f["fingerprint"] for f in doc.get("findings", [])]
+        self.expect(name, len(fps) == 2 and fps[0] != fps[1],
+                    f"distinct callers share a fingerprint: {fps}")
+
     def relative_compile_dir(self) -> None:
         name = "relative_compile_dir"
         fps = []
@@ -770,7 +841,7 @@ class Check:
 SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
              "changed_lines", "source_list", "checkpoint_recovery",
-             "relative_compile_dir", "worker_timeout"]
+             "baseline_counts", "relative_compile_dir", "worker_timeout"]
 
 
 def main() -> int:

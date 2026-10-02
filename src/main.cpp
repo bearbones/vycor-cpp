@@ -1137,7 +1137,8 @@ int main(int argc, const char **argv) {
     if (baseline) {
       run.baselineUsed = true;
       run.baselined =
-          vycor::applyBaseline(run.findings, *baseline, run.staleBaseline);
+          vycor::applyBaseline(run.findings, *baseline, run.staleBaseline,
+                               changedRanges ? &*changedRanges : nullptr);
     }
     if (changedRanges) {
       run.changedLinesUsed = true;

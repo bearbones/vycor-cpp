@@ -286,12 +286,13 @@ filter removed.
 
 The JSON report (`--format json`) carries the same facts: `summary`
 (`tus`, `analyzed`, `failed`, `findings`, `suppressed`, plus
-`baselined`/`staleBaseline` with `--baseline` and `outsideChanges` with
+`baselined`/`staleBaseline` (occurrences) with `--baseline` and `outsideChanges` with
 a patch), `tus` (one row per requested TU in source order: `file`,
 `status` — `analyzed`, `partial`, `skipped`, `crashed`, `poisoned`,
 `timeout` — and `detail` when not analyzed), `findings` (`check`,
 `kind`, `severity`, `file`, `line`, `column`, `message`,
-`fingerprint`), `staleBaseline` with `--baseline`, and
+`fingerprint` — not unique: identical findings share it), `staleBaseline`
+with `--baseline` (`fingerprint`, `count`, `check`, `file`, `message`), and
 `unusedSuppressions` under `-v`. The document is byte-identical
 whether the run was in-process, resumed from `--checkpoint`, or run
 under `--isolate-workers`.

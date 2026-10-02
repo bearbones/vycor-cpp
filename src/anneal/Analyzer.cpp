@@ -35,8 +35,10 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/ParentMapContext.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Index/USRGeneration.h"
 #include "clang/Tooling/CompilationDatabase.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -345,6 +347,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
         Diagnostic diag;
         diag.kind = Diagnostic::ADL_SameScore;
         diag.callLocation = formatLocation(callBeginLoc(expr));
+        diag.scope = enclosingScope(expr);
         diag.resolvedDecl = resolvedSig;
         diag.betterDecl = candidateSig;
         diag.missingHeader = entry->headerPath;
@@ -364,6 +367,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
 
     Diagnostic diag;
     diag.callLocation = formatLocation(callBeginLoc(expr));
+    diag.scope = enclosingScope(expr);
     diag.resolvedDecl = resolvedSig;
     diag.betterDecl = candidateSig;
     diag.missingHeader = entry->headerPath;
@@ -448,6 +452,7 @@ bool AnalyzerVisitor::VisitVarDecl(clang::VarDecl *decl) {
         Diagnostic diag;
         diag.kind = Diagnostic::CTAD_Fallback;
         diag.callLocation = formatLocation(decl->getBeginLoc());
+        diag.scope = enclosingScope(decl);
         diag.resolvedDecl = deducedType;
         diag.betterDecl = entry->deducedType;
         diag.missingHeader = entry->headerPath;
@@ -489,6 +494,69 @@ AnalyzerVisitor::formatLocation(clang::SourceLocation loc) const {
   unsigned col = sm_.getSpellingColumnNumber(spellingLoc);
   return file + ":" + std::to_string(line) + ":" +
          std::to_string(col);
+}
+
+namespace {
+
+// A function whose USR carries a byte offset (a lambda's call operator, a
+// local class's method: clang spells their USRs with the location) would
+// make the fingerprint move with every edit above it, so the scope is the
+// nearest enclosing function that is neither.
+bool isStableScope(const clang::FunctionDecl *fn) {
+  if (fn->getParentFunctionOrMethod())
+    return false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
+    if (method->getParent()->isLambda())
+      return false;
+  return true;
+}
+
+std::string usrOf(const clang::Decl *decl) {
+  llvm::SmallString<128> usr;
+  if (!clang::index::generateUSRForDecl(decl, usr))
+    return std::string(usr);
+  if (const auto *named = llvm::dyn_cast<clang::NamedDecl>(decl))
+    return named->getQualifiedNameAsString();
+  return "";
+}
+
+} // namespace
+
+std::string AnalyzerVisitor::enclosingScope(const clang::Expr *expr) const {
+  if (!astContext_)
+    return "";
+  // Up the first-parent chain to a stable enclosing function; a call in a
+  // namespace-scope initializer takes the outermost variable instead.
+  const clang::VarDecl *outerVar = nullptr;
+  clang::DynTypedNode node = clang::DynTypedNode::create(*expr);
+  for (;;) {
+    auto parents = astContext_->getParents(node);
+    if (parents.empty())
+      break;
+    node = parents[0];
+    if (const auto *fn = node.get<clang::FunctionDecl>()) {
+      if (isStableScope(fn))
+        return usrOf(fn);
+    } else if (const auto *var = node.get<clang::VarDecl>()) {
+      outerVar = var;
+    } else if (node.get<clang::TranslationUnitDecl>()) {
+      break;
+    }
+  }
+  return outerVar ? usrOf(outerVar) : "";
+}
+
+std::string
+AnalyzerVisitor::enclosingScope(const clang::VarDecl *decl) const {
+  for (const clang::DeclContext *dc = decl->getParentFunctionOrMethod(); dc;
+       dc = llvm::cast<clang::Decl>(dc)->getParentFunctionOrMethod()) {
+    const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(dc);
+    if (fn && isStableScope(fn))
+      return usrOf(fn);
+    if (!fn)
+      break; // a block or captured statement: fall back to the variable
+  }
+  return decl->getParentFunctionOrMethod() ? "" : usrOf(decl);
 }
 
 std::string

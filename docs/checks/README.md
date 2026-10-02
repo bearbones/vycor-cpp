@@ -102,20 +102,61 @@ xxh3-64 over, NUL-separated:
    the ADL, CTAD, coverage, and dead-code checks, the resolved and the
    better declaration and the missing header (relative to the root);
    for a check that records neither, the message with every
-   `:<line>[:<col>]` removed.
+   `:<line>[:<col>]` removed and every path under the project root made
+   root-relative (organization checks should still set `entities`: a
+   path outside the root, or any other text that varies, stays in);
+6. for the call-site checks (`adl-visibility`, `ctad-visibility`), the
+   enclosing function: the USR of the nearest function around the call
+   or declaration that is not a lambda or a local class's method (whose
+   USRs carry byte offsets), or of the variable for a namespace-scope
+   initializer (`Diagnostic::scope`).
 
 No line or column number enters, so inserting or deleting unrelated
 lines above a finding leaves its fingerprint unchanged; renaming an
-entity involved, or moving the finding to another file, changes it.
-Moving the checkout elsewhere does not (paths are root-relative).
+entity involved, renaming the enclosing function, or moving the finding
+to another file, changes it. Moving the checkout elsewhere does not:
+every location is made absolute against its TU's compile directory
+(so a relative compile command, `directory: build` with
+`file: ../src/x.cpp` as Meson writes it, names the real file) and then
+relative to the project root.
 
-Two findings that still share a fingerprint (the same fragile call
-written twice in one file) are numbered in line order: the second
-gets `-1` appended, the third `-2`. Fixing one of two such findings
-leaves one stale baseline entry; the numbering shifts, so which of the
-two entries reads as stale is not meaningful. Exact duplicates (the
-same header finding reached through several TUs) are merged into one
-finding before numbering.
+A fingerprint names a kind of finding, not one occurrence: the same
+fragile call written twice in one function gives two findings with the
+same fingerprint, and nothing numbers them by line (a number assigned in
+line order would move to a different call whenever a copy is inserted
+above). The baseline counts occurrences per fingerprint instead (below).
+Exact duplicates (the same header finding reached through several TUs)
+are merged into one finding.
+
+## Baselines
+
+`--write-baseline <file>` records the current findings; `--baseline
+<file>` then reports only what is new. The file (version 2) holds one
+entry per distinct fingerprint with how many findings carried it:
+
+```json
+{"version": 2, "tool": "vycor-cpp anneal", "findings": [
+  {"fingerprint": "afd3147461fcb3df", "count": 2,
+   "check": "adl-visibility", "file": "src/use.cpp",
+   "message": "Fragile ADL resolution: ..."}]}
+```
+
+`check`, `file`, and `message` are the first such finding's, for people
+reading the file; only `fingerprint` and `count` are matched. Per
+fingerprint, when a run has N findings and the baseline count is B,
+N − B of them are reported as new (none when N ≤ B) and B − N
+occurrences are listed as stale (`staleBaseline`, with a `count`). Which
+of N identical findings is reported cannot be known from the fingerprint,
+so with `--patch-file` or `--git-base` the ones on changed lines are
+reported first (a new copy of a baselined call, added above the old ones,
+is reported at its own line and is not filtered out as unchanged), and
+otherwise the first in report order.
+
+A version-1 file (one entry per finding, colliding fingerprints suffixed
+`-1`, `-2`, ...) is still read: the suffixes are dropped and the entries
+counted. Rewrite it with `--write-baseline`; call-site findings now
+include their enclosing function, so their fingerprints differ from the
+ones a version-1 file recorded.
 
 ## Suppressing a finding
 

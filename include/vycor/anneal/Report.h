@@ -45,11 +45,13 @@
 // NUL-separated. The identity is Diagnostic::entities when the check
 // filled it; otherwise resolvedDecl, betterDecl, and missingHeader
 // (relative to the root) when any is set; otherwise the message with every
-// ":<line>[:<col>]" removed. No line number enters, so inserting unrelated
-// lines leaves it unchanged; renaming an entity involved changes it.
-// Findings that still collide (the same call twice in one file) get
-// "-1", "-2", ... appended in line order, so every fingerprint in a run is
-// unique.
+// ":<line>[:<col>]" removed and paths under the root made relative. A
+// call-site finding's enclosing function (Diagnostic::scope) is appended.
+// No line number enters, so inserting unrelated lines leaves it
+// unchanged; renaming an entity involved changes it.
+// Findings that still share a fingerprint (the same fragile call twice in
+// one function) keep it: a fingerprint names a kind of finding, not one
+// occurrence, and the baseline counts occurrences per fingerprint.
 // ============================================================================
 
 namespace vycor {
@@ -112,8 +114,9 @@ std::vector<std::string> findingIdentity(const Diagnostic &diag,
 
 /// Findings for `diags`: located, fingerprinted, exact duplicates (the same
 /// header finding reported from several TUs) merged, sorted by (file, line,
-/// column, check, kind, message), collision suffixes assigned in that order.
-/// `projectRoot` is absolute and dot-free.
+/// column, check, kind, message). `projectRoot` is absolute and dot-free;
+/// a relative location (the analyzer records absolute ones) is taken
+/// against it.
 std::vector<Finding> buildFindings(const std::vector<Diagnostic> &diags,
                                    const std::string &projectRoot);
 
@@ -152,13 +155,17 @@ size_t applyInlineSuppressions(std::vector<Finding> &findings,
 
 struct BaselineEntry {
   std::string fingerprint;
+  unsigned count = 1; // findings carrying this fingerprint
   std::string check;
   std::string file;
   std::string message;
 };
 
-/// {"version": 1, "findings": [{fingerprint, check, file, message}...]},
-/// sorted by fingerprint, written atomically.
+/// {"version": 2, "findings": [{fingerprint, count, check, file,
+/// message}...]}: one entry per distinct fingerprint, sorted by it,
+/// written atomically. The reader also takes version 1 (one entry per
+/// finding, colliding fingerprints suffixed "-1", "-2", ...): suffixes are
+/// dropped and entries merged, so `entries` holds each fingerprint once.
 bool writeBaselineFile(const std::string &path,
                        const std::vector<Finding> &findings,
                        std::string &error);
@@ -167,11 +174,19 @@ bool readBaselineFile(const std::string &path,
 bool parseBaseline(llvm::StringRef text, std::vector<BaselineEntry> &entries,
                    std::string &error);
 
-/// Remove findings whose fingerprint the baseline holds; baseline entries
-/// that matched nothing go to `stale`. Returns the number removed.
+/// The baseline is a multiset of fingerprints: per fingerprint, when the
+/// run has N findings and the baseline count is B, max(N - B, 0) of them
+/// are reported (new) and the rest removed. Which of identical findings is
+/// reported is chosen without line order: those on `changedLines` (when
+/// given) first, then report order. A fingerprint with B > N goes to
+/// `stale` with count B - N. Returns the number removed.
 size_t applyBaseline(std::vector<Finding> &findings,
                      const std::vector<BaselineEntry> &baseline,
-                     std::vector<BaselineEntry> &stale);
+                     std::vector<BaselineEntry> &stale,
+                     const std::vector<PatchRange> *changedLines = nullptr);
+
+/// Total stale occurrences (the sum of the entries' counts).
+size_t staleBaselineCount(const std::vector<BaselineEntry> &stale);
 
 // ---- changed lines ---------------------------------------------------------
 

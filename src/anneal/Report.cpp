@@ -40,6 +40,7 @@ namespace {
 constexpr const char *kHelpBase =
     "https://github.com/bearbones/vycor-cpp/blob/main/docs/checks/";
 constexpr const char *kFingerprintKey = "vycorFingerprint/v1";
+constexpr int64_t kBaselineVersion = 2;
 
 bool isBuiltinCheck(const std::string &check) {
   for (const auto &info : builtinAnnealChecks())
@@ -85,11 +86,27 @@ void splitLocation(const std::string &loc, std::string &path, unsigned &line,
   }
 }
 
-// Message text with every ":<line>[:<col>]" removed: the identity of a
-// finding whose check filled no entity field.
-std::string messageIdentity(const std::string &message) {
+// Message text with every ":<line>[:<col>]" removed and every path under
+// the project root made root-relative: the identity of a finding whose
+// check filled no entity field (an organization check, typically), so it
+// survives unrelated edits and a moved checkout.
+std::string messageIdentity(const std::string &message,
+                            llvm::StringRef projectRoot) {
   static const llvm::Regex lineRef(":[0-9]+(:[0-9]+)?");
   std::string out = message;
+  llvm::StringRef root = projectRoot;
+  while (root.size() > 1 && root.ends_with("/"))
+    root = root.drop_back();
+  if (root.size() > 1) {
+    const std::string prefix = root.str() + "/";
+    std::string relative;
+    size_t from = 0;
+    for (size_t at; (at = out.find(prefix, from)) != std::string::npos;
+         from = at + prefix.size())
+      relative.append(out, from, at - from);
+    relative.append(out, from, std::string::npos);
+    out = std::move(relative);
+  }
   std::string previous;
   while (out != previous) {
     previous = out;
@@ -332,16 +349,22 @@ std::string findingFingerprint(const std::string &check,
 
 std::vector<std::string> findingIdentity(const Diagnostic &diag,
                                          llvm::StringRef projectRoot) {
+  std::vector<std::string> identity;
   if (!diag.entities.empty())
-    return diag.entities;
-  if (!diag.resolvedDecl.empty() || !diag.betterDecl.empty() ||
-      !diag.missingHeader.empty())
-    return {diag.resolvedDecl, diag.betterDecl,
-            diag.missingHeader.empty()
-                ? std::string()
-                : relativeToRoot(absolutePath(diag.missingHeader, projectRoot),
-                                 projectRoot)};
-  return {messageIdentity(diag.message)};
+    identity = diag.entities;
+  else if (!diag.resolvedDecl.empty() || !diag.betterDecl.empty() ||
+           !diag.missingHeader.empty())
+    identity = {diag.resolvedDecl, diag.betterDecl,
+                diag.missingHeader.empty()
+                    ? std::string()
+                    : relativeToRoot(
+                          absolutePath(diag.missingHeader, projectRoot),
+                          projectRoot)};
+  else
+    identity = {messageIdentity(diag.message, projectRoot)};
+  if (!diag.scope.empty())
+    identity.push_back("scope=" + diag.scope);
+  return identity;
 }
 
 std::vector<Finding> buildFindings(const std::vector<Diagnostic> &diags,
@@ -378,12 +401,6 @@ std::vector<Finding> buildFindings(const std::vector<Diagnostic> &diags,
                                       a.fingerprint == b.fingerprint;
                              }),
                  findings.end());
-  std::unordered_map<std::string, unsigned> seen;
-  for (auto &f : findings) {
-    unsigned n = seen[f.fingerprint]++;
-    if (n)
-      f.fingerprint += "-" + std::to_string(n);
-  }
   return findings;
 }
 
@@ -501,27 +518,36 @@ size_t applyInlineSuppressions(std::vector<Finding> &findings,
 bool writeBaselineFile(const std::string &path,
                        const std::vector<Finding> &findings,
                        std::string &error) {
-  std::vector<const Finding *> sorted;
-  for (const auto &f : findings)
-    sorted.push_back(&f);
-  std::sort(sorted.begin(), sorted.end(),
-            [](const Finding *a, const Finding *b) {
-              return a->fingerprint < b->fingerprint;
-            });
+  // One entry per distinct fingerprint, with how many findings carry it;
+  // check, file, and message are the first such finding's.
+  std::map<std::string, BaselineEntry> byFingerprint;
+  for (const auto &f : findings) {
+    auto [it, inserted] = byFingerprint.try_emplace(f.fingerprint);
+    if (inserted) {
+      it->second.fingerprint = f.fingerprint;
+      it->second.check = f.check;
+      it->second.file = f.file;
+      it->second.message = f.message;
+      it->second.count = 0;
+    }
+    ++it->second.count;
+  }
   return writeFileAtomically(
       path,
       [&](llvm::raw_ostream &os) {
         llvm::json::OStream j(os, 2);
         j.object([&] {
-          j.attribute("version", 1);
+          j.attribute("version", kBaselineVersion);
           j.attribute("tool", "vycor-cpp anneal");
           j.attributeArray("findings", [&] {
-            for (const auto *f : sorted)
+            for (const auto &kv : byFingerprint)
               j.object([&] {
-                j.attribute("fingerprint", f->fingerprint);
-                j.attribute("check", f->check);
-                j.attribute("file", f->file);
-                j.attribute("message", f->message);
+                const BaselineEntry &e = kv.second;
+                j.attribute("fingerprint", e.fingerprint);
+                j.attribute("count", static_cast<int64_t>(e.count));
+                j.attribute("check", e.check);
+                j.attribute("file", e.file);
+                j.attribute("message", e.message);
               });
           });
         });
@@ -543,8 +569,9 @@ bool parseBaseline(llvm::StringRef text, std::vector<BaselineEntry> &entries,
     return false;
   }
   auto version = root->getInteger("version");
-  if (!version || *version != 1) {
-    error = "unsupported baseline version (expected 1)";
+  if (!version || (*version != 1 && *version != kBaselineVersion)) {
+    error = "unsupported baseline version (expected 1 or " +
+            std::to_string(kBaselineVersion) + ")";
     return false;
   }
   const auto *list = root->getArray("findings");
@@ -552,7 +579,10 @@ bool parseBaseline(llvm::StringRef text, std::vector<BaselineEntry> &entries,
     error = "no \"findings\" array";
     return false;
   }
-  entries.clear();
+  // Merged by fingerprint: version 1 wrote one entry per finding, with
+  // "-1", "-2", ... suffixes on colliding fingerprints, which are dropped
+  // here (each such entry counts once).
+  std::map<std::string, BaselineEntry> byFingerprint;
   for (const auto &item : *list) {
     const auto *obj = item.getAsObject();
     auto fp = obj ? obj->getString("fingerprint") : std::nullopt;
@@ -560,16 +590,34 @@ bool parseBaseline(llvm::StringRef text, std::vector<BaselineEntry> &entries,
       error = "a baseline entry has no \"fingerprint\"";
       return false;
     }
-    BaselineEntry e;
-    e.fingerprint = fp->str();
-    if (auto v = obj->getString("check"))
-      e.check = v->str();
-    if (auto v = obj->getString("file"))
-      e.file = v->str();
-    if (auto v = obj->getString("message"))
-      e.message = v->str();
-    entries.push_back(std::move(e));
+    llvm::StringRef bare = *fp;
+    if (*version == 1)
+      bare = bare.split('-').first;
+    int64_t count = 1;
+    if (auto c = obj->getInteger("count")) {
+      if (*c < 1) {
+        error = "baseline entry " + bare.str() + " has a count below 1";
+        return false;
+      }
+      count = *c;
+    }
+    auto [it, inserted] = byFingerprint.try_emplace(bare.str());
+    BaselineEntry &e = it->second;
+    if (inserted) {
+      e.fingerprint = bare.str();
+      e.count = 0;
+      if (auto v = obj->getString("check"))
+        e.check = v->str();
+      if (auto v = obj->getString("file"))
+        e.file = v->str();
+      if (auto v = obj->getString("message"))
+        e.message = v->str();
+    }
+    e.count += static_cast<unsigned>(count);
   }
+  entries.clear();
+  for (auto &kv : byFingerprint)
+    entries.push_back(std::move(kv.second));
   return true;
 }
 
@@ -586,41 +634,6 @@ bool readBaselineFile(const std::string &path,
     return false;
   }
   return true;
-}
-
-size_t applyBaseline(std::vector<Finding> &findings,
-                     const std::vector<BaselineEntry> &baseline,
-                     std::vector<BaselineEntry> &stale) {
-  std::unordered_map<std::string, unsigned> remaining;
-  for (const auto &e : baseline)
-    ++remaining[e.fingerprint];
-  size_t removed = 0;
-  std::vector<Finding> kept;
-  kept.reserve(findings.size());
-  for (auto &f : findings) {
-    auto it = remaining.find(f.fingerprint);
-    if (it != remaining.end() && it->second > 0) {
-      --it->second;
-      ++removed;
-    } else {
-      kept.push_back(std::move(f));
-    }
-  }
-  findings = std::move(kept);
-  stale.clear();
-  for (const auto &e : baseline) {
-    auto it = remaining.find(e.fingerprint);
-    if (it != remaining.end() && it->second > 0) {
-      --it->second;
-      stale.push_back(e);
-    }
-  }
-  std::sort(stale.begin(), stale.end(),
-            [](const BaselineEntry &a, const BaselineEntry &b) {
-              return std::tie(a.file, a.check, a.fingerprint) <
-                     std::tie(b.file, b.check, b.fingerprint);
-            });
-  return removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +655,86 @@ bool patchPathMatches(llvm::StringRef patchFile, llvm::StringRef absPath) {
           absPath[absPath.size() - rel.size() - 1] == '/');
 }
 
+bool onChangedLine(const Finding &f, const std::vector<PatchRange> &ranges) {
+  if (!f.line || f.path.empty())
+    return false;
+  for (const auto &r : ranges)
+    // A pure deletion's range already spans the two lines around it
+    // (parseUnifiedDiff).
+    if (patchPathMatches(r.file, f.path) && f.line >= r.firstLine &&
+        f.line <= r.lastLine)
+      return true;
+  return false;
+}
+
 } // namespace
+
+size_t applyBaseline(std::vector<Finding> &findings,
+                     const std::vector<BaselineEntry> &baseline,
+                     std::vector<BaselineEntry> &stale,
+                     const std::vector<PatchRange> *changedLines) {
+  std::unordered_map<std::string, const BaselineEntry *> byFingerprint;
+  for (const auto &e : baseline)
+    byFingerprint[e.fingerprint] = &e;
+
+  // Per fingerprint, the findings carrying it (in report order).
+  std::map<std::string, std::vector<size_t>> groups;
+  for (size_t i = 0; i < findings.size(); ++i)
+    groups[findings[i].fingerprint].push_back(i);
+
+  std::vector<bool> report(findings.size(), true);
+  size_t removed = 0;
+  stale.clear();
+  for (auto &[fingerprint, members] : groups) {
+    auto it = byFingerprint.find(fingerprint);
+    size_t known = it == byFingerprint.end() ? 0 : it->second->count;
+    if (members.size() <= known) {
+      for (size_t i : members)
+        report[i] = false;
+      removed += members.size();
+      if (members.size() < known) {
+        BaselineEntry e = *it->second;
+        e.count = static_cast<unsigned>(known - members.size());
+        stale.push_back(std::move(e));
+      }
+      continue;
+    }
+    // More findings than the baseline knows: the surplus is new. Which of
+    // the identical findings is the new one is unknowable, so the ones on
+    // changed lines are reported first (under --patch-file / --git-base
+    // the new code is there), then the rest in report order.
+    size_t surplus = members.size() - known;
+    std::stable_partition(members.begin(), members.end(), [&](size_t i) {
+      return changedLines && onChangedLine(findings[i], *changedLines);
+    });
+    for (size_t k = surplus; k < members.size(); ++k)
+      report[members[k]] = false;
+    removed += known;
+  }
+  for (const auto &e : baseline)
+    if (!groups.count(e.fingerprint))
+      stale.push_back(e);
+
+  std::vector<Finding> kept;
+  kept.reserve(findings.size() - removed);
+  for (size_t i = 0; i < findings.size(); ++i)
+    if (report[i])
+      kept.push_back(std::move(findings[i]));
+  findings = std::move(kept);
+  std::sort(stale.begin(), stale.end(),
+            [](const BaselineEntry &a, const BaselineEntry &b) {
+              return std::tie(a.file, a.check, a.fingerprint) <
+                     std::tie(b.file, b.check, b.fingerprint);
+            });
+  return removed;
+}
+
+size_t staleBaselineCount(const std::vector<BaselineEntry> &stale) {
+  size_t n = 0;
+  for (const auto &e : stale)
+    n += e.count;
+  return n;
+}
 
 size_t filterToChangedLines(std::vector<Finding> &findings,
                             const std::vector<PatchRange> &ranges) {
@@ -650,19 +742,7 @@ size_t filterToChangedLines(std::vector<Finding> &findings,
   std::vector<Finding> kept;
   kept.reserve(findings.size());
   for (auto &f : findings) {
-    bool inside = false;
-    if (f.line && !f.path.empty())
-      for (const auto &r : ranges) {
-        if (!patchPathMatches(r.file, f.path))
-          continue;
-        // A pure deletion's range already spans the two lines around it
-        // (parseUnifiedDiff).
-        if (f.line >= r.firstLine && f.line <= r.lastLine) {
-          inside = true;
-          break;
-        }
-      }
-    if (inside)
+    if (onChangedLine(f, ranges))
       kept.push_back(std::move(f));
     else
       ++removed;
@@ -734,7 +814,7 @@ void renderJson(const AnnealRun &run, llvm::raw_ostream &os) {
       if (run.baselineUsed) {
         j.attribute("baselined", static_cast<int64_t>(run.baselined));
         j.attribute("staleBaseline",
-                    static_cast<int64_t>(run.staleBaseline.size()));
+                    static_cast<int64_t>(staleBaselineCount(run.staleBaseline)));
       }
       if (run.changedLinesUsed)
         j.attribute("outsideChanges",
@@ -759,6 +839,7 @@ void renderJson(const AnnealRun &run, llvm::raw_ostream &os) {
         for (const auto &e : run.staleBaseline)
           j.object([&] {
             j.attribute("fingerprint", e.fingerprint);
+            j.attribute("count", static_cast<int64_t>(e.count));
             j.attribute("check", e.check);
             j.attribute("file", e.file);
             j.attribute("message", e.message);
@@ -938,13 +1019,18 @@ void renderSummary(const AnnealRun &run, llvm::raw_ostream &err) {
     err << "; " << run.outsideChanges << " outside the changed lines";
   err << "\n";
   if (run.baselineUsed && !run.staleBaseline.empty()) {
-    err << "anneal: " << run.staleBaseline.size()
-        << " baseline entr" << (run.staleBaseline.size() == 1 ? "y" : "ies")
+    const size_t stale = staleBaselineCount(run.staleBaseline);
+    err << "anneal: " << stale << " baseline entr"
+        << (stale == 1 ? "y" : "ies")
         << " no longer found (stale; rewrite the baseline with "
            "--write-baseline to drop):\n";
-    for (const auto &e : run.staleBaseline)
+    for (const auto &e : run.staleBaseline) {
       err << "anneal:   " << e.fingerprint << " [" << e.check << "] "
-          << e.file << "\n";
+          << e.file;
+      if (e.count > 1)
+        err << " (x" << e.count << ")";
+      err << "\n";
+    }
   }
   if (run.reportUnusedSuppressions)
     for (const auto &s : run.unusedSuppressions) {

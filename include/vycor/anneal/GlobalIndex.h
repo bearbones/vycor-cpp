@@ -339,6 +339,11 @@ struct Diagnostic {
   // the finding fingerprint (anneal/Report.h) and never holds a line
   // number, so the fingerprint survives unrelated edits.
   std::vector<std::string> entities;
+  // For a call-site finding (adl-visibility, ctad-visibility): the USR of
+  // the function whose body holds the call or declaration (the variable's
+  // own USR at namespace scope). Also a fingerprint input, so the same
+  // fragile call in two functions is two findings, not a collision.
+  std::string scope;
 };
 
 // Project-wide database of all function overloads and deduction guides.

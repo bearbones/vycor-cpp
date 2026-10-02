@@ -65,8 +65,13 @@ an optional `AnalysisReport *` receives every TU's parse outcome
 parse that reported errors, `Skipped`, `Crashed` for a TU the checkpoint
 poisoned, `Poisoned`/`TimedOut` for an isolated worker that died or
 hung). Checkpoint records and worker shards carry the outcome
-(journal and shard format v9), so in-process, resumed, and isolated runs
-report the same rows.
+(journal and shard format v9; v10 adds `Diagnostic::scope` and the
+outcome on an attempt record), so in-process, resumed, and isolated runs
+report the same rows. Only a clean (`Indexed`) phase record replays; a
+TU that failed is parsed again on resume, and only the
+attempts-exhausted skip outlives a failure (reported with the journaled
+outcome). Every path the indexer and analyzer record is absolute against
+the TU's compile directory (`absoluteFileName`, `anneal/Indexer.h`).
 
 **anneal as a CI gate** (`anneal/Report.h`, contract in
 `docs/result-contract.md` "anneal exit codes" and
@@ -75,9 +80,13 @@ diagnostics into findings (check name from the kind or the org check's
 `name()`, a per-check severity, the location relative to
 `--project-root`, a fingerprint of check + kind + root-relative file +
 the entities involved — `Diagnostic::entities`, else
-resolved/better declaration and missing header, never a line number),
-drops those an inline `// vycor: ignore[check]` covers, those in
-`--baseline`, and those outside the changed lines (`--patch-file`,
+resolved/better declaration and missing header, plus the enclosing
+function `Diagnostic::scope` for call-site checks, never a line number;
+identical findings share it), drops those an inline
+`// vycor: ignore[check]` covers, those in `--baseline` (a multiset:
+per fingerprint only the surplus over the baseline count is reported,
+preferring findings on changed lines; baseline file version 2), and
+those outside the changed lines (`--patch-file`,
 `--git-base`), renders `--format text|json|sarif`, and exits 0 clean,
 1 findings at or above `--fail-on`, 2 usage, 3 a TU that did not parse
 cleanly (unless `--allow-parse-failures`). The JSON report is
