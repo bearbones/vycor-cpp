@@ -49,6 +49,8 @@ Scenarios, each over a scratch project written by this script:
                   its suppression, its fingerprint, and the SARIF uri;
   git_config      --git-base under diff.mnemonicPrefix / diff.noprefix and
                   with a non-ASCII file name;
+  trailing_suppression
+                  `code; // vycor: ignore[...]` covers its own line only;
   worker_timeout  a TU whose worker timed out reports `timeout` on the
                   run that hit it and on every --checkpoint resume.
 
@@ -845,6 +847,19 @@ class Check:
                         f"{key}={value}: exit {code}, {files}, "
                         f"{doc.get('summary')}")
 
+    def trailing_suppression(self) -> None:
+        name = "trailing_suppression"
+        d = self.adl_project(name, {"use.cpp": USE.replace(
+            "  scale(v, 3.14);",
+            "  scale(v, 2.5); // vycor: ignore[adl-visibility]\n"
+            "  scale(v, 3.14);")})
+        code, doc = self.json_run(name, d, sources=["use.cpp", "other.cpp"])
+        lines = [f["line"] for f in doc.get("findings", [])]
+        self.expect(name, code == 1 and lines == [5] and
+                    doc.get("summary", {}).get("suppressed") == 1,
+                    f"exit {code}, reported lines {lines}, "
+                    f"{doc.get('summary')} (expected line 5 reported)")
+
     def worker_timeout(self) -> None:
         name = "worker_timeout"
         slow = ("constexpr long spin() { long s = 0;\n"
@@ -877,7 +892,7 @@ SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
              "changed_lines", "source_list", "checkpoint_recovery",
              "baseline_counts", "relative_compile_dir", "git_config",
-             "worker_timeout"]
+             "trailing_suppression", "worker_timeout"]
 
 
 def main() -> int:

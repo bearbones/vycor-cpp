@@ -160,7 +160,8 @@ ones a version-1 file recorded.
 
 ## Suppressing a finding
 
-A comment on the finding's line or the line above it:
+A comment on the finding's line, or a comment alone on the line above
+it:
 
 ```cpp
 // vycor: ignore[adl-visibility]
@@ -169,6 +170,9 @@ scale(v, 2.5); // vycor: ignore[adl-visibility, odr-violations]
 // vycor: ignore[*]
 scale(v, 1.5);
 ```
+
+A trailing comment (code before it on the line, like the `2.5` call)
+covers its own line only, never the line after it.
 
 `*` suppresses every check. Suppressed findings are counted in the
 summary (`suppressed`) and do not affect the exit code. `-v` lists

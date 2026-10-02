@@ -278,8 +278,8 @@ vycor-cpp anneal --build-path build --source-list tus.txt \
   --baseline .vycor-anneal-baseline.json
 ```
 
-Silence one finding in the source with a comment on its line or the
-line above: `// vycor: ignore[adl-visibility]` (several:
+Silence one finding in the source with a comment on its line, or alone
+on the line above: `// vycor: ignore[adl-visibility]` (several:
 `ignore[adl-visibility, odr-violations]`; every check: `ignore[*]`).
 
 A GitHub Actions job that gates pull requests and uploads the findings

@@ -123,11 +123,14 @@ std::vector<Finding> buildFindings(const std::vector<Diagnostic> &diags,
 // ---- inline suppressions ---------------------------------------------------
 
 /// `// vycor: ignore[check-a, check-b]` (or `ignore[*]`) in a comment on
-/// a finding's line or the line above suppresses it.
+/// a finding's line, or alone on the line above, suppresses it.
 struct Suppression {
   std::string path; // absolute
   std::string file; // display
   unsigned line = 0;
+  // The comment is alone on its line, so it also covers the next line
+  // (a trailing `code; // vycor: ignore[...]` covers its own line only).
+  bool ownLine = true;
   std::vector<std::string> checks; // "*" = every check
   bool used = false;
 };

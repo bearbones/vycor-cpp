@@ -532,6 +532,28 @@ TEST_CASE("Organization checks inherit check name, fingerprint, and SARIF "
 
 // ---- review follow-ups -------------------------------------------------------
 
+TEST_CASE("A trailing suppression covers its own line only",
+          "[AnnealReport]") {
+  std::string use = "void use() {\n"                                    // 1
+                    "  scale(v, 2.5); // vycor: ignore[adl-visibility]\n" // 2
+                    "  scale(v, 3.14);\n"                               // 3
+                    "  /* vycor: ignore[adl-visibility] */\n"           // 4
+                    "  scale(v, 1.5);\n"                                // 5
+                    "}\n";
+  auto parsed = parseSuppressions(use, kRoot + "/use.cpp", "use.cpp");
+  REQUIRE(parsed.size() == 2);
+  std::vector<Diagnostic> diags;
+  for (const char *loc : {":2:3", ":3:3", ":5:3"})
+    diags.push_back(adlAt(kRoot + "/use.cpp" + loc));
+  auto findings = buildFindings(diags, kRoot);
+  std::vector<Suppression> unused;
+  CHECK(applyInlineSuppressions(findings, {}, kRoot, unused,
+                                readerFor({{kRoot + "/use.cpp", use}})) == 2);
+  REQUIRE(findings.size() == 1);
+  CHECK(findings[0].line == 3);
+  CHECK(unused.empty());
+}
+
 TEST_CASE("The enclosing function is part of a call-site finding's identity",
           "[AnnealReport]") {
   auto fp = [](const std::string &loc, const std::string &scope) {

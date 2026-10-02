@@ -428,6 +428,10 @@ std::vector<Suppression> parseSuppressions(llvm::StringRef text,
     s.path = path;
     s.file = file;
     s.line = lineNo;
+    // Only a comment alone on its line covers the next line: a trailing
+    // `code; // vycor: ignore[...]` belongs to its own line.
+    size_t comment = static_cast<size_t>(groups[0].data() - line.data());
+    s.ownLine = line.substr(0, comment).trim().empty();
     llvm::SmallVector<llvm::StringRef, 4> names;
     groups[2].split(names, ',', -1, /*KeepEmpty=*/false);
     for (auto name : names) {
@@ -483,7 +487,7 @@ size_t applyInlineSuppressions(std::vector<Finding> &findings,
     auto it = byPath.find(f.path);
     if (it != byPath.end() && f.line) {
       for (auto &s : it->second) {
-        if (s.line != f.line && s.line + 1 != f.line)
+        if (s.line != f.line && !(s.ownLine && s.line + 1 == f.line))
           continue;
         for (const auto &name : s.checks)
           if (name == "*" || name == f.check) {
