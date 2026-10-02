@@ -284,6 +284,18 @@ TU counts (`N TU(s): A analyzed, F failed`) naming each failed TU and
 its status, and what the suppressions, baseline, and changed-lines
 filter removed.
 
+A TU's status is never carried over from a `--checkpoint` journal when
+it failed: a TU that did not parse cleanly is parsed again on the next
+run, so fixing the cause (creating a missing generated header) clears
+exit 3. Only a TU whose parse used up its attempts (it died twice
+in-process, or its isolated worker crashed or timed out) stays skipped
+on resume, and it is reported with the status it was skipped for
+(`crashed`, `poisoned`, `timeout`). `--git-base` runs
+`git -c core.quotePath=false diff --src-prefix=a/ --dst-prefix=b/
+--no-color --no-ext-diff`, so `diff.mnemonicPrefix`, `diff.noprefix`,
+and non-ASCII file names do not change which lines count as changed
+(the same for megascope's `--git-base`).
+
 The JSON report (`--format json`) carries the same facts: `summary`
 (`tus`, `analyzed`, `failed`, `findings`, `suppressed`, plus
 `baselined`/`staleBaseline` (occurrences) with `--baseline` and `outsideChanges` with

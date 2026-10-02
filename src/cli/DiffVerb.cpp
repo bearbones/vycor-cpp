@@ -367,10 +367,18 @@ bool gitDiffText(const std::string &repo, const std::string &base,
     argv.push_back("-C");
     argv.push_back(repo);
   }
+  // The patch is parsed, not shown: pin everything a user's git config can
+  // change about its shape. Explicit prefixes override diff.mnemonicPrefix
+  // and diff.noprefix (parseUnifiedDiff strips a/ and b/ only), and
+  // core.quotePath=false keeps non-ASCII names unquoted.
+  argv.push_back("-c");
+  argv.push_back("core.quotePath=false");
   argv.push_back("diff");
   argv.push_back("-U0");
   argv.push_back("--no-color");
   argv.push_back("--no-ext-diff");
+  argv.push_back("--src-prefix=a/");
+  argv.push_back("--dst-prefix=b/");
   argv.push_back(base);
   if (!head.empty())
     argv.push_back(head);

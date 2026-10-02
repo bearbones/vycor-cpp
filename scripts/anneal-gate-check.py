@@ -47,6 +47,8 @@ Scenarios, each over a scratch project written by this script:
                   a compile command whose file is relative to its
                   directory (Meson's `../src/x.cpp`): the finding's file,
                   its suppression, its fingerprint, and the SARIF uri;
+  git_config      --git-base under diff.mnemonicPrefix / diff.noprefix and
+                  with a non-ASCII file name;
   worker_timeout  a TU whose worker timed out reports `timeout` on the
                   run that hit it and on every --checkpoint resume.
 
@@ -810,6 +812,39 @@ class Check:
         self.expect(name, len(fps) == 2 and fps[0] == fps[1],
                     f"the fingerprint depends on the checkout: {fps}")
 
+    def git_config(self) -> None:
+        name = "git_config"
+        git = shutil.which("git")
+        if not git:
+            print(f"skip {name}: no git", file=sys.stderr)
+            return
+        uname = "üse.cpp"
+        d = self.adl_project(name, {uname: USE.replace("use()", "use_u()")
+                                    .replace("3.14", "3")})
+        srcs = ["use.cpp", uname, "other.cpp"]
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t",
+               "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@example.com"}
+
+        def g(*argv: str) -> None:
+            subprocess.run([git, *argv], cwd=d, env=env, check=True,
+                           capture_output=True)
+
+        g("init", "-q")
+        g("add", "-A")
+        g("commit", "-q", "-m", "base")
+        (d / uname).write_text(USE.replace("use()", "use_u()"))
+        for key, value in (("diff.mnemonicPrefix", "true"),
+                           ("diff.noprefix", "true"),
+                           ("core.quotePath", "true")):
+            g("config", key, value)
+            code, doc = self.json_run(name, d, "--git-base", "HEAD",
+                                      sources=srcs)
+            files = [f["file"] for f in doc.get("findings", [])]
+            self.expect(name, code == 1 and files == [uname],
+                        f"{key}={value}: exit {code}, {files}, "
+                        f"{doc.get('summary')}")
+
     def worker_timeout(self) -> None:
         name = "worker_timeout"
         slow = ("constexpr long spin() { long s = 0;\n"
@@ -841,7 +876,8 @@ class Check:
 SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
              "changed_lines", "source_list", "checkpoint_recovery",
-             "baseline_counts", "relative_compile_dir", "worker_timeout"]
+             "baseline_counts", "relative_compile_dir", "git_config",
+             "worker_timeout"]
 
 
 def main() -> int:
