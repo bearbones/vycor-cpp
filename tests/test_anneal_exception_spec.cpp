@@ -36,6 +36,17 @@ using namespace vycor;
 
 namespace {
 
+// A fresh directory named after `dir` (dir-XXXXXX), stored back into `dir`:
+// ctest runs test cases as parallel processes, and a fixed name let one
+// case's cleanup delete another's sources mid-run.
+[[maybe_unused]] bool makeUniqueFixtureDir(std::string &dir) {
+  llvm::SmallString<128> made;
+  if (llvm::sys::fs::createUniqueDirectory(dir, made))
+    return false;
+  dir = std::string(made);
+  return true;
+}
+
 // The shim-header scenario: sdk.h declares sdk_init() potentially-throwing,
 // shim.hpp re-declares it noexcept; tu_a sees only the vendor header,
 // tu_b only the shim — no TU sees both, so no compiler ever objects.
@@ -46,7 +57,7 @@ struct SpecDivergenceFixture {
   std::string absDir;
 
   SpecDivergenceFixture() {
-    REQUIRE(!llvm::sys::fs::create_directory(dir));
+    REQUIRE(makeUniqueFixtureDir(dir));
     llvm::SmallString<256> abs;
     REQUIRE(!llvm::sys::fs::real_path(dir, abs));
     absDir = std::string(abs.str());
@@ -171,8 +182,8 @@ TEST_CASE("End-to-end: noexcept(MACRO) resolving differently per compile "
           "command is flagged at its single site",
           "[AnnealExceptionSpec]") {
   // Real compilation database with per-TU -D flags, like the ODR fixture.
-  const std::string dir = "anneal_xspec_macro_fixture";
-  REQUIRE(!llvm::sys::fs::create_directory(dir));
+  std::string dir = "anneal_xspec_macro_fixture";
+  REQUIRE(makeUniqueFixtureDir(dir));
   llvm::SmallString<256> abs;
   REQUIRE(!llvm::sys::fs::real_path(dir, abs));
   const std::string absDir(abs.str());

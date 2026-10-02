@@ -39,6 +39,17 @@ using namespace vycor;
 
 namespace {
 
+// A fresh directory named after `dir` (dir-XXXXXX), stored back into `dir`:
+// ctest runs test cases as parallel processes, and a fixed name let one
+// case's cleanup delete another's sources mid-run.
+[[maybe_unused]] bool makeUniqueFixtureDir(std::string &dir) {
+  llvm::SmallString<128> made;
+  if (llvm::sys::fs::createUniqueDirectory(dir, made))
+    return false;
+  dir = std::string(made);
+  return true;
+}
+
 // Cross-TU fixture:
 //  - a.cpp dynamically initializes ga; b.cpp initializes gb FROM ga (SIOF).
 //  - c.cpp initializes gc from constant-initialized kSafe (silent).
@@ -50,7 +61,7 @@ struct StaticInitFixture {
   std::string absDir;
 
   StaticInitFixture() {
-    REQUIRE(!llvm::sys::fs::create_directory(dir));
+    REQUIRE(makeUniqueFixtureDir(dir));
     llvm::SmallString<256> abs;
     REQUIRE(!llvm::sys::fs::real_path(dir, abs));
     absDir = std::string(abs.str());
@@ -262,7 +273,7 @@ TEST_CASE("Transitive SIOF: initializer reaching a cross-TU global through "
     std::string dir = "anneal_sinit_trans_fixture";
     std::string absDir;
     Fixture() {
-      REQUIRE(!llvm::sys::fs::create_directory(dir));
+      REQUIRE(makeUniqueFixtureDir(dir));
       llvm::SmallString<256> abs;
       REQUIRE(!llvm::sys::fs::real_path(dir, abs));
       absDir = std::string(abs.str());

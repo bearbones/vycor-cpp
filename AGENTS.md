@@ -129,6 +129,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
+| `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
+| `Utf8.h` | Every index string is valid UTF-8: converted (invalid bytes to U+FFFD, what `llvm::json` does without assertions) where it enters an index — the interner, inline node/context/channel strings, the snapshot loader, mapped control-flow strings — and lookups by a raw string convert the same way. The snapshot meta keeps TU paths raw (warm start stats them); `info` and the diff report convert them when printing |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -470,6 +472,25 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   2. `find_package(Catch2 3.10 CONFIG)` — system / vcpkg / Conan / Spack.
   3. `extern/Catch2` submodule (pinned to v3.10.0 upstream by default).
 - Defines `PROJECT_SOURCE_DIR` for example file paths.
+- Registers the Catch2 tests with their tags as ctest labels (`ctest -L
+  worker_pool`). The `[crash-guard]` tests, which crash a parse on purpose,
+  run with `tests/sanitizers/lsan-crash-recovery.supp` (the frames LLVM's
+  `CrashRecoveryContext` abandons); nothing else is suppressed.
+
+Sanitizer and fuzz options (top-level `CMakeLists.txt`):
+- `VYCOR_SANITIZE` — `address,undefined` (ASan + UBSan, `-fno-sanitize-recover=undefined`
+  so a UB report fails the test), `thread` (TSan; cannot combine with
+  `address`), or any other `-fsanitize=` list. Applied to every target
+  configured after it (project, tests, Catch2); the prebuilt LLVM
+  libraries stay uninstrumented.
+- `VYCOR_FUZZ` — clang only: coverage instrumentation everywhere, the
+  libFuzzer targets under `fuzz/` (`fuzz_snapshot`, `fuzz_checkpoint`,
+  `fuzz_shard`, `fuzz_batch`) and `fuzz_seeds`, which writes their seed
+  corpora from the test fixtures. Implies `VYCOR_SANITIZE=address,undefined`
+  unless set. Target list, input formats, run commands, and the findings
+  so far: `fuzz/README.md`.
+- Both need the compiler's sanitizer runtimes (`libclang-rt-<N>-dev` for
+  clang on Debian/Ubuntu).
 
 ---
 
@@ -529,6 +550,32 @@ keeps quality and cost apart. Its `header_change`,
 `compile_flag_invalidation`, and `change_impact` cases are before/after
 patch pairs.
 Benchmarks (`scripts/bench.py`) are run by hand, never by ctest.
+
+```bash
+# ASan + UBSan (or -DVYCOR_SANITIZE=thread), then the usual ctest
+cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DVYCOR_SANITIZE=address,undefined
+cmake --build build-asan && (cd build-asan && ctest --output-on-failure)
+
+# Fuzzing (fuzz/README.md)
+cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DVYCOR_FUZZ=ON -DVYCOR_BUILD_TESTS=OFF
+cmake --build build-fuzz --target fuzz
+build-fuzz/fuzz/fuzz_seeds fuzz-seeds
+build-fuzz/fuzz/fuzz_snapshot fuzz-corpus/snapshot fuzz-seeds/snapshot -max_total_time=600
+```
+
+CI (`.github/workflows/ci.yml`) runs, besides the Debug build-and-test on
+every supported LLVM: on the newest LLVM only, `release` (the shipped
+Release configuration, full ctest including `cli_golden` and `corpus`),
+`asan-ubsan` (full ctest), and `tsan` (the thread-pool tests by label, a
+4-thread in-process bake of `examples/deep_chains` with queries, and one
+corpus case). `.github/workflows/fuzz.yml` fuzzes, 60 s per target on a pull
+request that touches that target's parser and 20 min each nightly, and
+uploads failing inputs. A sanitizer or fuzz finding is fixed with a unit
+test that reproduces it; a suppression is only for a third-party (LLVM)
+issue, scoped as narrowly as the tool allows, with a comment saying why.
 
 Run tests from the project root, or ensure `PROJECT_SOURCE_DIR` is set
 correctly (the CMake build sets it automatically via a compile definition).

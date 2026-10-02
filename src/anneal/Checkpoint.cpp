@@ -599,7 +599,14 @@ bool decodeDiagnostics(Reader &r, std::vector<Diagnostic> &out) {
   uint32_t nDiag = r.u32();
   for (uint32_t i = 0; i < nDiag && r.ok; ++i) {
     Diagnostic d;
-    d.kind = static_cast<Diagnostic::Kind>(r.u32());
+    // A kind outside the enum is damage (or a future build's check), and
+    // loading it into the enum is undefined: the record is refused.
+    const uint32_t kind = r.u32();
+    if (kind > static_cast<uint32_t>(Diagnostic::Custom)) {
+      r.ok = false;
+      break;
+    }
+    d.kind = static_cast<Diagnostic::Kind>(kind);
     d.callLocation = r.str();
     d.resolvedDecl = r.str();
     d.betterDecl = r.str();

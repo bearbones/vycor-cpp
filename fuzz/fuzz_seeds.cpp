@@ -27,6 +27,8 @@
 //   <out>/batch/      NDJSON request streams: the cli-golden batch, and
 //                     one request per registered tool
 //   <out>/batch.dict  libFuzzer dictionary: tool and argument names
+//   <out>/batch.vycs  an examples/deep_chains index for fuzz_batch
+//                     (VYCOR_FUZZ_INDEX), so it need not bake at startup
 
 #include "FuzzCommon.h"
 
@@ -305,7 +307,6 @@ void batchSeeds(const std::string &deepChainsIndex) {
   }
   const auto pool =
       fuzz::ArgPool::from(snap->graph, snap->cfIndex, &snap->channels);
-  std::string all;
   std::set<std::string> words = {"tool", "args", "arguments", "id"};
   const auto tools = getRegisteredTools();
   for (size_t i = 0; i < tools.size(); ++i) {
@@ -318,14 +319,15 @@ void batchSeeds(const std::string &deepChainsIndex) {
     os << llvm::json::Value(std::move(req)) << "\n";
     os.flush();
     writeSeed("batch/" + tools[i].name, line);
-    all += line;
     words.insert(tools[i].name);
     if (const auto *schema = tools[i].inputSchema.getAsObject())
       if (const auto *props = schema->getObject("properties"))
         for (const auto &prop : *props)
           words.insert(prop.first.str());
   }
-  writeSeed("batch/all_tools", all);
+  // The index fuzz_batch answers from, so it can skip its own bake:
+  // VYCOR_FUZZ_INDEX=<out>/batch.vycs.
+  writeSeed("batch.vycs", readFile(deepChainsIndex));
   std::string dict;
   for (const auto &w : words)
     dict += "\"\\\"" + w + "\\\"\"\n";

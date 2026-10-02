@@ -122,8 +122,10 @@ include(Catch)
 # The [crash-guard] tests crash a parse on purpose; under LeakSanitizer the
 # frames LLVM's CrashRecoveryContext abandons are reported as leaks, so
 # those tests alone run with a suppression for them (see the file).
-catch_discover_tests(vycor_tests TEST_SPEC "~[crash-guard]")
-catch_discover_tests(vycor_tests TEST_SPEC "[crash-guard]"
+# Tags become ctest labels: the TSan job selects the thread-pool tests by
+# tag (ctest -L).
+catch_discover_tests(vycor_tests TEST_SPEC "~[crash-guard]" ADD_TAGS_AS_LABELS)
+catch_discover_tests(vycor_tests TEST_SPEC "[crash-guard]" ADD_TAGS_AS_LABELS
   TEST_LIST vycor_crash_guard_tests
   PROPERTIES ENVIRONMENT
     "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/sanitizers/lsan-crash-recovery.supp")
