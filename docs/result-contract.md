@@ -2,7 +2,7 @@
 
 Status: implemented on `main`. Owner: package C of
 `docs/plans/2026-09-next/`. This page is the contract every megascope
-transport (the CLI verbs, `batch`, and the MCP server) follows for a
+transport (the CLI verbs and `batch`) follows for a
 tool result, and the interface the diff/impact tools (package E) and the
 validation corpus (package D) build on.
 
@@ -10,15 +10,16 @@ Modules: `include/vycor/query/Tools.h` (`ResultStatus`, `IndexFacts`,
 `ToolContext::facts`, the typed error constructors, `runTool`,
 `completeResult`), `src/query/Registry.cpp` (the implementation),
 `src/cli/MegascopeCli.cpp` (`exitCodeFor`, `emitToolResult`, `batch`,
-`info`), `src/mcp/McpServer.cpp` (`wrapToolResult`).
+`info`).
 
 ## The problem this fixes
 
 Before this contract a tool payload said what it found but not what
 kind of answer it was. The CLI classified an error as "usage" or "empty"
 by the first word of its message (`Missing`, `Requires`, `Invalid`), so
-rewording a message changed an exit code; the MCP adapter reduced every
-error to `isError: true` with the bare message. Nothing in a payload
+rewording a message changed an exit code; the MCP adapter (removed
+since) reduced every error to `isError: true` with the bare message.
+Nothing in a payload
 said which index it came from, whether that index covered every
 requested TU, or whether anyone had checked it against the sources. A
 `never_caught` verdict over an index whose failed TUs held the only
@@ -41,7 +42,7 @@ prose.
 | `ambiguous` | the identity names several functions or call sites; pick one and re-query | `ambiguous: true`, `candidates`, the tool's disambiguation fields |
 | `usage_error` | the arguments are malformed: a parameter is missing, has the wrong type, or an invalid value | `error` |
 | `not_found` | the arguments are well-formed and name something the index does not contain (a function, a call site, a channel, a channel site) | `error` |
-| `unavailable` | the facts the tool needs are not loaded or were never indexed (the channel tools over a bake that registered no channel types; `reindex_tu` without a compilation database) | `error` |
+| `unavailable` | the facts the tool needs are not loaded or were never indexed (the channel tools over a bake that registered no channel types) | `error` |
 
 An empty, complete answer is `ok` with an empty record list, not an
 error. `not_found` is for a named thing that is absent; the message
@@ -72,8 +73,8 @@ the per-TU rows stay behind `megascope info --files`.
 
 | Member | Meaning |
 |---|---|
-| `bake` | `<environment fingerprint>@<bake_start_ns>`: identifies the bake that wrote the index (`docs/index-provenance.md`). Absent when there is no saved bake to cite (the ephemeral `--source` mode, a `serve` that baked without an index file). `megascope info` reports the same string as `provenance.bake`. |
-| `freshness` | `unchecked`: a saved index was loaded as-is and nobody compared it with the sources. `baked`: the facts were baked from the sources by this process (ephemeral mode; `serve`, whose warm start re-indexes dirty TUs before serving and whose `reindex_tu` re-parses on request). `unknown`: the adapter did not say (a handler called directly, as the unit tests do). No query verb validates an index; `megascope index` does. |
+| `bake` | `<environment fingerprint>@<bake_start_ns>`: identifies the bake that wrote the index (`docs/index-provenance.md`). Absent when there is no saved bake to cite (the ephemeral `--source` mode). `megascope info` reports the same string as `provenance.bake`. |
+| `freshness` | `unchecked`: a saved index was loaded as-is and nobody compared it with the sources. `baked`: the facts were baked from the sources by this process (ephemeral mode). `unknown`: the adapter did not say (a handler called directly, as the unit tests do). No query verb validates an index; `megascope index` does. |
 | `requested`, `indexed`, `partial`, `failed` | `IndexCoverage`: the selected TU set at the last save and its partition by parse outcome (`docs/index-provenance.md`). `requested == indexed + partial + failed`. |
 | `complete` | `requested == indexed`: every requested TU parsed cleanly. |
 
@@ -94,7 +95,7 @@ proof:
 - The model: paths are lexical, guards are reported but not evaluated,
   a `Plausible` edge is a candidate, virtual and pointer dispatch are
   over-approximated, asynchronous retrieval is unknown. See
-  `docs/path-analysis.md` and `docs/mcp-usage.md`.
+  `docs/path-analysis.md` and `docs/megascope-usage.md`.
 
 A universal verdict (`always_caught`, `never_caught`,
 `noexcept_barrier`) requires an exhaustive search **and**
@@ -142,7 +143,7 @@ it before any handler runs:
   when nothing is close. Deterministic, like every list here.
 - Before this rule, an unknown name resolved to itself and the by-name
   tools answered it: `get_callers` with `ok` and zero callers, the
-  path tools with an empty, incomplete search. Over MCP, `ok` with zero
+  path tools with an empty, incomplete search. An `ok` with zero
   callers reads as "nothing calls this"; a typo became a dead-code or
   attack-surface conclusion. The exit code is 1 either way; the
   `status` is what changed.
@@ -228,12 +229,12 @@ aliases are accepted too and keep working:
 
 The canonical spelling wins when both are present. An error names the
 spelling the request used (`parameter`). Aliases are argument names,
-not schema properties: they work wherever arguments are JSON (MCP,
-`batch`, `call --args`), while the CLI's `--flags` are derived from
+not schema properties: they work wherever arguments are JSON
+(`batch`, `call --args`), while the CLI's `--flags` are derived from
 the schema and take the canonical names. No schema lists an aliased
 parameter as `required` (`query_channels_for_function` reports a
-missing `function` itself), because the CLI's flag check and MCP
-clients that enforce `required` would reject the alias before the
+missing `function` itself), because the CLI's flag check (and any
+caller that enforces `required`) would reject the alias before the
 handler runs.
 
 ### Exit codes
@@ -271,15 +272,6 @@ now exits 3.
   `result.status`. A request the batch loop rejects itself (unparseable
   line, unknown tool) answers `{"id"?, "tool"?, "error", "status":
   "usage_error", "exit": 2}`.
-- **MCP `tools/call`**: `content[0].text` is the JSON payload for every
-  result, `isError: true` when `status` is an error status. Before this
-  contract an error's text was the bare message; a client that parsed
-  it reads `.error` now. `reindex_tu` answers a JSON payload
-  (`{"status": "ok", "file", "edgesRemoved", "edgesAfter",
-  "contextsRemoved", "contextsAfter", "indexScope"}`) instead of prose;
-  its `indexScope` still describes the bake the server started from,
-  because the single-TU re-parse does not report an outcome
-  (`docs/index-provenance.md`, follow-ups).
 - **`megascope info`**: adds `provenance.bake` and `freshness`
   (`unchecked`: info never compares the index with the sources).
 
@@ -290,10 +282,8 @@ now exits 3.
 Existing scripts keep working: every member they read is still there
 with the same meaning, `error` messages are unchanged, and the exit
 codes for `ok`, `not_found`, `usage_error`, and `ambiguous` are what
-they were. Two things to check:
+they were. One thing to check:
 
-- a script that treated an MCP error's text as the message reads
-  `.error` of the JSON text now;
 - a script that expected exit 1 from `query_channel` or
   `explain_ordering`, or an empty `ok` from `list_channels` or
   `query_channels_for_function`, over an index baked without channel
@@ -325,8 +315,7 @@ Unknown identities, paging, and aliases (package K of
 `ToolContext::facts` (`IndexFacts {coverage, bake, freshness,
 channelsIndexed}`) is set by the adapter that owns the index: the query
 verbs from the loaded meta (`freshness: unchecked`), the ephemeral bake
-from its in-memory meta (`baked`, no `bake`), `serve` from the meta it
-saved or kept (`baked`). `IndexFacts::of(meta, freshness)` builds it;
+from its in-memory meta (`baked`, no `bake`). `IndexFacts::of(meta, freshness)` builds it;
 `coversRequested()` is the verdict gate (stated and complete).
 
 `runTool(entry, args, ctx)` runs the handler and passes the payload
@@ -334,7 +323,7 @@ through `completeResult(payload, ctx)`, which stamps `status` (from the
 payload's shape and typed error status) and `indexScope` (from
 `ctx.facts`). Every adapter calls `runTool`; a test that calls a handler
 directly sees the raw payload. `statusOf` reads the stamped status back
-for `exitCodeFor` and `wrapToolResult`.
+for `exitCodeFor`.
 
 The coverage gate is `ControlFlowOracle::queryExceptionProtection` and
 `queryThrowPropagation`'s `indexComplete` argument: `verdictExhaustive
@@ -357,7 +346,6 @@ without a next page;
 complete empty, ambiguity, usage error, index failure, partial bake,
 truncated search, absent semantic information), the exit-code table,
 "a message change cannot change an exit code", the ndjson summary, the
-TSV policy, batch per-request status, and the MCP mapping.
+TSV policy, and batch per-request status.
 `examples/deep_chains/cli-golden/` records the shapes end to end;
-`tests/test_megascope_cli.cpp` and `tests/test_mcp_server.cpp` cover
-the adapters.
+`tests/test_megascope_cli.cpp` covers the adapter.

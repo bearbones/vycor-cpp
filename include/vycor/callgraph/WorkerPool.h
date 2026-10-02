@@ -37,13 +37,13 @@ namespace vycor {
 // exactly that TU: the last `WORKER-TU <path>` stderr marker identifies it
 // and the batch is re-dispatched without it.
 //
-// Lives under callgraph/ (not mcp/): the dispatcher has no MCP dependency —
-// it is a bake strategy over CallGraph/ControlFlowIndex/SnapshotIO.
+// The dispatcher is a bake strategy over CallGraph/ControlFlowIndex/
+// SnapshotIO; anneal reuses it through dispatchIsolated.
 // ============================================================================
 
 /// Everything needed to reconstruct a worker's megascope argv. The worker
 /// re-derives all bake state from these plus its explicit --source batch.
-struct McpBakeConfig {
+struct BakeWorkerConfig {
   std::string buildPath;
   std::vector<std::string> collapsePaths;
   /// Forwarded as --extra-arg; callers pass vycor::globalExtraArgs().
@@ -143,7 +143,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
                                     const std::vector<std::string> &files,
                                     unsigned workers, BuildStats *stats,
                                     const std::string &shardDir,
-                                    const McpBakeConfig *expected = nullptr,
+                                    const BakeWorkerConfig *expected = nullptr,
                                     unsigned batchSizeOverride = 0);
 
 /// Production entry: spawn `selfExe megascope --bake-worker ...` workers
@@ -152,19 +152,10 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
 /// under the system temp dir (also removed on SIGINT/SIGTERM). Workers run
 /// single-threaded so the last WORKER-TU marker is an exact poison
 /// identifier; parallelism comes from the worker count.
-BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
+BakedIndexes bakeIsolated(const std::string &selfExe, const BakeWorkerConfig &cfg,
                           const std::vector<std::string> &files,
                           unsigned workers, BuildStats *stats,
                           const WorkerLimits &limits = {});
-
-/// Crash- and hang-safe single-TU parse (reindex_tu): bakes `file` in one
-/// worker process under `limits` and returns that TU's indexes without
-/// touching any live index. `outcomes[file]` says how the parse ended; on
-/// a crash (Poisoned) or timeout (TimedOut) the indexes are empty, so the
-/// caller can keep, drop, or replace the TU's old facts as it chooses.
-BakedIndexes bakeTUIsolated(const std::string &selfExe,
-                            const McpBakeConfig &cfg, const std::string &file,
-                            const WorkerLimits &limits = {});
 
 /// Create a unique directory <system temp>/<base>-XXXXXX (base
 /// vycor-workers, vycor-anneal-workers) for one dispatch run. On failure

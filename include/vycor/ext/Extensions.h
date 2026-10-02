@@ -86,8 +86,8 @@ using IndexCheckFactory = std::function<std::unique_ptr<IndexCheck>()>;
 
 // Result of classifying a ConditionalGuard: e.g. {"feature-flag", "NewNav"}
 // for a guard whose condition matched a registered feature-flag pattern.
-// Surfaced as an "annotation" object on guard records in prism dump JSON
-// and MCP tool responses; combined with ConditionalGuard::inTrueBranch it
+// Surfaced as an "annotation" object on guard records in `megascope dump`
+// output and tool responses; combined with ConditionalGuard::inTrueBranch it
 // answers "this call path runs only with flag X on/off".
 struct GuardAnnotation {
   std::string kind; // e.g. "feature-flag"
@@ -181,7 +181,7 @@ private:
 };
 
 // Shorthand for ExtensionRegistry::instance().classify(g), used at the
-// guard-serialization points (prism dump, MCP tools).
+// guard-serialization points (`megascope dump`, the query tools).
 std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g);
 
 // Registers an AnnealCheck subclass (default-constructible) at static-init

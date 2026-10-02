@@ -29,7 +29,7 @@ See `include/vycor/ext/Extensions.h` for the full API and
 | Custom anneal check | `VYCOR_REGISTER_ANNEAL_CHECK(MyCheck)` | Runs per TU after the built-in analyzer; emits `Diagnostic::Custom` |
 | Lock types | `registry.addLockTypes({...})` | Recognized as `RaiiKind::Lock` in RAII/lock tracking (megascope/prism) |
 | Channel types | `registry.addChannelTypes({...})` | Producer/consumer call-site tracing (ChannelIndex) |
-| Guard classifiers / feature flags | `registry.addFeatureFlagPattern(...)` / `addGuardClassifier(...)` | Annotates conditional guards in prism dump + MCP responses (e.g. "this path only runs with FFlag::X on") |
+| Guard classifiers / feature flags | `registry.addFeatureFlagPattern(...)` / `addGuardClassifier(...)` | Annotates conditional guards in `megascope dump` and tool responses (e.g. "this path only runs with FFlag::X on") |
 
 Everything except the custom checks can also be configured **without
 code** through an org config JSON file passed as `--org-config` — see

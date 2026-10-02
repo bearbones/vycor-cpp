@@ -17,7 +17,7 @@
 // (docs/result-contract.md): typed status, the indexScope envelope, exit
 // codes derived from status rather than message text, the coverage gate
 // on universal exception verdicts, and the per-transport mapping (CLI
-// json/ndjson/tsv, batch, MCP, info). One case per acceptance row of
+// json/ndjson/tsv, batch, info). One case per acceptance row of
 // docs/plans/2026-09-next/C-result-contract.md.
 
 #include "vycor/callgraph/CallGraph.h"
@@ -25,7 +25,6 @@
 #include "vycor/callgraph/ControlFlowOracle.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/cli/MegascopeCli.h"
-#include "vycor/mcp/McpServer.h"
 #include "vycor/query/Tools.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -399,9 +398,6 @@ TEST_CASE("ambiguity is a status, not an error", "[query][contract]") {
   CHECK(out.getArray("candidates")->size() == 2);
   CHECK_FALSE(out.get("error"));
   CHECK(exitCodeFor(valueOf(out), "callers") == kExitAmbiguous);
-  CHECK_FALSE(objectOf(wrapToolResult(valueOf(out)))
-                  .getBoolean("isError")
-                  .has_value());
 }
 
 TEST_CASE("usage errors are typed by the handler", "[query][contract]") {
@@ -418,9 +414,6 @@ TEST_CASE("usage errors are typed by the handler", "[query][contract]") {
                         {{"call_site", "/x.cpp:1:1"},
                          {"kinds", llvm::json::Array{"bogus"}}});
   CHECK(badKind.getString("status") == "usage_error");
-  // A serve-only tool asked through runTool.
-  auto serveOnly = fx.run("reindex_tu", {{"file", "/x.cpp"}});
-  CHECK(serveOnly.getString("status") == "usage_error");
 }
 
 TEST_CASE("a named thing the index lacks is not_found", "[query][contract]") {
@@ -467,8 +460,6 @@ TEST_CASE("absent semantic information is unavailable, exit 3",
   CHECK(exitCodeFor(valueOf(list), "channels") == kExitIndex);
   auto forFn = fx.run("query_channels_for_function", {{"function", "main"}});
   CHECK(forFn.getString("status") == "unavailable");
-  auto mcp = objectOf(wrapToolResult(valueOf(chan)));
-  CHECK(mcp.getBoolean("isError") == true);
 
   // With channel types registered, the same index answers empty and ok.
   fx.ctx.facts.channelsIndexed = true;
@@ -735,29 +726,4 @@ TEST_CASE("batch preserves per-request status", "[contract][cli]") {
     CHECK(obj.getObject("coverage")->getBoolean("complete") == false);
   }
   std::remove(path.c_str());
-}
-
-TEST_CASE("MCP maps status onto isError and keeps the payload as text",
-          "[contract][mcp]") {
-  Fixture fx(kMixedFixture);
-  auto ok = fx.run("get_callers", {{"name", "target"}});
-  auto wrapped = objectOf(wrapToolResult(valueOf(ok)));
-  CHECK_FALSE(wrapped.getBoolean("isError").has_value());
-  const auto *content = wrapped.getArray("content");
-  REQUIRE(content != nullptr);
-  auto text = parseObject(*(*content)[0].getAsObject()->getString("text"));
-  CHECK(text.getString("status") == "ok");
-  CHECK(text.getObject("indexScope") != nullptr);
-
-  for (ResultStatus s : {ResultStatus::UsageError, ResultStatus::NotFound,
-                         ResultStatus::Unavailable}) {
-    auto e = objectOf(wrapToolResult(
-        completeResult(errorResult(s, "m"), fx.ctx)));
-    CHECK(e.getBoolean("isError") == true);
-    auto body = parseObject(
-        *(*e.getArray("content"))[0].getAsObject()->getString("text"));
-    CHECK(body.getString("error") == "m");
-    CHECK(body.getString("status") == resultStatusName(s));
-    CHECK(body.getObject("indexScope") != nullptr);
-  }
 }

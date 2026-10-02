@@ -13,19 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// test_mcp.cpp — Tests for the MCP call graph server.
+// test_query_tools.cpp — Tests for the transport-neutral query tools.
 
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
-#include "vycor/mcp/McpProtocol.h"
 #include "vycor/query/Tools.h"
 
 #include "llvm/Support/JSON.h"
 
 #include <catch2/catch_test_macros.hpp>
-#include <cstdio>
-#include <cstring>
+#include <set>
 #include <string>
 
 using namespace vycor;
@@ -34,7 +32,7 @@ using namespace vycor;
 // Helper: build a Chain-C-shaped graph for callback/concurrency tool tests
 //
 // Mirrors what the real builder produces for examples/deep_chains/runChainC
-// without pulling in a ClangTool invocation. Keeps the MCP tool tests purely
+// without pulling in a ClangTool invocation. Keeps the query tool tests purely
 // unit-level; the end-to-end edge-production behavior lives in
 // test_deep_chains.cpp.
 //
@@ -179,228 +177,12 @@ static llvm::json::Object parseToolResult(const llvm::json::Value &result) {
 
 
 // ============================================================================
-// Protocol tests
-// ============================================================================
-
-TEST_CASE("McpRequest isNotification", "[mcp][protocol]") {
-  McpRequest req;
-
-  SECTION("null id is a notification") {
-    req.id = nullptr;
-    CHECK(req.isNotification());
-  }
-
-  SECTION("integer id is not a notification") {
-    req.id = 1;
-    CHECK_FALSE(req.isNotification());
-  }
-
-  SECTION("string id is not a notification") {
-    req.id = "abc";
-    CHECK_FALSE(req.isNotification());
-  }
-}
-
-TEST_CASE("readRequest parses Content-Length framed messages",
-          "[mcp][protocol]") {
-  SECTION("valid request") {
-    std::string input =
-        "Content-Length: 58\r\n"
-        "\r\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "initialize");
-    auto id = req->id.getAsInteger();
-    REQUIRE(id.has_value());
-    CHECK(*id == 1);
-  }
-
-  SECTION("EOF returns nullopt") {
-    std::string input;
-    FILE *f = fmemopen(const_cast<char *>(input.data()), 0, "r");
-    // fmemopen with size 0 may return NULL on some platforms.
-    if (!f) {
-      // Just verify we handle it.
-      CHECK(true);
-      return;
-    }
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-    CHECK_FALSE(req.has_value());
-  }
-
-  SECTION("notification has null id") {
-    std::string input =
-        "Content-Length: 54\r\n"
-        "\r\n"
-        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "notifications/initialized");
-    CHECK(req->isNotification());
-  }
-
-  SECTION("Content-Length framing sets ContentLength write mode") {
-    setActiveFraming(McpFraming::Newline);
-    std::string input =
-        "Content-Length: 58\r\n"
-        "\r\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(activeFraming() == McpFraming::ContentLength);
-    setActiveFraming(McpFraming::Newline);
-  }
-}
-
-TEST_CASE("readRequest parses newline-delimited messages (MCP stdio framing)",
-          "[mcp][protocol]") {
-  SECTION("single request") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{}}\n";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "tools/list");
-    auto id = req->id.getAsInteger();
-    REQUIRE(id.has_value());
-    CHECK(*id == 7);
-    CHECK(activeFraming() == McpFraming::Newline);
-  }
-
-  SECTION("two requests back to back") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto first = readRequest(f, llvm::errs());
-    auto second = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(first.has_value());
-    CHECK(first->method == "initialize");
-    REQUIRE(second.has_value());
-    CHECK(second->method == "tools/list");
-  }
-
-  SECTION("blank lines between messages are tolerated") {
-    std::string input =
-        "\n\r\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n"
-        "\n";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "tools/list");
-  }
-
-  SECTION("CRLF line ending is stripped") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\"}\r\n";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "tools/list");
-  }
-
-  SECTION("trailing newline missing (EOF terminates the line)") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "tools/list");
-  }
-
-  SECTION("malformed line is skipped, next message still read") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",,,garbage\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\"}\n";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto req = readRequest(f, llvm::errs());
-    std::fclose(f);
-
-    REQUIRE(req.has_value());
-    CHECK(req->method == "tools/list");
-    auto id = req->id.getAsInteger();
-    REQUIRE(id.has_value());
-    CHECK(*id == 6);
-  }
-
-  SECTION("framing can alternate between messages") {
-    std::string input =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n"
-        "Content-Length: 46\r\n"
-        "\r\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
-
-    FILE *f = fmemopen(const_cast<char *>(input.data()), input.size(), "r");
-    REQUIRE(f != nullptr);
-
-    auto first = readRequest(f, llvm::errs());
-    REQUIRE(first.has_value());
-    CHECK(activeFraming() == McpFraming::Newline);
-
-    auto second = readRequest(f, llvm::errs());
-    std::fclose(f);
-    REQUIRE(second.has_value());
-    CHECK(second->method == "tools/list");
-    CHECK(activeFraming() == McpFraming::ContentLength);
-    setActiveFraming(McpFraming::Newline);
-  }
-}
-
-// ============================================================================
 // Tool registration tests
 // ============================================================================
 
-TEST_CASE("getRegisteredTools returns all 25 tools", "[mcp][tools]") {
+TEST_CASE("getRegisteredTools returns all 24 tools", "[tools]") {
   auto tools = getRegisteredTools();
-  CHECK(tools.size() == 25);
+  CHECK(tools.size() == 24);
 
   // Verify tool names.
   std::set<std::string> names;
@@ -422,7 +204,7 @@ TEST_CASE("getRegisteredTools returns all 25 tools", "[mcp][tools]") {
   CHECK(names.count("graph_summary") == 1);
   CHECK(names.count("list_callback_sites") == 1);
   CHECK(names.count("list_concurrency_entry_points") == 1);
-  CHECK(names.count("reindex_tu") == 1);
+  CHECK(names.count("reindex_tu") == 0);
   CHECK(names.count("impact_of_change") == 1);
   CHECK(names.count("search_functions") == 1);
   CHECK(names.count("list_channels") == 1);
@@ -435,7 +217,7 @@ TEST_CASE("getRegisteredTools returns all 25 tools", "[mcp][tools]") {
 // Tool handler tests
 // ============================================================================
 
-TEST_CASE("search_functions tool", "[mcp][tools]") {
+TEST_CASE("search_functions tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -493,7 +275,7 @@ TEST_CASE("search_functions tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("lookup_function tool", "[mcp][tools]") {
+TEST_CASE("lookup_function tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -536,7 +318,7 @@ TEST_CASE("lookup_function tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("get_callees tool", "[mcp][tools]") {
+TEST_CASE("get_callees tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -584,7 +366,7 @@ TEST_CASE("get_callees tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("get_callers tool", "[mcp][tools]") {
+TEST_CASE("get_callers tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -618,7 +400,7 @@ TEST_CASE("get_callers tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("find_call_chain tool", "[mcp][tools]") {
+TEST_CASE("find_call_chain tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -694,7 +476,7 @@ TEST_CASE("find_call_chain tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("query_call_site_context tool", "[mcp][tools]") {
+TEST_CASE("query_call_site_context tool", "[tools]") {
   auto graph = buildTestGraph();
   auto cfIndex = buildTestCfIndex();
   ControlFlowOracle oracle(graph, cfIndex);
@@ -730,7 +512,7 @@ TEST_CASE("query_call_site_context tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("analyze_dead_code tool", "[mcp][tools]") {
+TEST_CASE("analyze_dead_code tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -772,7 +554,7 @@ TEST_CASE("analyze_dead_code tool", "[mcp][tools]") {
   }
 }
 
-TEST_CASE("get_class_hierarchy tool", "[mcp][tools]") {
+TEST_CASE("get_class_hierarchy tool", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -823,7 +605,7 @@ TEST_CASE("get_class_hierarchy tool", "[mcp][tools]") {
 // ============================================================================
 
 TEST_CASE("get_callees with include_confidences selects exact tiers",
-          "[mcp][tools]") {
+          "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -878,7 +660,7 @@ TEST_CASE("get_callees with include_confidences selects exact tiers",
 // ============================================================================
 
 TEST_CASE("analyze_dead_code filters system headers and paginates",
-          "[mcp][tools]") {
+          "[tools]") {
   auto graph = buildTestGraph();
   // Add synthetic dead nodes in system and project locations.
   graph.addNode({"std::sys_dead", "/usr/include/fake.h", 10, false, false, ""});
@@ -963,7 +745,7 @@ TEST_CASE("analyze_dead_code filters system headers and paginates",
 // ============================================================================
 
 TEST_CASE("query_call_site_context surfaces malformed and unindexed input",
-          "[mcp][tools]") {
+          "[tools]") {
   auto graph = buildTestGraph();
   auto cfIndex = buildTestCfIndex();
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1006,7 +788,7 @@ TEST_CASE("query_call_site_context surfaces malformed and unindexed input",
 // list_entry_points and graph_summary introspection tools
 // ============================================================================
 
-TEST_CASE("list_entry_points returns configured entries", "[mcp][tools]") {
+TEST_CASE("list_entry_points returns configured entries", "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1037,7 +819,7 @@ TEST_CASE("list_entry_points returns configured entries", "[mcp][tools]") {
 }
 
 TEST_CASE("graph_summary produces histograms and top-N fanout",
-          "[mcp][tools]") {
+          "[tools]") {
   auto graph = buildTestGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1085,11 +867,11 @@ TEST_CASE("graph_summary produces histograms and top-N fanout",
 }
 
 // ============================================================================
-// Callback/concurrency MCP tool tests
+// Callback/concurrency tool tests
 //
 // Unit-level coverage for the lambda and thread-entry edges that
 // CallGraphBuilder emits for the deep_chains fixture's Chain C. These tests
-// exercise the MCP tool surface directly against a synthetic graph; the
+// exercise the tool surface directly against a synthetic graph; the
 // builder-side integration tests live in test_deep_chains.cpp.
 // ============================================================================
 
@@ -1104,7 +886,7 @@ ToolHandler findHandler(const std::vector<ToolEntry> &tools,
 } // namespace
 
 TEST_CASE("get_callees surfaces ThreadEntry edges with execution context",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   auto graph = buildChainCGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1202,7 +984,7 @@ TEST_CASE("get_callees surfaces ThreadEntry edges with execution context",
 }
 
 TEST_CASE("list_callback_sites groups callback edges by target",
-          "[mcp][tools][callbacks]") {
+          "[tools][callbacks]") {
   auto graph = buildChainCGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1271,7 +1053,7 @@ TEST_CASE("list_callback_sites groups callback edges by target",
 }
 
 TEST_CASE("list_concurrency_entry_points enumerates ThreadEntry edges",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   auto graph = buildChainCGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1340,7 +1122,7 @@ TEST_CASE("list_concurrency_entry_points enumerates ThreadEntry edges",
 }
 
 TEST_CASE("find_call_chain propagates executionContext per hop",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   auto graph = buildChainCGraph();
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1443,7 +1225,7 @@ static void buildThreeFrameChain(CallGraph &g, ControlFlowIndex &cf,
 }
 
 TEST_CASE("query_raii_scopes_at_callsite returns locals and respects kinds",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   CallGraph graph;
   graph.addNode({"caller", "a.cpp", 1, true, false, ""});
   graph.addNode({"callee", "b.cpp", 1, false, false, ""});
@@ -1525,7 +1307,7 @@ TEST_CASE("query_raii_scopes_at_callsite returns locals and respects kinds",
 }
 
 TEST_CASE("query_locks_held finds lock two frames up",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   CallGraph graph;
   ControlFlowIndex cf;
   buildThreeFrameChain(graph, cf, "entry.cpp:3:3", "mid.cpp:2:3");
@@ -1571,7 +1353,7 @@ TEST_CASE("query_locks_held finds lock two frames up",
 }
 
 TEST_CASE("query_locks_held respects max_depth",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   CallGraph graph;
   ControlFlowIndex cf;
   buildThreeFrameChain(graph, cf, "entry.cpp:3:3", "mid.cpp:2:3");
@@ -1597,7 +1379,7 @@ TEST_CASE("query_locks_held respects max_depth",
 }
 
 TEST_CASE("query_same_lock intersects locks across two targets",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   // Graph:
   //   entry() { lock_guard g(m); leafA(); leafB(); }
   // Both leaves see the same (type, varName) lock live in the caller.
@@ -1659,7 +1441,7 @@ TEST_CASE("query_same_lock intersects locks across two targets",
 }
 
 TEST_CASE("query_same_lock returns empty intersection when locks differ",
-          "[mcp][tools][concurrency]") {
+          "[tools][concurrency]") {
   // leafA is under lock `ga`; leafB under lock `gb` (same type, diff name).
   CallGraph graph;
   graph.addNode({"entry", "e.cpp", 1, true, false, ""});
@@ -1711,7 +1493,7 @@ TEST_CASE("query_same_lock returns empty intersection when locks differ",
 // ============================================================================
 
 TEST_CASE("query_throw_propagation reports the verdict with per-path detail",
-          "[mcp][tools][prism]") {
+          "[tools][prism]") {
   auto graph = buildTestGraph();
   auto cfIndex = buildTestCfIndex();
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1784,7 +1566,7 @@ TEST_CASE("query_throw_propagation reports the verdict with per-path detail",
 }
 
 TEST_CASE("query_all_path_contexts enumerates paths with their context",
-          "[mcp][tools][prism]") {
+          "[tools][prism]") {
   auto graph = buildTestGraph();
   auto cfIndex = buildTestCfIndex();
   ControlFlowOracle oracle(graph, cfIndex);
@@ -1827,7 +1609,7 @@ TEST_CASE("query_all_path_contexts enumerates paths with their context",
 }
 
 TEST_CASE("query_nearest_catches finds the handler up the call path",
-          "[mcp][tools][prism]") {
+          "[tools][prism]") {
   auto graph = buildTestGraph();
   auto cfIndex = buildTestCfIndex();
   ControlFlowOracle oracle(graph, cfIndex);

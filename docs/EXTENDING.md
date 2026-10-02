@@ -98,8 +98,8 @@ in every place guards are reported:
 
 Combined with `inTrueBranch`, this answers "this call site / channel send
 runs only with `NewNav` **on**" (or off, when `inTrueBranch` is false).
-Surfaced in `megascope dump`, the `query_call_site_context` tool (CLI
-verb and MCP), the path tools' `guardsOnPath`, and channel-site listings.
+Surfaced in `megascope dump`, the `query_call_site_context` tool, the
+path tools' `guardsOnPath`, and channel-site listings.
 
 Classification happens at **query/serialization time**, not at index time —
 adding or changing patterns does not invalidate megascope `--snapshot`

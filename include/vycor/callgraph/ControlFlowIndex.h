@@ -198,7 +198,7 @@ public:
                  const std::string &calleeUsr) const;
 
   // All live contexts sharing a spelling (macro expansion gives several
-  // call sites one file:line:col). Mirrors contextAtSite; the MCP
+  // call sites one file:line:col). Mirrors contextAtSite; the
   // disambiguation contract (PR C) enumerates these so a client can pick a
   // caller and re-query through the precise overload. Insertion order;
   // callers needing determinism sort the result.
@@ -531,22 +531,5 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          std::function<void(const std::string &)> preTu =
                              nullptr,
                          const ChannelTypeConfig &channelCfg = {});
-
-// Single-TU variant for incremental reindex (one parse). Call
-// graph.removeTU(file) and cfIndex.removeTU(file) first when re-indexing a
-// changed file. channelsOut, if non-null, gets channel.removeTU(file) called
-// by the caller first too, for the same reason. Runs under the in-process
-// crash guard: the TU's facts land only when its parse returns, so a crash
-// adds nothing (the returned outcome is Crashed). For a parse that must not
-// share the caller's process at all, see bakeTUIsolated (WorkerPool.h).
-TuOutcome bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
-            const clang::tooling::CompilationDatabase &compDb,
-            const std::string &file,
-            const std::vector<std::string> &collapsePaths = {},
-            const PchCache *pchCache = nullptr,
-            const std::string &sysroot = "",
-            const LockTypeConfig &lockCfg = {},
-            const ChannelTypeConfig &channelCfg = {},
-            ChannelIndex *channelsOut = nullptr);
 
 } // namespace vycor

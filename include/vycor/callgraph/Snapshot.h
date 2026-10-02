@@ -93,7 +93,7 @@ struct SnapshotMeta {
   // dependencies' changed (SnapshotIO::dirtyTUs).
   std::vector<FileStamp> deps;
   std::vector<std::vector<uint32_t>> tuDeps;
-  // v8: the bake's --entry-point list, so query verbs and serve default
+  // v8: the bake's --entry-point list, so query verbs default
   // to the same roots the index was built for (empty = "main").
   std::vector<std::string> entryPoints;
   // v10: per TU (parallel to `files`) the effective-input fingerprint the
@@ -120,7 +120,7 @@ struct IndexSummary {
 
 /// Sections a load may ask for (bitmask). Meta and the summary are always
 /// read. Each query tool declares what it reads (ToolEntry::needs) and the
-/// query verbs load only that; index/serve/batch load everything.
+/// query verbs load only that; index and batch load everything.
 enum IndexSection : unsigned {
   kSectionGraph = 1,
   kSectionControlFlow = 2,
@@ -165,7 +165,7 @@ struct SnapshotLoadStats {
 /// provenance (edgeIndex_, tuEdges_, nodeContributors_, tuNodes_), the
 /// ControlFlowIndex set-dedup keys and per-TU map, ChannelIndex's per-TU
 /// map — none of which a query reads (docs/megascope-cli-review.md §3.1.2).
-/// A read-only graph asserts if mutated afterwards; `index`/`serve` and
+/// A read-only graph asserts if mutated afterwards; `index` and
 /// worker shards must load Mutable.
 enum class LoadMode { Mutable, ReadOnly };
 

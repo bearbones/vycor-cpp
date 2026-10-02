@@ -204,7 +204,7 @@ against, in the root `VERSION` file. `CMakeLists.txt` reads it into
 `project(vycor-cpp VERSION ...)`, and `vycor-cpp --version` reports it
 alongside the embedded LLVM version.
 
-**Bump policy:** MAJOR = breaking CLI flag / output-format / MCP-protocol
+**Bump policy:** MAJOR = breaking CLI flag / output-format
 change; MINOR = new subcommand or flag, backward compatible; PATCH = bug fix
 only. `main` and each `release/llvm-NN` branch accumulate **independent**
 version histories once they diverge — `v0.3.0` on `release/llvm-18` is not

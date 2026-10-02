@@ -24,8 +24,6 @@ add_library(vycor_lib
   callgraph/WorkerPool.cpp
   callgraph/Interrupt.cpp
   callgraph/CrashGuard.cpp
-  mcp/McpProtocol.cpp
-  mcp/McpServer.cpp
   query/Serialize.cpp
   query/Identity.cpp
   query/GraphTools.cpp

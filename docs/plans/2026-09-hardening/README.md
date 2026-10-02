@@ -24,16 +24,16 @@ costs.
 |---|---|---|---|---|
 | H | [Index write integrity](H-index-write-integrity.md) | resilience | Now | — |
 | I | [Crash and hang containment](I-crash-hang-containment.md) | resilience | Now | — |
-| J | [MCP server robustness](J-mcp-server-robustness.md) | resilience/usability | Now | I (reindex_tu crash path) |
+| J | ~~[MCP server robustness](J-mcp-server-robustness.md)~~ | dropped: the MCP server was removed (2026-10-02) | — | — |
 | K | [Answer honesty and bounded results](K-answer-honesty-bounds.md) | usability | Now | — |
 | L | [anneal as a CI gate](L-anneal-ci-gate.md) | usability | Now | — |
 | M | [Control-flow context dedup](M-control-flow-dedup.md) | performance, measurement-gated | Measurement now | H (format version) |
 | N | [Query-time algorithms and bake timing](N-query-algorithms.md) | performance | Now | — |
 | O | [Onboarding, packaging, docs drift](O-onboarding-packaging.md) | usability | Now | — |
-| P | [CI hardening: sanitizers and fuzzing](P-ci-hardening.md) | resilience | Now | Final pass after H, I, J |
+| P | [CI hardening: sanitizers and fuzzing](P-ci-hardening.md) | resilience | Now | Final pass after H, I |
 
 Suggested order when slots are limited: **H, K, I** first (small changes,
-each fixes a silently wrong result or a hang), then **J, L, P**, then **M, N,
+each fixes a silently wrong result or a hang), then **L, P**, then **M, N,
 O**. M's first step (count distinct control-flow keys on the testbed) is one
 command and should run early regardless, because it decides whether M is
 worth doing.
@@ -62,7 +62,7 @@ shrinks the data each of these touches.
 The rules in [2026-09-next/README.md](../2026-09-next/README.md#shared-execution-rules)
 apply unchanged: isolated worktree and topical branch from current
 `origin/main`, an early interface note for anything another package consumes,
-CLI and MCP stay adapters over `src/query/`, self-review, relevant tests plus
+the CLI stays an adapter over `src/query/`, self-review, relevant tests plus
 CLI goldens, a focused PR, and the full LLVM matrix before merge.
 
 Additionally:
@@ -84,8 +84,7 @@ Additionally:
 | `Checkpoint.cpp` journal append/recovery | H | L reads findings only |
 | `WorkerPool.cpp` spawn, timeout, empty-bake fallback | I | H (save refuses an empty bake) |
 | Crash guard in `CallGraphBuilder.cpp` / `ControlFlowContextVisitor.cpp` | I | — |
-| `McpProtocol.cpp`, `McpServer.cpp` | J | I owns `reindexTU`'s crash handling |
-| `Identity.cpp`, result paging in `src/query/` | K | J adds MCP annotations only |
+| `Identity.cpp`, result paging in `src/query/` | K | — |
 | anneal output/exit code in `main.cpp`, finding identity | L | — |
 | `ControlFlowIndex.*` storage | M | — |
 | `PathSearch.cpp`, `DeadCodeAnalyzer.cpp`, `ImpactSearch.cpp` | N | — |
@@ -102,10 +101,9 @@ limitations, shared-file changes, and remaining dependencies.
 
 - **H:** Implement `docs/plans/2026-09-hardening/H-index-write-integrity.md`. Reproduce the concurrent-writer tear and the empty-bake overwrite first, then make every index and journal write atomic, locked, checksummed, and error-checked.
 - **I:** Implement `docs/plans/2026-09-hardening/I-crash-hang-containment.md`. Replace the `siglongjmp` crash guard, add worker timeouts that feed the existing poison/bisect path, clamp user-supplied search limits, and clean up on SIGINT/SIGTERM.
-- **J:** Implement `docs/plans/2026-09-hardening/J-mcp-server-robustness.md`. Fix framing resync and size caps, make `reindex_tu` atomic, bound the query cache, answer `initialize` before the bake, and add the protocol annotations.
 - **K:** Implement `docs/plans/2026-09-hardening/K-answer-honesty-bounds.md`. Return `not_found` with suggestions for unknown names, add a shared paging contract to the unbounded list tools, and update goldens and corpus.
 - **L:** Implement `docs/plans/2026-09-hardening/L-anneal-ci-gate.md`. Give anneal exit codes, per-TU outcomes, JSON and SARIF output, stable finding fingerprints, baselines, and inline suppressions.
 - **M:** Execute `docs/plans/2026-09-hardening/M-control-flow-dedup.md`. Measure the duplication ratio first and publish a go/no-go; implement deduplicated contexts only if the gate passes.
 - **N:** Implement `docs/plans/2026-09-hardening/N-query-algorithms.md`. Narrow the path-search corridor, move dead-code analysis to ids, fix the small query-time waste, and add parse-vs-visitor bake timing.
 - **O:** Implement `docs/plans/2026-09-hardening/O-onboarding-packaging.md`. Add bake progress and `vycor-cpp doctor`, make release binaries find clang's builtin headers on a clean machine, unify source selection, and fix the listed doc drift.
-- **P:** Implement `docs/plans/2026-09-hardening/P-ci-hardening.md`. Add sanitizer and Release CI jobs and fuzz targets for the four binary/stream parsers; triage what they find.
+- **P:** Implement `docs/plans/2026-09-hardening/P-ci-hardening.md`. Add sanitizer and Release CI jobs and fuzz targets for the binary and stream parsers; triage what they find.

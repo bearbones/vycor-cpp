@@ -1,10 +1,10 @@
-# vycor-cpp MCP Server — Usage Guide
+# megascope — Usage Guide
 
 This guide covers practical usage of `megascope` based on real analysis runs
 against game-engine codebases. It focuses on workflow, gotchas, and effective
 query patterns rather than repeating what's in AGENTS.md.
 
-For API critique and improvement proposals see `docs/mcp-review.md`.
+For the output contract and exit codes see `docs/result-contract.md`.
 
 ---
 
@@ -87,7 +87,7 @@ meta-only. See `docs/index-provenance.md`.
 ### 4. Query it
 
 Every tool is a verb. Its flags come from the tool's input schema (the
-same names an MCP client passes, hyphens or underscores), so
+names `batch` takes as JSON keys, hyphens or underscores), so
 `megascope <tool> --help` is the reference:
 
 ```bash
@@ -141,37 +141,6 @@ printf '%s\n' \
 `exit` carries the same code the one-shot verb would have returned and
 `status` mirrors `result.status`.
 
-### 5. Serve over MCP
-
-The same tools are available over MCP stdio for clients that speak it:
-
-```bash
-./build/src/vycor-cpp megascope serve --build-path /path/to/build \
-  --source /path/to/file1.cpp --source /path/to/file2.cpp
-```
-
-`serve` warm-starts from the same default index (saving it after a
-bake), prints progress to stderr, and then blocks on stdin waiting for
-JSON-RPC requests:
-
-```
-megascope: warm start from /path/to/build/.vycor/megascope.vycs (2 TU(s) re-indexed, 0 dropped, ...)
-megascope: server started, waiting for requests...
-```
-
-Do not send requests until "server started" appears — the index is not
-ready before that point. `serve` takes the index's write lock
-(`<index>.lock`) for its startup load, refresh, and save: when an
-`index` run holds it, `serve` prints `waiting for another writer
-holding ...` and answers nothing (not even `initialize`) until that run
-finishes; pass `--no-wait` to exit instead. The lock is released before
-serving. Per-request logging is off unless `-v`.
-`reindex_tu` is only available here (it mutates the live indexes).
-
-The pre-verb form `megascope --build-path ... --source ... [--snapshot F]`
-still works and means `serve`; it only touches an index file when
-`--snapshot`/`--index` is given.
-
 ---
 
 ## File selection
@@ -181,8 +150,8 @@ This is the most consequential decision. The index only covers functions
 when their definition is compiled in a TU you include.
 
 With no `--source`, `--source-list`, or `--source-re`, `megascope index`
-and `megascope serve` take the TU set recorded in the existing index —
-a bare `serve` refreshes what was indexed and never widens a narrow
+takes the TU set recorded in the existing index — a bare `index`
+refreshes what was indexed and never widens a narrow
 index by accident — or, when there is no index yet, every C/C++ entry
 of the compilation database that still exists on disk (assembly and
 resource entries are skipped; `--source-re .` re-selects the whole
@@ -207,10 +176,8 @@ whatever the base set is. Any of `--source`, `--source-list`, or
 Paths are made absolute with `.`/`..` removed before deduplication, so a
 relative list entry matches the database spelling and the index stamps.
 `megascope index` reports how many TUs each filter dropped on stderr and
-refuses to bake an empty selection. Under `serve`, `--source-list` must
-be a regular file (stdin, pipes, and devices would be drained before the
-first MCP request); a `compile_flags.txt` database cannot be enumerated,
-so it needs `--source` or `--source-list`.
+refuses to bake an empty selection. A `compile_flags.txt` database
+cannot be enumerated, so it needs `--source` or `--source-list`.
 
 **Rule of thumb:** include both the implementation files you want to analyze
 and their test files. The test TUs often pull in the concrete class
@@ -230,62 +197,6 @@ the files you provided.
 **Generated files:** the `Generated/src/` files (reflection registration,
 schema enums) are needed for a complete class hierarchy. Including them adds
 noise to the function list but ensures `get_class_hierarchy` is accurate.
-
----
-
-## Protocol
-
-The server speaks JSON-RPC 2.0 over stdio with MCP-standard
-**newline-delimited framing**: one compact JSON message per line. Framing is
-autodetected per message, so legacy clients that send LSP-style
-`Content-Length` headers continue to work; responses always use the framing
-of the most recent request.
-
-**Request format** (standard MCP clients — Claude Desktop, MCP SDKs — do
-this automatically):
-```
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"<tool>","arguments":{...}}}\n
-```
-
-**Legacy request format** (still accepted):
-```
-Content-Length: <byte count>\r\n
-\r\n
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"<tool>","arguments":{...}}}
-```
-
-**Initialization sequence** (required before any `tools/call`):
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-client","version":"1"}}}
-```
-Read the response, then send the notification:
-```json
-{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-```
-Do not send `tools/call` before the `initialize` response arrives.
-
-**Response format:** tool results arrive as a `content` array with a single
-`text` item containing JSON-encoded output. You must JSON-parse the `text`
-value to get the actual result object.
-
-**Minimal Python client skeleton:**
-```python
-import subprocess, json
-
-def send(proc, msg):
-    proc.stdin.write(json.dumps(msg).encode() + b"\n")
-    proc.stdin.flush()
-
-def recv(proc):
-    return json.loads(proc.stdout.readline())
-
-def call(proc, req_id, tool, params):
-    send(proc, {"jsonrpc":"2.0","id":req_id,"method":"tools/call",
-                "params":{"name":tool,"arguments":params}})
-    r = recv(proc)
-    text = r["result"]["content"][0]["text"]
-    return json.loads(text)
-```
 
 ---
 
@@ -392,9 +303,9 @@ vycor-cpp megascope get-callers \
 # (exit code 1) is a real entry point.
 ```
 
-Over MCP the same call is `call(proc, 1, "get_callers", {"name": ...})`;
-every step below maps the same way (tool name with underscores, arguments
-as a JSON object).
+In `megascope batch` the same call is
+`{"tool":"get_callers","args":{"name":"..."}}`; every step below maps
+the same way (tool name with underscores, arguments as a JSON object).
 
 Identical edges from multiple TUs are deduplicated server-side; distinct
 call sites for the same caller still appear as separate entries (that is
@@ -499,7 +410,7 @@ is hidden.
 
 **Function names are exact-match only.** Partial names, namespaces
 without the full path, and operator spellings all answer `not_found`
-(`isError: true` over MCP, exit 1 on the CLI) on every tool that takes
+(exit 1) on every tool that takes
 a function, with up to five `didYouMean` suggestions (the
 `search_functions` ranking, then near spellings). Re-query with a
 suggestion's `usr`, or mine real names from `search_functions` or a

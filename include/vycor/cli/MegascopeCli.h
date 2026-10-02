@@ -39,8 +39,9 @@
 // These verbs never touch llvm::cl: main.cpp peels the verb off argv and
 // hands the rest to runMegascopeQueryVerb. Per-tool flags are derived from
 // each tool's JSON Schema (parseToolArgs), so the CLI surface cannot drift
-// from what MCP clients see. `index` and `serve` stay llvm::cl verbs in
-// main.cpp because they share the bake option block with the legacy form.
+// from the schemas `megascope tools --format json` publishes. `index`
+// stays an llvm::cl verb in main.cpp because it shares the bake option
+// block with the bake worker.
 //
 // Output contract (2.3): stdout carries only the payload — compact JSON by
 // default, `--pretty` on request, `--format ndjson` (one record per line,
@@ -75,7 +76,7 @@ std::string defaultIndexPath(llvm::StringRef buildPath);
 /// then $VYCOR_INDEX (`envIndex`, already read by the caller), then
 /// defaultIndexPath(buildPath) when a build path is known, else
 /// defaultIndexPath(".") — i.e. run from the build directory and no flag is
-/// needed at all. The writing verbs (`index`, `serve`) deliberately skip
+/// needed at all. The writing verb (`index`) deliberately skips
 /// the environment variable: it is a query-side convenience, and honoring
 /// it as a write location would let one project's bake overwrite another
 /// project's index.
@@ -90,7 +91,7 @@ std::string canonicalToolName(llvm::StringRef verb);
 
 /// True when `verb` (argv[2] after "megascope") is handled by
 /// runMegascopeQueryVerb rather than the llvm::cl bake path: any word that
-/// is not an option and not `index`/`serve`. Unknown words are accepted
+/// is not an option and not `index`. Unknown words are accepted
 /// here so the runner can report them as a usage error naming the verbs.
 bool isMegascopeQueryVerb(llvm::StringRef verb);
 
@@ -107,7 +108,7 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
               llvm::json::Object seed = {});
 
 /// `--help` text for a tool: description, then every schema property with
-/// its type and description (the same text the MCP client sees).
+/// its type and description (the same text `tools --format json` emits).
 void printToolHelp(const ToolEntry &tool, llvm::raw_ostream &os);
 
 /// Exit code for a tool payload: error payloads map to kExitUsage when the

@@ -16,7 +16,7 @@
 
 // ============================================================================
 // Bake configuration shared by every entry point that parses sources: the
-// llvm::cl verbs in main.cpp (anneal, megascope index/serve) and the query
+// llvm::cl verbs in main.cpp (anneal, megascope index) and the query
 // verbs' ephemeral mode (MegascopeCli.cpp), which bakes the selected TUs
 // in memory when no index is wanted. Diagnostics go to llvm::errs().
 // ============================================================================

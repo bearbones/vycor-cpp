@@ -141,7 +141,6 @@ TEST_CASE("tool verbs accept hyphens and underscores", "[megascope][cli]") {
   CHECK(isMegascopeQueryVerb("tools"));
   CHECK(isMegascopeQueryVerb("nonsense")); // reported by the runner
   CHECK_FALSE(isMegascopeQueryVerb("index"));
-  CHECK_FALSE(isMegascopeQueryVerb("serve"));
   CHECK_FALSE(isMegascopeQueryVerb("--build-path"));
   CHECK_FALSE(isMegascopeQueryVerb(""));
 }
@@ -230,12 +229,12 @@ TEST_CASE("parseToolArgs maps schema property types onto flags",
   }
 
   SECTION("schema 'required' properties are enforced") {
-    const auto &tool = toolNamed(tools, "reindex_tu");
+    const auto &tool = toolNamed(tools, "search_functions");
     auto missing = parseToolArgs(tool, {});
     REQUIRE_FALSE(bool(missing));
-    CHECK(llvm::toString(missing.takeError()).find("--file") !=
+    CHECK(llvm::toString(missing.takeError()).find("--query") !=
           std::string::npos);
-    auto ok = parseToolArgs(tool, {"--file", "/src/a.cpp"});
+    auto ok = parseToolArgs(tool, {"--query", "helper"});
     REQUIRE(bool(ok));
   }
 }
@@ -250,7 +249,6 @@ TEST_CASE("tools declare the index sections they read", "[megascope][cli]") {
         (kSectionGraph | kSectionControlFlow));
   CHECK(toolNamed(tools, "list_channels").needs ==
         (kSectionGraph | kSectionChannels));
-  CHECK(toolNamed(tools, "reindex_tu").needs == kSectionAll);
   CHECK(sectionNames(kSectionGraph | kSectionChannels) ==
         std::vector<std::string>{"graph", "channels"});
 
@@ -560,9 +558,11 @@ TEST_CASE("query verbs answer from a saved index", "[megascope][cli]") {
     CHECK(unknownVerb.code == kExitUsage);
     CHECK(unknownVerb.err.find("unknown verb or tool 'frobnicate'") !=
           std::string::npos);
-    auto serveOnly = run({"reindex-tu", "--index", idx.path, "--file", "x"});
-    CHECK(serveOnly.code == kExitUsage);
-    CHECK(serveOnly.err.find("serve") != std::string::npos);
+    // reindex_tu went with the MCP server.
+    auto gone = run({"reindex-tu", "--index", idx.path, "--file", "x"});
+    CHECK(gone.code == kExitUsage);
+    CHECK(gone.err.find("unknown verb or tool 'reindex-tu'") !=
+          std::string::npos);
   }
 
   SECTION("index problems exit 3") {
@@ -710,8 +710,7 @@ TEST_CASE("tools lists every registered tool", "[megascope][cli]") {
   auto text = run({"tools"});
   CHECK(text.code == kExitResults);
   CHECK(text.out.find("get-callers") != std::string::npos);
-  CHECK(text.out.find("reindex-tu") != std::string::npos);
-  CHECK(text.out.find("[serve only]") != std::string::npos);
+  CHECK(text.out.find("reindex-tu") == std::string::npos);
   CHECK(lines(text.out).size() == tools.size());
   // One sentence per tool, and "e.g. " inside a sentence does not end it.
   for (const auto &line : lines(text.out)) {
@@ -732,7 +731,7 @@ TEST_CASE("tools lists every registered tool", "[megascope][cli]") {
       sawCallers = true;
       CHECK(o->getString("verb") == "get-callers");
       CHECK(o->getString("records") == "callers");
-      CHECK(o->getBoolean("cli") == true);
+      CHECK_FALSE(o->getBoolean("cli").has_value());
       CHECK(o->getObject("inputSchema") != nullptr);
     }
   }

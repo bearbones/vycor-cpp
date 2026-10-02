@@ -212,5 +212,4 @@ out of git.
   nothing about scale; use `scripts/bench.py` for that.
 - Peak RSS is `ru_maxrss` of the child process (kilobytes on Linux,
   converted from bytes on macOS).
-- The runner drives the CLI only; the MCP transport is covered by
-  `scripts/mcp-smoke.py` and the result-contract tests.
+- The runner drives the CLI only, which is the only transport.

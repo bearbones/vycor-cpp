@@ -283,7 +283,7 @@ TEST_CASE("an endpoint without a node resolves by its USR",
 TEST_CASE("no tool requires a parameter that has an alias",
           "[identity][tools]") {
   // A schema requirement on the canonical spelling makes the CLI's flag
-  // check and strict MCP clients reject the alias before the handler runs.
+  // check (and any schema-validating caller) reject the alias before the handler runs.
   for (const auto &tool : getRegisteredTools()) {
     INFO(tool.name);
     const auto *schema = tool.inputSchema.getAsObject();

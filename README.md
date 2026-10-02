@@ -5,11 +5,11 @@ analysis. It exposes four features as subcommands:
 
 - **anneal** — detect problems such as fragile ADL/CTAD resolutions across translation units. Like if `clang-tidy` went Super Saiyan.
 - **morph** — apply rule-driven, multi-pass AST matcher transformations
-- **megascope** — index a multi-TU call graph once, then query it from the shell (`megascope get-callers --name f`), in batches, or over MCP (Model Context Protocol); designed for LLM-assisted code analysis
+- **megascope** — index a multi-TU call graph once, then query it from the shell (`megascope get-callers --name f`) or in batches; designed for LLM-assisted code analysis
 
 Designed as a backend for external systems (e.g. a Python script translating
 a custom DSL, or an LLM agent performing security audits via the megascope
-verbs or MCP server),
+verbs),
 and as a **base for organization forks**: lock types, feature-flag
 conventions, and custom checks slot in without touching upstream code — see
 [Customizing for your organization](#customizing-for-your-organization).
@@ -257,7 +257,7 @@ writing them to disk.
 
 Bakes a unified cross-TU call graph and control-flow index into an index
 file, then answers queries from the shell (one process per query, or a
-batch on one loaded index) or over MCP.
+batch on one loaded index).
 
 ```bash
 # Build the index once (default location: <build-path>/.vycor/megascope.vycs).
@@ -274,14 +274,11 @@ batch on one loaded index) or over MCP.
 ./build/vycor-cpp megascope find-call-chain --to Foo::bar --format ndjson
 ./build/vycor-cpp megascope search-functions --query Foo --format tsv | cut -f4
 ./build/vycor-cpp megascope info            # what the index holds
-./build/vycor-cpp megascope tools           # the 25 tools
+./build/vycor-cpp megascope tools           # the 24 tools
 
 # Many queries, one load: NDJSON requests in, one response per line out.
 printf '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}\n' | \
   ./build/vycor-cpp megascope batch
-
-# The same tools over MCP stdio, for clients that speak it.
-./build/vycor-cpp megascope serve --build-path /path/to/compile_commands_dir
 
 # No index: --source/--source-list/--source-re bake the selected TUs in
 # memory and answer from that (quick single-file investigations).
@@ -328,7 +325,7 @@ line after a `{"_summary":...}` line — or as one JSON document with
 `--format json`; the stream never holds the materialized index, so it
 scales to the largest indexes.
 
-**25 tools**: `search_functions`, `lookup_function`, `get_callees`,
+**24 tools**: `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -337,11 +334,11 @@ scales to the largest indexes.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`, `reindex_tu` (serve only).
-See `docs/mcp-usage.md`. `megascope diff --before A --after B` compares
+`impact_of_change`.
+See `docs/megascope-usage.md`. `megascope diff --before A --after B` compares
 two saved indexes (`docs/change-impact.md`).
 
-Bake flags (`index`/`serve`): `--source`/`--source-list`/`--source-re`/
+Bake flags (`index`): `--source`/`--source-list`/`--source-re`/
 `--skip-paths` (TU selection; with none, the TUs recorded in the existing
 index, else the whole compilation database),
 `--index` (warm starts — only TUs whose source, any opened header, or
@@ -349,7 +346,7 @@ compile command changed are re-indexed, in parallel; `--snapshot` is
 the old spelling), `--force` (rebuild regardless), `--retry-failed`
 (re-parse the TUs whose last parse failed even when nothing changed;
 see `docs/index-provenance.md`), `--no-wait` (fail instead of waiting
-when another `index`/`serve` holds the index's write lock,
+when another `index` holds the index's write lock,
 `<index>.lock`), `--threads`,
 `--pch-dir`, `--isolate-workers`/`--workers` (subprocess baking: a
 crashing or hanging TU costs only that TU; the default whenever
@@ -415,21 +412,20 @@ include/vycor/
                                 Identity, Serialize)
   cli/                          megascope verbs: schema-derived flags,
                                 output contract, exit codes (MegascopeCli)
-  mcp/                          MCP adapter (McpServer, McpProtocol)
   ext/                          Organization extension API (Extensions.h,
                                 OrgConfig.h)
   compat/                       LLVM-version compat, PCH cache, tool adjusters
 
 src/
   main.cpp                      CLI entry point (anneal/morph/megascope)
-  anneal/ morph/ callgraph/ query/ cli/ mcp/ ext/ compat/   Implementations
+  anneal/ morph/ callgraph/ query/ cli/ impact/ ext/ compat/   Implementations
 
 ext/                            Organization slot-in (fork-owned; globbed
                                 into the build — see ext/README.md)
   examples/                     Reference extension + org config (not built)
 
 tests/                          Catch2 test suite
-docs/                           Design notes, MCP usage, EXTENDING.md
+docs/                           Design notes, megascope usage, EXTENDING.md
 examples/                       ADL/CTAD fragility and transform examples
 scripts/                        Benchmarking and smoke-test scripts
 ```
@@ -461,8 +457,8 @@ Phase 2 — Analyze:
 `bakeIndexes()` runs the declaration/hierarchy index, edge building, and
 control-flow context extraction over **one** frontend parse per TU.
 Cross-TU joins (virtual-dispatch fan-out, function-pointer-through-return)
-are resolved at query time, which also keeps incremental reindexing
-(`reindex_tu`, snapshot warm starts) consistent with full rebuilds.
+are resolved at query time, which also keeps warm refreshes of a saved
+index consistent with full rebuilds.
 
 ### Key Design Patterns
 

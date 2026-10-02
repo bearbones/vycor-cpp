@@ -57,9 +57,6 @@ Testing/
 # debug information files
 *.dwo
 
-# MCP smoke harness artifacts
-scripts/mcp-smoke-out/
-
 # Generated compile_commands.json for fixtures
 examples/deep_chains/compile_commands.json
 bench-out/

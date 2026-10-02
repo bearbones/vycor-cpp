@@ -72,8 +72,7 @@ static std::string hyphenated(llvm::StringRef name) {
 }
 
 bool isMegascopeQueryVerb(llvm::StringRef verb) {
-  return !verb.empty() && !verb.starts_with("-") && verb != "index" &&
-         verb != "serve";
+  return !verb.empty() && !verb.starts_with("-") && verb != "index";
 }
 
 // ============================================================================
@@ -662,8 +661,6 @@ void printVerbHelp(llvm::raw_ostream &os) {
         "            --source/--source-list/--source-re/--skip-paths\n"
         "            select TUs, default: the TUs already in the index,\n"
         "            else the whole database; `megascope index --help`)\n"
-        "  serve     Bake or warm-start (same flags as index), then serve\n"
-        "            the tools over MCP stdio\n"
         "  <tool>    Run one query tool against a saved index, e.g.\n"
         "            `megascope get-callers --name Foo::bar`\n"
         "  call      Run a tool from a JSON argument object:\n"
@@ -722,8 +719,7 @@ int runTools(const std::vector<ToolEntry> &tools, const CommonOpts &common,
     for (const auto &t : tools) {
       std::string verb = hyphenated(t.name);
       out << "  " << verb << std::string(width + 2 - verb.size(), ' ')
-          << firstSentence(t.description)
-          << (t.handler ? "" : "  [serve only]") << "\n";
+          << firstSentence(t.description) << "\n";
     }
     return kExitResults;
   }
@@ -741,7 +737,6 @@ int runTools(const std::vector<ToolEntry> &tools, const CommonOpts &common,
     o["inputSchema"] = t.inputSchema;
     o["records"] = t.recordsKey;
     o["needs"] = llvm::json::Array(sectionNames(t.needs));
-    o["cli"] = t.handler != nullptr;
     arr.push_back(llvm::json::Value(std::move(o)));
   }
   llvm::json::Object payload;
@@ -884,7 +879,7 @@ int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
     const std::string canon = canonicalToolName(*toolName);
     resp["tool"] = canon;
     auto it = byName.find(canon);
-    if (it == byName.end() || !it->second->handler) {
+    if (it == byName.end()) {
       batchError("unknown tool '" + *toolName + "'");
       continue;
     }
@@ -1145,14 +1140,9 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
         tool = &t;
     if (!tool) {
       err << "megascope: unknown verb or tool '" << typed
-          << "'. Verbs: index, serve, tools, info, batch, dump, diff, "
+          << "'. Verbs: index, tools, info, batch, dump, diff, "
              "call, <tool>; "
              "run `vycor-cpp megascope tools` for the tool list.\n";
-      return kExitUsage;
-    }
-    if (!tool->handler) {
-      err << "megascope: " << hyphenated(tool->name)
-          << " mutates the index and is only available through `serve`\n";
       return kExitUsage;
     }
   }

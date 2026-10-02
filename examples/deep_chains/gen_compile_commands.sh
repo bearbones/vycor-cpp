@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generates a compile_commands.json for the deep_chains fixture, rooted
-# at the current directory so the MCP CLI (`--build-path`) can find it.
+# at the current directory so `megascope` (`--build-path`) can find it.
 #
 # Usage: run from inside examples/deep_chains/:
 #   ./gen_compile_commands.sh

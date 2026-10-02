@@ -143,11 +143,6 @@ llvm::json::Value completeResult(llvm::json::Value payload,
 
 llvm::json::Value runTool(const ToolEntry &tool, const llvm::json::Object &args,
                           const ToolContext &ctx) {
-  if (!tool.handler)
-    return completeResult(
-        usageError(tool.name + " mutates the index and is only available "
-                               "through `serve`"),
-        ctx);
   return completeResult(tool.handler(args, ctx), ctx);
 }
 
@@ -223,28 +218,6 @@ std::vector<ToolEntry> getRegisteredTools() {
     auto needs = kExtraNeeds.find(tool.name);
     tool.needs = kSectionGraph |
                  (needs != kExtraNeeds.end() ? needs->second : 0u);
-  }
-
-  // reindex_tu — handler is null: it mutates the indexes, so each adapter
-  // (McpServer today) implements it against its own owned state.
-  {
-    llvm::json::Object schema;
-    schema["type"] = "object";
-    schema["required"] = llvm::json::Array{"file"};
-    llvm::json::Object props;
-    props["file"] = llvm::json::Object{
-        {"type", "string"},
-        {"description", "Absolute path of the TU to re-index"}};
-    schema["properties"] = std::move(props);
-
-    tools.push_back({"reindex_tu",
-                     "Re-index a single translation unit after source changes. "
-                     "Removes stale edges/contexts and re-runs all three "
-                     "analysis phases for the given file. Returns counts of "
-                     "edges and contexts removed and current totals.",
-                     llvm::json::Value(std::move(schema)),
-                     nullptr});
-    tools.back().needs = kSectionAll; // mutates every index
   }
 
   return tools;

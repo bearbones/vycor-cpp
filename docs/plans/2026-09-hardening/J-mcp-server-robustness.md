@@ -1,5 +1,10 @@
 # J — MCP server robustness
 
+**Status: dropped (2026-10-02).** The MCP server, `serve`, and
+`reindex_tu` were removed instead of hardened; the CLI verbs and
+`megascope batch` answer the same tools. Kept as a record of what the
+review found.
+
 ## Outcome
 
 `megascope serve` survives any input a client or a stray process can put on

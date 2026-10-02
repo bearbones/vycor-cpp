@@ -178,7 +178,7 @@ TEST_CASE("bakeIsolated: a hung megascope worker is recorded as timeout",
   REQUIRE(SnapshotIO::save(shard, CallGraph(), ControlFlowIndex(),
                            SnapshotMeta()));
   const std::string script = fakeWorkerScript(d, shard);
-  McpBakeConfig cfg;
+  BakeWorkerConfig cfg;
   cfg.buildPath = d.dir;
   WorkerLimits limits;
   limits.timeoutSeconds = 1;
@@ -192,11 +192,6 @@ TEST_CASE("bakeIsolated: a hung megascope worker is recorded as timeout",
   CHECK(out.outcomes.at("/tu/hang.cpp").status == TuStatus::TimedOut);
   CHECK(std::string(tuStatusName(TuStatus::TimedOut)) == "timeout");
   CHECK_FALSE(out.outcomes.count("/tu/ok.cpp")); // clean: shard had none
-
-  // The single-TU entry reindex_tu uses reports the same outcome.
-  auto one = bakeTUIsolated(script, cfg, "/tu/hang.cpp", limits);
-  CHECK(one.outcomes.at("/tu/hang.cpp").status == TuStatus::TimedOut);
-  CHECK(one.graph.nodeCount() == 0);
 }
 
 TEST_CASE("anneal isolatedRunner: a hung worker does not hang the analysis",
@@ -295,29 +290,6 @@ void vycor_crash_caller() {
   CHECK(hasEdgeFrom(baked.graph, "ok_caller"));
   // The shared graph's lock is free: mutating it again returns.
   CHECK(baked.graph.removeTU(okTu) > 0);
-}
-
-TEST_CASE("bakeTU: a crashed reindex adds nothing to the live graph",
-          "[containment][crash-guard]") {
-  ScratchDir d;
-  const std::string crashTu = d.write("crash.cpp", R"cpp(
-void vycor_crash_helper() {}
-void vycor_crash_target() {}
-void vycor_crash_caller() {
-  vycor_crash_helper();
-  vycor_crash_target();
-}
-)cpp");
-  clang::tooling::FixedCompilationDatabase db(".", {"-std=c++17"});
-  CallGraph graph;
-  ControlFlowIndex cf;
-  graph.addNode({"keep", "keep.cpp", 1, false, false, ""}, "keep.cpp");
-
-  HookGuard hook(crashOnTarget);
-  auto outcome = bakeTU(graph, cf, db, crashTu);
-  CHECK(outcome.status == TuStatus::Crashed);
-  CHECK(graph.nodeCount() == 1);
-  CHECK(cf.size() == 0);
 }
 
 namespace {

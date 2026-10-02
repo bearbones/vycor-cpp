@@ -7,14 +7,17 @@
 #
 #      http://www.apache.org/licenses/LICENSE-2.0
 #
-# Efficiency-analysis harness for the megascope MCP server.
+# Efficiency-analysis harness for megascope.
 #
 # Measures, for a given binary + compilation database:
-#   * cold index bake: wall time, per-phase and per-TU parse timings,
-#     parse-failure/crash counts, graph sizes, peak RSS
-#     (via megascope --stats-json)
-#   * snapshot save/load and warm-start cost (--snapshot)
-#   * MCP tool query latencies over newline-delimited stdio (--queries)
+#   * cold index bake (`megascope index`): wall time, per-phase and per-TU
+#     parse timings, parse-failure/crash counts, graph sizes, peak RSS
+#     (via --stats-json)
+#   * index size and the cost of a no-change warm `megascope index`
+#     (--snapshot)
+#   * resident query latencies over one `megascope batch` process, the
+#     index loaded once (--queries)
+#   * one-shot query latencies, one process per query (--cli)
 #
 # Outputs a self-contained run-report JSON plus a human summary, and can
 # diff two run reports (--compare) for A/B work.
@@ -25,7 +28,7 @@
 #       --build-path build-release --source-re '/vycor-cpp/src/' \
 #       --queries --label baseline --out bench-out
 #
-#   # Include snapshot warm-start measurement:
+#   # Include the index size and a no-change warm `megascope index`:
 #   python3 scripts/bench.py ... --snapshot
 #
 #   # Compare two runs:
@@ -47,49 +50,28 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# MCP client (newline-delimited JSON-RPC over stdio)
+# Batch client (NDJSON requests over one `megascope batch` process)
 # ---------------------------------------------------------------------------
 
-class McpClient:
+class BatchClient:
     def __init__(self, proc: subprocess.Popen):
         self.proc = proc
         self._id = 0
 
-    def request(self, method: str, params: dict | None = None) -> dict:
-        self._id += 1
-        msg = {"jsonrpc": "2.0", "id": self._id, "method": method}
-        if params is not None:
-            msg["params"] = params
-        line = json.dumps(msg, separators=(",", ":")) + "\n"
-        self.proc.stdin.write(line.encode())
-        self.proc.stdin.flush()
-        while True:
-            resp_line = self.proc.stdout.readline()
-            if not resp_line:
-                raise RuntimeError(f"server closed pipe during {method}")
-            resp_line = resp_line.strip()
-            if not resp_line:
-                continue
-            resp = json.loads(resp_line)
-            if resp.get("id") == self._id:
-                return resp
-
     def tool(self, name: str, args: dict | None = None) -> dict:
-        resp = self.request("tools/call",
-                            {"name": name, "arguments": args or {}})
-        result = resp.get("result", {})
-        content = result.get("content", [])
-        if content and content[0].get("type") == "text":
-            try:
-                return json.loads(content[0]["text"])
-            except (json.JSONDecodeError, KeyError):
-                return {"raw": content[0].get("text")}
-        return result
+        """One request; returns the tool payload (the response's result)."""
+        self._id += 1
+        msg = {"id": self._id, "tool": name, "args": args or {}}
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode())
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"megascope batch closed its output during {name}")
+        resp = json.loads(line)
+        if "result" not in resp:
+            raise RuntimeError(f"{name}: {resp.get('error', resp)}")
+        return resp["result"]
 
-
-# ---------------------------------------------------------------------------
-# Source selection
-# ---------------------------------------------------------------------------
 
 def select_sources(build_path: Path, source_re: str, max_tus: int) -> list[str]:
     cc_path = build_path / "compile_commands.json"
@@ -112,48 +94,40 @@ def select_sources(build_path: Path, source_re: str, max_tus: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Server lifecycle
+# Index bake and the batch process
 # ---------------------------------------------------------------------------
 
-READY_MARKER = b"server started, waiting for requests"
 # get_callers / get_callees page at 200 records by default
 # (docs/result-contract.md, "Paging"); a limit this large asks for all.
 ALL_RECORDS = 1_000_000_000
 
 
-def launch_megascope(binary: Path, build_path: Path, files: list[str],
-                     extra_args: list[str], threads: int,
-                     stats_json: Path, snapshot: Path | None,
-                     collapse: list[str],
-                     log_path: Path) -> tuple[subprocess.Popen, float, str]:
-    """Start megascope; wait until ready. Returns (proc, wall_to_ready_s, log)."""
-    cmd = [str(binary), "megascope", "--build-path", str(build_path),
+def run_index(binary: Path, build_path: Path, source_list: Path,
+              extra_args: list[str], threads: int, stats_json: Path,
+              index: Path, collapse: list[str], log_path: Path) -> float:
+    """Run `megascope index` to completion. Returns its wall time (s)."""
+    cmd = [str(binary), "megascope", "index", "--build-path", str(build_path),
+           "--source-list", str(source_list), "--index", str(index),
            "--threads", str(threads), "--stats-json", str(stats_json)]
-    for f in files:
-        cmd += ["--source", f]
     for a in extra_args:
         cmd += [f"--extra-arg={a}"]
     for c in collapse:
         cmd += ["--collapse-paths", c]
-    if snapshot is not None:
-        cmd += ["--snapshot", str(snapshot)]
-
-    log = open(log_path, "wb")
-    t0 = time.monotonic()
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=log)
-    # Wait for readiness by polling the stderr log file for the marker.
-    ready_s = None
-    while proc.poll() is None:
-        data = log_path.read_bytes()
-        if READY_MARKER in data:
-            ready_s = time.monotonic() - t0
-            break
-        time.sleep(0.05)
-    if ready_s is None:
+    with open(log_path, "wb") as log:
+        t0 = time.monotonic()
+        p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=log)
+        wall_s = time.monotonic() - t0
+    if p.returncode != 0:
         raise RuntimeError(
-            f"megascope exited before ready (see {log_path})")
-    return proc, ready_s, str(log_path)
+            f"megascope index exited {p.returncode} (see {log_path})")
+    return wall_s
+
+
+def launch_batch(binary: Path, index: Path) -> subprocess.Popen:
+    return subprocess.Popen(
+        [str(binary), "megascope", "batch", "--index", str(index)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL)
 
 
 def shutdown(proc: subprocess.Popen):
@@ -182,14 +156,8 @@ def timed(fn, reps: int) -> dict:
     }
 
 
-def run_query_benchmark(client: McpClient, reps: int) -> dict:
+def run_query_benchmark(client: BatchClient, reps: int) -> dict:
     out: dict[str, dict] = {}
-
-    client.request("initialize", {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "bench.py", "version": "1"},
-    })
 
     summary = client.tool("graph_summary")
     out["_graph_summary"] = summary
@@ -383,7 +351,7 @@ def summarize(report: dict) -> str:
     lines.append(
         f"cold bake: {s.get('bake_wall_ms', 0)/1000:.2f}s wall "
         + phases
-        + f"ready-to-serve {report.get('cold_ready_s', 0):.2f}s")
+        + f"index command {report.get('cold_wall_s', 0):.2f}s")
     lines.append(
         f"graph: {g.get('nodes')} nodes, {g.get('edges')} edges, "
         f"{g.get('call_sites')} call sites, "
@@ -397,19 +365,14 @@ def summarize(report: dict) -> str:
     if snap.get("loaded"):
         ws = report["warm_stats"]
         lines.append(
-            f"warm start: ready {report.get('warm_ready_s', 0):.2f}s "
-            f"(snapshot load {snap.get('load_ms', 0)/1000:.2f}s, "
-            f"{snap.get('refreshed_tus')} refreshed); snapshot size "
+            f"warm index (no change): {report.get('warm_wall_s', 0):.2f}s "
+            f"(meta load {snap.get('load_ms', 0)/1000:.2f}s, "
+            f"{snap.get('refreshed_tus')} refreshed); index size "
             f"{report.get('snapshot_bytes', 0)/1e6:.2f} MB; peak RSS "
             f"{(ws.get('peak_rss_kb') or 0)/1e6:.2f} GB")
-    ri = report.get("reindex")
-    if ri:
-        lines.append(
-            f"reindex_tu ({os.path.basename(ri['tu'])}): "
-            f"{ri['median_ms']:.0f} ms median")
     q = report.get("queries", {})
     if q:
-        lines.append("query latencies (median ms):")
+        lines.append("resident query latencies over batch (median ms):")
         for name, v in q.items():
             if name.startswith("_"):
                 continue
@@ -467,12 +430,11 @@ def compare(a_path: str, b_path: str) -> str:
     row("nodes", ga.get("nodes"), gb.get("nodes"))
     row("edges", ga.get("edges"), gb.get("edges"))
     row("call sites", ga.get("call_sites"), gb.get("call_sites"))
-    row("warm ready", (a.get("warm_ready_s") or 0) * 1000,
-        (b.get("warm_ready_s") or 0) * 1000, "ms")
-    row("snapshot bytes", a.get("snapshot_bytes"), b.get("snapshot_bytes"), "B")
-    ra, rb = a.get("reindex"), b.get("reindex")
-    if ra and rb:
-        row("reindex_tu", ra["median_ms"], rb["median_ms"], "ms")
+    row("cold index command", (a.get("cold_wall_s") or 0) * 1000,
+        (b.get("cold_wall_s") or 0) * 1000, "ms")
+    row("warm index (no change)", (a.get("warm_wall_s") or 0) * 1000,
+        (b.get("warm_wall_s") or 0) * 1000, "ms")
+    row("index bytes", a.get("snapshot_bytes"), b.get("snapshot_bytes"), "B")
     qa, qb = a.get("queries", {}), b.get("queries", {})
     for name in qa:
         if name.startswith("_") or name not in qb:
@@ -501,17 +463,14 @@ def main() -> int:
     ap.add_argument("--label", default="run")
     ap.add_argument("--out", type=Path, default=Path("bench-out"))
     ap.add_argument("--snapshot", action="store_true",
-                    help="also measure snapshot save + warm start")
+                    help="also measure the index size and a no-change "
+                         "warm `megascope index`")
     ap.add_argument("--queries", action="store_true",
-                    help="also measure MCP tool query latencies")
-    ap.add_argument("--reindex", metavar="TU_PATH",
-                    help="also measure reindex_tu latency for this TU "
-                         "(pick a small TU so removal cost is visible "
-                         "against the parse)")
+                    help="also measure resident query latencies over one "
+                         "`megascope batch` process")
     ap.add_argument("--cli", action="store_true",
                     help="also measure one-shot CLI query latency "
-                         "(process start + index load + query; implies "
-                         "--snapshot, the CLI reads the saved index)")
+                         "(process start + index load + query)")
     ap.add_argument("--sections", action="store_true",
                     help="with --cli, print the per-section index load "
                          "split each verb reports under -v")
@@ -525,8 +484,6 @@ def main() -> int:
 
     if not args.binary or not args.build_path:
         ap.error("--binary and --build-path are required (or use --compare)")
-    if args.cli:
-        args.snapshot = True
 
     files = select_sources(args.build_path, args.source_re, args.max_tus)
     if not files:
@@ -546,54 +503,46 @@ def main() -> int:
     }
 
     try:
-        # ---- cold run (optionally saving a snapshot) --------------------
-        snap_path = workdir / "graph.snapshot" if args.snapshot else None
+        # ---- cold bake ------------------------------------------------
+        snap_path = workdir / "megascope.vycs"
+        source_list = workdir / "sources.txt"
+        source_list.write_text("".join(f + "\n" for f in files))
         stats_path = workdir / "cold-stats.json"
         print("[bench] cold bake...", file=sys.stderr)
-        proc, ready_s, _ = launch_megascope(
-            args.binary, args.build_path, files, args.extra_args,
+        cold_s = run_index(
+            args.binary, args.build_path, source_list, args.extra_args,
             args.threads, stats_path, snap_path, args.collapse,
             workdir / "cold-stderr.log")
-        report["cold_ready_s"] = ready_s
-        print(f"[bench] cold ready in {ready_s:.2f}s", file=sys.stderr)
-
-        client = None
-        if args.queries:
-            print("[bench] query benchmark...", file=sys.stderr)
-            client = McpClient(proc)
-            report["queries"] = run_query_benchmark(client, args.query_reps)
-        if args.reindex:
-            print("[bench] reindex benchmark...", file=sys.stderr)
-            if client is None:
-                client = McpClient(proc)
-                client.request("initialize", {
-                    "protocolVersion": "2025-06-18", "capabilities": {},
-                    "clientInfo": {"name": "bench.py", "version": "1"}})
-            report["reindex"] = timed(
-                lambda: client.tool("reindex_tu",
-                                    {"file": args.reindex}), 3)
-            report["reindex"]["tu"] = args.reindex
-        shutdown(proc)
+        report["cold_wall_s"] = cold_s
         report["cold_stats"] = json.loads(stats_path.read_text())
         report["cold_tu_digest"] = tu_digest(report["cold_stats"])
+        print(f"[bench] cold index in {cold_s:.2f}s", file=sys.stderr)
 
-        # ---- warm run --------------------------------------------------
-        if args.snapshot and snap_path and snap_path.exists():
+        # ---- resident queries over one batch process -------------------
+        if args.queries:
+            print("[bench] query benchmark...", file=sys.stderr)
+            proc = launch_batch(args.binary, snap_path)
+            try:
+                report["queries"] = run_query_benchmark(
+                    BatchClient(proc), args.query_reps)
+            finally:
+                shutdown(proc)
+
+        # ---- no-change warm index --------------------------------------
+        if args.snapshot:
             report["snapshot_bytes"] = snap_path.stat().st_size
             warm_stats = workdir / "warm-stats.json"
-            print("[bench] warm start...", file=sys.stderr)
-            proc, warm_ready_s, _ = launch_megascope(
-                args.binary, args.build_path, files, args.extra_args,
+            print("[bench] warm index...", file=sys.stderr)
+            warm_s = run_index(
+                args.binary, args.build_path, source_list, args.extra_args,
                 args.threads, warm_stats, snap_path, args.collapse,
                 workdir / "warm-stderr.log")
-            shutdown(proc)
-            report["warm_ready_s"] = warm_ready_s
+            report["warm_wall_s"] = warm_s
             report["warm_stats"] = json.loads(warm_stats.read_text())
-            print(f"[bench] warm ready in {warm_ready_s:.2f}s",
-                  file=sys.stderr)
+            print(f"[bench] warm index in {warm_s:.2f}s", file=sys.stderr)
 
         # ---- one-shot CLI queries against the saved index --------------
-        if args.cli and snap_path and snap_path.exists():
+        if args.cli:
             print("[bench] cli benchmark...", file=sys.stderr)
             target = (report.get("queries", {}).get("_target") or {}).get(
                 "name")
