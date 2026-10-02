@@ -31,6 +31,7 @@
 #include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/Interrupt.h"
 #include "vycor/callgraph/Snapshot.h"
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/callgraph/WorkerPool.h"
 #include "vycor/cli/BakeConfig.h"
 #include "vycor/cli/MegascopeCli.h"
@@ -1593,7 +1594,7 @@ int main(int argc, const char **argv) {
       llvm::json::Array tus;
       for (const auto &t : buildStats.tuStats) {
         llvm::json::Object o;
-        o["file"] = t.file;
+        o["file"] = vycor::toIndexText(t.file); // raw path (Utf8.h)
         o["phase"] = static_cast<int64_t>(t.phase);
         o["ms"] = t.ms;
         o["status"] = static_cast<int64_t>(t.toolStatus);
@@ -1646,7 +1647,7 @@ int main(int argc, const char **argv) {
     if (saveFailed)
       return 1;
     llvm::json::Object summary;
-    summary["index"] = indexPath;
+    summary["index"] = vycor::toIndexText(indexPath); // raw path (Utf8.h)
     summary["mode"] = needFullBuild ? "cold" : "warm";
     summary["files"] = static_cast<int64_t>(files.size());
     summary["refreshed"] = static_cast<int64_t>(warmRefreshed);

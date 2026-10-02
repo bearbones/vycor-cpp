@@ -123,12 +123,16 @@ struct Reader {
   /// Inline length-prefixed string, as stored.
   std::string lenStr() { return bytes(u32()); }
 
-  /// Inline length-prefixed string bound for an index: made valid UTF-8
-  /// like every index string (Utf8.h). The meta keeps lenStr's raw bytes
-  /// (TU paths are stat'ed on warm start).
+  /// Length-prefixed index text (Utf8.h): the producers stored nothing
+  /// else, so a string that is not UTF-8 is damage and fails the reader
+  /// (repairing it could make it equal another stored string). The meta
+  /// keeps lenStr's raw bytes (TU paths are stat'ed on warm start).
   std::string text() {
     std::string s = lenStr();
-    makeValidUtf8(s);
+    if (ok && !isValidUtf8(s)) {
+      ok = false;
+      return std::string();
+    }
     return s;
   }
 
@@ -304,7 +308,7 @@ bool readInternerTable(Reader &r, StringInterner &interner) {
   std::vector<std::string> table;
   table.reserve(n);
   for (uint32_t i = 0; r.ok && i < n; ++i)
-    table.push_back(r.lenStr());
+    table.push_back(r.text());
   return r.ok && interner.installStrings(std::move(table));
 }
 

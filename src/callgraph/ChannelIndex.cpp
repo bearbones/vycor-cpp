@@ -39,22 +39,25 @@ ChannelIndex &ChannelIndex::operator=(ChannelIndex &&other) noexcept {
   return *this;
 }
 
-void ChannelIndex::addSite(ChannelSite site) { addSiteRefs(std::move(site), 1); }
-
-void ChannelIndex::addSiteRefs(ChannelSite site, uint32_t count) {
-  if (count == 0)
-    return;
-  // Valid UTF-8 like every index string (Utf8.h); removeTUs converts its
-  // TU paths the same way.
+void ChannelIndex::addSite(ChannelSite site) {
+  // A producer's raw bytes are stored as index text (Utf8.h); removeTUs
+  // converts its TU paths the same way. absorb copies index text through
+  // addSiteRefs as it is.
   for (std::string *s : {&site.channelId, &site.channelTypeName,
                          &site.category, &site.siteFunctionUsr,
                          &site.siteFunctionDisplay, &site.callSite,
                          &site.tuPath})
-    makeValidUtf8(*s);
+    makeIndexText(*s);
   for (auto &g : site.enclosingGuards) {
-    makeValidUtf8(g.conditionText);
-    makeValidUtf8(g.location);
+    makeIndexText(g.conditionText);
+    makeIndexText(g.location);
   }
+  addSiteRefs(std::move(site), 1);
+}
+
+void ChannelIndex::addSiteRefs(ChannelSite site, uint32_t count) {
+  if (count == 0)
+    return;
   std::lock_guard<std::mutex> lock(mutex_);
   SiteKey key{site.channelId, site.callSite, site.siteFunctionUsr, site.op};
   std::string tuPath = site.tuPath;
@@ -93,7 +96,7 @@ std::vector<ChannelSite>
 ChannelIndex::producersOf(const std::string &channelId) const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<ChannelSite> result;
-  auto it = byChannel_.find(channelId);
+  auto it = byChannel_.find(lookupText(channelId)); // Utf8.h
   if (it == byChannel_.end())
     return result;
   for (size_t i : it->second) {
@@ -108,7 +111,7 @@ std::vector<ChannelSite>
 ChannelIndex::consumersOf(const std::string &channelId) const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<ChannelSite> result;
-  auto it = byChannel_.find(channelId);
+  auto it = byChannel_.find(lookupText(channelId)); // Utf8.h
   if (it == byChannel_.end())
     return result;
   for (size_t i : it->second) {
@@ -123,9 +126,10 @@ std::vector<ChannelSite>
 ChannelIndex::sitesForFunction(const std::string &functionUsrOrDisplay) const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<ChannelSite> result;
+  const std::string key = lookupText(functionUsrOrDisplay); // Utf8.h
   auto collect =
       [&](const std::unordered_map<std::string, std::vector<size_t>> &m) {
-        auto it = m.find(functionUsrOrDisplay);
+        auto it = m.find(key);
         if (it == m.end())
           return;
         for (size_t i : it->second) {
@@ -231,7 +235,7 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   std::unordered_set<std::string> affectedChannels, affectedFuncUsr,
       affectedFuncDisplay;
   for (const auto &rawPath : tuPaths) {
-    auto tit = byTu_.find(validUtf8(rawPath));
+    auto tit = byTu_.find(toIndexText(rawPath)); // raw bytes (Utf8.h)
     if (tit == byTu_.end())
       continue;
     for (size_t idx : tit->second) {

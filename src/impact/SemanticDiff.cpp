@@ -442,7 +442,7 @@ std::string bakeRef(const SnapshotMeta &meta) {
     return "";
   // The meta keeps its strings as written; what is reported is valid
   // UTF-8 (callgraph/Utf8.h).
-  return validUtf8(meta.provenance.environment) + "@" +
+  return toIndexText(meta.provenance.environment) + "@" +
          std::to_string(meta.provenance.bakeStartNs);
 }
 
@@ -452,8 +452,8 @@ SideScope scopeOf(const SnapshotMeta *meta) {
     return s;
   s.bake = bakeRef(*meta);
   s.coverage = coverageOf(*meta);
-  s.analyzer = validUtf8(meta->provenance.analyzer);
-  s.toolchain = validUtf8(meta->provenance.toolchain);
+  s.analyzer = toIndexText(meta->provenance.analyzer);
+  s.toolchain = toIndexText(meta->provenance.toolchain);
   return s;
 }
 
@@ -509,23 +509,23 @@ Comparability checkComparability(const SnapshotMeta *before,
   if (before->provenance.analyzer != after->provenance.analyzer) {
     c.analyzerSame = false;
     c.reasons.push_back("analyzer differs (" +
-                        validUtf8(before->provenance.analyzer) + " vs " +
-                        validUtf8(after->provenance.analyzer) +
+                        toIndexText(before->provenance.analyzer) + " vs " +
+                        toIndexText(after->provenance.analyzer) +
                         "): the model itself may differ");
   }
   if (before->provenance.toolchain != after->provenance.toolchain) {
     c.toolchainSame = false;
     c.reasons.push_back("toolchain differs (" +
-                        validUtf8(before->provenance.toolchain) + " vs " +
-                        validUtf8(after->provenance.toolchain) +
+                        toIndexText(before->provenance.toolchain) + " vs " +
+                        toIndexText(after->provenance.toolchain) +
                         "): the frontend may resolve differently");
   }
 
   std::set<std::string> filesBefore, filesAfter;
   for (const auto &f : before->files)
-    filesBefore.insert(validUtf8(f.path));
+    filesBefore.insert(toIndexText(f.path));
   for (const auto &f : after->files)
-    filesAfter.insert(validUtf8(f.path));
+    filesAfter.insert(toIndexText(f.path));
   std::set_difference(filesBefore.begin(), filesBefore.end(),
                       filesAfter.begin(), filesAfter.end(),
                       std::back_inserter(c.tusOnlyBefore));
@@ -536,9 +536,9 @@ Comparability checkComparability(const SnapshotMeta *before,
                      std::vector<std::string> &partial) {
     for (const auto &[path, outcome] : SnapshotIO::outcomesOf(meta)) {
       if (outcome.status == TuStatus::Partial)
-        partial.push_back(validUtf8(path));
+        partial.push_back(toIndexText(path));
       else if (outcome.status != TuStatus::Indexed)
-        failed.push_back(validUtf8(path));
+        failed.push_back(toIndexText(path));
     }
     std::sort(failed.begin(), failed.end());
     std::sort(partial.begin(), partial.end());

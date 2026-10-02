@@ -157,6 +157,14 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/write-integrity-check.py
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(write_integrity PROPERTIES LABELS "cli;integrity")
+  # Paths and source text that are not UTF-8 (scripts/utf8-paths-check.py,
+  # callgraph/Utf8.h): nothing the binary prints aborts llvm::json, and
+  # paths that differ in one such byte stay two TUs through a warm refresh.
+  add_test(NAME utf8_paths
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/utf8-paths-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(utf8_paths PROPERTIES LABELS "cli;utf8")
   # The validation corpus (scripts/corpus-run.py, docs/validation.md):
   # every case under corpus/cases/ baked and queried, expectations
   # checked. corpus_selfcheck proves the checks can fail: the corpus

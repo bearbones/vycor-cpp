@@ -174,6 +174,8 @@ int loadSide(const std::string &path, unsigned needs,
     side.entryPoints = side.snap->meta.entryPoints;
   if (side.entryPoints.empty())
     side.entryPoints.push_back("main");
+  for (auto &e : side.entryPoints) // raw spellings (Utf8.h)
+    e = lookupText(e);
   side.ctx.emplace(ToolContext{side.snap->graph, *side.oracle,
                                side.snap->cfIndex, side.entryPoints,
                                &side.snap->channels, &side.cache,
@@ -438,7 +440,7 @@ int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
   // A diff of a Latin-1 source carries Latin-1 lines; JSON values are
   // UTF-8, converted the way the index converts its paths (Utf8.h), so
   // the hunks' file names still match the index's.
-  seed["patch"] = validUtf8(patch);
+  seed["patch"] = toIndexText(patch);
   return kExitResults;
 }
 

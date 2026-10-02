@@ -226,8 +226,9 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
                     *value + "'");
       args[key] = n;
     } else if (spec->type == "array") {
-      // Command-line bytes need not be UTF-8; JSON values must (Utf8.h).
-      llvm::json::Value item(validUtf8(*value));
+      // Command-line bytes need not be UTF-8: a raw spelling becomes the
+      // index text it is stored as (Utf8.h lookupText).
+      llvm::json::Value item(lookupText(*value));
       if (spec->itemType == "integer") {
         int64_t n = 0;
         if (value->getAsInteger(10, n))
@@ -243,7 +244,7 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
       }
       arr->push_back(std::move(item));
     } else {
-      args[key] = validUtf8(*value);
+      args[key] = lookupText(*value);
     }
   }
 
@@ -753,7 +754,7 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
             const CommonOpts &common, OutputFormat format,
             llvm::raw_ostream &out, llvm::raw_ostream &err) {
   llvm::json::Object o;
-  o["index"] = validUtf8(indexPath);
+  o["index"] = toIndexText(indexPath);
   o["format_version"] = static_cast<int64_t>(SnapshotIO::kFormatVersion);
   uint64_t bytes = 0;
   if (!llvm::sys::fs::file_size(indexPath, bytes))
@@ -769,7 +770,7 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   auto texts = [](const std::vector<std::string> &v) {
     llvm::json::Array a;
     for (const auto &s : v)
-      a.push_back(validUtf8(s));
+      a.push_back(toIndexText(s));
     return a;
   };
   o["entry_points"] = texts(snap.meta.entryPoints);
@@ -781,8 +782,8 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   llvm::json::Array channelTypes;
   for (const auto &ct : snap.meta.channelTypes) {
     llvm::json::Object c;
-    c["type"] = validUtf8(ct.qualifiedTypeName);
-    c["category"] = validUtf8(ct.category);
+    c["type"] = toIndexText(ct.qualifiedTypeName);
+    c["category"] = toIndexText(ct.category);
     c["produce"] = texts(ct.produceMethods);
     c["consume"] = texts(ct.consumeMethods);
     channelTypes.push_back(llvm::json::Value(std::move(c)));
@@ -794,16 +795,16 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   // produced and how much of the requested scope it holds. Both come from
   // the meta section alone.
   llvm::json::Object prov;
-  prov["analyzer"] = validUtf8(snap.meta.provenance.analyzer);
-  prov["toolchain"] = validUtf8(snap.meta.provenance.toolchain);
-  prov["environment"] = validUtf8(snap.meta.provenance.environment);
+  prov["analyzer"] = toIndexText(snap.meta.provenance.analyzer);
+  prov["toolchain"] = toIndexText(snap.meta.provenance.toolchain);
+  prov["environment"] = toIndexText(snap.meta.provenance.environment);
   prov["bake_start_ns"] =
       static_cast<int64_t>(snap.meta.provenance.bakeStartNs);
   // The reference a tool payload's indexScope.bake carries.
   const IndexFacts facts =
       IndexFacts::of(snap.meta, IndexFreshness::Unchecked);
   if (!facts.bake.empty())
-    prov["bake"] = validUtf8(facts.bake);
+    prov["bake"] = facts.bake; // already index text
   o["provenance"] = std::move(prov);
   // info never compares the index with the sources.
   o["freshness"] = "unchecked";
@@ -821,7 +822,7 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
     for (size_t i = 0; i < snap.meta.files.size(); ++i) {
       const auto &fs = snap.meta.files[i];
       llvm::json::Object f;
-      f["path"] = validUtf8(fs.path);
+      f["path"] = toIndexText(fs.path);
       f["mtime_ns"] = static_cast<int64_t>(fs.mtimeNs);
       f["size"] = static_cast<int64_t>(fs.size);
       const TuOutcome outcome = i < snap.meta.outcomes.size()
@@ -829,9 +830,9 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
                                     : TuOutcome{};
       f["status"] = tuStatusName(outcome.status);
       if (!outcome.detail.empty())
-        f["detail"] = validUtf8(outcome.detail);
+        f["detail"] = toIndexText(outcome.detail);
       f["fingerprint"] = i < snap.meta.fingerprints.size()
-                             ? validUtf8(snap.meta.fingerprints[i])
+                             ? toIndexText(snap.meta.fingerprints[i])
                              : std::string();
       files.push_back(llvm::json::Value(std::move(f)));
     }
@@ -1323,6 +1324,10 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
     entryPoints = snap->meta.entryPoints;
   if (entryPoints.empty())
     entryPoints.push_back("main");
+  // Flag and meta spellings are raw bytes; tools look them up and echo
+  // them as index text (Utf8.h).
+  for (auto &e : entryPoints)
+    e = lookupText(e);
   ToolContext ctx{snap->graph,  oracle,          snap->cfIndex,
                   entryPoints, &snap->channels, &cache,
                   &snap->summary};

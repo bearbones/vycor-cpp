@@ -130,7 +130,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
-| `Utf8.h` | Every index string is valid UTF-8: converted (invalid bytes to U+FFFD, what `llvm::json` does without assertions) where it enters an index — the interner, inline node/context/channel strings, the snapshot loader, mapped control-flow strings — and lookups by a raw string convert the same way. The snapshot meta keeps TU paths raw (warm start stats them); `info` and the diff report convert them when printing |
+| `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (anneal shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -227,7 +227,9 @@ sections the tool declares (`ToolEntry::needs`, set in
 per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
-place, v13 a checksum per section and for the header: header with
+place, v13 a checksum per section and for the header, v14 index text
+(`callgraph/Utf8.h`) for every graph, control-flow and channel string:
+header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels), so a graph-only tool never
 decodes (or checksums) the

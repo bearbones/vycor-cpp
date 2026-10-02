@@ -274,6 +274,30 @@ void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
   // section O(map ops) instead of O(strings) as worker counts grow
   // (measured neutral at 12 threads; the whole insert path is ~3.4us per
   // context).
+  // Every string is stored as index text (Utf8.h): the interned ones and
+  // the set tables' inline ones alike.
+  for (std::string *str : {&ctx.callerName, &ctx.calleeName, &ctx.callerUsr,
+                           &ctx.calleeUsr, &ctx.callSite, &ctx.tuPath})
+    makeIndexText(*str);
+  for (auto &l : ctx.liveRaiiLocals) {
+    makeIndexText(l.typeName);
+    makeIndexText(l.varName);
+    makeIndexText(l.declLocation);
+  }
+  for (auto &scope : ctx.enclosingTryCatches) {
+    makeIndexText(scope.tryLocation);
+    makeIndexText(scope.enclosingFunction);
+    for (auto &h : scope.handlers) {
+      makeIndexText(h.caughtType);
+      makeIndexText(h.location);
+      makeIndexText(h.bodySummary);
+    }
+  }
+  for (auto &g : ctx.enclosingGuards) {
+    makeIndexText(g.conditionText);
+    makeIndexText(g.location);
+  }
+
   SId calleeDisplayId = interner_.intern(ctx.calleeName);
   SId callerDisplayId = interner_.intern(ctx.callerName);
   // Name-only contexts (hand-built tests, legacy producers) key by display.
@@ -290,22 +314,6 @@ void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
     locals.push_back(StoredRaiiLocal{interner_.intern(l.typeName),
                                      interner_.intern(l.varName),
                                      interner_.intern(l.declLocation), l.kind});
-
-  // The set tables store their strings inline: valid UTF-8 like every
-  // index string (Utf8.h; the interner converts the rest).
-  for (auto &scope : ctx.enclosingTryCatches) {
-    makeValidUtf8(scope.tryLocation);
-    makeValidUtf8(scope.enclosingFunction);
-    for (auto &h : scope.handlers) {
-      makeValidUtf8(h.caughtType);
-      makeValidUtf8(h.location);
-      makeValidUtf8(h.bodySummary);
-    }
-  }
-  for (auto &g : ctx.enclosingGuards) {
-    makeValidUtf8(g.conditionText);
-    makeValidUtf8(g.location);
-  }
 
   std::string scopeKey = ctx.enclosingTryCatches.empty()
                              ? std::string()
@@ -478,17 +486,22 @@ std::pair<uint32_t, uint32_t> ControlFlowIndex::mappedRange(const char *order,
 }
 
 std::string ControlFlowIndex::stringOf(SId id) const {
-  // A mapped string is read straight from the file, so it is converted
-  // here rather than at load (Utf8.h).
+  // A mapped string is read straight from the file. A well-formed index
+  // holds index text only (Utf8.h); a damaged one may not, and is not
+  // scanned at load, so what it holds is converted here.
   if (mapped_)
-    return validUtf8(mappedString(id));
+    return lookupText(mappedString(id));
   if (id >= interner_.size())
     return std::string();
   return interner_.resolve(id);
 }
 
 std::optional<ControlFlowIndex::SId>
-ControlFlowIndex::findId(const std::string &s) const {
+ControlFlowIndex::findId(const std::string &raw) const {
+  // Lookups take index text; raw bytes (not UTF-8) are converted (Utf8.h).
+  // The stored table, mapped or resident, holds index text, so a raw path
+  // and its printed form find the same id.
+  const std::string s = lookupText(raw);
   if (!mapped_)
     return interner_.find(s);
   const MappedStore &m = *mapped_;
@@ -845,7 +858,12 @@ size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   // vector is scrubbed once for the whole set of TUs.
   std::vector<std::string> prefixes;
   std::vector<size_t> candidates;
-  for (const auto &tuPath : tuPaths) {
+  // TU paths are raw bytes (the compilation database's spelling); the
+  // index holds their index text (Utf8.h).
+  std::vector<std::string> tuTexts;
+  for (const auto &tuPath : tuPaths)
+    tuTexts.push_back(toIndexText(tuPath));
+  for (const auto &tuPath : tuTexts) {
     prefixes.push_back(tuPath + ":");
     if (auto tuId = interner_.find(tuPath)) {
       auto it = byTu_.find(*tuId);
@@ -913,7 +931,7 @@ size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
       bySite_.erase(it);
   }
   if (!dead.empty()) {
-    for (const auto &tuPath : tuPaths) {
+    for (const auto &tuPath : tuTexts) {
       if (auto tuId = interner_.find(tuPath)) {
         auto it = byTu_.find(*tuId);
         if (it != byTu_.end())

@@ -73,6 +73,6 @@ fuzzer (it fails before the fix):
 | Target | Finding | Regression test |
 |---|---|---|
 | `fuzz_snapshot` | a count read after a failed id check skipped its bound and sized an allocation (out of memory) | `test_snapshot.cpp` "a count read after a bad id cannot size an allocation" |
-| `fuzz_snapshot` | a string that is not UTF-8 reached `llvm::json` (assertion); real Latin-1 paths and source text do the same | `test_utf8_strings.cpp` |
+| `fuzz_snapshot` | a string that is not UTF-8 reached `llvm::json` (assertion); real Latin-1 paths and source text do the same. Fixed by storing index text (`callgraph/Utf8.h`, an exact escape; a first fix that replaced bytes with U+FFFD merged distinct paths and USRs) | `test_utf8_strings.cpp`; ctest `utf8_paths` (`scripts/utf8-paths-check.py`) for the CLI |
 | `fuzz_snapshot` | a channel site's refcount was merged one `addSite` per count (timeout), and a multi-TU site lost all but its first TU | `test_channel_index.cpp` "ChannelIndex absorb replays each registration under its own TU", "a loaded channel site's refcount is checked and merged in one step" |
 | `fuzz_checkpoint` | a diagnostic kind outside `Diagnostic::Kind` was cast into the enum (UBSan) | `test_anneal_checkpoint.cpp` "A diagnostic kind outside the enum is refused and not loaded" |

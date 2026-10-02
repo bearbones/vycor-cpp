@@ -147,7 +147,7 @@ struct ArgPool {
     if (prop == "query" || prop == "filter")
       // A prefix that may cut a multi-byte character: made whole again,
       // as a query from JSON would be.
-      return validUtf8(pick(functions, salt).substr(0, 3));
+      return lookupText(pick(functions, salt).substr(0, 3));
     return pick(functions, salt);
   }
 
