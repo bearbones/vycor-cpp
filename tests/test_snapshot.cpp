@@ -28,10 +28,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <iterator>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 
 using namespace vycor;
 
@@ -591,6 +593,17 @@ std::string writeText(const std::string &path, const std::string &text) {
   return path;
 }
 
+/// Set `path`'s modification time (nanoseconds since the epoch).
+void setMtime(const std::string &path, uint64_t mtimeNs) {
+  int fd = -1;
+  REQUIRE(!llvm::sys::fs::openFileForWrite(path, fd,
+                                           llvm::sys::fs::CD_OpenExisting,
+                                           llvm::sys::fs::OF_Append));
+  const llvm::sys::TimePoint<> t{std::chrono::nanoseconds(mtimeNs)};
+  CHECK(!llvm::sys::fs::setLastAccessAndModificationTime(fd, t, t));
+  ::close(fd);
+}
+
 /// What the frontend records for a file it opened: whole-second mtime.
 FileStamp parsedStamp(const std::string &path) {
   auto fs = SnapshotIO::stampFiles({path})[0];
@@ -790,6 +803,7 @@ TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
   }
 
   SECTION("each TU is counted once, inputs before deps before retry") {
+    const uint64_t sharedMtime = SnapshotIO::stampFiles({shared})[0].mtimeNs;
     writeText(shared, "// shared, edited\n");
     fps[0] = "fp-a2";
     outcomes[b] = {TuStatus::Crashed, "signal 11"};
@@ -805,7 +819,11 @@ TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
     outcomes[a] = {TuStatus::Partial, "parse errors"};
     SnapshotIO::recordOutcomes(meta, outcomes);
     fps[0] = meta.fingerprints[0];
+    // Restored byte for byte and to its recorded mtime: unchanged. (Its
+    // mtime alone used to depend on the rewrite landing in the same
+    // second as the first write, which a slow first test missed.)
     writeText(shared, "// shared\n");
+    setMtime(shared, sharedMtime);
     CHECK(SnapshotIO::dirtyTUs(meta, SnapshotIO::stampFiles({a, b}), &fps,
                                &why) == std::vector<bool>{true, true});
     CHECK(why.reasons == std::vector<R>{R::Retry, R::Stamp});

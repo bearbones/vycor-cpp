@@ -118,7 +118,7 @@ if(VYCOR_EXT_SOURCES)
   message(STATUS "Organization extensions: ${VYCOR_EXT_SOURCES}")
 endif()
 
-add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES})
+add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES} ${VYCOR_SANITIZER_SOURCES})
 target_link_libraries(vycor-cpp PRIVATE vycor_lib)
 target_compile_options(vycor-cpp PRIVATE ${VYCOR_WARNING_FLAGS})
 

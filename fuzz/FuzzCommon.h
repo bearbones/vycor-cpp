@@ -23,6 +23,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/Snapshot.h"
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/query/Tools.h"
 
 #include "llvm/Support/FileSystem.h"
@@ -144,7 +145,9 @@ struct ArgPool {
     if (prop == "patch")
       return "--- a/main.cpp\n+++ b/main.cpp\n@@ -1,1 +1,1 @@\n-x\n+y\n";
     if (prop == "query" || prop == "filter")
-      return pick(functions, salt).substr(0, 3);
+      // A prefix that may cut a multi-byte character: made whole again,
+      // as a query from JSON would be.
+      return validUtf8(pick(functions, salt).substr(0, 3));
     return pick(functions, salt);
   }
 

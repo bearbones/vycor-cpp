@@ -163,6 +163,9 @@ if(VYCOR_SANITIZE)
   endif()
   add_compile_options(${VYCOR_SANITIZE_FLAGS})
   add_link_options(${VYCOR_SANITIZE_FLAGS})
+  # Runtime defaults, linked into every executable (see the file).
+  set(VYCOR_SANITIZER_SOURCES
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/compat/SanitizerDefaults.cpp")
   message(STATUS "Sanitizers: ${VYCOR_SANITIZE}")
 endif()
 if(VYCOR_FUZZ)

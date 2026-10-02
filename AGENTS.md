@@ -482,7 +482,12 @@ Sanitizer and fuzz options (top-level `CMakeLists.txt`):
   so a UB report fails the test), `thread` (TSan; cannot combine with
   `address`), or any other `-fsanitize=` list. Applied to every target
   configured after it (project, tests, Catch2); the prebuilt LLVM
-  libraries stay uninstrumented.
+  libraries stay uninstrumented. Every executable of an ASan build links
+  `src/compat/SanitizerDefaults.cpp` (`allow_user_poisoning=0`: LLVM's
+  header-inline `BumpPtrAllocator` poisoning, compiled into both our
+  instrumented objects and the uninstrumented LLVM libraries, otherwise
+  reports use-after-poison inside clang; the file says why that is the
+  narrowest switch).
 - `VYCOR_FUZZ` — clang only: coverage instrumentation everywhere, the
   libFuzzer targets under `fuzz/` (`fuzz_snapshot`, `fuzz_checkpoint`,
   `fuzz_shard`, `fuzz_batch`) and `fuzz_seeds`, which writes their seed

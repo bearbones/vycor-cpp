@@ -6,7 +6,7 @@
 set(VYCOR_FUZZ_TARGETS fuzz_snapshot fuzz_checkpoint fuzz_shard fuzz_batch)
 
 foreach(_target IN LISTS VYCOR_FUZZ_TARGETS)
-  add_executable(${_target} ${_target}.cpp)
+  add_executable(${_target} ${_target}.cpp ${VYCOR_SANITIZER_SOURCES})
   target_link_libraries(${_target} PRIVATE vycor_lib)
   target_compile_options(${_target} PRIVATE ${VYCOR_WARNING_FLAGS})
   target_link_options(${_target} PRIVATE -fsanitize=fuzzer)
@@ -15,7 +15,7 @@ foreach(_target IN LISTS VYCOR_FUZZ_TARGETS)
 endforeach()
 
 # Seed corpora, generated from the fixtures at the current formats.
-add_executable(fuzz_seeds fuzz_seeds.cpp)
+add_executable(fuzz_seeds fuzz_seeds.cpp ${VYCOR_SANITIZER_SOURCES})
 target_link_libraries(fuzz_seeds PRIVATE vycor_lib)
 target_compile_options(fuzz_seeds PRIVATE ${VYCOR_WARNING_FLAGS})
 target_compile_definitions(fuzz_seeds PRIVATE

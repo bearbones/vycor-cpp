@@ -105,6 +105,7 @@ add_executable(vycor_tests
   test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
+  ${VYCOR_SANITIZER_SOURCES}
 )
 
 target_link_libraries(vycor_tests PRIVATE
