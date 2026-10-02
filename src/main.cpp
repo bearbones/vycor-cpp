@@ -18,6 +18,7 @@
 #include "vycor/anneal/Checkpoint.h"
 #include "vycor/anneal/DeadCodeAnalyzer.h"
 #include "vycor/anneal/Indexer.h"
+#include "vycor/anneal/Report.h"
 #include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
@@ -37,6 +38,7 @@
 #include "vycor/cli/MegascopeCli.h"
 #include "vycor/cli/SourceSelection.h"
 #include "vycor/compat/PchCache.h"
+#include "vycor/impact/PatchMapping.h"
 #include "vycor/Version.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
@@ -284,6 +286,87 @@ static llvm::cl::opt<std::string>
                        "docs/EXTENDING.md)"),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealSourceList("source-list",
+        llvm::cl::desc("Read source files from this file, one per line "
+                       "('-' = stdin, '#' comments); unioned with --source"),
+        llvm::cl::value_desc("file|-"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealFormat("format",
+        llvm::cl::desc("Report format: text (file:line:col: [check] "
+                       "message), json, or sarif (SARIF 2.1.0)"),
+        llvm::cl::value_desc("text|json|sarif"), llvm::cl::init("text"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealOutput("output",
+        llvm::cl::desc("Write the report to this file instead of stdout"),
+        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealFailOn("fail-on",
+        llvm::cl::desc("Exit 1 when a reported finding is at or above this "
+                       "severity: note (any finding, the default), warning, "
+                       "error, or none"),
+        llvm::cl::value_desc("severity"), llvm::cl::init("note"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    AnnealAllowParseFailures("allow-parse-failures",
+        llvm::cl::desc("Report TUs that failed to parse as a warning instead "
+                       "of exiting 3"),
+        llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealBaseline("baseline",
+        llvm::cl::desc("Suppress the findings recorded in this baseline "
+                       "file and report only new ones, plus a count of "
+                       "baseline entries no longer found"),
+        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealWriteBaseline("write-baseline",
+        llvm::cl::desc("Record the current findings' fingerprints in this "
+                       "baseline file (the run then exits 0 unless a TU "
+                       "failed)"),
+        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealPatchFile("patch-file",
+        llvm::cl::desc("Report only findings on lines this unified diff "
+                       "changes ('-' = stdin)"),
+        llvm::cl::value_desc("file|-"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealGitBase("git-base",
+        llvm::cl::desc("Report only findings on lines changed since this "
+                       "revision (`git diff <rev> [--git-head]`, run in "
+                       "--project-root)"),
+        llvm::cl::value_desc("rev"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealGitHead("git-head",
+        llvm::cl::desc("With --git-base: the revision to diff against "
+                       "(default: the working tree)"),
+        llvm::cl::value_desc("rev"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<std::string>
+    AnnealProjectRoot("project-root",
+        llvm::cl::desc("Directory finding paths and fingerprints are "
+                       "relative to (default: the working directory)"),
+        llvm::cl::value_desc("dir"), llvm::cl::sub(AnnealCmd));
+
+static llvm::cl::opt<bool>
+    AnnealVerbose("verbose",
+        llvm::cl::desc("Also report inline suppressions that suppressed "
+                       "nothing"),
+        llvm::cl::sub(AnnealCmd));
+static llvm::cl::alias AnnealVerboseShort("v",
+                                          llvm::cl::desc("Alias for --verbose"),
+                                          llvm::cl::aliasopt(AnnealVerbose));
 
 static llvm::cl::opt<bool>
     AnnealModelConvertibility("model-convertibility",
@@ -599,14 +682,20 @@ int main(int argc, const char **argv) {
        << VYCOR_HOST_COMPILER_VERSION << "\n";
   });
 
-  llvm::cl::ParseCommandLineOptions(
-      argc, argv,
-      "vycor-cpp: AST-based C++ analysis and transformation tool\n"
-      "\nSubcommands:\n"
-      "  anneal     Detect fragile ADL/CTAD resolution across translation units\n"
-      "  morph     Apply rule-driven AST matcher transformations\n"
-      "  megascope  Index a project's call graph and query it "
-      "(`megascope help`)\n");
+  // A malformed command line exits 2 for anneal (its usage code — exit 1
+  // means findings there) and 1, as before, for everything else.
+  const bool annealArgv = argc > 1 && llvm::StringRef(argv[1]) == "anneal";
+  if (!llvm::cl::ParseCommandLineOptions(
+          argc, argv,
+          "vycor-cpp: AST-based C++ analysis and transformation tool\n"
+          "\nSubcommands:\n"
+          "  anneal     Detect fragile ADL/CTAD resolution across translation "
+          "units\n"
+          "  morph     Apply rule-driven AST matcher transformations\n"
+          "  megascope  Index a project's call graph and query it "
+          "(`megascope help`)\n",
+          &llvm::errs()))
+    return annealArgv ? vycor::kAnnealExitUsage : 1;
 
   vycor::appendGlobalExtraArgs({ExtraArgs.begin(), ExtraArgs.end()});
 
@@ -628,7 +717,7 @@ int main(int argc, const char **argv) {
       // Org registrations (ext/ static init + --org-config) participate.
       vycor::OrgConfig listOrgCfg;
       if (!loadOrgConfigIfSet(AnnealOrgConfig, listOrgCfg))
-        return 1;
+        return vycor::kAnnealExitUsage;
       auto defaults = vycor::defaultCheckSet();
       llvm::outs() << "anneal checks (docs/checks/<name>.md):\n";
       for (const auto &check : vycor::builtinAnnealChecks()) {
@@ -662,13 +751,38 @@ int main(int argc, const char **argv) {
       llvm::outs() << "\n";
       return 0;
     }
+    // Usage errors exit 2 (docs/result-contract.md, "anneal exit codes").
+    const int kUsage = vycor::kAnnealExitUsage;
     if (AnnealBuildPath.empty()) {
       llvm::errs() << "anneal: --build-path is required\n";
-      return 1;
+      return kUsage;
     }
-    if (AnnealSourceFiles.empty()) {
-      llvm::errs() << "anneal: at least one --source file is required\n";
-      return 1;
+    if (AnnealFormat != "text" && AnnealFormat != "json" &&
+        AnnealFormat != "sarif") {
+      llvm::errs() << "anneal: --format must be text, json, or sarif (got '"
+                   << AnnealFormat << "')\n";
+      return kUsage;
+    }
+    std::optional<vycor::Severity> failOn;
+    if (!vycor::parseFailOn(AnnealFailOn, failOn)) {
+      llvm::errs() << "anneal: --fail-on must be note, warning, error, or "
+                      "none (got '"
+                   << AnnealFailOn << "')\n";
+      return kUsage;
+    }
+    if (!AnnealPatchFile.empty() && !AnnealGitBase.empty()) {
+      llvm::errs() << "anneal: --patch-file and --git-base are "
+                      "alternatives\n";
+      return kUsage;
+    }
+    if (!AnnealGitHead.empty() && AnnealGitBase.empty()) {
+      llvm::errs() << "anneal: --git-head requires --git-base\n";
+      return kUsage;
+    }
+    if (AnnealSourceList == "-" && AnnealPatchFile == "-") {
+      llvm::errs() << "anneal: --source-list - and --patch-file - cannot "
+                      "both read stdin\n";
+      return kUsage;
     }
 
     std::string dbError;
@@ -677,14 +791,39 @@ int main(int argc, const char **argv) {
     if (!compDb) {
       llvm::errs() << "anneal: error loading compilation database from "
                    << AnnealBuildPath << ": " << dbError << "\n";
-      return 1;
+      return kUsage;
     }
 
-    std::vector<std::string> files(AnnealSourceFiles.begin(),
-                                   AnnealSourceFiles.end());
+    // --source and --source-list, unioned in order; paths made absolute
+    // and dot-free (cli/SourceSelection.h). Workers get the parent's
+    // already-resolved list.
+    std::vector<std::string> files;
+    {
+      vycor::SourceSelection selection;
+      selection.explicitFiles.assign(AnnealSourceFiles.begin(),
+                                     AnnealSourceFiles.end());
+      selection.listFile = AnnealSourceList;
+      if (selection.explicitFiles.empty() && selection.listFile.empty()) {
+        llvm::errs() << "anneal: at least one --source file (or "
+                        "--source-list) is required\n";
+        return kUsage;
+      }
+      auto selected = vycor::selectSources(*compDb, selection, std::cin);
+      if (!selected) {
+        llvm::errs() << "anneal: " << llvm::toString(selected.takeError())
+                     << "\n";
+        return kUsage;
+      }
+      files = std::move(*selected);
+      if (files.empty()) {
+        llvm::errs() << "anneal: the source list names no files\n";
+        return kUsage;
+      }
+    }
+
     vycor::OrgConfig orgCfg;
     if (!loadOrgConfigIfSet(AnnealOrgConfig, orgCfg))
-      return 1;
+      return kUsage;
 
     // ---- named-check selection (--checks / .vycor-anneal.json) -----------
     // Sources in order, later winning: discovered/explicit config file,
@@ -700,14 +839,14 @@ int main(int argc, const char **argv) {
         if (!buf) {
           llvm::errs() << "anneal: checks-config: cannot read " << cfgPath
                        << ": " << buf.getError().message() << "\n";
-          return 1;
+          return kUsage;
         }
         std::string err;
         if (!vycor::parseChecksConfigJson(
                 std::string((*buf)->getBuffer()), spec, err)) {
           llvm::errs() << "anneal: checks-config: " << cfgPath << ": " << err
                        << "\n";
-          return 1;
+          return kUsage;
         }
       }
       std::string cli = AnnealChecks;
@@ -733,7 +872,7 @@ int main(int argc, const char **argv) {
       std::string err;
       if (!vycor::resolveCheckSpec(spec, enabledChecks, err)) {
         llvm::errs() << "anneal: checks: " << err << "\n";
-        return 1;
+        return kUsage;
       }
     }
 
@@ -777,6 +916,7 @@ int main(int argc, const char **argv) {
       }
       if (AnnealIndexWorker) {
         std::vector<std::pair<std::string, vycor::AnnealIndexPayload>> shards;
+        std::vector<vycor::TuOutcome> outcomes;
         shards.reserve(files.size());
         for (const auto &file : files) {
           llvm::errs() << "WORKER-TU " << file << "\n";
@@ -785,10 +925,11 @@ int main(int argc, const char **argv) {
           vycor::IndexerActionFactory factory(
             shard, opts.enableOdrDiag,
             opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag);
-          tool.run(&factory);
+          outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           shards.emplace_back(file, vycor::AnnealIndexPayload::capture(shard));
         }
-        if (!vycor::writeAnnealIndexShard(AnnealWorkerOut, shards)) {
+        if (!vycor::writeAnnealIndexShard(AnnealWorkerOut, shards,
+                                          outcomes)) {
           llvm::errs() << "anneal: worker: cannot write shard to "
                        << AnnealWorkerOut << "\n";
           return 1;
@@ -803,16 +944,17 @@ int main(int argc, const char **argv) {
         }
         std::vector<std::pair<std::string, std::vector<vycor::Diagnostic>>>
             perTu;
+        std::vector<vycor::TuOutcome> outcomes;
         perTu.reserve(files.size());
         for (const auto &file : files) {
           llvm::errs() << "WORKER-TU " << file << "\n";
           std::vector<vycor::Diagnostic> local;
           auto tool = vycor::makeClangTool(*compDb, {file});
           vycor::AnalyzerActionFactory factory(indexIn, local, opts);
-          tool.run(&factory);
+          outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           perTu.emplace_back(file, std::move(local));
         }
-        if (!vycor::writeAnnealDiagShard(AnnealWorkerOut, perTu)) {
+        if (!vycor::writeAnnealDiagShard(AnnealWorkerOut, perTu, outcomes)) {
           llvm::errs() << "anneal: worker: cannot write shard to "
                        << AnnealWorkerOut << "\n";
           return 1;
@@ -877,9 +1019,56 @@ int main(int argc, const char **argv) {
       };
     }
 
+    // The changed-lines filter and the baseline are read before the
+    // analysis runs, so a bad path fails fast instead of after it.
+    std::string projectRoot;
+    {
+      llvm::SmallString<256> cwd;
+      llvm::sys::fs::current_path(cwd);
+      projectRoot = vycor::absolutePath(
+          AnnealProjectRoot.empty() ? llvm::StringRef(cwd)
+                                    : llvm::StringRef(AnnealProjectRoot),
+          cwd);
+    }
+    std::optional<std::vector<vycor::PatchRange>> changedRanges;
+    if (!AnnealPatchFile.empty() || !AnnealGitBase.empty()) {
+      std::string patch, error;
+      if (!AnnealGitBase.empty()) {
+        if (!vycor::gitDiffText(projectRoot, AnnealGitBase, AnnealGitHead,
+                                patch, error)) {
+          llvm::errs() << "anneal: " << error << "\n";
+          return kUsage;
+        }
+      } else if (AnnealPatchFile == "-") {
+        patch.assign(std::istreambuf_iterator<char>(std::cin),
+                     std::istreambuf_iterator<char>());
+      } else {
+        auto buf = llvm::MemoryBuffer::getFile(AnnealPatchFile);
+        if (!buf) {
+          llvm::errs() << "anneal: cannot read --patch-file "
+                       << AnnealPatchFile << ": "
+                       << buf.getError().message() << "\n";
+          return kUsage;
+        }
+        patch = (*buf)->getBuffer().str();
+      }
+      changedRanges = vycor::parseUnifiedDiff(patch);
+    }
+    std::optional<std::vector<vycor::BaselineEntry>> baseline;
+    if (!AnnealBaseline.empty()) {
+      baseline.emplace();
+      std::string error;
+      if (!vycor::readBaselineFile(AnnealBaseline, *baseline, error)) {
+        llvm::errs() << "anneal: --baseline: " << error << "\n";
+        return kUsage;
+      }
+    }
+
     // Keep the merged index alive for graph-backed post passes.
     vycor::GlobalIndex mergedIndex;
-    auto diagnostics = vycor::runAnalysis(*compDb, files, opts, &mergedIndex);
+    vycor::AnalysisReport analysisReport;
+    auto diagnostics = vycor::runAnalysis(*compDb, files, opts, &mergedIndex,
+                                          &analysisReport);
 
     // Graph-backed checks (dead-code, static-init-hazards) share one call
     // graph build.
@@ -910,15 +1099,88 @@ int main(int argc, const char **argv) {
 
     // Never report on a run an interrupt cut short (callgraph/Interrupt.h).
     vycor::exitIfInterrupted();
-    if (diagnostics.empty()) {
-      llvm::outs() << "anneal: no issues found.\n";
-      return 0;
+
+    // ---- the report (anneal/Report.h) ------------------------------------
+    vycor::AnnealRun run;
+    run.projectRoot = projectRoot;
+    run.tus = std::move(analysisReport.tus);
+    run.checks.assign(enabledChecks.begin(), enabledChecks.end());
+    run.toolVersion = VYCOR_VERSION_STRING;
+    run.reportUnusedSuppressions = AnnealVerbose;
+    run.findings = vycor::buildFindings(diagnostics, projectRoot);
+    // The analyzed TUs are scanned for unused suppressions only under -v.
+    run.suppressed = vycor::applyInlineSuppressions(
+        run.findings,
+        AnnealVerbose ? files : std::vector<std::string>{}, projectRoot,
+        run.unusedSuppressions);
+    const size_t failedTus = vycor::failedTuCount(run);
+
+    bool baselineWritten = false;
+    if (!AnnealWriteBaseline.empty()) {
+      if (failedTus && !AnnealAllowParseFailures) {
+        llvm::errs() << "anneal: --write-baseline: not written — " << failedTus
+                     << " TU(s) failed to parse, so the findings are "
+                        "incomplete (--allow-parse-failures writes it "
+                        "anyway)\n";
+      } else {
+        std::string error;
+        if (!vycor::writeBaselineFile(AnnealWriteBaseline, run.findings,
+                                      error)) {
+          llvm::errs() << "anneal: --write-baseline: " << error << "\n";
+          return kUsage;
+        }
+        llvm::errs() << "anneal: wrote " << run.findings.size()
+                     << " finding(s) to the baseline " << AnnealWriteBaseline
+                     << "\n";
+        baselineWritten = true;
+      }
+    }
+    if (baseline) {
+      run.baselineUsed = true;
+      run.baselined =
+          vycor::applyBaseline(run.findings, *baseline, run.staleBaseline,
+                               changedRanges ? &*changedRanges : nullptr);
+    }
+    if (changedRanges) {
+      run.changedLinesUsed = true;
+      run.outsideChanges =
+          vycor::filterToChangedLines(run.findings, *changedRanges);
     }
 
-    for (const auto &diag : diagnostics)
-      llvm::outs() << diag.callLocation << ": " << diag.message << "\n";
+    auto render = [&](llvm::raw_ostream &os) {
+      if (AnnealFormat == "json")
+        vycor::renderJson(run, os);
+      else if (AnnealFormat == "sarif")
+        vycor::renderSarif(run, os);
+      else
+        vycor::renderText(run, os);
+    };
+    // The TU summary is printed whatever happens to the report, so a run
+    // whose --output cannot be written still names its failed TUs.
+    std::string outputError;
+    bool outputWritten = true;
+    if (!AnnealOutput.empty()) {
+      outputWritten =
+          vycor::writeFileAtomically(AnnealOutput, render, &outputError);
+    } else {
+      render(llvm::outs());
+      llvm::outs().flush();
+    }
+    vycor::renderSummary(run, llvm::errs());
+    if (failedTus && AnnealAllowParseFailures)
+      llvm::errs() << "anneal: WARNING: " << failedTus
+                   << " TU(s) failed; findings in them may be missing "
+                      "(--allow-parse-failures)\n";
+    if (!outputWritten) {
+      llvm::errs() << "anneal: --output: " << outputError << "\n";
+      return kUsage;
+    }
 
-    return 0;
+    // A baseline write accepts the current findings: only a parse failure
+    // still fails the run.
+    return vycor::annealExitCode(run,
+                                 baselineWritten ? std::nullopt : failOn,
+                                 AnnealAllowParseFailures);
   }
 
   // ---- morph ---------------------------------------------------------------

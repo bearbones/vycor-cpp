@@ -35,8 +35,10 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/ParentMapContext.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Index/USRGeneration.h"
 #include "clang/Tooling/CompilationDatabase.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -47,6 +49,7 @@
 #include <map>
 #include <tuple>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <thread>
@@ -55,6 +58,15 @@
 namespace vycor {
 
 namespace {
+
+// Attribute the Custom diagnostics an organization check appended (from
+// index `first` on) to that check, when it did not name itself.
+void stampCheckName(std::vector<Diagnostic> &diags, size_t first,
+                    const std::string &name) {
+  for (size_t i = first; i < diags.size(); ++i)
+    if (diags[i].kind == Diagnostic::Custom && diags[i].checkName.empty())
+      diags[i].checkName = name;
+}
 
 // ---- Overload-resolution heuristics ---------------------------------------
 //
@@ -335,6 +347,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
         Diagnostic diag;
         diag.kind = Diagnostic::ADL_SameScore;
         diag.callLocation = formatLocation(callBeginLoc(expr));
+        diag.scope = enclosingScope(expr);
         diag.resolvedDecl = resolvedSig;
         diag.betterDecl = candidateSig;
         diag.missingHeader = entry->headerPath;
@@ -354,6 +367,7 @@ bool AnalyzerVisitor::VisitCallExpr(clang::CallExpr *expr) {
 
     Diagnostic diag;
     diag.callLocation = formatLocation(callBeginLoc(expr));
+    diag.scope = enclosingScope(expr);
     diag.resolvedDecl = resolvedSig;
     diag.betterDecl = candidateSig;
     diag.missingHeader = entry->headerPath;
@@ -438,6 +452,7 @@ bool AnalyzerVisitor::VisitVarDecl(clang::VarDecl *decl) {
         Diagnostic diag;
         diag.kind = Diagnostic::CTAD_Fallback;
         diag.callLocation = formatLocation(decl->getBeginLoc());
+        diag.scope = enclosingScope(decl);
         diag.resolvedDecl = deducedType;
         diag.betterDecl = entry->deducedType;
         diag.missingHeader = entry->headerPath;
@@ -463,7 +478,7 @@ void AnalyzerVisitor::populateIncludedFiles() const {
 
   // Collect all files that are part of this translation unit.
   for (auto it = sm_.fileinfo_begin(); it != sm_.fileinfo_end(); ++it) {
-    includedFiles_.insert(std::string(it->first.getName()));
+    includedFiles_.insert(absoluteFileName(sm_, it->first.getName()));
   }
 }
 
@@ -474,11 +489,74 @@ bool AnalyzerVisitor::isFileIncluded(const std::string &path) const {
 std::string
 AnalyzerVisitor::formatLocation(clang::SourceLocation loc) const {
   auto spellingLoc = sm_.getSpellingLoc(loc);
-  auto file = sm_.getFilename(spellingLoc);
+  auto file = absoluteFileName(sm_, sm_.getFilename(spellingLoc));
   unsigned line = sm_.getSpellingLineNumber(spellingLoc);
   unsigned col = sm_.getSpellingColumnNumber(spellingLoc);
-  return std::string(file) + ":" + std::to_string(line) + ":" +
+  return file + ":" + std::to_string(line) + ":" +
          std::to_string(col);
+}
+
+namespace {
+
+// A function whose USR carries a byte offset (a lambda's call operator, a
+// local class's method: clang spells their USRs with the location) would
+// make the fingerprint move with every edit above it, so the scope is the
+// nearest enclosing function that is neither.
+bool isStableScope(const clang::FunctionDecl *fn) {
+  if (fn->getParentFunctionOrMethod())
+    return false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
+    if (method->getParent()->isLambda())
+      return false;
+  return true;
+}
+
+std::string usrOf(const clang::Decl *decl) {
+  llvm::SmallString<128> usr;
+  if (!clang::index::generateUSRForDecl(decl, usr))
+    return std::string(usr);
+  if (const auto *named = llvm::dyn_cast<clang::NamedDecl>(decl))
+    return named->getQualifiedNameAsString();
+  return "";
+}
+
+} // namespace
+
+std::string AnalyzerVisitor::enclosingScope(const clang::Expr *expr) const {
+  if (!astContext_)
+    return "";
+  // Up the first-parent chain to a stable enclosing function; a call in a
+  // namespace-scope initializer takes the outermost variable instead.
+  const clang::VarDecl *outerVar = nullptr;
+  clang::DynTypedNode node = clang::DynTypedNode::create(*expr);
+  for (;;) {
+    auto parents = astContext_->getParents(node);
+    if (parents.empty())
+      break;
+    node = parents[0];
+    if (const auto *fn = node.get<clang::FunctionDecl>()) {
+      if (isStableScope(fn))
+        return usrOf(fn);
+    } else if (const auto *var = node.get<clang::VarDecl>()) {
+      outerVar = var;
+    } else if (node.get<clang::TranslationUnitDecl>()) {
+      break;
+    }
+  }
+  return outerVar ? usrOf(outerVar) : "";
+}
+
+std::string
+AnalyzerVisitor::enclosingScope(const clang::VarDecl *decl) const {
+  for (const clang::DeclContext *dc = decl->getParentFunctionOrMethod(); dc;
+       dc = llvm::cast<clang::Decl>(dc)->getParentFunctionOrMethod()) {
+    const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(dc);
+    if (fn && isStableScope(fn))
+      return usrOf(fn);
+    if (!fn)
+      break; // a block or captured statement: fall back to the variable
+  }
+  return decl->getParentFunctionOrMethod() ? "" : usrOf(decl);
 }
 
 std::string
@@ -486,7 +564,7 @@ AnalyzerVisitor::getFilePath(clang::SourceLocation loc) const {
   auto fileEntry = sm_.getFileEntryRefForID(
       sm_.getFileID(sm_.getSpellingLoc(loc)));
   if (fileEntry)
-    return std::string(fileEntry->getName());
+    return absoluteFileName(sm_, fileEntry->getName());
   return "<unknown>";
 }
 
@@ -534,6 +612,7 @@ bool AnalyzerVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
       diag.callLocation = poi.isValid() ? formatLocation(poi)
                                         : formatLocation(decl->getLocation());
       diag.missingHeader = entry->headerPath;
+      diag.entities = {entry->templateName + "<" + args + ">"};
       diag.message =
           "IFNDR: this TU instantiates the primary template '" +
           entry->templateName + "<" + args + ">' but an explicit "
@@ -562,9 +641,15 @@ void AnalyzerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.TraverseDecl(context.getTranslationUnitDecl());
   // Organization checks (ext/ registrars) run after the built-in analysis
   // of the same TU; fresh instances per TU so member state needs no reset.
+  // A Custom diagnostic is always attributed to the check that emitted it
+  // (its name() is the finding's check name, fingerprint input, and SARIF
+  // rule id — anneal/Report.h), even when the check left checkName empty.
   for (auto &check :
-       ExtensionRegistry::instance().createAnnealChecks(opts_.disabledChecks))
+       ExtensionRegistry::instance().createAnnealChecks(opts_.disabledChecks)) {
+    size_t first = diagnostics_.size();
     check->checkTU(context, index_, diagnostics_);
+    stampCheckName(diagnostics_, first, check->name());
+  }
 }
 
 // --- AnalyzerAction ---
@@ -777,7 +862,8 @@ void analyzeOdrViolations(const GlobalIndex &index,
   // per-method echoes of the same root cause.
   std::set<std::string> duplicatedClasses;
 
-  auto analyzeGroup = [&](const Group &group, bool classesOnly) {
+  auto analyzeGroup = [&](const std::string &key, const Group &group,
+                          bool classesOnly) {
     if (group.isClass != classesOnly)
       return;
 
@@ -788,6 +874,7 @@ void analyzeOdrViolations(const GlobalIndex &index,
       Diagnostic diag;
       diag.kind = Diagnostic::ODR_DivergentDefinition;
       diag.callLocation = formatSite(site);
+      diag.entities = {key};
       diag.message =
           "ODR violation: '" + group.displayName + "' at " +
           formatSite(site) + " compiles to " +
@@ -820,6 +907,7 @@ void analyzeOdrViolations(const GlobalIndex &index,
     Diagnostic diag;
     diag.kind = Diagnostic::ODR_DuplicateDefinition;
     diag.callLocation = formatSite(group.sites.front().first);
+    diag.entities = {key};
     diag.message = "ODR violation: '" + group.displayName + "' has " +
                    std::to_string(group.sites.size()) +
                    " definitions with differing bodies (" + sitesText +
@@ -831,9 +919,9 @@ void analyzeOdrViolations(const GlobalIndex &index,
   };
 
   for (const auto &kv : groups)
-    analyzeGroup(kv.second, /*classesOnly=*/true);
+    analyzeGroup(kv.first, kv.second, /*classesOnly=*/true);
   for (const auto &kv : groups)
-    analyzeGroup(kv.second, /*classesOnly=*/false);
+    analyzeGroup(kv.first, kv.second, /*classesOnly=*/false);
 }
 
 // --- default-argument divergence ---
@@ -883,6 +971,7 @@ void analyzeDefaultArgDivergence(const GlobalIndex &index,
     diag.kind = Diagnostic::DefaultArg_Divergent;
     diag.callLocation =
         group.sites.front().file + ":" + std::to_string(group.sites.front().line);
+    diag.entities = {key};
     diag.message =
         "Default-argument divergence: parameter" +
         (group.paramName.empty() ? std::string()
@@ -931,6 +1020,7 @@ void analyzeExceptionSpecDivergence(const GlobalIndex &index,
     Diagnostic diag;
     diag.kind = Diagnostic::ExceptionSpec_Divergent;
     diag.callLocation = formatSite(group.sites.front().first);
+    diag.entities = {key};
 
     // Root-cause first: a single site resolving both ways means the spec
     // depends on preprocessor state (noexcept(MACRO) under differing
@@ -1003,6 +1093,7 @@ void analyzeHeaderStaticDuplication(const GlobalIndex &index,
     Diagnostic diag;
     diag.kind = Diagnostic::HeaderStatic_Duplicated;
     diag.callLocation = entry->filePath + ":" + std::to_string(entry->line);
+    diag.entities = {entry->name};
     diag.message =
         "Header-static duplication: '" + entry->name +
         "' is defined static in " + entry->filePath + ":" +
@@ -1046,6 +1137,7 @@ void analyzeStaticInitOrder(const GlobalIndex &index,
       diag.kind = Diagnostic::StaticInit_OrderDependency;
       diag.callLocation =
           entry->filePath + ":" + std::to_string(entry->line);
+      diag.entities = {entry->qualifiedName, target->qualifiedName};
       diag.message =
           "Static initialization order fiasco: '" + entry->qualifiedName +
           "' (" + entry->filePath + ":" + std::to_string(entry->line) +
@@ -1167,6 +1259,7 @@ void analyzeExceptionEscape(const GlobalIndex &index,
     Diagnostic diag;
     diag.kind = Diagnostic::Exception_Escape;
     diag.callLocation = root->filePath + ":" + std::to_string(root->line);
+    diag.entities = {root->qualifiedName, hit};
     diag.message =
         "Exception escape: noexcept function '" + root->qualifiedName +
         "' (" + root->filePath + ":" + std::to_string(root->line) +
@@ -1247,6 +1340,7 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
     Diagnostic diag;
     diag.kind = Diagnostic::StaticInit_Hazard;
     diag.callLocation = root->filePath + ":" + std::to_string(root->line);
+    diag.entities = {root->qualifiedName, hit};
     diag.message =
         std::string("Static-init hazard: ") +
         (root->isConstructorFn ? "constructor function '"
@@ -1287,14 +1381,70 @@ void runPerTuTasks(const std::vector<std::string> &tus, unsigned threadCount,
   }
 }
 
+TuOutcome workerFailureOutcome(WorkerFailure why) {
+  return why == WorkerFailure::TimedOut
+             ? TuOutcome{TuStatus::TimedOut, "worker timed out"}
+             : TuOutcome{TuStatus::Poisoned, "worker crashed"};
+}
+
+int outcomeRank(TuStatus status) {
+  switch (status) {
+  case TuStatus::Indexed:
+    return 0;
+  case TuStatus::Partial:
+    return 1;
+  case TuStatus::Skipped:
+    return 2;
+  default:
+    return 3; // Crashed, Poisoned, TimedOut: no facts at all
+  }
+}
+
 } // namespace
+
+const TuOutcome &worseOutcome(const TuOutcome &a, const TuOutcome &b) {
+  return outcomeRank(b.status) > outcomeRank(a.status) ? b : a;
+}
+
+TuOutcome outcomeForToolStatus(int status) {
+  switch (status) {
+  case 0:
+    return {TuStatus::Indexed, ""};
+  case 2:
+    return {TuStatus::Skipped, "no compile command"};
+  default:
+    return {TuStatus::Partial, "parse errors"};
+  }
+}
 
 std::vector<Diagnostic>
 runAnalysis(const clang::tooling::CompilationDatabase &compDb,
             const std::vector<std::string> &sourceFiles,
-            const AnalysisOptions &opts, GlobalIndex *indexOut) {
+            const AnalysisOptions &opts, GlobalIndex *indexOut,
+            AnalysisReport *reportOut) {
   GlobalIndex localIndex;
   GlobalIndex &index = indexOut ? *indexOut : localIndex;
+
+  // Per-file slots: phase-2 diagnostics and each TU's outcome land in
+  // source order regardless of task completion order.
+  std::unordered_map<std::string, size_t> slotFor;
+  for (size_t i = 0; i < sourceFiles.size(); ++i)
+    slotFor[sourceFiles[i]] = i;
+  // A TU nothing reported an outcome for (a parse that never ran) reads
+  // as skipped, never as clean.
+  std::vector<TuOutcome> outcomes(
+      sourceFiles.size(), TuOutcome{TuStatus::Skipped, "no outcome reported"});
+  std::vector<bool> noted(sourceFiles.size(), false);
+  std::mutex outcomeMutex;
+  auto noteOutcome = [&](const std::string &file, const TuOutcome &outcome) {
+    auto slot = slotFor.find(file);
+    if (slot == slotFor.end())
+      return;
+    std::lock_guard<std::mutex> lock(outcomeMutex);
+    size_t i = slot->second;
+    outcomes[i] = noted[i] ? worseOutcome(outcomes[i], outcome) : outcome;
+    noted[i] = true;
+  };
 
   // Checkpoint journal (opt-in): per-TU progress survives a killed run.
   std::unique_ptr<AnnealCheckpoint> ckpt;
@@ -1340,27 +1490,51 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
   }
 
+  // A TU whose parse used up kMaxAttempts (died in-process, or its worker
+  // crashed or timed out) is skipped, reported with the outcome journaled
+  // with its last attempt, so a resume reports the same row as the run
+  // that poisoned it.
+  auto skipExhausted = [&](uint8_t phase, const std::string &file,
+                           const FileStamp &st) {
+    std::optional<TuOutcome> why;
+    if (ckpt->attempts(phase, file, st, &why) <
+        AnnealCheckpoint::kMaxAttempts)
+      return false;
+    const char *phaseName =
+        phase == AnnealCheckpoint::kPhaseIndex ? "phase-1" : "phase-2";
+    TuOutcome outcome =
+        why ? *why
+            : TuOutcome{TuStatus::Crashed,
+                        std::string(phaseName) + " parse died " +
+                            std::to_string(AnnealCheckpoint::kMaxAttempts) +
+                            " times (checkpoint)"};
+    llvm::errs() << "anneal: WARNING: skipping " << file << " — its "
+                 << phaseName << " parse "
+                 << (why ? "was poisoned (" + why->detail + ")"
+                         : "died " +
+                               std::to_string(AnnealCheckpoint::kMaxAttempts) +
+                               " time(s)")
+                 << " (see checkpoint); delete the checkpoint file to retry "
+                    "it\n";
+    noteOutcome(file, outcome);
+    return true;
+  };
+
   // Phase 1: index all translation units. Journaled TUs with a matching
-  // stamp are replayed without a parse; TUs whose parse fatally died
-  // kMaxAttempts times are skipped as poisoned.
+  // stamp and a clean parse are replayed without a parse; TUs whose parse
+  // used up kMaxAttempts are skipped as poisoned.
   std::vector<std::string> toIndex;
-  std::vector<FileStamp> contributing; // drives the phase-2 validity hash
   std::set<std::string> poisoned;
   size_t replayed1 = 0;
   for (const auto &file : sourceFiles) {
     const FileStamp *st = ckpt ? stampFor[file] : nullptr;
-    if (ckpt && ckpt->replayPhase1(file, *st, index)) {
-      contributing.push_back(*st);
+    TuOutcome replayedOutcome;
+    if (ckpt && ckpt->replayPhase1(file, *st, index, &replayedOutcome)) {
+      noteOutcome(file, replayedOutcome);
       ++replayed1;
       continue;
     }
-    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseIndex, file, *st) >=
-                    AnnealCheckpoint::kMaxAttempts) {
-      llvm::errs() << "anneal: WARNING: skipping " << file
-                   << " — its phase-1 parse died "
-                   << AnnealCheckpoint::kMaxAttempts
-                   << " time(s) (see checkpoint); delete the checkpoint "
-                      "file to retry it\n";
+    if (ckpt && skipExhausted(AnnealCheckpoint::kPhaseIndex, file, *st)) {
       poisoned.insert(file);
       continue;
     }
@@ -1371,14 +1545,15 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // skips it like an in-process parse that died kMaxAttempts times instead
   // of dispatching it again (and, for a hang, waiting out the timeout
   // again).
-  auto recordPoisoned = [&](uint8_t phase, const std::string &tu) {
+  auto recordPoisoned = [&](uint8_t phase, const std::string &tu,
+                            WorkerFailure why) {
     if (!ckpt)
       return;
     auto it = stampFor.find(tu);
     if (it == stampFor.end())
       return;
     for (unsigned i = 0; i < AnnealCheckpoint::kMaxAttempts; ++i)
-      ckpt->recordAttempt(phase, tu, *it->second);
+      ckpt->recordAttempt(phase, tu, *it->second, workerFailureOutcome(why));
   };
   if (isolate) {
     // Parses run in worker subprocesses; a crashing TU costs only itself
@@ -1394,15 +1569,21 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         toIndex, workers, std::string(shardDir),
         [&](const std::string &shardPath, const std::vector<std::string> &,
             double) {
+          TuOutcome shardOutcome; // set per entry, before its payload
           return readAnnealIndexShard(
               shardPath,
               [&](const std::string &tu, const AnnealIndexPayload &payload) {
                 if (ckpt) {
                   auto it = stampFor.find(tu);
                   if (it != stampFor.end())
-                    ckpt->recordPhase1(tu, *it->second, payload);
+                    ckpt->recordPhase1(tu, *it->second, payload,
+                                       shardOutcome);
                 }
                 payload.applyTo(index);
+              },
+              [&](const std::string &tu, const TuOutcome &outcome) {
+                shardOutcome = outcome;
+                noteOutcome(tu, outcome);
               });
         },
         [&](const std::string &tu, WorkerFailure why) {
@@ -1410,8 +1591,9 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                        << (why == WorkerFailure::TimedOut ? "timed out"
                                                           : "crashed worker")
                        << "): " << tu << "\n";
+          noteOutcome(tu, workerFailureOutcome(why));
           poisoned.insert(tu);
-          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu);
+          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu, why);
         });
   } else {
     runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
@@ -1425,24 +1607,33 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         IndexerActionFactory factory(shard, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
                                          opts.enableExceptionEscapeDiag);
-        tool.run(&factory);
-        ckpt->recordPhase1(file, *st, shard);
+        TuOutcome outcome = outcomeForToolStatus(tool.run(&factory));
+        noteOutcome(file, outcome);
+        ckpt->recordPhase1(file, *st, shard, outcome);
         index.absorb(shard);
       } else {
         auto tool = vycor::makeClangTool(compDb, {file});
         IndexerActionFactory factory(index, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
                                          opts.enableExceptionEscapeDiag);
-        tool.run(&factory);
+        noteOutcome(file, outcomeForToolStatus(tool.run(&factory)));
       }
     });
   }
-  // TUs indexed this run (not poisoned along the way) join the phase-2
-  // validity set alongside the replayed ones.
+  // Every TU not poisoned joins the phase-2 validity set, keyed on its
+  // stamp AND how its phase-1 parse ended: a TU re-parsed because its
+  // last parse failed keeps its stamp, but a parse that now succeeds (its
+  // missing header appeared) contributes new declarations, so every
+  // phase-2 record is invalidated with it.
+  std::vector<FileStamp> contributing;
   if (ckpt)
-    for (const auto &file : toIndex)
-      if (!poisoned.count(file))
-        contributing.push_back(*stampFor[file]);
+    for (const auto &file : sourceFiles)
+      if (!poisoned.count(file)) {
+        FileStamp key = *stampFor[file];
+        key.path += '|';
+        key.path += tuStatusName(outcomes[slotFor[file]].status);
+        contributing.push_back(std::move(key));
+      }
   if (replayed1)
     llvm::errs() << "anneal: checkpoint: " << replayed1 << " of "
                  << sourceFiles.size()
@@ -1473,8 +1664,11 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // record content (unlike per-TU AnnealChecks, whose diagnostics land in
   // phase-2 records).
   for (auto &check :
-       ExtensionRegistry::instance().createIndexChecks(opts.disabledChecks))
+       ExtensionRegistry::instance().createIndexChecks(opts.disabledChecks)) {
+    size_t first = diagnostics.size();
     check->check(index, diagnostics);
+    stampCheckName(diagnostics, first, check->name());
+  }
 
   // Phase 2: analyze each TU against the now-complete index. Per-file
   // slots keep output deterministic (source order) regardless of task
@@ -1483,9 +1677,6 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // that change another TU's diagnostics.
   const uint64_t setHash = ckpt ? annealStampSetHash(contributing) : 0;
   std::vector<std::vector<Diagnostic>> perFile(sourceFiles.size());
-  std::unordered_map<std::string, size_t> slotFor;
-  for (size_t i = 0; i < sourceFiles.size(); ++i)
-    slotFor[sourceFiles[i]] = i;
 
   std::vector<std::string> toAnalyze;
   size_t replayed2 = 0;
@@ -1493,20 +1684,15 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     if (poisoned.count(file))
       continue; // its phase-2 parse would die the same way
     const FileStamp *st = ckpt ? stampFor[file] : nullptr;
-    if (ckpt &&
-        ckpt->replayPhase2(file, *st, setHash, perFile[slotFor[file]])) {
+    TuOutcome replayedOutcome;
+    if (ckpt && ckpt->replayPhase2(file, *st, setHash, perFile[slotFor[file]],
+                                   &replayedOutcome)) {
+      noteOutcome(file, replayedOutcome);
       ++replayed2;
       continue;
     }
-    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseAnalyze, file, *st) >=
-                    AnnealCheckpoint::kMaxAttempts) {
-      llvm::errs() << "anneal: WARNING: skipping " << file
-                   << " — its phase-2 parse died "
-                   << AnnealCheckpoint::kMaxAttempts
-                   << " time(s) (see checkpoint); delete the checkpoint "
-                      "file to retry it\n";
+    if (ckpt && skipExhausted(AnnealCheckpoint::kPhaseAnalyze, file, *st))
       continue;
-    }
     toAnalyze.push_back(file);
   }
   if (isolate) {
@@ -1529,6 +1715,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
           toAnalyze, workers, std::string(shardDir),
           [&](const std::string &shardPath, const std::vector<std::string> &,
               double) {
+            TuOutcome shardOutcome; // set per entry, before its diagnostics
             return readAnnealDiagShard(
                 shardPath,
                 [&](const std::string &tu, std::vector<Diagnostic> diags) {
@@ -1536,8 +1723,13 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                   if (slot == slotFor.end())
                     return; // not ours (malformed shard) — drop
                   if (ckpt)
-                    ckpt->recordPhase2(tu, *stampFor[tu], setHash, diags);
+                    ckpt->recordPhase2(tu, *stampFor[tu], setHash, diags,
+                                       shardOutcome);
                   perFile[slot->second] = std::move(diags);
+                },
+                [&](const std::string &tu, const TuOutcome &outcome) {
+                  shardOutcome = outcome;
+                  noteOutcome(tu, outcome);
                 });
           },
           [&](const std::string &tu, WorkerFailure why) {
@@ -1545,7 +1737,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                          << (why == WorkerFailure::TimedOut ? "timed out"
                                                             : "crashed worker")
                          << "): " << tu << "\n";
-            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu);
+            noteOutcome(tu, workerFailureOutcome(why));
+            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu, why);
           });
     }
   }
@@ -1557,9 +1750,10 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
       std::vector<Diagnostic> local;
       auto tool = vycor::makeClangTool(compDb, {file});
       AnalyzerActionFactory factory(index, local, opts);
-      tool.run(&factory);
+      TuOutcome outcome = outcomeForToolStatus(tool.run(&factory));
+      noteOutcome(file, outcome);
       if (ckpt)
-        ckpt->recordPhase2(file, *stampFor[file], setHash, local);
+        ckpt->recordPhase2(file, *stampFor[file], setHash, local, outcome);
       perFile[slotFor[file]] = std::move(local);
     });
   }
@@ -1575,6 +1769,11 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     diagnostics.insert(diagnostics.end(),
                        std::make_move_iterator(slot.begin()),
                        std::make_move_iterator(slot.end()));
+  if (reportOut) {
+    reportOut->tus.clear();
+    for (size_t i = 0; i < sourceFiles.size(); ++i)
+      reportOut->tus.emplace_back(sourceFiles[i], outcomes[i]);
+  }
   return diagnostics;
 }
 

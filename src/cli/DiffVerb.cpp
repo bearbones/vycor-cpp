@@ -352,6 +352,61 @@ bool takeFlag(std::vector<std::string> &args, llvm::StringRef name,
 
 } // namespace
 
+bool gitDiffText(const std::string &repo, const std::string &base,
+                 const std::string &head, std::string &patch,
+                 std::string &error) {
+  auto git = llvm::sys::findProgramByName("git");
+  if (!git) {
+    error = "git not found on PATH";
+    return false;
+  }
+  llvm::SmallString<128> tmp;
+  if (auto ec = llvm::sys::fs::createTemporaryFile("vycor-diff", "patch",
+                                                   tmp)) {
+    error = "cannot create a temporary file: " + ec.message();
+    return false;
+  }
+  std::vector<llvm::StringRef> argv = {*git};
+  if (!repo.empty()) {
+    argv.push_back("-C");
+    argv.push_back(repo);
+  }
+  // The patch is parsed, not shown: pin everything a user's git config can
+  // change about its shape. Explicit prefixes override diff.mnemonicPrefix
+  // and diff.noprefix (parseUnifiedDiff strips a/ and b/ only), and
+  // core.quotePath=false keeps non-ASCII names unquoted.
+  argv.push_back("-c");
+  argv.push_back("core.quotePath=false");
+  argv.push_back("diff");
+  argv.push_back("-U0");
+  argv.push_back("--no-color");
+  argv.push_back("--no-ext-diff");
+  argv.push_back("--src-prefix=a/");
+  argv.push_back("--dst-prefix=b/");
+  argv.push_back(base);
+  if (!head.empty())
+    argv.push_back(head);
+  argv.push_back("--");
+  std::string errMsg;
+  llvm::StringRef tmpRef(tmp);
+  std::optional<llvm::StringRef> redirects[] = {std::nullopt, tmpRef,
+                                                std::nullopt};
+  int rc = llvm::sys::ExecuteAndWait(*git, argv, std::nullopt, redirects, 0,
+                                     0, &errMsg);
+  auto buf = llvm::MemoryBuffer::getFile(tmp);
+  llvm::sys::fs::remove(tmp);
+  if (rc != 0 || !buf) {
+    error = "`git diff " + base + (head.empty() ? "" : " " + head) +
+            "` failed";
+    if (!errMsg.empty())
+      error += ": " + errMsg;
+    error += " (exit " + std::to_string(rc) + ")";
+    return false;
+  }
+  patch = (*buf)->getBuffer().str();
+  return true;
+}
+
 int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
                     std::istream &in, llvm::raw_ostream &err) {
   std::string patchFile, gitBase, gitHead, repo, error;
@@ -395,47 +450,11 @@ int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
       patch = (*buf)->getBuffer().str();
     }
   } else {
-    auto git = llvm::sys::findProgramByName("git");
-    if (!git) {
-      err << "megascope impact-of-change: git not found on PATH\n";
+    std::string error;
+    if (!gitDiffText(hasRepo ? repo : "", gitBase, gitHead, patch, error)) {
+      err << "megascope impact-of-change: " << error << "\n";
       return kExitUsage;
     }
-    llvm::SmallString<128> tmp;
-    if (auto ec = llvm::sys::fs::createTemporaryFile("vycor-diff", "patch",
-                                                     tmp)) {
-      err << "megascope impact-of-change: cannot create a temporary file: "
-          << ec.message() << "\n";
-      return kExitUsage;
-    }
-    std::vector<llvm::StringRef> argv = {*git};
-    if (hasRepo) {
-      argv.push_back("-C");
-      argv.push_back(repo);
-    }
-    argv.push_back("diff");
-    argv.push_back("-U0");
-    argv.push_back("--no-color");
-    argv.push_back("--no-ext-diff");
-    argv.push_back(gitBase);
-    argv.push_back(gitHead);
-    argv.push_back("--");
-    std::string errMsg;
-    llvm::StringRef tmpRef(tmp);
-    std::optional<llvm::StringRef> redirects[] = {std::nullopt, tmpRef,
-                                                  std::nullopt};
-    int rc = llvm::sys::ExecuteAndWait(*git, argv, std::nullopt, redirects,
-                                       0, 0, &errMsg);
-    auto buf = llvm::MemoryBuffer::getFile(tmp);
-    llvm::sys::fs::remove(tmp);
-    if (rc != 0 || !buf) {
-      err << "megascope impact-of-change: `git diff " << gitBase << " "
-          << gitHead << "` failed";
-      if (!errMsg.empty())
-        err << ": " << errMsg;
-      err << " (exit " << rc << ")\n";
-      return kExitUsage;
-    }
-    patch = (*buf)->getBuffer().str();
   }
   // A diff of a Latin-1 source carries Latin-1 lines; JSON values are
   // UTF-8, converted the way the index converts its paths (Utf8.h), so

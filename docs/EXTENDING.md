@@ -156,10 +156,23 @@ Semantics:
 - Runs inside `vycor-cpp anneal`, per TU, **after** the built-in
   ADL/CTAD analysis of that TU. The two-phase pipeline still applies: the
   `GlobalIndex` you receive was fully populated by phase 1 across all TUs.
-- Diagnostics print through the standard anneal output
-  (`location: message`), so downstream tooling needs no changes.
-- `name()` is the stable ID used by `disabledAnnealChecks`; keep it
-  kebab-case and don't rename casually.
+- Diagnostics go through the standard anneal report: text
+  (`location: [name] message`), JSON, and SARIF, where `name()` is the
+  rule id (one rule per enabled check, `warning` level, no `helpUri`).
+  Inline `// vycor: ignore[name]` suppressions, baselines, and
+  `--fail-on` apply to them like any built-in finding.
+- `name()` is the stable ID used by `disabledAnnealChecks`, `--checks`,
+  and the finding fingerprint (`docs/checks/README.md`, "Finding
+  identity"); keep it kebab-case and don't rename casually — a rename
+  changes every fingerprint, so baselined findings come back as new. A
+  diagnostic left without `checkName` is attributed to `name()`.
+- Set `Diagnostic::callLocation` (`file:line[:col]`) and, for a stable
+  fingerprint, `Diagnostic::entities` (qualified names or USRs of what
+  the finding is about, never a line number). Without entities the
+  fingerprint falls back to the message with `:<line>[:<col>]`
+  references removed and paths under the project root made relative;
+  any other varying text in the message (a path outside the root, a
+  count) changes the fingerprint, so set `entities`.
 
 ### Cross-TU checks over the merged index
 

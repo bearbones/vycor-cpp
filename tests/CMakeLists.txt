@@ -102,6 +102,7 @@ add_executable(vycor_tests
   test_anneal_exception_spec.cpp
   test_check_set.cpp
   test_crash_containment.cpp
+  test_anneal_report.cpp
   test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
@@ -190,6 +191,17 @@ if(Python3_Interpreter_FOUND)
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(interrupt_cleanup PROPERTIES LABELS "cli;containment"
                        TIMEOUT 600)
+  # anneal as a CI gate (scripts/anneal-gate-check.py): exit codes over a
+  # TU that fails to parse, JSON/SARIF (schema-validated against
+  # tests/data/sarif-schema-2.1.0.json), byte-identical JSON across
+  # --checkpoint and --isolate-workers, fingerprints, baselines,
+  # suppressions, and the changed-lines filter.
+  add_test(NAME anneal_gate
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/anneal-gate-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(anneal_gate PROPERTIES LABELS "cli;anneal"
+                       TIMEOUT 900)
 else()
   message(STATUS "python3 not found: the cli_golden test is not registered")
 endif()

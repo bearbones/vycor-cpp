@@ -36,8 +36,11 @@ namespace {
 constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // v2: AnnealIndexPayload gained odrEntries. v3: specializations.
 // v4: defaultArgs. v5: staticInits. v6: functionSummaries.
-// v7: headerStatics. v8: exceptionSpecs.
-constexpr uint32_t kVersion = 8;
+// v7: headerStatics. v8: exceptionSpecs. v9: phase records carry the
+// TU's parse outcome; diagnostics carry entities. v10: diagnostics carry
+// their enclosing scope; an attempt record may carry the outcome that
+// used it up (a worker crash or timeout).
+constexpr uint32_t kVersion = 10;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -581,6 +584,20 @@ bool decodeIndexPayload(Reader &r, AnnealIndexPayload &p) {
   return r.ok;
 }
 
+void putOutcome(std::string &out, const TuOutcome &outcome) {
+  putU8(out, static_cast<uint8_t>(outcome.status));
+  putStr(out, outcome.detail);
+}
+
+bool readOutcome(Reader &r, TuOutcome &outcome) {
+  uint8_t status = r.u8();
+  outcome.detail = r.str();
+  if (status > static_cast<uint8_t>(TuStatus::TimedOut))
+    r.ok = false;
+  outcome.status = static_cast<TuStatus>(status);
+  return r.ok;
+}
+
 void encodeDiagnostics(std::string &out,
                        const std::vector<Diagnostic> &diags) {
   putU32(out, static_cast<uint32_t>(diags.size()));
@@ -592,6 +609,10 @@ void encodeDiagnostics(std::string &out,
     putStr(out, d.missingHeader);
     putStr(out, d.message);
     putStr(out, d.checkName);
+    putU32(out, static_cast<uint32_t>(d.entities.size()));
+    for (const auto &e : d.entities)
+      putStr(out, e);
+    putStr(out, d.scope);
   }
 }
 
@@ -613,6 +634,10 @@ bool decodeDiagnostics(Reader &r, std::vector<Diagnostic> &out) {
     d.missingHeader = r.str();
     d.message = r.str();
     d.checkName = r.str();
+    uint32_t nEntities = r.u32();
+    for (uint32_t k = 0; k < nEntities && r.ok; ++k)
+      d.entities.push_back(r.str());
+    d.scope = r.str();
     out.push_back(std::move(d));
   }
   return r.ok;
@@ -740,13 +765,15 @@ size_t AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       stamp.size = r.u64();
       if (!r.ok)
         break;
-      auto &state = attempts_[attemptKey(phase, tu)];
-      if (state.stamp == stamp) {
-        ++state.count;
-      } else {
-        state.stamp = stamp;
-        state.count = 1;
+      // Optional trailer: the outcome that used this attempt up.
+      std::optional<TuOutcome> why;
+      if (r.pos < r.size) {
+        TuOutcome outcome;
+        if (!readOutcome(r, outcome))
+          break;
+        why = std::move(outcome);
       }
+      countAttempt(attempts_[attemptKey(phase, tu)], stamp, why);
       break;
     }
     case kKindPhase1: {
@@ -755,7 +782,7 @@ size_t AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       rec.stamp.path = tu;
       rec.stamp.mtimeNs = r.u64();
       rec.stamp.size = r.u64();
-      if (!decodeIndexPayload(r, rec.payload))
+      if (!readOutcome(r, rec.outcome) || !decodeIndexPayload(r, rec.payload))
         break;
       // Completion clears the attempt counter for this TU/phase.
       attempts_.erase(attemptKey(kPhaseIndex, tu));
@@ -769,7 +796,8 @@ size_t AnnealCheckpoint::loadRecords(const char *data, size_t size) {
       rec.stamp.mtimeNs = r.u64();
       rec.stamp.size = r.u64();
       rec.indexSetHash = r.u64();
-      if (!decodeDiagnostics(r, rec.diagnostics))
+      if (!readOutcome(r, rec.outcome) ||
+          !decodeDiagnostics(r, rec.diagnostics))
         break;
       attempts_.erase(attemptKey(kPhaseAnalyze, tu));
       phase2_[tu] = std::move(rec);
@@ -789,40 +817,55 @@ size_t AnnealCheckpoint::loadRecords(const char *data, size_t size) {
 // ---------------------------------------------------------------------------
 
 unsigned AnnealCheckpoint::attempts(uint8_t phase, const std::string &tu,
-                                    const FileStamp &stamp) const {
+                                    const FileStamp &stamp,
+                                    std::optional<TuOutcome> *why) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = attempts_.find(attemptKey(phase, tu));
   if (it == attempts_.end() || !(it->second.stamp == stamp))
     return 0;
+  if (why)
+    *why = it->second.why;
   return it->second.count;
 }
 
+const TuOutcome AnnealCheckpoint::kCleanParse{TuStatus::Indexed, ""};
+
 bool AnnealCheckpoint::replayPhase1(const std::string &tu,
-                                    const FileStamp &stamp,
-                                    GlobalIndex &into) const {
+                                    const FileStamp &stamp, GlobalIndex &into,
+                                    TuOutcome *outcome) const {
   const Phase1Record *rec = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = phase1_.find(tu);
-    if (it == phase1_.end() || !(it->second.stamp == stamp))
+    // Only a clean parse is a trustworthy record (TuOutcome.h): a TU that
+    // failed is re-parsed, so fixing its cause (a missing generated
+    // header) clears the failure.
+    if (it == phase1_.end() || !(it->second.stamp == stamp) ||
+        it->second.outcome.status != TuStatus::Indexed)
       return false;
     rec = &it->second;
   }
   // Replay outside the lock: the loaded maps are append-only per run and
   // this record can't be evicted.
   rec->payload.applyTo(into);
+  if (outcome)
+    *outcome = rec->outcome;
   return true;
 }
 
 bool AnnealCheckpoint::replayPhase2(const std::string &tu,
                                     const FileStamp &stamp,
                                     uint64_t indexSetHash,
-                                    std::vector<Diagnostic> &out) const {
+                                    std::vector<Diagnostic> &out,
+                                    TuOutcome *outcome) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = phase2_.find(tu);
   if (it == phase2_.end() || !(it->second.stamp == stamp) ||
-      it->second.indexSetHash != indexSetHash)
+      it->second.indexSetHash != indexSetHash ||
+      it->second.outcome.status != TuStatus::Indexed)
     return false;
+  if (outcome)
+    *outcome = it->second.outcome;
   out.insert(out.end(), it->second.diagnostics.begin(),
              it->second.diagnostics.end());
   return true;
@@ -858,37 +901,37 @@ void AnnealCheckpoint::appendRecord(uint8_t kind, const std::string &payload) {
 }
 
 void AnnealCheckpoint::recordAttempt(uint8_t phase, const std::string &tu,
-                                     const FileStamp &stamp) {
+                                     const FileStamp &stamp,
+                                     const std::optional<TuOutcome> &why) {
   std::string payload;
   putU8(payload, phase);
   putStr(payload, tu);
   putStamp(payload, stamp);
+  if (why)
+    putOutcome(payload, *why);
   appendRecord(kKindAttempt, payload);
 
   // Mirror the load-time counting so same-process queries agree with what
   // a reload would see.
   std::lock_guard<std::mutex> lock(mutex_);
-  auto &state = attempts_[attemptKey(phase, tu)];
-  if (state.stamp == stamp) {
-    ++state.count;
-  } else {
-    state.stamp = stamp;
-    state.count = 1;
-  }
+  countAttempt(attempts_[attemptKey(phase, tu)], stamp, why);
 }
 
 void AnnealCheckpoint::recordPhase1(const std::string &tu,
                                     const FileStamp &stamp,
-                                    const GlobalIndex &shard) {
-  recordPhase1(tu, stamp, AnnealIndexPayload::capture(shard));
+                                    const GlobalIndex &shard,
+                                    const TuOutcome &outcome) {
+  recordPhase1(tu, stamp, AnnealIndexPayload::capture(shard), outcome);
 }
 
 void AnnealCheckpoint::recordPhase1(const std::string &tu,
                                     const FileStamp &stamp,
-                                    const AnnealIndexPayload &contribution) {
+                                    const AnnealIndexPayload &contribution,
+                                    const TuOutcome &outcome) {
   std::string payload;
   putStr(payload, tu);
   putStamp(payload, stamp);
+  putOutcome(payload, outcome);
   encodeIndexPayload(payload, contribution);
   appendRecord(kKindPhase1, payload);
 
@@ -901,11 +944,13 @@ void AnnealCheckpoint::recordPhase1(const std::string &tu,
 void AnnealCheckpoint::recordPhase2(const std::string &tu,
                                     const FileStamp &stamp,
                                     uint64_t indexSetHash,
-                                    const std::vector<Diagnostic> &diags) {
+                                    const std::vector<Diagnostic> &diags,
+                                    const TuOutcome &outcome) {
   std::string payload;
   putStr(payload, tu);
   putStamp(payload, stamp);
   putU64(payload, indexSetHash);
+  putOutcome(payload, outcome);
   encodeDiagnostics(payload, diags);
   appendRecord(kKindPhase2, payload);
 
@@ -924,8 +969,10 @@ namespace {
 // on read (workers write complete files then exit 0).
 // v2: index payloads gained odrEntries. v3: specializations.
 // v4: defaultArgs. v5: staticInits. v6: functionSummaries.
-// v7: headerStatics. v8: exceptionSpecs.
-constexpr uint32_t kShardVersion = 8;
+// v7: headerStatics. v8: exceptionSpecs. v9: index and diagnostics
+// entries lead with the TU's parse outcome; diagnostics carry entities.
+// v10: diagnostics carry their enclosing scope.
+constexpr uint32_t kShardVersion = 10;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>
@@ -989,13 +1036,23 @@ constexpr char kGlobalIndexMagic[4] = {'V', 'Y', 'G', 'I'};
 
 } // namespace
 
+static TuOutcome outcomeAt(const std::vector<TuOutcome> &outcomes,
+                           size_t i) {
+  return i < outcomes.size()
+             ? outcomes[i]
+             : TuOutcome{TuStatus::Skipped, "no outcome reported"};
+}
+
 bool writeAnnealIndexShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus) {
+    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus,
+    const std::vector<TuOutcome> &outcomes) {
   std::vector<std::pair<std::string, std::string>> encoded;
   encoded.reserve(tus.size());
-  for (const auto &[tu, payload] : tus) {
+  for (size_t i = 0; i < tus.size(); ++i) {
+    const auto &[tu, payload] = tus[i];
     std::string bytes;
+    putOutcome(bytes, outcomeAt(outcomes, i));
     encodeIndexPayload(bytes, payload);
     encoded.emplace_back(tu, std::move(bytes));
   }
@@ -1005,12 +1062,17 @@ bool writeAnnealIndexShard(
 bool readAnnealIndexShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             const AnnealIndexPayload &payload)> &fn) {
+                             const AnnealIndexPayload &payload)> &fn,
+    const AnnealOutcomeFn &onOutcome) {
   return readShardFile(path, kIndexShardMagic,
                        [&](const std::string &tu, Reader &r) {
+                         TuOutcome outcome;
                          AnnealIndexPayload payload;
-                         if (!decodeIndexPayload(r, payload))
+                         if (!readOutcome(r, outcome) ||
+                             !decodeIndexPayload(r, payload))
                            return false;
+                         if (onOutcome)
+                           onOutcome(tu, outcome);
                          fn(tu, payload);
                          return true;
                        });
@@ -1018,11 +1080,14 @@ bool readAnnealIndexShard(
 
 bool writeAnnealDiagShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus) {
+    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus,
+    const std::vector<TuOutcome> &outcomes) {
   std::vector<std::pair<std::string, std::string>> encoded;
   encoded.reserve(tus.size());
-  for (const auto &[tu, diags] : tus) {
+  for (size_t i = 0; i < tus.size(); ++i) {
+    const auto &[tu, diags] = tus[i];
     std::string bytes;
+    putOutcome(bytes, outcomeAt(outcomes, i));
     encodeDiagnostics(bytes, diags);
     encoded.emplace_back(tu, std::move(bytes));
   }
@@ -1032,12 +1097,17 @@ bool writeAnnealDiagShard(
 bool readAnnealDiagShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             std::vector<Diagnostic> diags)> &fn) {
+                             std::vector<Diagnostic> diags)> &fn,
+    const AnnealOutcomeFn &onOutcome) {
   return readShardFile(path, kDiagShardMagic,
                        [&](const std::string &tu, Reader &r) {
+                         TuOutcome outcome;
                          std::vector<Diagnostic> diags;
-                         if (!decodeDiagnostics(r, diags))
+                         if (!readOutcome(r, outcome) ||
+                             !decodeDiagnostics(r, diags))
                            return false;
+                         if (onOutcome)
+                           onOutcome(tu, outcome);
                          fn(tu, std::move(diags));
                          return true;
                        });
