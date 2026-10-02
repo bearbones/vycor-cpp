@@ -35,7 +35,13 @@ Scenarios, each over a scratch project written by this script:
                   `ignore[*]`, unused suppressions under -v;
   changed_lines   --patch-file and --git-base keep only findings in
                   changed hunks;
-  source_list     --source-list from a file and from stdin.
+  source_list     --source-list from a file and from stdin;
+  checkpoint_recovery
+                  a TU that failed under --checkpoint is parsed again on
+                  the next run, so creating its missing header clears exit
+                  3 (and the declarations it gains reach the other TUs);
+  worker_timeout  a TU whose worker timed out reports `timeout` on the
+                  run that hit it and on every --checkpoint resume.
 
 Also a ctest: `ctest -R anneal_gate`.
 
@@ -645,10 +651,75 @@ class Check:
         code, _, _ = self.anneal(d, "--source-list", str(d / "missing.txt"))
         self.expect(name, code == 2, f"unreadable list: exit {code}")
 
+    # ---- review follow-ups -------------------------------------------------
+
+    def checkpoint_recovery(self) -> None:
+        name = "checkpoint_recovery"
+        # gen.hpp (a generated header, missing at first) holds the better
+        # overload: until it exists, gen.cpp fails to parse and use.cpp has
+        # no finding.
+        d = self.project(name, {
+            "core.hpp": CORE, "use.cpp": USE,
+            "gen.cpp": '#include "gen.hpp"\nvoid gen() {}\n'})
+        srcs = ["use.cpp", "gen.cpp"]
+        ckpt = str(d / "anneal.ckpt")
+        code, doc = self.json_run(name, d, "--checkpoint", ckpt,
+                                  sources=srcs)
+        tus = {Path(t["file"]).name: t["status"] for t in doc.get("tus", [])}
+        self.expect(name, code == 3 and tus.get("gen.cpp") == "partial",
+                    f"missing header: exit {code}, {tus}")
+        (d / "gen.hpp").write_text(EXT)
+        code, doc = self.json_run(name, d, "--checkpoint", ckpt,
+                                  sources=srcs)
+        tus = {Path(t["file"]).name: t["status"] for t in doc.get("tus", [])}
+        files = [f["file"] for f in doc.get("findings", [])]
+        self.expect(name, code == 1 and tus == {"use.cpp": "analyzed",
+                                                "gen.cpp": "analyzed"}
+                    and files == ["use.cpp"],
+                    f"header created, same checkpoint: exit {code}, {tus}, "
+                    f"findings {files} (expected exit 1, both analyzed, "
+                    f"the use.cpp finding)")
+        _, fresh = self.json_run(name, d, sources=srcs)
+        self.expect(name, doc == fresh,
+                    "resumed JSON differs from a run without the checkpoint")
+        # Resumed again with nothing changed: still the same answer.
+        code, again = self.json_run(name, d, "--checkpoint", ckpt,
+                                    sources=srcs)
+        self.expect(name, code == 1 and again == fresh,
+                    f"second resume: exit {code}")
+
+    def worker_timeout(self) -> None:
+        name = "worker_timeout"
+        slow = ("constexpr long spin() { long s = 0;\n"
+                "  for (long i = 0; i < 2000000000L; ++i) s += i & 1;\n"
+                "  return s; }\n"
+                "constexpr long kSpun = spin();\n")
+        d = self.project(name, {"clean.cpp": CLEAN, "slow.cpp": slow})
+        entries = json.loads((d / "compile_commands.json").read_text())
+        for e in entries:
+            if e["file"].endswith("slow.cpp"):
+                e["arguments"].insert(1, "-fconstexpr-steps=2147483647")
+        (d / "compile_commands.json").write_text(json.dumps(entries))
+        srcs = ["clean.cpp", "slow.cpp"]
+        argv = ["--isolate-workers", "--workers", "1", "--worker-timeout",
+                "2", "--checkpoint", str(d / "anneal.ckpt")]
+        rows = []
+        for attempt in ("first run", "resumed"):
+            code, doc = self.json_run(name, d, *argv, sources=srcs)
+            tus = {Path(t["file"]).name: (t["status"], t.get("detail", ""))
+                   for t in doc.get("tus", [])}
+            rows.append(tus)
+            self.expect(name, code == 3 and
+                        tus.get("slow.cpp", ("",))[0] == "timeout",
+                        f"{attempt}: exit {code}, {tus}")
+        self.expect(name, len(rows) == 2 and rows[0] == rows[1],
+                    f"the resumed run reports differently: {rows}")
+
 
 SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
-             "changed_lines", "source_list"]
+             "changed_lines", "source_list", "checkpoint_recovery",
+             "worker_timeout"]
 
 
 def main() -> int:

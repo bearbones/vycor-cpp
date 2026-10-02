@@ -1422,11 +1422,40 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     }
   }
 
+  // A TU whose parse used up kMaxAttempts (died in-process, or its worker
+  // crashed or timed out) is skipped, reported with the outcome journaled
+  // with its last attempt, so a resume reports the same row as the run
+  // that poisoned it.
+  auto skipExhausted = [&](uint8_t phase, const std::string &file,
+                           const FileStamp &st) {
+    std::optional<TuOutcome> why;
+    if (ckpt->attempts(phase, file, st, &why) <
+        AnnealCheckpoint::kMaxAttempts)
+      return false;
+    const char *phaseName =
+        phase == AnnealCheckpoint::kPhaseIndex ? "phase-1" : "phase-2";
+    TuOutcome outcome =
+        why ? *why
+            : TuOutcome{TuStatus::Crashed,
+                        std::string(phaseName) + " parse died " +
+                            std::to_string(AnnealCheckpoint::kMaxAttempts) +
+                            " times (checkpoint)"};
+    llvm::errs() << "anneal: WARNING: skipping " << file << " — its "
+                 << phaseName << " parse "
+                 << (why ? "was poisoned (" + why->detail + ")"
+                         : "died " +
+                               std::to_string(AnnealCheckpoint::kMaxAttempts) +
+                               " time(s)")
+                 << " (see checkpoint); delete the checkpoint file to retry "
+                    "it\n";
+    noteOutcome(file, outcome);
+    return true;
+  };
+
   // Phase 1: index all translation units. Journaled TUs with a matching
-  // stamp are replayed without a parse; TUs whose parse fatally died
-  // kMaxAttempts times are skipped as poisoned.
+  // stamp and a clean parse are replayed without a parse; TUs whose parse
+  // used up kMaxAttempts are skipped as poisoned.
   std::vector<std::string> toIndex;
-  std::vector<FileStamp> contributing; // drives the phase-2 validity hash
   std::set<std::string> poisoned;
   size_t replayed1 = 0;
   for (const auto &file : sourceFiles) {
@@ -1434,21 +1463,10 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     TuOutcome replayedOutcome;
     if (ckpt && ckpt->replayPhase1(file, *st, index, &replayedOutcome)) {
       noteOutcome(file, replayedOutcome);
-      contributing.push_back(*st);
       ++replayed1;
       continue;
     }
-    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseIndex, file, *st) >=
-                    AnnealCheckpoint::kMaxAttempts) {
-      llvm::errs() << "anneal: WARNING: skipping " << file
-                   << " — its phase-1 parse died "
-                   << AnnealCheckpoint::kMaxAttempts
-                   << " time(s) (see checkpoint); delete the checkpoint "
-                      "file to retry it\n";
-      noteOutcome(file, {TuStatus::Crashed,
-                         "phase-1 parse died " +
-                             std::to_string(AnnealCheckpoint::kMaxAttempts) +
-                             " times (checkpoint)"});
+    if (ckpt && skipExhausted(AnnealCheckpoint::kPhaseIndex, file, *st)) {
       poisoned.insert(file);
       continue;
     }
@@ -1459,14 +1477,15 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // skips it like an in-process parse that died kMaxAttempts times instead
   // of dispatching it again (and, for a hang, waiting out the timeout
   // again).
-  auto recordPoisoned = [&](uint8_t phase, const std::string &tu) {
+  auto recordPoisoned = [&](uint8_t phase, const std::string &tu,
+                            WorkerFailure why) {
     if (!ckpt)
       return;
     auto it = stampFor.find(tu);
     if (it == stampFor.end())
       return;
     for (unsigned i = 0; i < AnnealCheckpoint::kMaxAttempts; ++i)
-      ckpt->recordAttempt(phase, tu, *it->second);
+      ckpt->recordAttempt(phase, tu, *it->second, workerFailureOutcome(why));
   };
   if (isolate) {
     // Parses run in worker subprocesses; a crashing TU costs only itself
@@ -1506,7 +1525,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                        << "): " << tu << "\n";
           noteOutcome(tu, workerFailureOutcome(why));
           poisoned.insert(tu);
-          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu);
+          recordPoisoned(AnnealCheckpoint::kPhaseIndex, tu, why);
         });
   } else {
     runPerTuTasks(toIndex, opts.threadCount, [&](const std::string &file) {
@@ -1533,12 +1552,20 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
       }
     });
   }
-  // TUs indexed this run (not poisoned along the way) join the phase-2
-  // validity set alongside the replayed ones.
+  // Every TU not poisoned joins the phase-2 validity set, keyed on its
+  // stamp AND how its phase-1 parse ended: a TU re-parsed because its
+  // last parse failed keeps its stamp, but a parse that now succeeds (its
+  // missing header appeared) contributes new declarations, so every
+  // phase-2 record is invalidated with it.
+  std::vector<FileStamp> contributing;
   if (ckpt)
-    for (const auto &file : toIndex)
-      if (!poisoned.count(file))
-        contributing.push_back(*stampFor[file]);
+    for (const auto &file : sourceFiles)
+      if (!poisoned.count(file)) {
+        FileStamp key = *stampFor[file];
+        key.path += '|';
+        key.path += tuStatusName(outcomes[slotFor[file]].status);
+        contributing.push_back(std::move(key));
+      }
   if (replayed1)
     llvm::errs() << "anneal: checkpoint: " << replayed1 << " of "
                  << sourceFiles.size()
@@ -1596,19 +1623,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
       ++replayed2;
       continue;
     }
-    if (ckpt && ckpt->attempts(AnnealCheckpoint::kPhaseAnalyze, file, *st) >=
-                    AnnealCheckpoint::kMaxAttempts) {
-      llvm::errs() << "anneal: WARNING: skipping " << file
-                   << " — its phase-2 parse died "
-                   << AnnealCheckpoint::kMaxAttempts
-                   << " time(s) (see checkpoint); delete the checkpoint "
-                      "file to retry it\n";
-      noteOutcome(file, {TuStatus::Crashed,
-                         "phase-2 parse died " +
-                             std::to_string(AnnealCheckpoint::kMaxAttempts) +
-                             " times (checkpoint)"});
+    if (ckpt && skipExhausted(AnnealCheckpoint::kPhaseAnalyze, file, *st))
       continue;
-    }
     toAnalyze.push_back(file);
   }
   if (isolate) {
@@ -1654,7 +1670,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                                                             : "crashed worker")
                          << "): " << tu << "\n";
             noteOutcome(tu, workerFailureOutcome(why));
-            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu);
+            recordPoisoned(AnnealCheckpoint::kPhaseAnalyze, tu, why);
           });
     }
   }

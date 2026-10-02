@@ -111,7 +111,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v9 is current).
+and worker shards (since journal/shard format v2; v10 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `anneal --index-worker` /

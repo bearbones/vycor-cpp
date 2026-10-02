@@ -134,6 +134,15 @@ uint64_t fileSize(const std::string &path) {
   return size;
 }
 
+// "file|status|detail" per TU, in report order.
+std::vector<std::string> outcomeRows(const AnalysisReport &report) {
+  std::vector<std::string> rows;
+  for (const auto &[file, outcome] : report.tus)
+    rows.push_back(llvm::sys::path::filename(file).str() + "|" +
+                   tuStatusName(outcome.status) + "|" + outcome.detail);
+  return rows;
+}
+
 struct CheckpointFileGuard {
   std::string path;
   explicit CheckpointFileGuard(std::string p) : path(std::move(p)) {
@@ -347,8 +356,11 @@ TEST_CASE("A TU whose parse died kMaxAttempts times is skipped on resume",
   // Resume: user_c is poisoned and skipped entirely (both phases); the run
   // degrades to a user_a + user_b analysis — user_a's fragile-ADL
   // diagnostic still fires — instead of dying a third time.
-  auto resumed = runAnalysis(compDb, files, opts);
+  AnalysisReport report;
+  auto resumed = runAnalysis(compDb, files, opts, nullptr, &report);
   REQUIRE(!resumed.empty());
+  CHECK(outcomeRows(report).back() ==
+        "user_c.cpp|crashed|phase-1 parse died 2 times (checkpoint)");
 
   AnalysisOptions plain;
   plain.threadCount = 1;
@@ -467,7 +479,8 @@ TEST_CASE("Shard files round-trip index payloads, diagnostics, and the "
     src.mutableTypeRelations().addBase("D", "B");
 
     REQUIRE(writeAnnealIndexShard(
-        shard.path, {{"tu1.cpp", AnnealIndexPayload::capture(src)}}));
+        shard.path, {{"tu1.cpp", AnnealIndexPayload::capture(src)}},
+        {AnnealCheckpoint::kCleanParse}));
 
     GlobalIndex dst;
     unsigned seen = 0;
@@ -488,7 +501,8 @@ TEST_CASE("Shard files round-trip index payloads, diagnostics, and the "
     d.kind = Diagnostic::ADL_Fallback;
     d.callLocation = "a.cpp:1:1";
     d.message = "msg";
-    REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}}));
+    REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}},
+                                 {AnnealCheckpoint::kCleanParse}));
 
     unsigned seen = 0;
     REQUIRE(readAnnealDiagShard(
@@ -622,15 +636,22 @@ TEST_CASE("A TU the isolated dispatcher poisoned is skipped on resume",
   isolated.isolatedRunner = makeInProcessRunner(compDb, plain, &invocations,
                                                 /*crashOn=*/files[2]);
 
-  auto cold = runAnalysis(compDb, files, isolated);
+  AnalysisReport coldReport, warmReport;
+  auto cold = runAnalysis(compDb, files, isolated, nullptr, &coldReport);
   REQUIRE(invocations.load() > 0);
 
   // Resume: user_a and user_b replay from the journal, user_c is skipped
   // as poisoned — no worker runs at all.
   invocations = 0;
-  auto warm = runAnalysis(compDb, files, isolated);
+  auto warm = runAnalysis(compDb, files, isolated, nullptr, &warmReport);
   CHECK(invocations.load() == 0);
   CHECK(sortedKeys(warm) == sortedKeys(cold));
+  // ... and reported the way the run that poisoned it reported it, not as
+  // an in-process parse that died.
+  CHECK(outcomeRows(coldReport) ==
+        std::vector<std::string>{"user_a.cpp|indexed|", "user_b.cpp|indexed|",
+                                 "user_c.cpp|poisoned|worker crashed"});
+  CHECK(outcomeRows(warmReport) == outcomeRows(coldReport));
 }
 
 // ---- per-TU outcomes (anneal as a CI gate) ---------------------------------
@@ -649,15 +670,6 @@ struct BrokenTuFixture : ScratchFixture {
     return f;
   }
 };
-
-std::vector<std::string>
-outcomeRows(const AnalysisReport &report) {
-  std::vector<std::string> rows;
-  for (const auto &[file, outcome] : report.tus)
-    rows.push_back(llvm::sys::path::filename(file).str() + "|" +
-                   tuStatusName(outcome.status) + "|" + outcome.detail);
-  return rows;
-}
 
 } // namespace
 
@@ -762,13 +774,107 @@ TEST_CASE("Shards carry each TU's outcome", "[AnnealOutcomes]") {
       }));
   CHECK(seen == std::vector<std::string>{"a.cpp|indexed", "b.cpp|partial"});
 
-  // Without outcomes every entry reads as a clean parse.
-  REQUIRE(writeAnnealIndexShard(shard.path, {{"c.cpp", {}}}));
+  // An entry the outcomes do not cover reads as skipped, never as clean.
+  REQUIRE(writeAnnealIndexShard(shard.path, {{"c.cpp", {}}}, {}));
   seen.clear();
   REQUIRE(readAnnealIndexShard(
       shard.path, [](const std::string &, const AnnealIndexPayload &) {},
       [&](const std::string &tu, const TuOutcome &outcome) {
         seen.push_back(tu + "|" + tuStatusName(outcome.status));
       }));
-  CHECK(seen == std::vector<std::string>{"c.cpp|indexed"});
+  CHECK(seen == std::vector<std::string>{"c.cpp|skipped"});
+}
+
+// ---- review follow-ups -------------------------------------------------------
+
+TEST_CASE("A TU whose parse failed is parsed again on resume, so fixing it "
+          "clears the failure",
+          "[AnnealOutcomes]") {
+  CheckpointFileGuard ckpt("anneal_ckpt_refix.vycj");
+  BrokenTuFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.filesWithBroken();
+
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  opts.checkpointPath = ckpt.path;
+  AnalysisReport first;
+  runAnalysis(compDb, files, opts, nullptr, &first);
+  CHECK(outcomeRows(first).back() == "broken.cpp|partial|parse errors");
+
+  // The missing header appears (a generated file). broken.cpp's own stamp
+  // is unchanged, but a failed parse is never a cache entry.
+  fx.write("no-such-header.hpp", "#pragma once\n");
+  AnalysisReport second;
+  runAnalysis(compDb, files, opts, nullptr, &second);
+  std::remove((fx.dir + "/no-such-header.hpp").c_str());
+  CHECK(outcomeRows(second).back() == "broken.cpp|indexed|");
+}
+
+TEST_CASE("Declarations a re-parsed TU gains invalidate the other TUs' "
+          "phase-2 records",
+          "[AnnealOutcomes]") {
+  CheckpointFileGuard ckpt("anneal_ckpt_regen.vycj");
+  ScratchFixture fx;
+  // gen.cpp reaches ext.hpp's better overload only through gen.hpp, which
+  // does not exist yet: until it does, user_a has no fragile call.
+  fx.write("gen.cpp", "#include \"gen.hpp\"\nvoid gen();\n");
+  auto compDb = fx.db();
+  const std::vector<std::string> files = {fx.path("user_a.cpp"),
+                                          fx.path("gen.cpp")};
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  opts.checkpointPath = ckpt.path;
+  CHECK(runAnalysis(compDb, files, opts).empty());
+
+  fx.write("gen.hpp", "#pragma once\n#include \"ext.hpp\"\n");
+  AnalysisReport report;
+  auto resumed = runAnalysis(compDb, files, opts, nullptr, &report);
+  std::remove((fx.dir + "/gen.hpp").c_str());
+  std::remove((fx.dir + "/gen.cpp").c_str());
+  CHECK(outcomeRows(report) ==
+        std::vector<std::string>{"user_a.cpp|indexed|", "gen.cpp|indexed|"});
+  REQUIRE(resumed.size() == 1);
+  CHECK(resumed[0].kind == Diagnostic::ADL_Fallback);
+}
+
+TEST_CASE("An attempt record carries the outcome that used it up",
+          "[AnnealCheckpoint]") {
+  CheckpointFileGuard ckpt("anneal_ckpt_attempt_outcome.vycj");
+  ScratchFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.files();
+
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  opts.checkpointPath = ckpt.path;
+
+  // What the isolated dispatcher journals for a TU whose worker timed out.
+  auto stamps = SnapshotIO::stampFiles({files[2]});
+  REQUIRE(stamps.size() == 1);
+  const TuOutcome timedOut{TuStatus::TimedOut, "worker timed out"};
+  {
+    auto journal =
+        AnnealCheckpoint::open(ckpt.path, annealOptionsFingerprint(opts));
+    REQUIRE(journal);
+    for (unsigned i = 0; i < AnnealCheckpoint::kMaxAttempts; ++i)
+      journal->recordAttempt(AnnealCheckpoint::kPhaseIndex, files[2],
+                             stamps[0], timedOut);
+  }
+  {
+    auto journal =
+        AnnealCheckpoint::open(ckpt.path, annealOptionsFingerprint(opts));
+    REQUIRE(journal);
+    std::optional<TuOutcome> why;
+    CHECK(journal->attempts(AnnealCheckpoint::kPhaseIndex, files[2],
+                            stamps[0], &why) == AnnealCheckpoint::kMaxAttempts);
+    REQUIRE(why);
+    CHECK(*why == timedOut);
+  }
+
+  AnalysisReport report;
+  runAnalysis(compDb, files, opts, nullptr, &report);
+  CHECK(outcomeRows(report) ==
+        std::vector<std::string>{"user_a.cpp|indexed|", "user_b.cpp|indexed|",
+                                 "user_c.cpp|timeout|worker timed out"});
 }

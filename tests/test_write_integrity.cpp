@@ -584,7 +584,8 @@ TEST_CASE("A shard entry length near 4 GiB is refused",
           "[write-integrity][AnnealCheckpoint]") {
   ScratchDir dir;
   const std::string path = dir.file("diag.shard");
-  REQUIRE(writeAnnealDiagShard(path, {{"/src/a.cpp", {}}}));
+  REQUIRE(writeAnnealDiagShard(path, {{"/src/a.cpp", {}}},
+                               {AnnealCheckpoint::kCleanParse}));
   std::string bytes = readBytes(path);
   // magic(4) version(4) count(4) tu(len 4 + 10 bytes) payloadLen(4)...
   const size_t lenAt = 12 + 4 + std::strlen("/src/a.cpp");
