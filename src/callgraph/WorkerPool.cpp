@@ -148,9 +148,9 @@ int runWorkerProcess(const std::vector<std::string> &argv,
     return -1;
   std::vector<llvm::StringRef> args(argv.begin(), argv.end());
   // stdin from the null device (empty redirect path = null device); stdout
-  // joins the stderr log — the parent's own stdout may be an MCP channel
-  // and must never see worker output (identical stdout/stderr paths are
-  // dup'd onto one descriptor).
+  // joins the stderr log — the parent's own stdout carries its result
+  // (`megascope index`'s JSON summary) and must never see worker output
+  // (identical stdout/stderr paths are dup'd onto one descriptor).
   std::optional<llvm::StringRef> redirects[3] = {
       llvm::StringRef(""), llvm::StringRef(logPath), llvm::StringRef(logPath)};
   std::string errMsg;
@@ -409,7 +409,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
                                     const std::vector<std::string> &files,
                                     unsigned workers, BuildStats *stats,
                                     const std::string &shardDir,
-                                    const McpBakeConfig *expected,
+                                    const BakeWorkerConfig *expected,
                                     unsigned batchSizeOverride) {
   BakedIndexes out;
   unsigned poisonedCount = 0;
@@ -467,7 +467,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
 namespace {
 
 WorkerRunner makeSubprocessRunner(const std::string &selfExe,
-                                  const McpBakeConfig &cfg,
+                                  const BakeWorkerConfig &cfg,
                                   const WorkerLimits &limits) {
   return [selfExe, cfg, limits](const std::vector<std::string> &batch,
                         const std::string &shardPath,
@@ -535,7 +535,7 @@ void removeWorkerShardDir(llvm::StringRef dir) {
   llvm::sys::fs::remove_directories(dir, /*IgnoreErrors=*/true);
 }
 
-BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
+BakedIndexes bakeIsolated(const std::string &selfExe, const BakeWorkerConfig &cfg,
                           const std::vector<std::string> &files,
                           unsigned workers, BuildStats *stats,
                           const WorkerLimits &limits) {
@@ -559,16 +559,6 @@ BakedIndexes bakeIsolated(const std::string &selfExe, const McpBakeConfig &cfg,
                                     files, workers, stats,
                                     std::string(shardDir), &cfg);
   removeWorkerShardDir(shardDir);
-  return out;
-}
-
-BakedIndexes bakeTUIsolated(const std::string &selfExe,
-                            const McpBakeConfig &cfg, const std::string &file,
-                            const WorkerLimits &limits) {
-  auto out = bakeIsolated(selfExe, cfg, {file}, 1, nullptr, limits);
-  // A shard directory that could not be created leaves no outcome at all.
-  if (!out.outcomes.count(file))
-    out.outcomes[file] = TuOutcome{TuStatus::Skipped, "worker not run"};
   return out;
 }
 

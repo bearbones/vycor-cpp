@@ -1,5 +1,10 @@
 # Review: megascope as a CLI-first tool (usability and performance)
 
+> **Historical.** The MCP server (`megascope serve`, `src/mcp/`,
+> `reindex_tu`, `scripts/mcp-smoke.py`) was removed on 2026-10-02; the
+> CLI verbs and `megascope batch` answer the same tools
+> (`docs/megascope-usage.md`). This review is kept as a record.
+
 Date: 2026-09-02
 Scope: `src/main.cpp` (megascope/prism wiring), `src/mcp/`, `src/callgraph/`
 (Snapshot, bake, WorkerPool), docs and scripts that describe the agent

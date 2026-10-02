@@ -36,7 +36,6 @@
 #include "vycor/cli/MegascopeCli.h"
 #include "vycor/cli/SourceSelection.h"
 #include "vycor/compat/PchCache.h"
-#include "vycor/mcp/McpServer.h"
 #include "vycor/Version.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
@@ -94,7 +93,7 @@ static llvm::cl::SubCommand
 static llvm::cl::SubCommand
     MegascopeCmd("megascope",
                  "Index a project's call graph and query it (verbs: index, "
-                 "serve, tools, info, batch, <tool>; `megascope help`)");
+                 "tools, info, batch, dump, diff, <tool>; `megascope help`)");
 
 // ---------------------------------------------------------------------------
 // options common to all subcommands
@@ -188,8 +187,8 @@ static llvm::cl::opt<bool>
                         llvm::cl::sub(AnnealCmd));
 
 static llvm::cl::opt<bool>
-    McpNoWait("no-wait",
-        llvm::cl::desc("Fail at once when another index/serve process "
+    MegascopeNoWait("no-wait",
+        llvm::cl::desc("Fail at once when another index process "
                        "holds the index's write lock (<index>.lock) "
                        "instead of waiting for it"),
         llvm::cl::init(false),
@@ -328,13 +327,13 @@ static llvm::cl::opt<bool>
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
-    McpBuildPath("build-path",
+    MegascopeBuildPath("build-path",
                  llvm::cl::desc("Directory containing compile_commands.json"),
                  llvm::cl::value_desc("dir"),
                  llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
-    McpSourceFiles("source",
+    MegascopeSourceFiles("source",
                    llvm::cl::desc("Source files to index (repeatable). "
                                   "Default: every entry of the compilation "
                                   "database"),
@@ -342,70 +341,70 @@ static llvm::cl::list<std::string>
                    llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpSourceList("source-list",
+    MegascopeSourceList("source-list",
         llvm::cl::desc("File with one source path per line ('-' = stdin; "
                        "'#' comments); unioned with --source"),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpSourceRe("source-re",
+    MegascopeSourceRe("source-re",
         llvm::cl::desc("Keep only source paths matching this POSIX extended "
                        "regex (searched, not anchored)"),
         llvm::cl::value_desc("regex"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
-    McpEntryPoints("entry-point",
+    MegascopeEntryPoints("entry-point",
                    llvm::cl::desc("Entry point function names (default: main)"),
                    llvm::cl::value_desc("name"),
                    llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
-    McpCollapsePaths("collapse-paths",
+    MegascopeCollapsePaths("collapse-paths",
         llvm::cl::desc("Path patterns to collapse (internal edges skipped)"),
         llvm::cl::value_desc("pattern"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
-    McpSkipPaths("skip-paths",
+    MegascopeSkipPaths("skip-paths",
         llvm::cl::desc("Path patterns to skip entirely (TUs matching are not processed)"),
         llvm::cl::value_desc("pattern"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
-    McpThreads("threads",
+    MegascopeThreads("threads",
         llvm::cl::desc("Number of threads (0 = hardware_concurrency, 1 = serial)"),
         llvm::cl::init(0),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpPchDir("pch-dir",
+    MegascopePchDir("pch-dir",
         llvm::cl::desc("Directory for compiled PCH cache (enables PCH reuse)"),
         llvm::cl::value_desc("dir"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpClang("clang",
+    MegascopeClang("clang",
         llvm::cl::desc("Path to clang++ binary for PCH compilation"),
         llvm::cl::value_desc("path"),
         llvm::cl::init(VYCOR_DEFAULT_CLANG),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpSysroot("sysroot",
+    MegascopeSysroot("sysroot",
         llvm::cl::desc("macOS SDK sysroot path (default: auto-detect via xcrun)"),
         llvm::cl::value_desc("dir"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
-    McpLockTypes("lock-types",
+    MegascopeLockTypes("lock-types",
         llvm::cl::desc("Qualified names of additional lock types (repeatable)"),
         llvm::cl::value_desc("qualified-name"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpChannelTypesJson("channel-types-json",
+    MegascopeChannelTypesJson("channel-types-json",
         llvm::cl::desc("JSON file registering channel/queue types to trace "
                        "producer/consumer call sites for (see "
                        "ChannelIndex.h for the schema)."),
@@ -413,7 +412,7 @@ static llvm::cl::opt<std::string>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpOrgConfig("org-config",
+    MegascopeOrgConfig("org-config",
         llvm::cl::desc("Organization config JSON (lock/channel types, "
                        "feature-flag patterns, collapse paths — see "
                        "docs/EXTENDING.md). Merged with the equivalent "
@@ -422,45 +421,38 @@ static llvm::cl::opt<std::string>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpIndex("index",
+    MegascopeIndex("index",
         llvm::cl::desc("Index file: load the baked graph if present "
                        "(re-indexing only changed TUs) and save after "
-                       "building. The index/serve verbs default it to "
+                       "building. Default: "
                        "<build-path>/.vycor/megascope.vycs"),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
-// Pre-verb spelling; cl::alias must not carry cl::sub (it inherits
-// McpIndex's subcommand).
+// Older spelling; cl::alias must not carry cl::sub (it inherits
+// MegascopeIndex's subcommand).
 static llvm::cl::alias
-    McpSnapshotAlias("snapshot", llvm::cl::desc("Alias for --index"),
-                     llvm::cl::aliasopt(McpIndex), llvm::cl::NotHidden);
+    MegascopeSnapshotAlias("snapshot", llvm::cl::desc("Alias for --index"),
+                     llvm::cl::aliasopt(MegascopeIndex), llvm::cl::NotHidden);
 
 static llvm::cl::opt<bool>
-    McpVerbose("v",
-        llvm::cl::desc("Verbose: per-request logging in the serve loop"),
+    MegascopeVerbose("v",
+        llvm::cl::desc("Verbose: name each re-indexed TU and why"),
         llvm::cl::init(false),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<bool>
-    McpMcp("mcp",
-        llvm::cl::desc("serve: speak MCP over stdio (the only transport "
-                       "today; on by default)"),
-        llvm::cl::init(true),
-        llvm::cl::sub(MegascopeCmd));
-
-static llvm::cl::opt<bool>
-    McpIsolateWorkers("isolate-workers",
+    MegascopeIsolateWorkers("isolate-workers",
         llvm::cl::desc("Bake the indexes in subprocess workers (a crashing "
                        "or hanging TU costs only that TU; parent RSS stays "
-                       "bounded). Default: on for index/serve when "
+                       "bounded). Default: on when "
                        "--threads is not 1 and --pch-dir is unset; "
                        "--isolate-workers=false bakes in-process"),
         llvm::cl::init(false),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<bool>
-    McpForce("force",
+    MegascopeForce("force",
         llvm::cl::desc("Rebuild the index from scratch instead of "
                        "refreshing the TUs whose sources or headers "
                        "changed"),
@@ -468,7 +460,7 @@ static llvm::cl::opt<bool>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<bool>
-    McpRetryFailed("retry-failed",
+    MegascopeRetryFailed("retry-failed",
         llvm::cl::desc("Re-parse the TUs whose last parse failed even "
                        "when nothing else changed (by default they are "
                        "retried only alongside a refresh that rewrites "
@@ -477,14 +469,14 @@ static llvm::cl::opt<bool>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
-    McpWorkers("workers",
+    MegascopeWorkers("workers",
         llvm::cl::desc("Number of worker processes for --isolate-workers "
                        "(0 = the --threads value)"),
         llvm::cl::init(0),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
-    McpWorkerTimeout("worker-timeout",
+    MegascopeWorkerTimeout("worker-timeout",
         llvm::cl::desc("Under worker isolation: kill a worker that starts "
                        "no new TU for this many seconds and record the TU "
                        "it was parsing as timed out (0 = no timeout)"),
@@ -493,7 +485,7 @@ static llvm::cl::opt<unsigned>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
-    McpWorkerMemoryLimit("worker-memory-limit",
+    MegascopeWorkerMemoryLimit("worker-memory-limit",
         llvm::cl::desc("Under worker isolation: per-worker data-segment "
                        "limit in MiB; a worker that exceeds it dies and its "
                        "TU is poisoned (0 = no limit)"),
@@ -504,33 +496,33 @@ static llvm::cl::opt<unsigned>
 // Worker-mode plumbing (spawned by the --isolate-workers parent; not part
 // of the user-facing surface).
 static llvm::cl::opt<bool>
-    McpBakeWorker("bake-worker",
+    MegascopeBakeWorker("bake-worker",
         llvm::cl::desc("Internal: bake the --source list and write a "
-                       "snapshot shard instead of serving"),
+                       "snapshot shard instead of saving an index"),
         llvm::cl::Hidden,
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpWorkerOut("worker-out",
+    MegascopeWorkerOut("worker-out",
         llvm::cl::desc("Internal: shard output path for --bake-worker"),
         llvm::cl::value_desc("file"),
         llvm::cl::Hidden,
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpStatsJson("stats-json",
+    MegascopeStatsJson("stats-json",
         llvm::cl::desc("Write index-build efficiency statistics (per-phase "
                        "and per-TU timings, parse outcomes, graph sizes, "
                        "snapshot timings, peak RSS) as JSON to this file "
-                       "once the server is ready"),
+                       "once the index is saved"),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<std::string>
-    McpDumpNodes("dump-nodes",
+    MegascopeDumpNodes("dump-nodes",
         llvm::cl::desc("Write the node inventory as TSV (usr, display name, "
                        "file, line, comma-joined caller usrs) to this file "
-                       "once the index is ready, then serve normally. "
+                       "once the index is ready. "
                        "Measurement aid for identity/growth analysis "
                        "(docs/design-f8-usr-identity.md risk note)"),
         llvm::cl::value_desc("file"),
@@ -544,10 +536,10 @@ int main(int argc, const char **argv) {
   // megascope verbs (docs/megascope-cli-review.md §2.1). llvm::cl
   // subcommands are single-level, so the verb is peeled off argv here:
   // query verbs never reach llvm::cl (their flags come from each tool's
-  // JSON schema), while `index`/`serve` share the bake option block with
-  // the legacy verb-less form and hand the remaining argv to llvm::cl.
-  enum class MegascopeVerb { Legacy, Index, Serve };
-  MegascopeVerb megascopeVerb = MegascopeVerb::Legacy;
+  // JSON schema), while `index` shares the bake option block with the
+  // verb-less `--bake-worker` form and hands the remaining argv to
+  // llvm::cl.
+  bool indexVerb = false;
   std::vector<const char *> peeledArgv;
   if (argc >= 2 && llvm::StringRef(argv[1]) == "prism") {
     // Folded into megascope (docs/megascope-cli-review.md §4.1): the query
@@ -571,14 +563,28 @@ int main(int argc, const char **argv) {
       return vycor::runMegascopeQueryVerb({}, llvm::outs(), llvm::errs(),
                                           std::cin);
     llvm::StringRef verb = argv[2];
+    if (verb == "serve") {
+      // The MCP server is gone: the query verbs answer the same tools,
+      // and `batch` keeps one loaded index for many requests.
+      llvm::errs()
+          << "vycor-cpp megascope serve has been removed (the MCP server is "
+             "no longer shipped):\n"
+             "  build or refresh the index -> megascope index --build-path "
+             "<dir> [selection flags]\n"
+             "  query it                   -> megascope <tool> [flags], or "
+             "megascope batch for\n"
+             "                                NDJSON requests on stdin over "
+             "one loaded index\n"
+             "Run `vycor-cpp megascope help`.\n";
+      return vycor::kExitUsage;
+    }
     if (vycor::isMegascopeQueryVerb(verb)) {
       std::vector<std::string> rest(argv + 2, argv + argc);
       return vycor::runMegascopeQueryVerb(rest, llvm::outs(), llvm::errs(),
                                           std::cin);
     }
-    if (verb == "index" || verb == "serve") {
-      megascopeVerb =
-          verb == "index" ? MegascopeVerb::Index : MegascopeVerb::Serve;
+    if (verb == "index") {
+      indexVerb = true;
       peeledArgv.assign(argv, argv + argc);
       peeledArgv.erase(peeledArgv.begin() + 2);
       argv = peeledArgv.data();
@@ -606,7 +612,7 @@ int main(int argc, const char **argv) {
   // SIGINT/SIGTERM: a parent kills its workers and removes its scratch
   // files; a worker dies with its parent (callgraph/Interrupt.h). Before
   // any thread exists, so every later thread inherits the blocked mask.
-  if (McpBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker) {
+  if (MegascopeBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker) {
     vycor::bindWorkerToParent();
     // A worker that crashes (or aborts at --worker-memory-limit) must die,
     // so the parent's marker/poison/bisect path handles the TU
@@ -952,45 +958,33 @@ int main(int argc, const char **argv) {
 
   // ---- megascope -------------------------------------------------------------
   if (MegascopeCmd) {
-    if (McpBuildPath.empty()) {
+    if (!indexVerb && !MegascopeBakeWorker) {
+      llvm::errs() << "megascope: missing verb — `megascope index` builds "
+                      "or refreshes the index; run `vycor-cpp megascope "
+                      "help` for the query verbs\n";
+      return vycor::kExitUsage;
+    }
+    if (MegascopeBuildPath.empty()) {
       llvm::errs() << "megascope: --build-path is required\n";
       return 1;
     }
-    // The serve loop owns stdin; a list piped in (or any /dev/stdin-style
-    // alias, pipe, or device) would be drained before the first request
-    // could arrive. Only a regular file is safe to read here.
-    if (!McpSourceList.empty() && megascopeVerb != MegascopeVerb::Index) {
-      llvm::sys::fs::file_status st;
-      bool regular = McpSourceList != "-" &&
-                     !llvm::sys::fs::status(McpSourceList, st) &&
-                     llvm::sys::fs::is_regular_file(st);
-      if (!regular) {
-        llvm::errs() << "megascope: --source-list must be a regular file "
-                        "with the serve verb (stdin, pipes, and devices "
-                        "are only available with `megascope index`)\n";
-        return 1;
-      }
-    }
-    if (!McpMcp && megascopeVerb != MegascopeVerb::Index) {
-      llvm::errs() << "megascope: MCP is the only serve transport\n";
-      return 1;
-    }
 
-    // The verb forms default the index location to
-    // <build-path>/.vycor/megascope.vycs — not $VYCOR_INDEX, which is a
-    // query-side convenience and must never become a write target (see
-    // resolveIndexPath). The legacy verb-less form keeps --snapshot's
-    // opt-in semantics.
-    std::string indexPath = McpIndex;
-    if (megascopeVerb != MegascopeVerb::Legacy && indexPath.empty())
-      indexPath = vycor::defaultIndexPath(McpBuildPath);
+    // The index location defaults to <build-path>/.vycor/megascope.vycs —
+    // not $VYCOR_INDEX, which is a query-side convenience and must never
+    // become a write target (see resolveIndexPath). A bake worker writes
+    // only its shard (--worker-out).
+    std::string indexPath = MegascopeIndex;
+    if (MegascopeBakeWorker)
+      indexPath.clear();
+    else if (indexPath.empty())
+      indexPath = vycor::defaultIndexPath(MegascopeBuildPath);
 
     std::string dbError;
     auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-        McpBuildPath, dbError);
+        MegascopeBuildPath, dbError);
     if (!compDb) {
       llvm::errs() << "megascope: error loading compilation database from "
-                   << McpBuildPath << ": " << dbError << "\n";
+                   << MegascopeBuildPath << ": " << dbError << "\n";
       return 1;
     }
 
@@ -1003,21 +997,20 @@ int main(int argc, const char **argv) {
 
     // An existing index is loaded before the TU selection: with no
     // selection flag at all its recorded TU set is what gets refreshed,
-    // so a bare `serve` never silently widens a narrow index to the whole
+    // so a bare `index` never silently widens a narrow index to the whole
     // database (and re-saves the result). Workers never carry an index.
     std::optional<vycor::SnapshotData> snap;
     vycor::SnapshotLoadStats snapLoadStats;
     double snapLoadMs = 0;
     // The whole load → dirty check → bake → save sequence runs under the
-    // index's write lock, so two writers (two `index` runs, or `serve`
-    // starting next to one) serialize instead of racing; readers never
-    // lock. Held until the save (serve releases it before serving).
+    // index's write lock, so two `index` runs serialize instead of
+    // racing; readers never lock. Held until the process exits.
     std::unique_ptr<vycor::IndexWriteLock> writeLock;
-    if (!indexPath.empty() && !McpBakeWorker) {
+    if (!indexPath.empty() && !MegascopeBakeWorker) {
       std::string lockError;
       bool busy = false;
       writeLock = vycor::IndexWriteLock::acquire(
-          indexPath, !McpNoWait, &lockError, &busy,
+          indexPath, !MegascopeNoWait, &lockError, &busy,
           [](const std::string &lock) {
             llvm::errs() << "megascope: waiting for another writer holding "
                          << lock << " (pass --no-wait to fail instead)...\n";
@@ -1028,7 +1021,7 @@ int main(int argc, const char **argv) {
       }
       if (!writeLock) {
         // A directory we cannot create the lock file in is one no other
-        // writer can save to either (an unchanged `serve` over a
+        // writer can save to either (an unchanged `index` over a
         // read-only index still works; a save would fail and say so).
         llvm::errs() << "megascope: WARNING: " << lockError
                      << " — continuing without the write lock\n";
@@ -1039,11 +1032,11 @@ int main(int argc, const char **argv) {
                      << " temp file(s) left by an interrupted save\n";
       }
     }
-    if (!indexPath.empty() && !McpBakeWorker) {
+    if (!indexPath.empty() && !MegascopeBakeWorker) {
       auto t0 = StatsClock::now();
       // Meta and header counts only: enough for TU selection and the
       // dirty check. The graph is decoded further down only when a warm
-      // refresh or serve needs it, so an unchanged `index` never pays
+      // refresh or --dump-nodes needs it, so an unchanged `index` never pays
       // for it (5 s on a 938-TU index).
       snap = vycor::SnapshotIO::load(indexPath, &snapLoadStats,
                                      vycor::LoadMode::ReadOnly, 0);
@@ -1052,11 +1045,12 @@ int main(int argc, const char **argv) {
     }
 
     vycor::SourceSelection selection;
-    selection.explicitFiles.assign(McpSourceFiles.begin(),
-                                   McpSourceFiles.end());
-    selection.listFile = McpSourceList;
-    selection.regex = McpSourceRe;
-    selection.skipPaths.assign(McpSkipPaths.begin(), McpSkipPaths.end());
+    selection.explicitFiles.assign(MegascopeSourceFiles.begin(),
+                                   MegascopeSourceFiles.end());
+    selection.listFile = MegascopeSourceList;
+    selection.regex = MegascopeSourceRe;
+    selection.skipPaths.assign(MegascopeSkipPaths.begin(),
+                               MegascopeSkipPaths.end());
     if (snap)
       for (const auto &fs : snap->meta.files)
         selection.recordedFiles.push_back(fs.path);
@@ -1096,46 +1090,47 @@ int main(int argc, const char **argv) {
     }
     if (selStats.regexDropped || selStats.skipDropped || selStats.dbSkipped)
       llvm::errs() << "megascope: " << describeSelection() << "\n";
-    std::vector<std::string> collapsePaths(McpCollapsePaths.begin(),
-                                           McpCollapsePaths.end());
+    std::vector<std::string> collapsePaths(MegascopeCollapsePaths.begin(),
+                                           MegascopeCollapsePaths.end());
 
     // Pre-compile PCH headers if --pch-dir is set.
     std::unique_ptr<vycor::PchCache> pchCache;
-    if (!McpPchDir.empty()) {
+    if (!MegascopePchDir.empty()) {
       llvm::errs() << "megascope: building PCH cache...\n";
       pchCache = std::make_unique<vycor::PchCache>(
-          McpPchDir.getValue(), McpClang.getValue());
+          MegascopePchDir.getValue(), MegascopeClang.getValue());
       pchCache->buildFromCompileCommands(*compDb, files);
     }
     const vycor::PchCache *pchPtr = pchCache.get();
 
-    std::string sysroot = McpSysroot.getValue();
+    std::string sysroot = MegascopeSysroot.getValue();
 
     vycor::LockTypeConfig lockCfg;
-    lockCfg.userAllowlist.assign(McpLockTypes.begin(), McpLockTypes.end());
+    lockCfg.userAllowlist.assign(MegascopeLockTypes.begin(),
+                                 MegascopeLockTypes.end());
     vycor::ChannelTypeConfig channelCfg;
-    if (!McpChannelTypesJson.empty() &&
-        !parseChannelTypesJson(McpChannelTypesJson, channelCfg)) {
+    if (!MegascopeChannelTypesJson.empty() &&
+        !parseChannelTypesJson(MegascopeChannelTypesJson, channelCfg)) {
       return 1;
     }
     vycor::OrgConfig orgCfg;
-    if (!loadOrgConfigIfSet(McpOrgConfig, orgCfg))
+    if (!loadOrgConfigIfSet(MegascopeOrgConfig, orgCfg))
       return 1;
     mergeExtensionConfig(orgCfg, lockCfg, channelCfg, collapsePaths);
     // ---- worker mode (spawned by an --isolate-workers parent) ------------
     // Bake the batch with the existing in-process pipeline (crash guard
-    // still enabled — first line of defense stays in-process), write the v5
-    // snapshot shard, exit. No server loop, no snapshot warm start, no
-    // stats-json. The WORKER-TU stderr marker before each parse is the
-    // parent's poison identifier when this process dies.
-    if (McpBakeWorker) {
-      if (McpWorkerOut.empty()) {
+    // disabled in workers, see main's entry), write the v5 snapshot shard,
+    // exit. No index, no warm start, no stats-json. The WORKER-TU stderr
+    // marker before each parse is the parent's poison identifier when this
+    // process dies.
+    if (MegascopeBakeWorker) {
+      if (MegascopeWorkerOut.empty()) {
         llvm::errs() << "megascope: --bake-worker requires --worker-out\n";
         return 1;
       }
       auto baked = vycor::bakeIndexes(
-          *compDb, files, collapsePaths, McpThreads, pchPtr, sysroot, lockCfg,
-          /*stats=*/nullptr,
+          *compDb, files, collapsePaths, MegascopeThreads, pchPtr, sysroot,
+          lockCfg, /*stats=*/nullptr,
           [](const std::string &f) {
             llvm::errs() << "WORKER-TU " << f << "\n";
           },
@@ -1151,11 +1146,11 @@ int main(int argc, const char **argv) {
       vycor::SnapshotIO::recordDependencies(meta, baked.deps);
       vycor::SnapshotIO::recordOutcomes(meta, baked.outcomes);
       std::string saveError;
-      if (!vycor::SnapshotIO::save(McpWorkerOut, baked.graph, baked.cfIndex,
-                                   meta, baked.channels, &saveError,
-                                   /*durable=*/false)) {
+      if (!vycor::SnapshotIO::save(MegascopeWorkerOut, baked.graph,
+                                   baked.cfIndex, meta, baked.channels,
+                                   &saveError, /*durable=*/false)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
-                     << McpWorkerOut << ": " << saveError << "\n";
+                     << MegascopeWorkerOut << ": " << saveError << "\n";
         return 1;
       }
       return 0;
@@ -1169,7 +1164,7 @@ int main(int argc, const char **argv) {
     // replace the index (SnapshotIO::unpublishableBake).
     std::string bakeRefusal;
 
-    // Efficiency stats, dumped to --stats-json once the server is ready.
+    // Efficiency stats, dumped to --stats-json once the index is saved.
     vycor::BuildStats buildStats;
     // Whether this process changed the indexes relative to the loaded
     // snapshot (full build, or warm-start refresh/drop). An unchanged warm
@@ -1202,7 +1197,8 @@ int main(int argc, const char **argv) {
     // Effective inputs, taken with the stamps: the environment once, each
     // TU's compile commands on top (InputFingerprint.h). A TU whose
     // recorded fingerprint differs is dirty like an edited one.
-    const auto bakeEnv = vycor::BakeEnvironment::current(sysroot, McpPchDir);
+    const auto bakeEnv =
+        vycor::BakeEnvironment::current(sysroot, MegascopePchDir);
     const std::string envFingerprint = vycor::environmentFingerprint(bakeEnv);
     auto fingerprintStart = StatsClock::now();
     auto currentFingerprints =
@@ -1216,38 +1212,39 @@ int main(int argc, const char **argv) {
     // stays for --threads 1 (the in-process crash guard, docs/
     // design-f12-subprocess-workers.md "Failure modes") and for --pch-dir,
     // which workers do not receive.
-    const bool isolate = McpIsolateWorkers.getNumOccurrences()
-                             ? McpIsolateWorkers.getValue()
-                             : McpThreads != 1 && McpPchDir.empty();
+    const bool isolate = MegascopeIsolateWorkers.getNumOccurrences()
+                             ? MegascopeIsolateWorkers.getValue()
+                             : MegascopeThreads != 1 && MegascopePchDir.empty();
     vycor::WorkerLimits workerLimits;
-    workerLimits.timeoutSeconds = McpWorkerTimeout;
-    workerLimits.memoryLimitMB = McpWorkerMemoryLimit;
+    workerLimits.timeoutSeconds = MegascopeWorkerTimeout;
+    workerLimits.memoryLimitMB = MegascopeWorkerMemoryLimit;
     static int selfExeAnchor; // address anchors getMainExecutable
     const std::string selfExe =
         llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
-    vycor::McpBakeConfig bakeCfg;
-    bakeCfg.buildPath = McpBuildPath;
+    vycor::BakeWorkerConfig bakeCfg;
+    bakeCfg.buildPath = MegascopeBuildPath;
     bakeCfg.collapsePaths = collapsePaths;
     bakeCfg.extraArgs = vycor::globalExtraArgs();
     bakeCfg.sysroot = sysroot;
     bakeCfg.lockTypes = lockCfg.userAllowlist;
-    bakeCfg.channelTypesJson = McpChannelTypesJson;
-    bakeCfg.orgConfig = McpOrgConfig;
+    bakeCfg.channelTypesJson = MegascopeChannelTypesJson;
+    bakeCfg.orgConfig = MegascopeOrgConfig;
 
     // One bake for the cold build and the warm refresh alike: the
     // in-process parallel pipeline, or subprocess workers.
     auto runBake = [&](const std::vector<std::string> &toBake) {
       if (isolate) {
         unsigned workerCount =
-            McpWorkers ? McpWorkers.getValue() : McpThreads.getValue();
+            MegascopeWorkers ? MegascopeWorkers.getValue()
+                             : MegascopeThreads.getValue();
         if (workerCount == 0)
           workerCount = std::thread::hardware_concurrency();
         return vycor::bakeIsolated(selfExe, bakeCfg, toBake, workerCount,
                                    &buildStats, workerLimits);
       }
-      return vycor::bakeIndexes(*compDb, toBake, collapsePaths, McpThreads,
-                                pchPtr, sysroot, lockCfg, &buildStats,
-                                nullptr, channelCfg);
+      return vycor::bakeIndexes(*compDb, toBake, collapsePaths,
+                                MegascopeThreads, pchPtr, sysroot, lockCfg,
+                                &buildStats, nullptr, channelCfg);
     };
 
     if (!indexPath.empty()) {
@@ -1287,7 +1284,7 @@ int main(int argc, const char **argv) {
         // with any refresh that rewrites the index anyway (a changed or
         // dropped TU), or --retry-failed/--force.
         if (changed == 0 && dropped == 0 && dirtyWhy.retried > 0 &&
-            !McpRetryFailed && !McpForce) {
+            !MegascopeRetryFailed && !MegascopeForce) {
           for (size_t i = 0; i < dirtyFlags.size(); ++i)
             if (dirtyWhy.reasons[i] ==
                 vycor::SnapshotIO::DirtyReason::Retry)
@@ -1298,7 +1295,7 @@ int main(int argc, const char **argv) {
                           "them)\n";
           dirtyWhy.retried = 0;
         }
-        if (McpForce) {
+        if (MegascopeForce) {
           llvm::errs() << "megascope: --force — full rebuild\n";
         } else if (!configMatch) {
           llvm::errs() << "megascope: snapshot build configuration differs "
@@ -1344,9 +1341,7 @@ int main(int argc, const char **argv) {
           needFullBuild = false;
           snapLoaded = true;
 
-          if (toDrop.empty() && toBake.empty() &&
-              megascopeVerb == MegascopeVerb::Index &&
-              McpDumpNodes.empty()) {
+          if (toDrop.empty() && toBake.empty() && MegascopeDumpNodes.empty()) {
             // Nothing to refresh and nobody to hand the graph to: report
             // the header counts and leave the sections undecoded.
             graphSkipped = true;
@@ -1405,7 +1400,7 @@ int main(int argc, const char **argv) {
                              << " for changed compile inputs, "
                              << dirtyWhy.retried
                              << " retried after a failed parse...\n";
-                if (McpVerbose) {
+                if (MegascopeVerbose) {
                   for (size_t i = 0; i < dirtyFlags.size(); ++i)
                     if (dirtyFlags[i])
                       llvm::errs() << "megascope:   " << currentStamps[i].path
@@ -1455,7 +1450,7 @@ int main(int argc, const char **argv) {
     if (needFullBuild) {
       llvm::errs() << "megascope: baking call graph + control flow index ("
                    << files.size() << " files, "
-                   << McpThreads << " threads)...\n";
+                   << MegascopeThreads << " threads)...\n";
       auto bakeStart = StatsClock::now();
       vycor::BakedIndexes baked = runBake(files);
       bakeMs = msSince(bakeStart);
@@ -1484,18 +1479,12 @@ int main(int argc, const char **argv) {
                                              : channels.size();
 
     bool saveFailed = false;
-    // What every served payload says about these indexes
-    // (docs/result-contract.md): the bake that wrote or kept the index,
-    // and its coverage. Baked here, so `baked`.
-    vycor::IndexFacts serveFacts;
-    if (!indexPath.empty() && !indexesChanged) {
+    if (!indexesChanged) {
       llvm::errs() << "megascope: index unchanged — skipping re-save\n";
       // Nothing re-indexed: the coverage is what the index records
       // (failed TUs left as recorded included).
       coverage = vycor::coverageOf(snap->meta);
-      serveFacts =
-          vycor::IndexFacts::of(snap->meta, vycor::IndexFreshness::Baked);
-    } else if (!indexPath.empty()) {
+    } else {
       vycor::SnapshotMeta meta;
       meta.collapsePaths = collapsePaths;
       meta.lockAllowlist = lockCfg.userAllowlist;
@@ -1505,7 +1494,8 @@ int main(int argc, const char **argv) {
       meta.fingerprints = std::move(currentFingerprints);
       vycor::SnapshotIO::recordDependencies(meta, deps);
       vycor::SnapshotIO::recordOutcomes(meta, outcomes);
-      meta.entryPoints.assign(McpEntryPoints.begin(), McpEntryPoints.end());
+      meta.entryPoints.assign(MegascopeEntryPoints.begin(),
+                              MegascopeEntryPoints.end());
       meta.provenance.analyzer = vycor::analyzerIdentity();
       meta.provenance.toolchain = vycor::toolchainIdentity();
       meta.provenance.environment = envFingerprint;
@@ -1513,7 +1503,6 @@ int main(int argc, const char **argv) {
       unstableStamps =
           vycor::SnapshotIO::markUnstableStamps(meta, bakeStartNs);
       coverage = vycor::coverageOf(meta);
-      serveFacts = vycor::IndexFacts::of(meta, vycor::IndexFreshness::Baked);
       if (!coverage.complete())
         llvm::errs() << "megascope: WARNING: " << coverage.indexed << " of "
                      << coverage.requested << " TU(s) indexed cleanly ("
@@ -1539,22 +1528,13 @@ int main(int argc, const char **argv) {
                      << indexPath << ": " << saveError
                      << " (the previous index is left as it was)\n";
       }
-    } else {
-      // No index file: the coverage of this in-memory bake, with no
-      // saved bake to cite.
-      vycor::SnapshotMeta meta;
-      meta.channelTypes = channelCfg.registeredTypes;
-      meta.files = currentStamps;
-      vycor::SnapshotIO::recordOutcomes(meta, outcomes);
-      coverage = vycor::coverageOf(meta);
-      serveFacts = vycor::IndexFacts::of(meta, vycor::IndexFreshness::Baked);
     }
 
-    if (!McpStatsJson.empty()) {
+    if (!MegascopeStatsJson.empty()) {
       llvm::json::Object root;
       root["mode"] = needFullBuild ? "cold" : "warm";
       root["files"] = static_cast<int64_t>(files.size());
-      root["threads"] = static_cast<int64_t>(McpThreads);
+      root["threads"] = static_cast<int64_t>(MegascopeThreads);
       root["bake_wall_ms"] = bakeMs;
       root["phase1_wall_ms"] = buildStats.phase1WallMs;
       root["phase2_wall_ms"] = buildStats.phase2WallMs;
@@ -1622,23 +1602,23 @@ int main(int argc, const char **argv) {
       root["tu"] = std::move(tus);
 
       std::error_code ec;
-      llvm::raw_fd_ostream out(McpStatsJson, ec);
+      llvm::raw_fd_ostream out(MegascopeStatsJson, ec);
       if (ec) {
         llvm::errs() << "megascope: WARNING: cannot write stats to "
-                     << McpStatsJson << ": " << ec.message() << "\n";
+                     << MegascopeStatsJson << ": " << ec.message() << "\n";
       } else {
         out << llvm::json::Value(std::move(root)) << "\n";
-        llvm::errs() << "megascope: stats written to " << McpStatsJson
+        llvm::errs() << "megascope: stats written to " << MegascopeStatsJson
                      << "\n";
       }
     }
 
-    if (!McpDumpNodes.empty()) {
+    if (!MegascopeDumpNodes.empty()) {
       std::error_code ec;
-      llvm::raw_fd_ostream out(McpDumpNodes, ec);
+      llvm::raw_fd_ostream out(MegascopeDumpNodes, ec);
       if (ec) {
         llvm::errs() << "megascope: WARNING: cannot write node dump to "
-                     << McpDumpNodes << ": " << ec.message() << "\n";
+                     << MegascopeDumpNodes << ": " << ec.message() << "\n";
       } else {
         // Tabs/newlines cannot appear in USRs or qualified names; no
         // escaping needed. Caller USRs come from the same materialized
@@ -1658,66 +1638,31 @@ int main(int argc, const char **argv) {
           out << '\n';
         }
         llvm::errs() << "megascope: node dump (" << graph.nodeCount()
-                     << " nodes) written to " << McpDumpNodes << "\n";
+                     << " nodes) written to " << MegascopeDumpNodes << "\n";
       }
     }
 
-    if (megascopeVerb == MegascopeVerb::Index) {
-      // The index file is the product: failing to write it is the error.
-      if (saveFailed)
-        return 1;
-      llvm::json::Object summary;
-      summary["index"] = indexPath;
-      summary["mode"] = needFullBuild ? "cold" : "warm";
-      summary["files"] = static_cast<int64_t>(files.size());
-      summary["refreshed"] = static_cast<int64_t>(warmRefreshed);
-      summary["refreshed_for_headers"] = static_cast<int64_t>(warmViaDeps);
-      summary["refreshed_for_inputs"] = static_cast<int64_t>(warmViaInputs);
-      summary["retried"] = static_cast<int64_t>(warmRetried);
-      summary["dropped"] = static_cast<int64_t>(warmDropped);
-      summary["indexed"] = static_cast<int64_t>(coverage.indexed);
-      summary["partial"] = static_cast<int64_t>(coverage.partial);
-      summary["failed"] = static_cast<int64_t>(coverage.failed);
-      summary["nodes"] = static_cast<int64_t>(liveNodes);
-      summary["edges"] = static_cast<int64_t>(liveEdges);
-      summary["call_sites"] = static_cast<int64_t>(liveCallSites);
-      summary["channel_sites"] = static_cast<int64_t>(liveChannelSites);
-      llvm::outs() << llvm::json::Value(std::move(summary)) << "\n";
-      return 0;
-    }
-
-    // --entry-point, else the roots recorded in the index (v8 meta), else
-    // main — the same resolution the query verbs use.
-    std::vector<std::string> entryPoints(McpEntryPoints.begin(),
-                                         McpEntryPoints.end());
-    if (entryPoints.empty() && snap)
-      entryPoints = snap->meta.entryPoints;
-    if (entryPoints.empty())
-      entryPoints.push_back("main");
-
-    vycor::McpBuildParams buildParams;
-    buildParams.compDb = std::shared_ptr<clang::tooling::CompilationDatabase>(
-        std::move(compDb));
-    buildParams.collapsePaths = collapsePaths;
-    buildParams.pchCache = pchPtr;
-    buildParams.sysroot = sysroot;
-    buildParams.lockCfg = std::move(lockCfg);
-    buildParams.channelCfg = std::move(channelCfg);
-    if (isolate) {
-      // reindex_tu re-parses in a worker too (bakeTUIsolated).
-      buildParams.workerExe = selfExe;
-      buildParams.workerCfg = bakeCfg;
-      buildParams.workerLimits = workerLimits;
-    }
-
-    // Serving only reads: let the next writer in.
-    writeLock.reset();
-    vycor::McpServer server(std::move(graph), std::move(cfIndex),
-                                 std::move(channels), std::move(entryPoints),
-                                 std::move(buildParams));
-    server.setVerbose(McpVerbose);
-    server.setIndexFacts(std::move(serveFacts));
-    return server.run();
+    // The index file is the product: failing to write it is the error.
+    if (saveFailed)
+      return 1;
+    llvm::json::Object summary;
+    summary["index"] = indexPath;
+    summary["mode"] = needFullBuild ? "cold" : "warm";
+    summary["files"] = static_cast<int64_t>(files.size());
+    summary["refreshed"] = static_cast<int64_t>(warmRefreshed);
+    summary["refreshed_for_headers"] = static_cast<int64_t>(warmViaDeps);
+    summary["refreshed_for_inputs"] = static_cast<int64_t>(warmViaInputs);
+    summary["retried"] = static_cast<int64_t>(warmRetried);
+    summary["dropped"] = static_cast<int64_t>(warmDropped);
+    summary["indexed"] = static_cast<int64_t>(coverage.indexed);
+    summary["partial"] = static_cast<int64_t>(coverage.partial);
+    summary["failed"] = static_cast<int64_t>(coverage.failed);
+    summary["nodes"] = static_cast<int64_t>(liveNodes);
+    summary["edges"] = static_cast<int64_t>(liveEdges);
+    summary["call_sites"] = static_cast<int64_t>(liveCallSites);
+    summary["channel_sites"] = static_cast<int64_t>(liveChannelSites);
+    llvm::outs() << llvm::json::Value(std::move(summary)) << "\n";
+    return 0;
   }
 
   llvm::errs() << "No subcommand specified. Use 'anneal', 'morph', "

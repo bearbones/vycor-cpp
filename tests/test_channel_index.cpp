@@ -310,9 +310,9 @@ TEST_CASE("ChannelIndex proves same-vs-different channel under a guard "
   llvm::sys::fs::remove(built.path);
 }
 
-TEST_CASE("explain_ordering MCP tool proves same-vs-different channel "
-          "end-to-end (AST -> ChannelIndex -> MCP JSON)",
-          "[ChannelIndex][AST][mcp]") {
+TEST_CASE("explain_ordering tool proves same-vs-different channel "
+          "end-to-end (AST -> ChannelIndex -> tool JSON)",
+          "[ChannelIndex][AST][tools]") {
   ChannelTypeConfig cfg;
   ChannelTypeSpec spec;
   spec.qualifiedTypeName = "Queue";

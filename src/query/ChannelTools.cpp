@@ -354,8 +354,8 @@ void registerChannelTools(std::vector<ToolEntry> &tools) {
         "call sites to list. Alias: 'name'.");
     addPagingProps(props, kDefaultListLimit, "sites");
     // Not "required": the handler accepts the 'name' alias, and a schema
-    // requirement on the canonical spelling would make the CLI and strict
-    // MCP clients reject it. The handler reports a missing identity itself.
+    // requirement on the canonical spelling would make the CLI (and any
+    // schema-validating caller) reject it. The handler reports a missing identity itself.
     llvm::json::Object schema;
     schema["type"] = "object";
     schema["properties"] = std::move(props);

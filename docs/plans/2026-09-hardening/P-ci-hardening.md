@@ -12,15 +12,16 @@ build that ships is the build that is tested.
   LLVM 18/20/21 matrix. There is no ASan, UBSan, or TSan job and no Release
   test run, although releases ship Release builds, where asserts
   (including `CallGraph`'s read-only guards) compile out.
-- No fuzz targets exist. Four parsers read untrusted or corruptible bytes:
+- No fuzz targets exist. Three parsers read untrusted or corruptible bytes:
   the snapshot loader (`src/callgraph/Snapshot.cpp`, including the mapped
   v12 control-flow section in `ControlFlowIndex.cpp:339-461`), the anneal
-  checkpoint journal and worker shards (`src/anneal/Checkpoint.cpp`), and the
-  MCP framing reader (`src/mcp/McpProtocol.cpp`).
+  checkpoint journal and worker shards (`src/anneal/Checkpoint.cpp`), and
+  the `megascope batch` request loop (`src/cli/MegascopeCli.cpp`). (The
+  MCP framing reader this list named was removed with the MCP server.)
 - Corruption coverage is thin: `tests/test_snapshot.cpp:493` covers bad
   magic, half-truncation, and version mismatch only. There are no tests for
-  torn concurrent writes, garbage or oversized MCP input, worker hangs, or a
-  failed `reindex_tu` (H, I, and J each add their own reproductions).
+  torn concurrent writes or worker hangs (H and I each added their own
+  reproductions).
 - The thread pool bake and the concurrent `CallGraph`/`ControlFlowIndex`
   inserts have never run under TSan.
 
@@ -37,21 +38,21 @@ build that ships is the build that is tested.
    document it in AGENTS.md.
 2. Fuzz targets (libFuzzer, built only with `-DVYCOR_FUZZ=ON` under clang):
    snapshot load in both `Mutable` and `ReadOnly` modes followed by a few
-   queries; checkpoint journal replay; worker shard read; MCP
-   `readRequest` over an in-memory stream. Seed corpora from the test
-   fixtures (a small saved index, a journal, a shard, recorded MCP
-   sessions).
+   queries; checkpoint journal replay; worker shard read; `megascope
+   batch` over an in-memory stream and a small index. Seed corpora from
+   the test fixtures (a small saved index, a journal, a shard, the
+   `batch` golden's requests).
 3. Run each fuzz target for a fixed short budget in CI (for example 60 s
    each, on pull requests that touch the corresponding file), and longer on
    a nightly schedule; upload crashing inputs as artifacts.
 4. Triage: fix what the sanitizers and fuzzers find, or file each finding
-   with a reproducer if it belongs to H, I, or J and they are in flight.
+   with a reproducer if it belongs to H or I and they are in flight.
    Add every crashing input as a regression test.
 
 ## Ownership and boundaries
 
 Own `ci.yml`, the sanitizer and fuzz CMake options, the fuzz targets, and
-their seed corpora. H, I, and J own fixes in their areas; this package
+their seed corpora. H and I own fixes in their areas; this package
 reports to them rather than fixing in parallel while they are open.
 
 ## Acceptance
@@ -61,7 +62,7 @@ reports to them rather than fixing in parallel while they are open.
 - Each fuzz target runs at least 10 minutes locally without a finding after
   triage, with the command documented.
 - Every sanitizer or fuzz finding has a regression test.
-- A final pass after H, I, and J merge reruns the fuzzers against their
+- A final pass after H and I merge reruns the fuzzers against their
   changes.
 
 ## Deliverables

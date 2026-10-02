@@ -429,7 +429,7 @@ TEST_CASE("An isolated bake without a shard directory is not an empty "
   // The shard directory goes under the system temp dir: point it nowhere.
   ::setenv("TMPDIR", dir.file("no-such-dir").c_str(), 1);
   const std::vector<std::string> files{"/src/a.cpp", "/src/b.cpp"};
-  BakedIndexes baked = bakeIsolated("/no/such/exe", McpBakeConfig{}, files,
+  BakedIndexes baked = bakeIsolated("/no/such/exe", BakeWorkerConfig{}, files,
                                     2, nullptr);
   if (old)
     ::setenv("TMPDIR", saved.c_str(), 1);

@@ -47,7 +47,7 @@ applied to a whole edge.
 | `query_locks_held`, `query_same_lock` | `paths` | engine canonical order; locks on a path innermost frame first; `skippedHubs` by usr |
 | `analyze_dead_code` | `dead`, `optimisticallyAlive` | (file, line, usr); one `offset` / `limit` window pages both over that order |
 | `get_class_hierarchy` | `derivedClasses`, `overrides` | class names in name order (`offset` / `limit` page `derivedClasses`); base methods in usr order, each method's overrides in name order |
-| `list_entry_points` | `entryPoints` | as recorded by the bake (`--entry-point` order) or as passed to `serve`; `offset` / `limit` page over that order |
+| `list_entry_points` | `entryPoints` | as recorded by the bake (`--entry-point` order) or as passed with the query's `--entry-point`; `offset` / `limit` page over that order |
 | `graph_summary` | `topFanoutCallers`, `topFanoutCallees` | count descending, then name; the histograms are objects |
 | `list_callback_sites` | `targets`, `sites` | target name (`offset` / `limit` page the targets); sites within a target in canonical edge order, the first `site_limit` kept |
 | `list_concurrency_entry_points` | `entries` | canonical edge order (spawner usr, target usr, call site, ...); `offset` / `limit` page over that order |

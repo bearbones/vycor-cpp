@@ -18,15 +18,14 @@ Tree) infrastructure to:
    C++ source code using Clang's dynamic matcher DSL.
 3. **Cross-TU call graph index and query tools** (`megascope`) — bakes a
    multi-TU call graph and control flow index into a file, then answers
-   queries from the shell (`megascope <tool>`, `batch`, `dump`) or over
-   MCP (`serve`) for LLM-assisted code analysis (security audits, dead
-   code, etc.). Given source selection flags instead of an index, the
+   queries from the shell (`megascope <tool>`, `batch`, `dump`) for
+   LLM-assisted code analysis (security audits, dead code, etc.). Given source selection flags instead of an index, the
    query verbs bake the selected TUs in memory and answer (ephemeral
    mode — the former `prism` subcommand).
 
 It is designed to be called by external tooling (e.g. a Python orchestrator,
-or an LLM agent using the megascope verbs or MCP server for security
-vulnerability analysis).
+or an LLM agent using the megascope verbs for security vulnerability
+analysis).
 
 ---
 
@@ -119,15 +118,15 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 
 | File | Purpose |
 |---|---|
-| `AtomicFile.h/.cpp` | `writeFileAtomically` (unique temp, fsync, rename, directory fsync — every index, journal header, and shard write), `IndexWriteLock` (`flock` on `<index>.lock` for `index`/`serve`), stale temp cleanup |
+| `AtomicFile.h/.cpp` | `writeFileAtomically` (unique temp, fsync, rename, directory fsync — every index, journal header, and shard write), `IndexWriteLock` (`flock` on `<index>.lock` for `index`), stale temp cleanup |
 | `CallGraph.h/.cpp` | Graph data structure: nodes (functions), edges (calls), class hierarchy, virtual overrides |
 | `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges |
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
-| `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes, conditional guards, and live RAII locals; resident (deduplicated records, set tables, hash maps) for bakes and `serve`, or mapped over a v12 snapshot for the one-shot query verbs (`docs/control-flow-access.md`) |
+| `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes, conditional guards, and live RAII locals; resident (deduplicated records, set tables, hash maps) for bakes, `batch`, and ephemeral queries, or mapped over a v12 snapshot for the one-shot query verbs (`docs/control-flow-access.md`) |
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
-| `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), `bakeIsolated`, and `bakeTUIsolated` — the crash- and hang-safe single-TU parse `reindex_tu` uses |
+| `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
 
@@ -146,7 +145,7 @@ for callers that need only one of the two indexes (also single-parse).
 **Virtual dispatch** is stored as ONE Plausible `VirtualDispatch` edge to the
 static target per call site. `CallGraph::calleesOf`/`callersOf` expand it
 through the transitive override map at query time, so overrides indexed
-later (other TUs, incremental reindex) are visible to existing call sites.
+later (other TUs, warm refreshes) are visible to existing call sites.
 Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
@@ -154,10 +153,9 @@ are in collapsed paths are skipped. Boundary edges (non-collapsed caller → col
 are preserved. This reduces noise from utility/math headers while keeping entry points visible.
 
 **Crash and hang containment** (`docs/design-f12-subprocess-workers.md`,
-"Failure modes"): `megascope index`/`serve` bake in subprocess workers
+"Failure modes"): `megascope index` bakes in subprocess workers
 by default whenever `--threads` is not 1 and `--pch-dir` is unset
-(`--isolate-workers=false` opts out), and `serve`'s `reindex_tu` then
-re-parses through `bakeTUIsolated`. A worker that starts no new TU for
+(`--isolate-workers=false` opts out). A worker that starts no new TU for
 `--worker-timeout` seconds (default 600) is killed and handled as a
 crash; its TU is recorded `timeout`. In-process parses (`--threads 1`,
 ephemeral queries, tests) run under `CrashGuard.h` into TU-local
@@ -172,9 +170,9 @@ indexes absorbed only on a clean return. The fault-injection seam is
 **Sources:** `src/query/`
 
 Every megascope tool is a pure function `(json::Object args, ToolContext)
--> json::Value` over the in-memory indexes. Transports (the CLI verbs and
-the MCP server) are thin adapters over this table; tests call the
-handlers directly.
+-> json::Value` over the in-memory indexes. The CLI verbs
+(`cli/`) are a thin adapter over this table; tests call the handlers
+directly.
 
 | File | Purpose |
 |---|---|
@@ -238,21 +236,21 @@ its records either: the section keeps them sorted by call site with
 by-caller / by-callee orders and a string-sorted id table after them,
 and `ControlFlowIndex` answers every query from the mapped file
 (`isMapped()`; `docs/control-flow-access.md` has the layout, the
-measurements behind it, and the parity tests). `index`/`serve` and
+measurements behind it, and the parity tests). `index` and
 worker shards load `Mutable` and everything — the records decoded into
 the resident form, the orders skipped. The bake's `--entry-point` list
-is recorded in the meta and is the default for queries and `serve` runs
-that pass none.
+is recorded in the meta and is the default for queries that pass none.
 
 `main.cpp` peels the verb off argv before `llvm::cl` runs: query verbs
-never touch `llvm::cl`; `index` and `serve` share the bake option block
-with the legacy verb-less form (which keeps `--snapshot`'s opt-in
-semantics). `megascope index` prints a one-line JSON summary on stdout.
+never touch `llvm::cl`; `index` shares the bake option block with the
+verb-less `--bake-worker` form the isolated bake spawns (any other
+verb-less invocation is a usage error, and `serve` prints its removal
+notice). `megascope index` prints a one-line JSON summary on stdout.
 
 TU selection (`SourceSelection.h/.cpp`): `--source` and `--source-list`
 entries are unioned; `--source-re` and `--skip-paths` narrow the base
 set. With no `--source`/`--source-list`/`--source-re` the base set is the
-TU set recorded in the existing index (so a bare `serve` refreshes what
+TU set recorded in the existing index (so a bare `index` refreshes what
 was indexed instead of widening it), or every C/C++ entry of the
 compilation database when there is no index yet (`--source-re .`
 re-selects the whole database). Paths are canonicalized (absolute,
@@ -278,7 +276,7 @@ the cold bake runs instead, and an environment mismatch rebuilds
 outright. Failed TUs are retried alongside any refresh that rewrites
 the index, or on `--retry-failed`; a refresh that would otherwise touch
 nothing leaves them as recorded. `--force` rebuilds regardless.
-`index`/`serve` first load the meta section only (selection + dirty
+`index` first loads the meta section only (selection + dirty
 check); an `index` with nothing to refresh reports the header counts
 and never decodes the graph, otherwise the full mutable load follows
 and the drop + dirty set is removed in one `removeTUs` call per index
@@ -290,7 +288,7 @@ Write integrity (`docs/index-provenance.md`, format v13): every index,
 anneal journal header, and worker shard is published through
 `writeFileAtomically` (`callgraph/AtomicFile.h`: unique temp file in the
 target directory, fsync, rename, directory fsync; temp removed and
-stream error cleared on failure). `index`/`serve` hold an advisory
+stream error cleared on failure). `index` holds an advisory
 `flock` on `<index>.lock` (`IndexWriteLock`) from the meta load to the
 save (`--no-wait` fails instead of waiting; readers never lock). A load
 verifies the header checksum and each decoded section's xxh3 checksum
@@ -302,17 +300,7 @@ appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
 
-### `mcp` — MCP Server (adapter)
-
-**Headers:** `include/vycor/mcp/`
-**Sources:** `src/mcp/`
-
-| File | Purpose |
-|---|---|
-| `McpServer.h/.cpp` | JSON-RPC dispatch loop; owns the indexes, `QueryCache`, and the `IndexFacts` main.cpp sets; `wrapToolResult` turns a query payload into a `content[0].text` block (the JSON payload itself; an error status → `isError`); implements `reindex_tu` (needs mutable indexes) as a JSON payload through the same contract |
-| `McpProtocol.h/.cpp` | MCP stdio framing: newline-delimited JSON, with Content-Length autodetect for legacy clients |
-
-**25 tools** (CLI verbs and MCP): `search_functions`, `lookup_function`, `get_callees`,
+**24 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -321,7 +309,7 @@ failure mode.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`, `reindex_tu` (serve only).
+`impact_of_change`.
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
@@ -337,7 +325,7 @@ Every tool payload, on every transport, carries `status` (`ok`,
 `ambiguous`, `usage_error`, `not_found`, `unavailable`) and
 `indexScope` (the bake reference, `freshness`, and the requested /
 indexed / partial / failed TU counts of the index answered from). Exit
-codes and MCP `isError` derive from `status`, never from message text;
+codes derive from `status`, never from message text;
 a universal exception verdict needs an exhaustive search and complete
 coverage (`docs/result-contract.md`). A function identity the index
 does not hold (no node, no edge endpoint) is `not_found` with
@@ -395,7 +383,6 @@ vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-lis
 vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..}} on stdin
 vycor-cpp megascope dump    [--index <file> | --build-path <dir>] [--format ndjson|json] [--pretty]   # stream every call-site context and channel site
 vycor-cpp megascope diff    --before <index> --after <index> [--to <name>] [--impact] [--no-context] [--allow-mismatch]   # semantic diff of two saved indexes
-vycor-cpp megascope serve   --build-path <dir> [same selection flags as index] [--index <file>] [--entry-point <name>...] [-v]
 vycor-cpp megascope tools | info [--files] | help
 ```
 
@@ -425,12 +412,12 @@ To add a new subcommand, follow the pattern in `main.cpp`:
 
 ### Indexed vs ephemeral
 
-- **Indexed**: `megascope index` bakes a unified call graph + control-flow index into a file once; every tool verb (`megascope get-callers --name f`, `megascope batch`, `megascope dump`) loads it and answers, and `megascope serve` exposes the same tools over MCP stdio. **Always index for security audits or multi-file analysis.**
+- **Indexed**: `megascope index` bakes a unified call graph + control-flow index into a file once; every tool verb (`megascope get-callers --name f`, `megascope batch`, `megascope dump`) loads it and answers. **Always index for security audits or multi-file analysis.**
 - **Ephemeral**: the same verbs given `--source`/`--source-list`/`--source-re` (with `--build-path`) bake those TUs in memory per invocation and answer — quick single-file investigations, the role the removed `prism` subcommand played. The bake sees only the selected TUs, so cross-file callers are invisible.
 
 ### Edge Collapse (--collapse-paths)
 
-`megascope` (`index`, `serve`, and the ephemeral query mode) accepts
+`megascope` (`index` and the ephemeral query mode) accepts
 `--collapse-paths` to reduce noise from header-inlined utility code. Patterns are path component substrings:
 
 ```bash
@@ -469,7 +456,7 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
-- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `mcp/*.cpp`, and `ext/*.cpp`.
+- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, and `ext/*.cpp`.
 - Builds `vycor-cpp` executable from `main.cpp` plus a `CONFIGURE_DEPENDS`
   glob of top-level `ext/*.cpp` (organization slot-in — attached to the
   executable, not the archive, so static registrars survive linking).

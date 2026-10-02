@@ -50,9 +50,9 @@ it in the mapped file:
 `diff` — validates the array lengths against the section and hands the
 region to `ControlFlowIndex::attachMapped`; the `llvm::MemoryBuffer`
 that maps the file is shared into the index and outlives the load. A
-`Mutable` load — `index`, `serve`, the worker shards — decodes the
+`Mutable` load — `index` and the worker shards — decodes the
 records into the resident form exactly as before and skips the orders,
-so bake, refresh, and `reindex_tu` are unchanged in behaviour.
+so bake and refresh are unchanged in behaviour.
 
 Every `ControlFlowIndex` query is written once over positions:
 contexts_ indices in the resident form, record positions in the mapped
@@ -146,7 +146,7 @@ production read-only path.
 What the decision trades: 116 MB more on disk per 7M contexts, a
 save that walks the records four more times, and two code paths in
 `ControlFlowIndex` (resident and mapped) that the parity tests keep
-honest. What it does not change: `index`, `serve`, and the worker
+honest. What it does not change: `index` and the worker
 shards still build and hold the resident form; no daemon, no cache
 directory, no background process. A one-shot control-flow query on
 the testbed is now 0.6 s and 370 MB where it was 3 s and 1.6 GB.

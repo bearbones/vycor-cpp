@@ -13,7 +13,7 @@ with one command, and the docs match the code.
   of failed TUs but not their names, and does not point to
   `megascope info --files`. Open since `docs/megascope-cli-review.md` §3.2.
 - Onboarding: the README does not explain how to produce
-  `compile_commands.json` (only `docs/mcp-usage.md` step 2 does) and has no
+  `compile_commands.json` (only `docs/megascope-usage.md` step 2 does) and has no
   troubleshooting section. `docs/pch-sdk-mismatch.md` and
   `docs/toolchain-portability.md` are design notes, not guides. A `--source`
   that is not in the compilation database is not diagnosed up front
@@ -33,7 +33,6 @@ with one command, and the docs match the code.
   `llvm::cl` (`megascope help` works); an unknown tool name
   gets no suggestion (`MegascopeCli.cpp:1147`); morph `--dry-run` prints
   "replace with '…'" rather than a diff (`TransformPipeline.cpp:119-141`).
-- No MCP client configuration snippet (`claude mcp add …`, `.mcp.json`).
 
 ## Work
 
@@ -64,8 +63,8 @@ with one command, and the docs match the code.
    get a did-you-mean; morph `--dry-run` prints a unified diff.
 7. README: a quick start that covers producing `compile_commands.json`
    (CMake, Bear, Bazel), a troubleshooting section that starts with
-   `doctor`, and MCP client snippets for Claude Code and a generic
-   `.mcp.json`.
+   `doctor`, and a short agent recipe (index once, then the query verbs
+   or `megascope batch`).
 8. Docs drift (verified at `8f7d68e`):
    - AGENTS.md says morph's JSON rules format "is not yet implemented" and
      lists "Parse `--rules-json`" and "Write final replacements to disk" as
@@ -85,7 +84,7 @@ with one command, and the docs match the code.
      FetchContent.
    - `docs/callgraph-mcp-review.md` item 9 says "in progress"; subprocess
      workers shipped.
-   - `docs/mcp-usage.md` gotchas and `scripts/morph-batch.sh` (`RBX_CHECK`)
+   - `docs/megascope-usage.md` gotchas and `scripts/morph-batch.sh` (`RBX_CHECK`)
      contain organization-specific names and timings; generalize or move
      them under `ext/examples/`.
 

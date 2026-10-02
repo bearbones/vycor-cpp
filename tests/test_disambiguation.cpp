@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// test_disambiguation.cpp — F8 PR C: the MCP disambiguation contract
+// test_disambiguation.cpp — F8 PR C: the disambiguation contract
 // (docs/design-f8-usr-identity.md §4), end-to-end against the
 // examples/precision fixtures.
 //
@@ -105,7 +105,7 @@ std::vector<std::string> requireAmbiguousUsrs(const llvm::json::Object &obj,
 
 TEST_CASE("get_callers disambiguates overloads by name and answers "
           "precisely by usr",
-          "[mcp][disambiguation]") {
+          "[disambiguation]") {
   auto graph = buildPrecisionGraph({"overloads.cpp"});
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -157,7 +157,7 @@ TEST_CASE("get_callers disambiguates overloads by name and answers "
 }
 
 TEST_CASE("lookup_function disambiguates and resolves by usr",
-          "[mcp][disambiguation]") {
+          "[disambiguation]") {
   auto graph = buildPrecisionGraph({"overloads.cpp"});
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -211,7 +211,7 @@ TEST_CASE("lookup_function disambiguates and resolves by usr",
 }
 
 TEST_CASE("get_callers with a unique name is unchanged",
-          "[mcp][disambiguation]") {
+          "[disambiguation]") {
   auto graph = buildPrecisionGraph({"overloads.cpp"});
   ControlFlowIndex cfIndex;
   ControlFlowOracle oracle(graph, cfIndex);
@@ -232,7 +232,7 @@ TEST_CASE("get_callers with a unique name is unchanged",
 }
 
 TEST_CASE("call-site tools disambiguate a macro-shared spelling by caller",
-          "[mcp][disambiguation]") {
+          "[disambiguation]") {
   // Two functions expand CALL_GUARDED, so their calls to precision::guarded
   // share one spelling (the macro definition line). Bare-spelling queries
   // must surface BOTH contexts as candidates; the `caller` parameter routes
@@ -378,7 +378,7 @@ struct BigOverloadFixture {
 } // namespace
 
 TEST_CASE("ambiguous candidate list is capped with a by-file summary",
-          "[mcp][disambiguation][cap]") {
+          "[disambiguation][cap]") {
   BigOverloadFixture fx(30);
   ControlFlowOracle oracle(fx.graph, fx.cfIndex);
   std::vector<std::string> eps = {"main"};
@@ -414,7 +414,7 @@ TEST_CASE("ambiguous candidate list is capped with a by-file summary",
 }
 
 TEST_CASE("small ambiguous sets are not truncated",
-          "[mcp][disambiguation][cap]") {
+          "[disambiguation][cap]") {
   BigOverloadFixture fx(3);
   ControlFlowOracle oracle(fx.graph, fx.cfIndex);
   std::vector<std::string> eps = {"main"};
@@ -432,7 +432,7 @@ TEST_CASE("small ambiguous sets are not truncated",
   CHECK(obj.getArray("candidates")->size() == 3);
 }
 
-TEST_CASE("filter narrows an ambiguous name", "[mcp][disambiguation][filter]") {
+TEST_CASE("filter narrows an ambiguous name", "[disambiguation][filter]") {
   BigOverloadFixture fx(30);
   ControlFlowOracle oracle(fx.graph, fx.cfIndex);
   std::vector<std::string> eps = {"main"};
@@ -475,7 +475,7 @@ TEST_CASE("filter narrows an ambiguous name", "[mcp][disambiguation][filter]") {
 }
 
 TEST_CASE("site resolves an ambiguous name to the instantiation called there",
-          "[mcp][disambiguation][site]") {
+          "[disambiguation][site]") {
   BigOverloadFixture fx(30);
   ControlFlowOracle oracle(fx.graph, fx.cfIndex);
   std::vector<std::string> eps = {"main"};
@@ -529,7 +529,7 @@ TEST_CASE("site resolves an ambiguous name to the instantiation called there",
 }
 
 TEST_CASE("macro-shared site with distinct callees lists the small set",
-          "[mcp][disambiguation][site]") {
+          "[disambiguation][site]") {
   BigOverloadFixture fx(4);
   // A second context at the SAME spelling calling a DIFFERENT instantiation
   // (macro expanded in two functions).

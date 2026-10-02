@@ -1020,7 +1020,7 @@ std::vector<FileStamp> openedFiles(clang::SourceManager &sm,
 }
 
 // Sink for openedFiles across a parallel bake: null when the caller does
-// not record dependencies (bakeTU under serve).
+// not record dependencies.
 struct DependencySink {
   TuDependencies *deps = nullptr;
   std::mutex mutex;
@@ -1257,28 +1257,6 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   }
 
   return out;
-}
-
-TuOutcome bakeTU(CallGraph &graph, ControlFlowIndex &cfIndex,
-            const clang::tooling::CompilationDatabase &compDb,
-            const std::string &file,
-            const std::vector<std::string> &collapsePaths,
-            const PchCache *pchCache,
-            const std::string &sysroot,
-            const LockTypeConfig &lockCfg,
-            const ChannelTypeConfig &channelCfg,
-            ChannelIndex *channelsOut) {
-  CollapseFilter collapseFilter(collapsePaths);
-  const CollapseFilter *collapsePtr =
-      collapseFilter.empty() ? nullptr : &collapseFilter;
-  const ChannelTypeConfig *channelCfgPtr = channelsOut ? &channelCfg : nullptr;
-
-  CrashGuardScope crashGuard;
-  int crashSignal = 0;
-  int status = bakeTuLocally(graph, cfIndex, channelsOut, compDb, file,
-                             collapsePtr, &lockCfg, channelCfgPtr, pchCache,
-                             sysroot, /*depSink=*/nullptr, &crashSignal);
-  return outcomeFor(status, crashSignal);
 }
 
 } // namespace vycor

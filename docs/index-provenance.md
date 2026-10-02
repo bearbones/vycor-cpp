@@ -230,9 +230,6 @@ The ephemeral query mode (`--source ...` without an index) prints the
 same coverage warning so a partial in-memory bake is visible, but it
 persists nothing.
 
-`megascope serve`'s `reindex_tu` re-parses one TU in memory; it does not
-update the fingerprints or outcomes of a saved index (serve does not save).
-
 ## Provenance and coverage: the interface for package C
 
 C++ (all in `Snapshot.h`, immutable value types):
@@ -327,10 +324,9 @@ and refused when there is nothing to publish.
   place). A write error (full disk) clears the stream error, removes
   the temp file, leaves the previous index as it was, and returns the
   reason; `megascope index` then exits 1.
-- **Write lock.** `index` and `serve` hold an advisory `flock` on
+- **Write lock.** `index` holds an advisory `flock` on
   `<index>.lock` (`IndexWriteLock`) for the whole meta load → dirty
-  check → bake → save sequence; `serve` releases it before answering
-  requests. A second writer prints `waiting for another writer holding
+  check → bake → save sequence. A second writer prints `waiting for another writer holding
   <index>.lock` and blocks, or with `--no-wait` exits 1 at once.
   Readers never lock: the rename is atomic for them. Under the lock any
   `<index>.tmp-XXXXXX` left by a killed writer is removed. The lock file
@@ -338,7 +334,7 @@ and refused when there is nothing to publish.
   user created and this one cannot write (a shared build directory) is
   locked through a read-only descriptor, so it still excludes; only a
   lock file that cannot be opened at all (a read-only index directory)
-  lets `index`/`serve` continue unlocked, with a warning.
+  lets `index` continue unlocked, with a warning.
 - **Checksums.** v13 extends each section table entry with an xxh3-64
   checksum of its section and ends the header with a checksum of the
   header itself (`kHeaderBytes` 152, was 112). The sections must end
@@ -449,6 +445,3 @@ opened file, and the fingerprint covers the inputs that are not files.
   working-directory scenario caught it). `makeClangTool` now gives every
   tool its own physical file system. anneal and morph share the helper
   and inherit the fix.
-- `reindex_tu` over MCP answers a JSON payload through C's envelope now,
-  but still not the TU's new outcome: `bakeTU` reports none, so the
-  served `indexScope` keeps describing the bake the server started from.

@@ -32,16 +32,16 @@
 #include <vector>
 
 // Transport-neutral query tools over the baked indexes. Every tool is a
-// pure function (args, context) -> JSON payload; the MCP server
-// (vycor/mcp/) and the CLI are thin adapters that own the indexes and
-// translate this contract onto their wire format.
+// pure function (args, context) -> JSON payload; the CLI verbs
+// (vycor/cli/) are thin adapters that own the indexes and translate this
+// contract onto their output formats and exit codes.
 
 namespace vycor {
 
 /// Whole-graph query results cached across tool calls. Owned by the adapter
-/// (McpServer, the CLI batch loop) and cleared wholesale whenever the
-/// indexes mutate (reindex_tu), so a cached value is always consistent with
-/// the graph it was computed from. Used by handlers whose cost scales with
+/// (the CLI batch loop, `diff`) and lives no longer than the loaded
+/// indexes, so a cached value is always consistent with the graph it was
+/// computed from. Used by handlers whose cost scales with
 /// the whole graph rather than the query (analyze_dead_code reruns full
 /// liveness; graph_summary materializes calleesOf for every node).
 struct QueryCache {
@@ -62,7 +62,7 @@ struct QueryCache {
 enum class IndexFreshness : uint8_t {
   Unknown,   // the adapter did not say (a handler called directly)
   Unchecked, // a saved index loaded as-is; no comparison was made
-  Baked,     // baked from the sources by this process (ephemeral, serve)
+  Baked,     // baked from the sources by this process (ephemeral mode)
 };
 
 /// The producer-side facts a result cites about its index: which bake
@@ -112,7 +112,8 @@ struct ToolContext {
   /// Counts from the index header (v8). Set by the one-shot query verbs,
   /// which may not have decoded the control-flow or channel sections;
   /// graph_summary reports these instead of the live index sizes when
-  /// present. Null under serve, where the live sizes are authoritative.
+  /// present. Null in a context built directly (the unit tests), where the
+  /// live sizes are used.
   const IndexSummary *summary = nullptr;
   /// Where the indexes came from and how much of the requested scope
   /// they hold (docs/result-contract.md). Set by the adapter that owns
@@ -129,8 +130,8 @@ struct ToolContext {
 ///   - error:   `{"error": "<message>", "status": "<kind>"}` built with
 ///              usageError / notFoundError / unavailableError (or
 ///              errorResult with an explicit ResultStatus). The kind, not
-///              the message, decides the exit code and the MCP isError
-///              flag; message text is free-form;
+///              the message, decides the exit code; message text is
+///              free-form;
 ///   - ambiguous identity: a non-error payload with `"ambiguous": true` and
 ///     a `candidates` list (see isAmbiguousResult and Identity.h).
 /// Adapters run handlers through runTool, which stamps `status` and
@@ -144,15 +145,14 @@ struct ToolEntry {
   std::string name;
   std::string description;
   llvm::json::Value inputSchema; // JSON Schema object
-  // Null for adapter-implemented tools (reindex_tu mutates the indexes).
   ToolHandler handler;
   /// Name of the payload member holding this tool's record list (callers,
   /// matches, paths, ...), or empty when the payload is one scalar record.
   /// Drives the CLI's ndjson/tsv output and its empty-result exit code
-  /// (vycor/cli/MegascopeCli.h); the MCP adapter ignores it.
+  /// (vycor/cli/MegascopeCli.h).
   std::string recordsKey;
   /// IndexSection bits this tool reads. The query verbs decode only these
-  /// sections (docs/megascope-cli-review.md §3.1.1); serve and batch load
+  /// sections (docs/megascope-cli-review.md §3.1.1); batch loads
   /// everything. Graph-only unless Registry.cpp says otherwise.
   unsigned needs = kSectionGraph;
 };
@@ -204,7 +204,7 @@ ResultStatus statusOf(const llvm::json::Value &result);
 llvm::json::Value completeResult(llvm::json::Value payload,
                                  const ToolContext &ctx);
 /// Run `tool`'s handler and complete its result. What every adapter
-/// calls; a null handler (reindex_tu) is a usage error.
+/// calls.
 llvm::json::Value runTool(const ToolEntry &tool, const llvm::json::Object &args,
                           const ToolContext &ctx);
 

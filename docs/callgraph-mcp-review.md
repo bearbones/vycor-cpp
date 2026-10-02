@@ -1,5 +1,10 @@
 # Architecture Review: Call Graph Indexing and the megascope MCP Server
 
+> **Historical.** The MCP server (`megascope serve`, `src/mcp/`,
+> `reindex_tu`, `scripts/mcp-smoke.py`) was removed on 2026-10-02; the
+> CLI verbs and `megascope batch` answer the same tools
+> (`docs/megascope-usage.md`). This review is kept as a record.
+
 Date: 2026-06-09
 Scope: `include/vycor/callgraph/`, `src/callgraph/`, `include/vycor/mcp/`,
 `src/mcp/`, and the `megascope` wiring in `src/main.cpp`.

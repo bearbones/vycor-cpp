@@ -46,7 +46,7 @@ main
 | `tokenizer.{hpp,cpp}` | `Tokenizer` base + `JsonTokenizer` / `TextTokenizer`. Used by stage2 helper. |
 | `callbacks.{hpp,cpp}` | Free functions (`&cbs::defaultHasher` etc.) + a `Registry` struct whose members stash fn pointers — the primary way Plausible FunctionPointer edges are generated. |
 | `expected_chains.json` | Test oracle: per-chain paths, required edges with `kind`+`confidence`, and per-layer "must have Proven + Plausible" assertions. |
-| `gen_compile_commands.sh` | Writes `compile_commands.json` at runtime with absolute paths. The MCP CLI takes `--build-path` to this directory. |
+| `gen_compile_commands.sh` | Writes `compile_commands.json` at runtime with absolute paths. `megascope` takes `--build-path` to this directory. |
 
 ## How to analyze
 
@@ -54,25 +54,17 @@ main
 # From repo root, after building vycor-cpp:
 ( cd examples/deep_chains && ./gen_compile_commands.sh )
 
-./build/vycor-cpp megascope \
+./build/src/vycor-cpp megascope index \
   --build-path examples/deep_chains \
-  --source examples/deep_chains/main.cpp \
-  --source examples/deep_chains/pipeline.cpp \
-  --source examples/deep_chains/stage1_ingest.cpp \
-  --source examples/deep_chains/stage2_parse.cpp \
-  --source examples/deep_chains/stage3_transform.cpp \
-  --source examples/deep_chains/stage4_dispatch.cpp \
-  --source examples/deep_chains/stage5_sink.cpp \
-  --source examples/deep_chains/plugins.cpp \
-  --source examples/deep_chains/workers.cpp \
-  --source examples/deep_chains/tokenizer.cpp \
-  --source examples/deep_chains/scheduler.cpp \
-  --source examples/deep_chains/callbacks.cpp \
+  --source-re 'examples/deep_chains/.*\.cpp$' \
   --entry-point main
+
+./build/src/vycor-cpp megascope find-call-chain \
+  --build-path examples/deep_chains --from main --to stage5_sink --pretty
 ```
 
-Or use `scripts/mcp-smoke.py` which does this automatically and dumps
-request/response artifacts under `scripts/mcp-smoke-out/`.
+`scripts/cli-golden.py` runs a fixed set of queries over this fixture and
+compares them with `cli-golden/`.
 
 ## Confidence invariants
 

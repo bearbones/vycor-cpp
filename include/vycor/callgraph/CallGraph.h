@@ -65,7 +65,7 @@ enum class Confidence {
 };
 
 // Where the callee runs relative to the caller. Recorded on CallGraphEdge so
-// MCP clients can answer "does this callback run synchronously or on another
+// queries can answer "does this callback run synchronously or on another
 // thread/task?" without a second index join.
 enum class ExecutionContext {
   Synchronous,
@@ -113,8 +113,8 @@ struct CallGraphEdge {
 // builder relies on phase barriers for this: Phase 2 workers read only maps
 // that Phase 1 finished writing (hierarchy, overrides, function returns)
 // before the pool barrier, while Phase 2's own writes touch disjoint state
-// (nodes_/edges_/outEdges_/inEdges_). The MCP serve loop is single-threaded,
-// so queries never overlap reindexTU. Revisit before adding concurrent reads.
+// (nodes_/edges_/outEdges_/inEdges_). Queries run only over a finished
+// index, never next to a mutation. Revisit before adding concurrent reads.
 //
 // calleesOf/callersOf return edges by value (the result can contain
 // synthesized virtual-dispatch expansions that have no stored counterpart),
@@ -199,7 +199,7 @@ public:
   std::vector<const CallGraphNode *> allNodes() const;
   // Accepts a usr or a display name. Ambiguous display names resolve to the
   // candidate with the smallest usr string (deterministic; PR C surfaces
-  // ambiguity through the MCP disambiguation contract — findNode is used by
+  // ambiguity through the disambiguation contract — findNode is used by
   // tools for metadata display).
   const CallGraphNode *findNode(const std::string &qualifiedName) const;
 

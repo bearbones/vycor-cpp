@@ -158,13 +158,14 @@ future distributed or incremental-shard scheme.
 ## Failure modes
 
 Added 2026-09 (hardening package I). Superseding notes on the sections
-above: isolation is now the default for `megascope index`/`serve`
+above: isolation is now the default for `megascope index`
 whenever `--threads` is not 1 and `--pch-dir` is unset
 (`--isolate-workers=false` opts out; workers do not receive a PCH
-cache), `reindex_tu` re-parses in a worker when the server's bake did,
-and the in-process `siglongjmp` guard is replaced.
+cache), and the in-process `siglongjmp` guard is replaced. (`serve`
+and its `reindex_tu`, mentioned above, were removed with the MCP
+server in 2026-10.)
 
-| Failure | Isolated (default for index/serve at `--threads` ≠ 1) | In-process (`--threads 1`, ephemeral queries, library callers) |
+| Failure | Isolated (default for `index` at `--threads` ≠ 1) | In-process (`--threads 1`, ephemeral queries, library callers) |
 |---|---|---|
 | Frontend or visitor crash (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) | The worker dies (workers turn the in-process guard off, `disableCrashGuard`, so they never recover and carry on); its last `WORKER-TU` marker names the TU, recorded `poisoned`; the rest of the batch is re-dispatched. | `CrashGuard.h`: `llvm::CrashRecoveryContext` unwinds to the guard; the TU is recorded `crashed` (`signal N`). |
 | Stack overflow (deep templates) | As a crash. | Recovered: the guard's handlers run on a per-thread `sigaltstack` (`SA_ONSTACK` added to CrashRecoveryContext's handlers). |

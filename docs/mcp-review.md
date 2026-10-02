@@ -1,5 +1,10 @@
 # MCP Server Review — Improvements from an LLM-Consumer Perspective
 
+> **Historical.** The MCP server (`megascope serve`, `src/mcp/`,
+> `reindex_tu`, `scripts/mcp-smoke.py`) was removed on 2026-10-02; the
+> CLI verbs and `megascope batch` answer the same tools
+> (`docs/megascope-usage.md`). This review is kept as a record.
+
 All findings below are grounded in the run captured under
 `scripts/mcp-smoke-out/` against the `examples/deep_chains/` fixture
 (call graph: 1696 nodes, 66 edges, 34 call sites). See

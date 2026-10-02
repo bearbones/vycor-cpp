@@ -428,8 +428,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
 
   {
     // Reading private state directly; hold the graph lock for a consistent
-    // view (save may be called while the serve loop is idle, but cheap
-    // insurance against future callers). Every graph mutator holds this
+    // view (no caller saves while mutating today, but cheap insurance
+    // against future callers). Every graph mutator holds this
     // lock too, so the interner cannot grow between the table emit and the
     // record emits below.
     std::lock_guard<std::mutex> lock(graph.mutex_);
