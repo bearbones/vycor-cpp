@@ -23,9 +23,14 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/Snapshot.h"
 #include "vycor/query/Tools.h"
 
+#include "SnapshotBytes.h"
+
 #include <algorithm>
+#include <chrono>
+#include <iterator>
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>
 #include <fstream>
@@ -384,4 +389,101 @@ TEST_CASE("ChannelIndex compact drops tombstones without losing live data",
   auto consumers = index.consumersOf("c:eventQueue_");
   REQUIRE(consumers.size() == 1);
   CHECK(consumers[0].siteFunctionUsr == "fn:B::drain");
+}
+
+// fuzz_snapshot finding (a timeout): absorb replayed every one of a site's
+// `refs` registrations through addSite, all under the site's first TU. A
+// loaded site claiming millions of registrations took minutes to merge,
+// and a site two TUs of one worker batch contributed came out of the
+// shard merge attributed to the first TU alone.
+TEST_CASE("ChannelIndex absorb replays each registration under its own TU",
+          "[ChannelIndex]") {
+  ChannelIndex shard;
+  shard.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                         "shared.h:10:5", "a.cpp"));
+  shard.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                         "shared.h:10:5", "b.cpp"));
+  ChannelIndex master;
+  master.absorb(shard);
+  REQUIRE(master.size() == 1);
+  // b.cpp still contributes the site after a.cpp is gone, and the other
+  // way round: each TU releases exactly its own registration.
+  master.removeTU("a.cpp");
+  CHECK(master.size() == 1);
+  master.removeTU("b.cpp");
+  CHECK(master.size() == 0);
+
+  ChannelIndex again;
+  again.absorb(shard);
+  again.removeTU("b.cpp");
+  CHECK(again.size() == 1);
+  again.removeTU("a.cpp");
+  CHECK(again.size() == 0);
+}
+
+namespace {
+
+std::string savedChannelImage(const ChannelIndex &ch, std::string &path) {
+  llvm::SmallString<128> p;
+  llvm::sys::fs::createUniquePath("vycor-channels-%%%%%%.vycs", p, true);
+  path = std::string(p.str());
+  REQUIRE(SnapshotIO::save(path, CallGraph(), ControlFlowIndex(),
+                           SnapshotMeta(), ch));
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
+/// The site record's refs field follows its call site string.
+void patchRefs(std::string &bytes, const std::string &callSite,
+               uint32_t refs) {
+  auto at = bytes.find(callSite);
+  REQUIRE(at != std::string::npos);
+  at += callSite.size();
+  for (int i = 0; i < 4; ++i)
+    bytes[at + i] = static_cast<char>((refs >> (8 * i)) & 0xff);
+  testing::resealSnapshot(bytes);
+}
+
+} // namespace
+
+TEST_CASE("a loaded channel site's refcount is checked and merged in one "
+          "step",
+          "[ChannelIndex][snapshot]") {
+  SECTION("registrations without a TU are merged as one count") {
+    ChannelIndex ch;
+    ch.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:f",
+                        "ZZsite.h:1:1", "a.cpp"));
+    std::string path;
+    std::string bytes = savedChannelImage(ch, path);
+    patchRefs(bytes, "ZZsite.h:1:1", 50000000u); // 1 by a.cpp, the rest none
+    std::ofstream(path, std::ios::binary) << bytes;
+    auto snap = SnapshotIO::load(path, nullptr, LoadMode::Mutable);
+    std::remove(path.c_str());
+    REQUIRE(snap);
+    ChannelIndex master;
+    const auto t0 = std::chrono::steady_clock::now();
+    master.absorb(snap->channels);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+    // a.cpp's registration goes; the provenance-less ones keep the site.
+    master.removeTU("a.cpp");
+    CHECK(master.size() == 1);
+  }
+
+  SECTION("fewer registrations than contributing TUs is corruption") {
+    ChannelIndex ch;
+    ch.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:f",
+                        "ZZsite.h:1:1", "a.cpp"));
+    ch.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:f",
+                        "ZZsite.h:1:1", "b.cpp"));
+    std::string path;
+    std::string bytes = savedChannelImage(ch, path);
+    patchRefs(bytes, "ZZsite.h:1:1", 1u);
+    std::ofstream(path, std::ios::binary) << bytes;
+    SnapshotLoadStats stats;
+    CHECK_FALSE(SnapshotIO::load(path, &stats, LoadMode::Mutable));
+    std::remove(path.c_str());
+    CHECK(stats.error.find("section 'channels' does not decode") !=
+          std::string::npos);
+  }
 }

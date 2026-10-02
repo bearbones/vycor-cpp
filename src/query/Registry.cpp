@@ -15,6 +15,7 @@
 
 
 #include "vycor/query/Tools.h"
+#include "vycor/callgraph/Utf8.h"
 #include "Registry.h"
 
 #include <cassert>
@@ -51,7 +52,10 @@ bool isErrorStatus(ResultStatus status) {
 llvm::json::Value errorResult(ResultStatus kind, llvm::StringRef message) {
   assert(isErrorStatus(kind) && "errorResult needs an error status");
   llvm::json::Object obj;
-  obj["error"] = message.str();
+  // Handlers compose messages from arguments and index text, both UTF-8;
+  // anything raw that slips in is converted rather than aborting llvm::json
+  // (Utf8.h).
+  obj["error"] = lookupText(message);
   obj["status"] = resultStatusName(kind);
   return llvm::json::Value(std::move(obj));
 }
@@ -114,7 +118,7 @@ IndexFacts IndexFacts::of(const SnapshotMeta &meta, IndexFreshness freshness) {
   IndexFacts f;
   f.coverage = coverageOf(meta);
   if (!meta.provenance.environment.empty())
-    f.bake = meta.provenance.environment + "@" +
+    f.bake = toIndexText(meta.provenance.environment) + "@" +
              std::to_string(meta.provenance.bakeStartNs);
   f.freshness = freshness;
   f.channelsIndexed = !meta.channelTypes.empty();

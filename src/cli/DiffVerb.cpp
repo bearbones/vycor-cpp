@@ -20,6 +20,8 @@
 // index's facts so `indexScope` names what the answer was read from.
 
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/RetainUntilExit.h"
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/cli/MegascopeCli.h"
 #include "vycor/query/ChangeImpact.h"
@@ -158,8 +160,8 @@ int loadSide(const std::string &path, unsigned needs,
     return kExitIndex;
   }
   SnapshotLoadStats stats;
-  auto *holder = new std::optional<SnapshotData>(
-      SnapshotIO::load(path, &stats, LoadMode::ReadOnly, needs));
+  auto *holder = retainUntilExit(new std::optional<SnapshotData>(
+      SnapshotIO::load(path, &stats, LoadMode::ReadOnly, needs)));
   if (!*holder) {
     err << "megascope diff: cannot load index " << path << " (" << label
         << "): " << stats.error << "\n";
@@ -172,6 +174,8 @@ int loadSide(const std::string &path, unsigned needs,
     side.entryPoints = side.snap->meta.entryPoints;
   if (side.entryPoints.empty())
     side.entryPoints.push_back("main");
+  for (auto &e : side.entryPoints) // raw spellings (Utf8.h)
+    e = lookupText(e);
   side.ctx.emplace(ToolContext{side.snap->graph, *side.oracle,
                                side.snap->cfIndex, side.entryPoints,
                                &side.snap->channels, &side.cache,
@@ -452,7 +456,10 @@ int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
       return kExitUsage;
     }
   }
-  seed["patch"] = patch;
+  // A diff of a Latin-1 source carries Latin-1 lines; JSON values are
+  // UTF-8, converted the way the index converts its paths (Utf8.h), so
+  // the hunks' file names still match the index's.
+  seed["patch"] = toIndexText(patch);
   return kExitResults;
 }
 

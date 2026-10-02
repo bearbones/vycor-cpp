@@ -166,8 +166,10 @@ std::string makeShardDir() {
 
 /// Write a plausible shard for `batch`: one function node per TU, an edge
 /// from it to a shared "common" callee (dedup fodder across shards), and
-/// one call-site context per TU.
-void writeShard(const std::string &shardPath,
+/// one call-site context per TU. Runs on the dispatcher's threads, where
+/// Catch2 assertions are not thread-safe (TSan): a failed save is
+/// reported like a real worker's, through the exit status.
+bool writeShard(const std::string &shardPath,
                 const std::vector<std::string> &batch) {
   CallGraph g;
   ControlFlowIndex cf;
@@ -205,7 +207,7 @@ void writeShard(const std::string &shardPath,
   }
   SnapshotIO::recordDependencies(meta, deps);
   SnapshotIO::recordOutcomes(meta, outcomes);
-  REQUIRE(SnapshotIO::save(shardPath, g, cf, meta, channels));
+  return SnapshotIO::save(shardPath, g, cf, meta, channels);
 }
 
 void writeMarkers(const std::string &stderrPath,
@@ -574,8 +576,7 @@ TEST_CASE("dispatcher absorbs clean batches", "[worker_pool][dispatcher]") {
                             const std::string &stderrPath) {
     log.record(batch);
     writeMarkers(stderrPath, batch);
-    writeShard(shardPath, batch);
-    return 0;
+    return writeShard(shardPath, batch) ? 0 : 1;
   };
 
   BuildStats stats;
@@ -630,8 +631,7 @@ TEST_CASE("a worker's Partial outcome survives the shard merge",
                             const std::string &shardPath,
                             const std::string &stderrPath) {
     writeMarkers(stderrPath, batch);
-    writeShard(shardPath, batch);
-    return 0;
+    return writeShard(shardPath, batch) ? 0 : 1;
   };
   auto out = bakeIsolatedWithRunner(runner, files, /*workers=*/1, nullptr,
                                     dir, /*expected=*/nullptr,
@@ -663,8 +663,7 @@ TEST_CASE("crash with marker poisons exactly the marked TU and re-dispatches "
       return 1;
     }
     writeMarkers(stderrPath, batch);
-    writeShard(shardPath, batch);
-    return 0;
+    return writeShard(shardPath, batch) ? 0 : 1;
   };
 
   BuildStats stats;
@@ -703,8 +702,7 @@ TEST_CASE("markerless crash bisects down to the single poisoned TU",
     if (hasD)
       return 1; // spawn-style failure: no stderr, no shard
     writeMarkers(stderrPath, batch);
-    writeShard(shardPath, batch);
-    return 0;
+    return writeShard(shardPath, batch) ? 0 : 1;
   };
 
   BuildStats stats;

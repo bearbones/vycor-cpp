@@ -1,0 +1,188 @@
+name: Fuzz
+
+# libFuzzer targets under fuzz/ (fuzz/README.md). On a pull request, each
+# target whose parser the change touches runs for a short fixed budget; the
+# nightly run gives every target a longer one and keeps the grown corpora
+# in the Actions cache. A crashing, leaking, or hanging input fails the job
+# and is uploaded as an artifact.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        default: "1200"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    name: Fuzz (LLVM 21)
+    # Four targets at the nightly 20 min, plus the build and the corpus
+    # merge; a pull request's run is 60 s per target.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 180 }}
+    env:
+      LLVM_VERSION: "21"
+      PR_SECONDS: "60"
+      NIGHTLY_SECONDS: "1200"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      # Each target and the paths whose change puts it in a pull request's
+      # run (its parser, what that parser loads into, and the harness).
+      - name: Select targets
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          DISPATCH_SECONDS: ${{ github.event.inputs.seconds }}
+        run: |
+          set -euo pipefail
+          common='^(fuzz/(CMakeLists\.txt|FuzzCommon\.h|fuzz_seeds\.cpp)|\.github/workflows/fuzz\.yml|(src/)?CMakeLists\.txt)$'
+          # Code a target executes, beyond its parser: the snapshot target
+          # runs every tool, dump and save over what it loads; the anneal
+          # targets run every index-only check and write back; batch loads a
+          # real index and answers every tool.
+          index='src/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile)\.cpp|include/vycor/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile|StringInterner|Utf8)\.h'
+          tools='src/(query|impact)/.*|include/vycor/(query|impact)/.*'
+          anneal='src/anneal/(Checkpoint|GlobalIndex|Analyzer)\.cpp|include/vycor/anneal/(Checkpoint|GlobalIndex|Analyzer)\.h|src/callgraph/AtomicFile\.cpp|include/vycor/callgraph/AtomicFile\.h'
+          declare -A paths=(
+            [snapshot]="^(${index}|${tools}|tests/SnapshotBytes\.h|fuzz/fuzz_snapshot\.cpp)\$"
+            [checkpoint]="^(${anneal}|fuzz/fuzz_checkpoint\.cpp)\$"
+            [shard]="^(${anneal}|fuzz/fuzz_shard\.cpp)\$"
+            [batch]="^(${index}|${tools}|src/cli/MegascopeCli\.cpp|include/vycor/cli/MegascopeCli\.h|fuzz/fuzz_batch\.cpp)\$"
+          )
+          targets=""
+          if [ "$EVENT" = "pull_request" ]; then
+            seconds="$PR_SECONDS"
+            changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+            for t in snapshot checkpoint shard batch; do
+              if grep -qE "${paths[$t]}|$common" <<<"$changed"; then
+                targets="$targets $t"
+              fi
+            done
+          else
+            seconds="${DISPATCH_SECONDS:-$NIGHTLY_SECONDS}"
+            targets="snapshot checkpoint shard batch"
+          fi
+          echo "targets=${targets# }" >> "$GITHUB_OUTPUT"
+          echo "seconds=$seconds" >> "$GITHUB_OUTPUT"
+          echo "Fuzzing: ${targets:-nothing} (${seconds}s each)"
+
+      - name: Initialize Catch2 submodule
+        if: steps.select.outputs.targets != ''
+        run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Install LLVM/Clang
+        if: steps.select.outputs.targets != ''
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-${LLVM_VERSION}-dev" \
+            "libclang-${LLVM_VERSION}-dev" \
+            "libclang-rt-${LLVM_VERSION}-dev" \
+            ninja-build
+
+      - name: Narrow mmap randomization for the sanitizers
+        if: steps.select.outputs.targets != ''
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build
+        if: steps.select.outputs.targets != ''
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="clang-${LLVM_VERSION}" \
+            -DCMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}" \
+            -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_VERSION}" \
+            -DVYCOR_WERROR=ON -DVYCOR_BUILD_TESTS=OFF -DVYCOR_FUZZ=ON
+          cmake --build build --target fuzz
+
+      - name: Restore corpora
+        if: steps.select.outputs.targets != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz
+        if: steps.select.outputs.targets != ''
+        env:
+          TARGETS: ${{ steps.select.outputs.targets }}
+          SECONDS_EACH: ${{ steps.select.outputs.seconds }}
+        run: |
+          set -euo pipefail
+          build/fuzz/fuzz_seeds fuzz-seeds > /dev/null
+          export VYCOR_FUZZ_INDEX="$PWD/fuzz-seeds/batch.vycs"
+          mkdir -p fuzz-artifacts
+          status=0
+          for t in $TARGETS; do
+            mkdir -p "fuzz-corpus/$t"
+            extra=()
+            # Short request streams keep the batch target's executions fast.
+            [ "$t" = batch ] && extra=(-dict=fuzz-seeds/batch.dict -max_len=2048)
+            echo "::group::fuzz_$t (${SECONDS_EACH}s)"
+            if ! "build/fuzz/fuzz_$t" "fuzz-corpus/$t" "fuzz-seeds/$t" \
+                "${extra[@]}" -max_total_time="$SECONDS_EACH" -timeout=30 \
+                -rss_limit_mb=4096 -print_final_stats=1 \
+                -artifact_prefix="fuzz-artifacts/$t-" 2>&1 | tail -n 200; then
+              echo "::error::fuzz_$t found a failing input (see the artifacts)"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: fuzz-artifacts/
+          if-no-files-found: ignore
+
+      # Only the nightly and manual runs grow the shared corpora; a pull
+      # request's short run reads them but does not write. Each corpus is
+      # first minimized (-merge=1 keeps the smallest set of inputs with the
+      # same coverage), so the cache does not grow without bound. A merge
+      # that fails keeps the corpus as it was.
+      - name: Minimize corpora
+        if: always() && steps.select.outputs.targets != '' && github.event_name != 'pull_request'
+        env:
+          TARGETS: ${{ steps.select.outputs.targets }}
+        run: |
+          set -euo pipefail
+          export VYCOR_FUZZ_INDEX="$PWD/fuzz-seeds/batch.vycs"
+          for t in $TARGETS; do
+            [ -d "fuzz-corpus/$t" ] || continue
+            rm -rf "fuzz-corpus-min/$t"
+            mkdir -p "fuzz-corpus-min/$t"
+            before="$(ls "fuzz-corpus/$t" | wc -l)"
+            if "build/fuzz/fuzz_$t" -merge=1 -timeout=30 -rss_limit_mb=4096 \
+                "fuzz-corpus-min/$t" "fuzz-corpus/$t" > "merge-$t.log" 2>&1; then
+              rm -rf "fuzz-corpus/$t"
+              mv "fuzz-corpus-min/$t" "fuzz-corpus/$t"
+              echo "fuzz_$t: corpus $before -> $(ls "fuzz-corpus/$t" | wc -l) inputs"
+            else
+              echo "::warning::fuzz_$t: corpus merge failed; kept as is"
+              tail -n 20 "merge-$t.log"
+            fi
+          done
+
+      - name: Save corpora
+        if: always() && steps.select.outputs.targets != '' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}

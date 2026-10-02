@@ -25,6 +25,7 @@ add_library(vycor_lib
   callgraph/WorkerPool.cpp
   callgraph/Interrupt.cpp
   callgraph/CrashGuard.cpp
+  callgraph/RetainUntilExit.cpp
   query/Serialize.cpp
   query/Identity.cpp
   query/GraphTools.cpp
@@ -118,7 +119,7 @@ if(VYCOR_EXT_SOURCES)
   message(STATUS "Organization extensions: ${VYCOR_EXT_SOURCES}")
 endif()
 
-add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES})
+add_executable(vycor-cpp main.cpp ${VYCOR_EXT_SOURCES} ${VYCOR_SANITIZER_SOURCES})
 target_link_libraries(vycor-cpp PRIVATE vycor_lib)
 target_compile_options(vycor-cpp PRIVATE ${VYCOR_WARNING_FLAGS})
 

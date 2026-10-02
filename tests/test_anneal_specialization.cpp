@@ -37,6 +37,17 @@ using namespace vycor;
 
 namespace {
 
+// A fresh directory named after `dir` (dir-XXXXXX), stored back into `dir`:
+// ctest runs test cases as parallel processes, and a fixed name let one
+// case's cleanup delete another's sources mid-run.
+[[maybe_unused]] bool makeUniqueFixtureDir(std::string &dir) {
+  llvm::SmallString<128> made;
+  if (llvm::sys::fs::createUniqueDirectory(dir, made))
+    return false;
+  dir = std::string(made);
+  return true;
+}
+
 // traits.hpp declares the primary Traits<T>; traits_int.hpp explicitly
 // specializes Traits<int>. tu_bad instantiates Traits<int> WITHOUT the
 // specialization header (IFNDR once tu_good exists); tu_good includes it;
@@ -47,7 +58,7 @@ struct SpecFixture {
   std::string absDir;
 
   SpecFixture() {
-    REQUIRE(!llvm::sys::fs::create_directory(dir));
+    REQUIRE(makeUniqueFixtureDir(dir));
     llvm::SmallString<256> abs;
     REQUIRE(!llvm::sys::fs::real_path(dir, abs));
     absDir = std::string(abs.str());

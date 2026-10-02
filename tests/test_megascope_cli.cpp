@@ -931,7 +931,10 @@ TEST_CASE("query verbs bake in memory when given --source",
     auto head = parseObject(ls[0]);
     CHECK(head.getObject("_summary")->getInteger("callSiteCount") ==
           static_cast<int64_t>(ls.size() - 1));
-    auto tu = parseObject(ls[1]).getString("tu");
+    // The record must outlive the StringRef getString returns into it
+    // (ASan: heap-use-after-free when it was a temporary).
+    auto rec = parseObject(ls[1]);
+    auto tu = rec.getString("tu");
     REQUIRE(tu.has_value());
     CHECK(tu->ends_with("callbacks.cpp"));
   }

@@ -15,6 +15,7 @@
 
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/CrashGuard.h"
+#include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
@@ -1054,7 +1055,7 @@ int indexTuLocally(CallGraph &graph,
   IndexEdgeFactory factory(*local, collapse, file);
   int status = runToolGuarded(compDb, file, factory, pchCache, sysroot);
   if (status == -1) {
-    (void)local.release();
+    retainUntilExit(local.release());
     return status;
   }
   if (status == 1)

@@ -103,8 +103,10 @@ add_executable(vycor_tests
   test_check_set.cpp
   test_crash_containment.cpp
   test_anneal_report.cpp
+  test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
+  ${VYCOR_SANITIZER_SOURCES}
 )
 
 target_link_libraries(vycor_tests PRIVATE
@@ -119,7 +121,18 @@ target_compile_definitions(vycor_tests PRIVATE
 )
 
 include(Catch)
-catch_discover_tests(vycor_tests)
+# The [crash-guard] tests crash a parse on purpose; under LeakSanitizer the
+# frames LLVM's CrashRecoveryContext abandons are reported as leaks, so
+# those tests alone run with a suppression for them (see the file), and
+# do not print the suppressions they used: with a log_path set (CI), that
+# summary would be a report file of its own.
+# Tags become ctest labels: the TSan job selects the thread-pool tests by
+# tag (ctest -L).
+catch_discover_tests(vycor_tests TEST_SPEC "~[crash-guard]" ADD_TAGS_AS_LABELS)
+catch_discover_tests(vycor_tests TEST_SPEC "[crash-guard]" ADD_TAGS_AS_LABELS
+  TEST_LIST vycor_crash_guard_tests
+  PROPERTIES ENVIRONMENT
+    "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/sanitizers/lsan-crash-recovery.supp:print_suppressions=0")
 
 # End-to-end CLI output contract: the built binary over examples/deep_chains
 # against examples/deep_chains/cli-golden/ (scripts/cli-golden.py; refresh
@@ -147,6 +160,14 @@ if(Python3_Interpreter_FOUND)
                    ${CMAKE_SOURCE_DIR}/scripts/write-integrity-check.py
                    --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(write_integrity PROPERTIES LABELS "cli;integrity")
+  # Paths and source text that are not UTF-8 (scripts/utf8-paths-check.py,
+  # callgraph/Utf8.h): nothing the binary prints aborts llvm::json, and
+  # paths that differ in one such byte stay two TUs through a warm refresh.
+  add_test(NAME utf8_paths
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_SOURCE_DIR}/scripts/utf8-paths-check.py
+                   --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(utf8_paths PROPERTIES LABELS "cli;utf8")
   # The validation corpus (scripts/corpus-run.py, docs/validation.md):
   # every case under corpus/cases/ baked and queried, expectations
   # checked. corpus_selfcheck proves the checks can fail: the corpus

@@ -37,12 +37,24 @@
 #include <atomic>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
 using namespace vycor;
 
 namespace {
+
+// A fresh directory named after `dir` (dir-XXXXXX), stored back into `dir`:
+// ctest runs test cases as parallel processes, and a fixed name let one
+// case's cleanup delete another's sources mid-run.
+[[maybe_unused]] bool makeUniqueFixtureDir(std::string &dir) {
+  llvm::SmallString<128> made;
+  if (llvm::sys::fs::createUniqueDirectory(dir, made))
+    return false;
+  dir = std::string(made);
+  return true;
+}
 
 // On-disk scratch project with a genuinely fragile TU (written fresh per
 // test case, removed on destruction). user_a.cpp and user_c.cpp call
@@ -56,7 +68,7 @@ struct ScratchFixture {
   std::string dir = "anneal_ckpt_fixture";
 
   ScratchFixture() {
-    REQUIRE(!llvm::sys::fs::create_directory(dir));
+    REQUIRE(makeUniqueFixtureDir(dir));
     write("core.hpp", R"cpp(
 #pragma once
 namespace MathLib {
@@ -545,6 +557,90 @@ TEST_CASE("Shard files round-trip index payloads, diagnostics, and the "
                                      [](const std::string &,
                                         const AnnealIndexPayload &) {}));
     CHECK_FALSE(readGlobalIndexFile(shard.path, dst));
+  }
+}
+
+namespace {
+
+void putU32At(std::string &b, size_t at, uint32_t v) {
+  for (int i = 0; i < 4; ++i)
+    b[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+}
+
+uint32_t u32At(const std::string &b, size_t at) {
+  uint32_t v = 0;
+  for (int i = 0; i < 4; ++i)
+    v |= static_cast<uint32_t>(static_cast<uint8_t>(b[at + i])) << (8 * i);
+  return v;
+}
+
+std::string slurp(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+// fuzz_checkpoint finding (UBSan): a diagnostic kind outside
+// Diagnostic::Kind was cast into the enum, undefined behavior the first
+// time the kind was read. Shards and journal records now refuse it.
+TEST_CASE("A diagnostic kind outside the enum is refused and not loaded",
+          "[AnnealIsolated][AnnealCheckpoint]") {
+  Diagnostic d;
+  d.kind = Diagnostic::ADL_Fallback;
+  d.callLocation = "ZZloc.cpp:1:1";
+  d.message = "msg";
+
+  SECTION("diagnostics shard") {
+    CheckpointFileGuard shard("anneal_shard_badkind.bin");
+    REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}},
+                                 {AnnealCheckpoint::kCleanParse}));
+    std::string bytes = slurp(shard.path);
+    // magic, version, count; tu "a.cpp"; payload length; then the
+    // payload: the TU's outcome, diagnostic count, kind, location, ...;
+    // the checksum follows it. The kind sits just before its location.
+    const size_t lenAt = 12 + 4 + 5, payload = lenAt + 4;
+    const uint32_t len = u32At(bytes, lenAt);
+    const size_t loc = bytes.find("ZZloc.cpp");
+    REQUIRE(loc != std::string::npos);
+    REQUIRE(u32At(bytes, loc - 12) == 1); // the diagnostic count
+    putU32At(bytes, loc - 8, 32);
+    putU32At(bytes, payload + len,
+             annealRecordChecksum(bytes.data() + payload, len));
+    std::ofstream(shard.path, std::ios::binary | std::ios::trunc) << bytes;
+    CHECK_FALSE(readAnnealDiagShard(
+        shard.path, [](const std::string &, std::vector<Diagnostic>) {}));
+  }
+
+  SECTION("journal phase-2 record") {
+    CheckpointFileGuard ckpt("anneal_ckpt_badkind.bin");
+    FileStamp stamp;
+    stamp.path = "a.cpp";
+    stamp.mtimeNs = 1;
+    stamp.size = 2;
+    {
+      auto journal = AnnealCheckpoint::open(ckpt.path, 7);
+      REQUIRE(journal);
+      journal->recordPhase2("a.cpp", stamp, 99, {d});
+    }
+    std::string bytes = slurp(ckpt.path);
+    // Header (16), then the one record: kind u8, length u32, payload,
+    // checksum. The diagnostic's kind sits just before its location.
+    const size_t payload = 16 + 5;
+    const uint32_t len = u32At(bytes, 17);
+    const size_t loc = bytes.find("ZZloc.cpp");
+    REQUIRE(loc != std::string::npos);
+    putU32At(bytes, loc - 8, 32);
+    putU32At(bytes, payload + len,
+             annealRecordChecksum(bytes.data() + payload, len));
+    std::ofstream(ckpt.path, std::ios::binary | std::ios::trunc) << bytes;
+    auto journal = AnnealCheckpoint::open(ckpt.path, 7);
+    REQUIRE(journal);
+    std::vector<Diagnostic> out;
+    CHECK_FALSE(journal->replayPhase2("a.cpp", stamp, 99, out));
+    CHECK(out.empty());    journal.reset();
+    std::remove((ckpt.path + ".lock").c_str());
   }
 }
 

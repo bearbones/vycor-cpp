@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -52,3 +55,221 @@ jobs:
 
       - name: Test
         run: cd build && ctest --output-on-failure
+
+  # The Release build that ships (release.yml's Linux configure: host gcc,
+  # CMAKE_BUILD_TYPE=Release, so asserts — CallGraph's read-only guards
+  # among them — are compiled out) runs the whole suite, cli_golden and
+  # corpus included.
+  release:
+    runs-on: ubuntu-24.04
+    name: Release (LLVM 21)
+    timeout-minutes: 60
+    env:
+      LLVM_VERSION: "21"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize Catch2 submodule
+        run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Install LLVM/Clang
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-${LLVM_VERSION}-dev" \
+            "libclang-${LLVM_VERSION}-dev" \
+            ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_VERSION}" \
+            -DVYCOR_USE_SUBMODULE=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+      # Already part of the full run above; repeated by name so the
+      # end-to-end contract checks read as their own step in the log.
+      - name: CLI goldens and validation corpus
+        run: |
+          cd build && ctest --output-on-failure --no-tests=error \
+            -R '^(cli_golden|corpus)$'
+
+  # Debug + AddressSanitizer + UndefinedBehaviorSanitizer (a UB report
+  # aborts), full suite. LeakSanitizer is on (the ASan default on Linux):
+  # objects kept on purpose are retained from a global
+  # (callgraph/RetainUntilExit.h), so a report is a real leak.
+  asan-ubsan:
+    runs-on: ubuntu-24.04
+    name: ASan + UBSan (LLVM 21)
+    timeout-minutes: 90
+    env:
+      LLVM_VERSION: "21"
+      # log_path: every report, from a test or from a subprocess worker
+      # whose abort the parent absorbs as a crashed TU, lands in a file
+      # that the last step fails on.
+      ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:log_path=/tmp/sanitizer-logs/asan"
+      UBSAN_OPTIONS: "print_stacktrace=1:log_path=/tmp/sanitizer-logs/ubsan"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize Catch2 submodule
+        run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Install LLVM/Clang
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-${LLVM_VERSION}-dev" \
+            "libclang-${LLVM_VERSION}-dev" \
+            "libclang-rt-${LLVM_VERSION}-dev" \
+            ninja-build
+
+      # The runner kernel's 32-bit mmap randomization can put mappings
+      # where the sanitizer runtimes expect shadow memory.
+      - name: Narrow mmap randomization for the sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Create the sanitizer log directory
+        run: mkdir -p /tmp/sanitizer-logs
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="clang-${LLVM_VERSION}" \
+            -DCMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}" \
+            -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_VERSION}" \
+            -DVYCOR_WERROR=ON \
+            -DVYCOR_SANITIZE=address,undefined
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+      # A sanitizer report anywhere (a test, the CLI, an isolated worker)
+      # fails the job, whatever the steps above concluded.
+      - name: Sanitizer reports
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(/tmp/sanitizer-logs/*)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "No sanitizer reports."
+            exit 0
+          fi
+          for f in "${logs[@]}"; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+          echo "::error::${#logs[@]} sanitizer report file(s)"
+          exit 1
+
+  # ThreadSanitizer over what runs on more than one thread: the per-TU
+  # thread pool (determinism bakes at 1 and 4 threads, the worker-pool and
+  # shard-merge tests, parallel anneal), an in-process 4-thread bake of
+  # examples/deep_chains with queries over it, and one validation corpus
+  # case (its isolated bake drives the parent's worker dispatcher).
+  tsan:
+    runs-on: ubuntu-24.04
+    name: TSan (LLVM 21)
+    timeout-minutes: 60
+    env:
+      LLVM_VERSION: "21"
+      # log_path: see asan-ubsan.
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:log_path=/tmp/sanitizer-logs/tsan"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize Catch2 submodule
+        run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Install LLVM/Clang
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y \
+            "llvm-${LLVM_VERSION}-dev" \
+            "libclang-${LLVM_VERSION}-dev" \
+            "libclang-rt-${LLVM_VERSION}-dev" \
+            ninja-build
+
+      - name: Narrow mmap randomization for the sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Create the sanitizer log directory
+        run: mkdir -p /tmp/sanitizer-logs
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="clang-${LLVM_VERSION}" \
+            -DCMAKE_CXX_COMPILER="clang++-${LLVM_VERSION}" \
+            -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_VERSION}" \
+            -DVYCOR_WERROR=ON \
+            -DVYCOR_SANITIZE=thread
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Thread-pool tests
+        run: |
+          cd build && ctest --output-on-failure --no-tests=error \
+            -L '^(worker_pool|determinism|AnnealCheckpoint|AnnealIsolated)$'
+
+      - name: Multi-threaded bake of examples/deep_chains
+        run: |
+          set -euo pipefail
+          # Writes examples/deep_chains/compile_commands.json.
+          examples/deep_chains/gen_compile_commands.sh
+          work="$(mktemp -d)"
+          bin=build/src/vycor-cpp
+          "$bin" megascope index --build-path examples/deep_chains \
+            --index "$work/i.vycs" --threads 4 --isolate-workers=false
+          "$bin" megascope get-callers --index "$work/i.vycs" \
+            --name stage5_sink > /dev/null
+          "$bin" megascope batch --index "$work/i.vycs" > /dev/null <<'REQ'
+          {"tool":"find_call_chain","args":{"from":"main","to":"stage5_sink"}}
+          {"tool":"query_exception_safety","args":{"function":"stage5_sink","exception_type":"std::exception"}}
+          REQ
+
+      - name: One validation corpus case
+        run: |
+          python3 scripts/corpus-run.py --binary build/src/vycor-cpp \
+            --reps 1 --case mixed_exception_protection
+
+      # A sanitizer report anywhere (a test, the CLI, an isolated worker)
+      # fails the job, whatever the steps above concluded.
+      - name: Sanitizer reports
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(/tmp/sanitizer-logs/*)
+          if [ ${#logs[@]} -eq 0 ]; then
+            echo "No sanitizer reports."
+            exit 0
+          fi
+          for f in "${logs[@]}"; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+          echo "::error::${#logs[@]} sanitizer report file(s)"
+          exit 1

@@ -36,6 +36,17 @@ using namespace vycor;
 
 namespace {
 
+// A fresh directory named after `dir` (dir-XXXXXX), stored back into `dir`:
+// ctest runs test cases as parallel processes, and a fixed name let one
+// case's cleanup delete another's sources mid-run.
+[[maybe_unused]] bool makeUniqueFixtureDir(std::string &dir) {
+  llvm::SmallString<128> made;
+  if (llvm::sys::fs::createUniqueDirectory(dir, made))
+    return false;
+  dir = std::string(made);
+  return true;
+}
+
 // state.hpp defines a MUTABLE static (gCounter) and a const one (kTag);
 // both a.cpp and b.cpp include it — gCounter forks, kTag is benign.
 // only.cpp includes solo.hpp's mutable static (one TU: no duplication),
@@ -45,7 +56,7 @@ struct HeaderStaticFixture {
   std::string absDir;
 
   HeaderStaticFixture() {
-    REQUIRE(!llvm::sys::fs::create_directory(dir));
+    REQUIRE(makeUniqueFixtureDir(dir));
     llvm::SmallString<256> abs;
     REQUIRE(!llvm::sys::fs::real_path(dir, abs));
     absDir = std::string(abs.str());

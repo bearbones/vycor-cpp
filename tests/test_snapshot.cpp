@@ -28,10 +28,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <iterator>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 
 using namespace vycor;
 
@@ -538,6 +540,43 @@ TEST_CASE("snapshot load rejects bad input", "[snapshot]") {
     CHECK_FALSE(SnapshotIO::load(path).has_value());
     std::remove(path.c_str());
   }
+
+  // fuzz_snapshot finding: a bad id inside a record failed the reader,
+  // but the next count was still read and trusted without its "no more
+  // elements than bytes left" bound, so a Mutable load reserved an edge
+  // map for ~4 billion entries (out of memory) instead of refusing the
+  // section.
+  SECTION("a count read after a bad id cannot size an allocation") {
+    auto path = tempSnapshotPath("stickyfail");
+    CallGraph g;
+    g.addNode({"only", "/src/a.cpp", 1, false, false, "ZZMarkerClass"},
+              "/src/a.cpp");
+    REQUIRE(SnapshotIO::save(path, g, ControlFlowIndex(), makeMeta()));
+    std::ifstream in(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    in.close();
+    // The node record ends: enclosingClass, contributor count (1), the
+    // contributor's TU id; the edge count follows (no edges).
+    auto pos = bytes.find("ZZMarkerClass");
+    REQUIRE(pos != std::string::npos);
+    const size_t contribCount = pos + 13, tuId = contribCount + 4,
+                 edgeCount = tuId + 4;
+    REQUIRE(testing::snapshotU64At(bytes, contribCount) % (1ull << 32) == 1);
+    auto put32 = [&](size_t at, uint32_t v) {
+      for (int i = 0; i < 4; ++i)
+        bytes[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+    };
+    put32(tuId, 0xFFFFFFF0u);      // no such interned string
+    put32(edgeCount, 0xFFFFFFF0u); // far more edges than bytes left
+    testing::resealSnapshot(bytes);
+    std::ofstream(path, std::ios::binary) << bytes;
+    SnapshotLoadStats stats;
+    CHECK_FALSE(SnapshotIO::load(path, &stats, LoadMode::Mutable));
+    CHECK(stats.error.find("section 'graph' does not decode") !=
+          std::string::npos);
+    std::remove(path.c_str());
+  }
 }
 
 TEST_CASE("stampFiles flags missing files with zero stamps", "[snapshot]") {
@@ -552,6 +591,17 @@ namespace {
 std::string writeText(const std::string &path, const std::string &text) {
   std::ofstream(path) << text;
   return path;
+}
+
+/// Set `path`'s modification time (nanoseconds since the epoch).
+void setMtime(const std::string &path, uint64_t mtimeNs) {
+  int fd = -1;
+  REQUIRE(!llvm::sys::fs::openFileForWrite(path, fd,
+                                           llvm::sys::fs::CD_OpenExisting,
+                                           llvm::sys::fs::OF_Append));
+  const llvm::sys::TimePoint<> t{std::chrono::nanoseconds(mtimeNs)};
+  CHECK(!llvm::sys::fs::setLastAccessAndModificationTime(fd, t, t));
+  ::close(fd);
 }
 
 /// What the frontend records for a file it opened: whole-second mtime.
@@ -753,6 +803,7 @@ TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
   }
 
   SECTION("each TU is counted once, inputs before deps before retry") {
+    const uint64_t sharedMtime = SnapshotIO::stampFiles({shared})[0].mtimeNs;
     writeText(shared, "// shared, edited\n");
     fps[0] = "fp-a2";
     outcomes[b] = {TuStatus::Crashed, "signal 11"};
@@ -768,7 +819,11 @@ TEST_CASE("fingerprints and outcomes dirty TUs the stamps would keep",
     outcomes[a] = {TuStatus::Partial, "parse errors"};
     SnapshotIO::recordOutcomes(meta, outcomes);
     fps[0] = meta.fingerprints[0];
+    // Restored byte for byte and to its recorded mtime: unchanged. (Its
+    // mtime alone used to depend on the rewrite landing in the same
+    // second as the first write, which a slow first test missed.)
     writeText(shared, "// shared\n");
+    setMtime(shared, sharedMtime);
     CHECK(SnapshotIO::dirtyTUs(meta, SnapshotIO::stampFiles({a, b}), &fps,
                                &why) == std::vector<bool>{true, true});
     CHECK(why.reasons == std::vector<R>{R::Retry, R::Stamp});

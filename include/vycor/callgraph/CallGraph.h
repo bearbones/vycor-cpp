@@ -280,6 +280,11 @@ public:
 private:
   using SId = StringInterner::Id;
 
+  // Producers hand in raw bytes, which are stored as index text
+  // (callgraph/Utf8.h); lookups take index text, or convert raw bytes.
+  SId internRaw(const std::string &s);
+  std::optional<SId> findText(const std::string &s) const;
+
   // Compact interned edge record. Public queries materialize CallGraphEdge
   // (with resolved strings) on demand; nothing outside CallGraph sees this.
   struct StoredEdge {

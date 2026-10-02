@@ -237,6 +237,42 @@ missing `function` itself), because the CLI's flag check (and any
 caller that enforces `required`) would reject the alias before the
 handler runs.
 
+### Strings that are not UTF-8
+
+File paths, USRs (Clang puts the file name of an internal-linkage
+entity into its USR) and source text are bytes; a Latin-1 directory
+name or comment is legal input. JSON strings are UTF-8. Every string
+the index holds is therefore *index text*
+(`include/vycor/callgraph/Utf8.h`): valid UTF-8, converted from the raw
+bytes by an exact escape, and printed as it is stored.
+
+- A byte that is not part of a valid UTF-8 sequence, `b` (0x80–0xFF),
+  becomes the code point U+10FF00 + `b` (U+10FF80–U+10FFFF, the top of
+  plane 16, private use). Latin-1 `é` (0xE9) in a path prints as
+  U+10FFE9.
+- A code point already in that range is escaped byte by byte the same
+  way. Every other string — all valid UTF-8 without those 128 code
+  points — is unchanged.
+- The escape round-trips (`fromIndexText`): a consumer that needs the
+  raw path maps each U+10FF80–U+10FFFF back to the byte it stands for.
+  Two strings that differ in a non-UTF-8 byte stay two strings, so
+  `a\xe9.cpp` and `a\xe8.cpp` are two TUs and two `static helper()`
+  in them are two functions.
+- A lookup (a tool argument, a CLI flag, a `batch` request) that is
+  valid UTF-8 is taken as index text, so a string copied from any
+  output finds what it names. One that is not UTF-8 (a raw path from
+  the shell) is converted first, so the raw spelling finds it too. The
+  only string its raw spelling cannot name is one that itself contains
+  U+10FF80–U+10FFFF; its printed form still does.
+- The snapshot meta keeps TU paths and configuration raw (warm start
+  stats the paths); `info`, `diff`, `index`'s summary line and
+  `--stats-json` print them as index text, so a TU path reads the same
+  there as in `indexScope` and the tool payloads.
+
+Replacing each bad byte with U+FFFD (what `llvm::json` does in a build
+without assertions) was the first fix tried and was dropped: it merged
+distinct paths and USRs into one identity.
+
 ### Exit codes
 
 The exit code is derived from `status` and the record list, never from

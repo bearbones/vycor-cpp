@@ -219,7 +219,14 @@ public:
   ///     itself; a load verifies the header and every section it decodes
   ///     and refuses a mismatch, naming the section (SnapshotLoadStats::
   ///     error). Section contents are unchanged from v12.
-  static constexpr uint32_t kFormatVersion = 13;
+  /// v14: every string in the graph, control-flow and channel sections
+  ///     is index text (callgraph/Utf8.h): valid UTF-8, with a byte that
+  ///     was not converted by an exact escape. A v13 index held such bytes
+  ///     raw, and a lookup now converts a raw argument before comparing,
+  ///     so a v13 index would answer `not_found` for them: it is rebuilt.
+  ///     A loader refuses a string that is not UTF-8 as damage. The meta
+  ///     section is unchanged (TU paths stay raw).
+  static constexpr uint32_t kFormatVersion = 14;
   /// Bytes before the first section: magic(4) + version(4) + summary(32) +
   /// table count(4) + 4 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).

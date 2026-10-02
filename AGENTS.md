@@ -164,6 +164,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
+| `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
+| `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (anneal shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -260,7 +262,9 @@ sections the tool declares (`ToolEntry::needs`, set in
 per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
-place, v13 a checksum per section and for the header: header with
+place, v13 a checksum per section and for the header, v14 index text
+(`callgraph/Utf8.h`) for every graph, control-flow and channel string:
+header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels), so a graph-only tool never
 decodes (or checksums) the
@@ -510,6 +514,33 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   2. `find_package(Catch2 3.10 CONFIG)` — system / vcpkg / Conan / Spack.
   3. `extern/Catch2` submodule (pinned to v3.10.0 upstream by default).
 - Defines `PROJECT_SOURCE_DIR` for example file paths.
+- Registers the Catch2 tests with their tags as ctest labels (`ctest -L
+  worker_pool`). The `[crash-guard]` tests, which crash a parse on purpose,
+  run with `tests/sanitizers/lsan-crash-recovery.supp` (the frames LLVM's
+  `CrashRecoveryContext` abandons); nothing else is suppressed.
+
+Sanitizer and fuzz options (top-level `CMakeLists.txt`):
+- `VYCOR_SANITIZE` — `address,undefined` (ASan + UBSan, `-fno-sanitize-recover=undefined`
+  so a UB report fails the test), `thread` (TSan; cannot combine with
+  `address`), or any other `-fsanitize=` list. Applied to every target
+  configured after it (project, tests, Catch2); the prebuilt LLVM
+  libraries stay uninstrumented. Every executable of an ASan build links
+  `src/compat/SanitizerDefaults.cpp` (`allow_user_poisoning=0`: LLVM's
+  header-inline `BumpPtrAllocator` poisoning, compiled into both our
+  instrumented objects and the uninstrumented LLVM libraries, otherwise
+  reports use-after-poison inside clang; the file says why that is the
+  narrowest switch).
+- `VYCOR_FUZZ` — clang only: coverage instrumentation everywhere, the
+  libFuzzer targets under `fuzz/` (`fuzz_snapshot`, `fuzz_checkpoint`,
+  `fuzz_shard`, `fuzz_batch`) and `fuzz_seeds`, which writes their seed
+  corpora from the test fixtures. Implies `VYCOR_SANITIZE=address,undefined`
+  unless set. Target list, input formats, run commands, and the findings
+  so far: `fuzz/README.md`.
+- Both need the compiler's sanitizer runtimes (`libclang-rt-<N>-dev` for
+  clang on Debian/Ubuntu).
+- `VYCOR_FUZZ` picks `address,undefined` in a normal variable, not the
+  cache: reconfiguring the same build directory with `-DVYCOR_FUZZ=OFF`
+  builds unsanitized again.
 
 ---
 
@@ -569,6 +600,37 @@ keeps quality and cost apart. Its `header_change`,
 `compile_flag_invalidation`, and `change_impact` cases are before/after
 patch pairs.
 Benchmarks (`scripts/bench.py`) are run by hand, never by ctest.
+
+```bash
+# ASan + UBSan (or -DVYCOR_SANITIZE=thread), then the usual ctest
+cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DVYCOR_SANITIZE=address,undefined
+cmake --build build-asan && (cd build-asan && ctest --output-on-failure)
+
+# Fuzzing (fuzz/README.md)
+cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DVYCOR_FUZZ=ON -DVYCOR_BUILD_TESTS=OFF
+cmake --build build-fuzz --target fuzz
+build-fuzz/fuzz/fuzz_seeds fuzz-seeds
+build-fuzz/fuzz/fuzz_snapshot fuzz-corpus/snapshot fuzz-seeds/snapshot -max_total_time=600
+```
+
+CI (`.github/workflows/ci.yml`) runs, besides the Debug build-and-test on
+every supported LLVM: on the newest LLVM only, `release` (the shipped
+Release configuration, full ctest including `cli_golden` and `corpus`),
+`asan-ubsan` (full ctest), and `tsan` (the thread-pool tests by label, a
+4-thread in-process bake of `examples/deep_chains` with queries, and one
+corpus case). The sanitizer jobs set `log_path` in `*SAN_OPTIONS` and
+end with a step that fails if any report file exists, so a report from a
+subprocess worker (which the parent absorbs as a crashed TU) fails the
+job too; filtered ctest runs pass `--no-tests=error`.
+`.github/workflows/fuzz.yml` fuzzes, 60 s per target on a pull request
+that touches code the target executes (the path lists in the workflow)
+and 20 min each nightly, minimizes the nightly corpora (`-merge=1`)
+before caching them, and uploads failing inputs. A sanitizer or fuzz finding is fixed with a unit
+test that reproduces it; a suppression is only for a third-party (LLVM)
+issue, scoped as narrowly as the tool allows, with a comment saying why.
 
 Run tests from the project root, or ensure `PROJECT_SOURCE_DIR` is set
 correctly (the CMake build sets it automatically via a compile definition).

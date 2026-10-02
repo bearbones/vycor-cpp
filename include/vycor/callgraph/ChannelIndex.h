@@ -138,7 +138,11 @@ public:
   }
 
   // Merge another index into this one (worker-shard merge, mirrors
-  // CallGraph::absorb / ControlFlowIndex::absorb).
+  // CallGraph::absorb / ControlFlowIndex::absorb). Every registration of a
+  // shard site is replayed under the TU that made it, so removeTU on this
+  // index releases exactly what that TU contributed; registrations without
+  // a TU are added as one count. O(sites + TU registrations), whatever the
+  // refcounts.
   void absorb(const ChannelIndex &shard);
 
   // Remove all sites contributed by the given TU. Matches on the recorded
@@ -154,6 +158,9 @@ public:
   void compact();
 
 private:
+  // addSite registering `count` contributions of `site` at once.
+  void addSiteRefs(ChannelSite site, uint32_t count);
+
   // Reads/writes sites_/index_/byChannel_/byFunctionUsr_/byFunctionDisplay_/
   // byTu_ directly (refs and per-TU contributor lists, which the public API
   // doesn't expose) to serialize/restore snapshot warm-start state exactly

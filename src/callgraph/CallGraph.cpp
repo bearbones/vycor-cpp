@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/Utf8.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -107,6 +108,11 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   // keeps their edges — also name-keyed — consistent with the node key.
   if (node.usr.empty())
     node.usr = node.qualifiedName;
+  // Stored as index text (Utf8.h), interned and inline strings alike.
+  makeIndexText(node.usr);
+  makeIndexText(node.qualifiedName);
+  makeIndexText(node.file);
+  makeIndexText(node.enclosingClass);
   SId nameId = interner_.intern(node.usr);
   SId displayId = interner_.intern(node.qualifiedName);
   auto it = nodes_.find(nameId);
@@ -129,7 +135,7 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
       it->second.enclosingClass = std::move(node.enclosingClass);
   }
   if (!tuPath.empty()) {
-    SId tuId = interner_.intern(tuPath);
+    SId tuId = internRaw(tuPath);
     if (nodeContributors_[nameId].insert(tuId).second)
       tuNodes_[tuId].push_back(nameId);
   }
@@ -142,9 +148,18 @@ const std::string &CallGraph::displayFor(SId usrId) const {
   return interner_.resolve(usrId);
 }
 
+CallGraph::SId CallGraph::internRaw(const std::string &s) {
+  return needsIndexEscape(s) ? interner_.intern(toIndexText(s))
+                             : interner_.intern(s);
+}
+
+std::optional<CallGraph::SId> CallGraph::findText(const std::string &s) const {
+  return isValidUtf8(s) ? interner_.find(s) : interner_.find(toIndexText(s));
+}
+
 std::vector<CallGraph::SId>
 CallGraph::resolveUsrIds(const std::string &name) const {
-  auto id = interner_.find(name);
+  auto id = findText(name);
   if (!id)
     return {};
   // Exact-usr match first: the string keys a registered node directly.
@@ -187,9 +202,9 @@ void CallGraph::addEdge(CallGraphEdge edge, const std::string &tuPath) {
   if (auto hook = g_edgeInsertHook.load(std::memory_order_relaxed))
     hook(edge);
   StoredEdge se;
-  se.caller = interner_.intern(edge.callerName);
-  se.callee = interner_.intern(edge.calleeName);
-  se.callSite = interner_.intern(edge.callSite);
+  se.caller = internRaw(edge.callerName);
+  se.callee = internRaw(edge.calleeName);
+  se.callSite = internRaw(edge.callSite);
   se.kind = edge.kind;
   se.confidence = edge.confidence;
   se.execContext = edge.execContext;
@@ -213,7 +228,7 @@ void CallGraph::addEdge(CallGraphEdge edge, const std::string &tuPath) {
     ++liveEdgeCount_;
   }
   if (!tuPath.empty()) {
-    SId tuId = interner_.intern(tuPath);
+    SId tuId = internRaw(tuPath);
     tuEdges_[tuId].push_back(idx);
   }
 }
@@ -453,8 +468,8 @@ void CallGraph::addDerivedClass(const std::string &baseClass,
     warnReadOnlyMutation();
     return;
   }
-  SId baseId = interner_.intern(baseClass);
-  SId derivedId = interner_.intern(derivedClass);
+  SId baseId = internRaw(baseClass);
+  SId derivedId = internRaw(derivedClass);
   auto &vec = derivedClasses_[baseId];
   if (std::find(vec.begin(), vec.end(), derivedId) == vec.end())
     vec.push_back(derivedId);
@@ -462,7 +477,7 @@ void CallGraph::addDerivedClass(const std::string &baseClass,
 
 std::vector<std::string>
 CallGraph::getDerivedClasses(const std::string &baseClass) const {
-  auto id = interner_.find(baseClass);
+  auto id = findText(baseClass);
   if (!id)
     return {};
   auto it = derivedClasses_.find(*id);
@@ -478,7 +493,7 @@ CallGraph::getDerivedClasses(const std::string &baseClass) const {
 
 std::vector<std::string>
 CallGraph::getAllDerivedClasses(const std::string &baseClass) const {
-  auto baseId = interner_.find(baseClass);
+  auto baseId = findText(baseClass);
   if (!baseId)
     return {};
   std::vector<std::string> result;
@@ -510,8 +525,8 @@ void CallGraph::addMethodOverride(const std::string &baseMethod,
     warnReadOnlyMutation();
     return;
   }
-  SId baseId = interner_.intern(baseMethod);
-  SId overrideId = interner_.intern(overrideMethod);
+  SId baseId = internRaw(baseMethod);
+  SId overrideId = internRaw(overrideMethod);
   auto &vec = methodOverrides_[baseId];
   if (std::find(vec.begin(), vec.end(), overrideId) == vec.end())
     vec.push_back(overrideId);
@@ -569,8 +584,8 @@ void CallGraph::addEffectiveImpl(const std::string &concreteClass,
     warnReadOnlyMutation();
     return;
   }
-  SId implId = interner_.intern(implMethod);
-  SId classId = interner_.intern(concreteClass);
+  SId implId = internRaw(implMethod);
+  SId classId = internRaw(concreteClass);
   effectiveImplClasses_[implId].insert(classId);
 }
 
@@ -601,8 +616,8 @@ void CallGraph::addFunctionReturn(const std::string &funcName,
     warnReadOnlyMutation();
     return;
   }
-  SId funcId = interner_.intern(funcName);
-  SId retId = interner_.intern(returnedFunc);
+  SId funcId = internRaw(funcName);
+  SId retId = internRaw(returnedFunc);
   if (functionReturns_[funcId].insert(retId).second)
     returnedBy_[retId].push_back(funcId);
 }
@@ -761,8 +776,9 @@ size_t CallGraph::removeTUs(const std::vector<std::string> &tuPaths) {
     return 0;
   }
   std::vector<SId> tuIds;
+  // TU paths are raw bytes (the compilation database's spelling).
   for (const auto &tuPath : tuPaths)
-    if (auto tuId = interner_.find(tuPath))
+    if (auto tuId = interner_.find(toIndexText(tuPath)))
       tuIds.push_back(*tuId);
   size_t removed = 0;
 

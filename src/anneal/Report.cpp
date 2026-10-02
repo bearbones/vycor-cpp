@@ -792,13 +792,18 @@ namespace {
 
 void writeTus(llvm::json::OStream &j, const AnnealRun &run) {
   j.attributeArray("tus", [&] {
-    for (const auto &[path, outcome] : run.tus)
+    // Named references, not structured bindings: a lambda capturing a
+    // structured binding is C++20 (clang -Wc++20-extensions).
+    for (const auto &tu : run.tus) {
+      const std::string &path = tu.first;
+      const auto &outcome = tu.second;
       j.object([&] {
         j.attribute("file", relativeToRoot(path, run.projectRoot));
         j.attribute("status", annealTuStatusName(outcome.status));
         if (!outcome.detail.empty() && outcome.status != TuStatus::Indexed)
           j.attribute("detail", outcome.detail);
       });
+    }
   });
 }
 
@@ -937,7 +942,9 @@ void renderSarif(const AnnealRun &run, llvm::raw_ostream &os) {
           j.object([&] {
             j.attribute("executionSuccessful", failed == 0);
             j.attributeArray("toolExecutionNotifications", [&] {
-              for (const auto &[path, outcome] : run.tus) {
+              for (const auto &tu : run.tus) {
+                const std::string &path = tu.first; // captured below
+                const auto &outcome = tu.second;
                 if (outcome.status == TuStatus::Indexed)
                   continue;
                 j.object([&] {

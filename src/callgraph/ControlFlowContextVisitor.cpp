@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CrashGuard.h"
+#include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/callgraph/UsrIdent.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
@@ -470,7 +471,9 @@ public:
 
 private:
   ControlFlowIndex &index_;
-  const CallGraph &graph_;
+  // Not read by this visitor today; kept so the constructor matches the
+  // other per-TU visitors. [[maybe_unused]] for clang -Wunused-private-field.
+  [[maybe_unused]] const CallGraph &graph_;
   clang::SourceManager &sm_;
   std::string tuPath_;
   clang::ASTContext *ctx_ = nullptr;
@@ -874,7 +877,7 @@ int indexCfLocally(ControlFlowIndex &index, ChannelIndex *channels,
                                     file);
   int status = runCfToolGuarded(compDb, file, factory, pchCache, sysroot);
   if (status == -1) {
-    (void)local.release();
+    retainUntilExit(local.release());
     return status;
   }
   index.absorb(local->index);
@@ -1153,7 +1156,7 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
   int status =
       runCfToolGuarded(compDb, file, factory, pchCache, sysroot, crashSignal);
   if (status == -1) {
-    (void)local.release(); // torn: see above
+    retainUntilExit(local.release()); // torn: see above
     return status;
   }
   graph.absorb(local->graph);
