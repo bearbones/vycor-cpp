@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/Utf8.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -107,6 +108,10 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
   // keeps their edges — also name-keyed — consistent with the node key.
   if (node.usr.empty())
     node.usr = node.qualifiedName;
+  // Interned strings are made valid UTF-8 by the interner; the inline ones
+  // here (Utf8.h).
+  makeValidUtf8(node.file);
+  makeValidUtf8(node.enclosingClass);
   SId nameId = interner_.intern(node.usr);
   SId displayId = interner_.intern(node.qualifiedName);
   auto it = nodes_.find(nameId);

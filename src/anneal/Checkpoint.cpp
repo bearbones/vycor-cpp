@@ -284,6 +284,10 @@ void AnnealIndexPayload::applyTo(GlobalIndex &into) const {
     types.addConvOpEdge(p.first, p.second);
 }
 
+uint32_t annealRecordChecksum(const char *data, size_t size) {
+  return fnv32(data, size);
+}
+
 uint64_t annealStampSetHash(const std::vector<FileStamp> &stamps) {
   std::vector<std::string> keys;
   keys.reserve(stamps.size());

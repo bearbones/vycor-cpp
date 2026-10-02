@@ -15,6 +15,7 @@
 
 
 #include "vycor/query/Tools.h"
+#include "vycor/callgraph/Utf8.h"
 #include "Registry.h"
 
 #include <cassert>
@@ -114,7 +115,7 @@ IndexFacts IndexFacts::of(const SnapshotMeta &meta, IndexFreshness freshness) {
   IndexFacts f;
   f.coverage = coverageOf(meta);
   if (!meta.provenance.environment.empty())
-    f.bake = meta.provenance.environment + "@" +
+    f.bake = validUtf8(meta.provenance.environment) + "@" +
              std::to_string(meta.provenance.bakeStartNs);
   f.freshness = freshness;
   f.channelsIndexed = !meta.channelTypes.empty();

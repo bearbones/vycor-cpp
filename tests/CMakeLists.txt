@@ -102,6 +102,7 @@ add_executable(vycor_tests
   test_anneal_exception_spec.cpp
   test_check_set.cpp
   test_crash_containment.cpp
+  test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
 )
@@ -118,7 +119,14 @@ target_compile_definitions(vycor_tests PRIVATE
 )
 
 include(Catch)
-catch_discover_tests(vycor_tests)
+# The [crash-guard] tests crash a parse on purpose; under LeakSanitizer the
+# frames LLVM's CrashRecoveryContext abandons are reported as leaks, so
+# those tests alone run with a suppression for them (see the file).
+catch_discover_tests(vycor_tests TEST_SPEC "~[crash-guard]")
+catch_discover_tests(vycor_tests TEST_SPEC "[crash-guard]"
+  TEST_LIST vycor_crash_guard_tests
+  PROPERTIES ENVIRONMENT
+    "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/sanitizers/lsan-crash-recovery.supp")
 
 # End-to-end CLI output contract: the built binary over examples/deep_chains
 # against examples/deep_chains/cli-golden/ (scripts/cli-golden.py; refresh

@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "vycor/callgraph/Utf8.h"
+
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -52,6 +54,9 @@ public:
   StringInterner(const StringInterner &) = delete;
   StringInterner &operator=(const StringInterner &) = delete;
 
+  /// Strings are stored as valid UTF-8 (Utf8.h): a string that is not is
+  /// interned, and found, as its U+FFFD-replaced form. The check runs only
+  /// on a miss, since a stored string is always valid.
   Id intern(const std::string &s) {
     {
       std::shared_lock lock(mutex_);
@@ -59,6 +64,8 @@ public:
       if (it != index_.end())
         return it->second;
     }
+    if (!isValidUtf8(s))
+      return intern(llvm::json::fixUTF8(s));
     std::unique_lock lock(mutex_);
     auto it = index_.find(s);
     if (it != index_.end())
@@ -75,10 +82,14 @@ public:
   }
 
   std::optional<Id> find(const std::string &s) const {
-    std::shared_lock lock(mutex_);
-    auto it = index_.find(s);
-    if (it != index_.end())
-      return it->second;
+    {
+      std::shared_lock lock(mutex_);
+      auto it = index_.find(s);
+      if (it != index_.end())
+        return it->second;
+    }
+    if (!isValidUtf8(s))
+      return find(llvm::json::fixUTF8(s));
     return std::nullopt;
   }
 
@@ -105,8 +116,10 @@ public:
     std::unique_lock lock(mutex_);
     if (!strings_.empty())
       return false;
-    for (auto &s : strings)
+    for (auto &s : strings) {
+      makeValidUtf8(s); // a saved table is input like any other
       strings_.push_back(std::move(s));
+    }
     rebuildIndex();
     return true;
   }

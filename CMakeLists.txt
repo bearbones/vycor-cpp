@@ -134,10 +134,59 @@ else()
   endif()
 endif()
 
+# Sanitizers (AGENTS.md "Sanitizer and fuzz builds"). Applied to every
+# target configured below — the project, its tests, and the vendored
+# Catch2 — so a TSan build has no uninstrumented test harness. LLVM itself
+# is a prebuilt library and stays uninstrumented: ASan/UBSan miss bugs
+# inside it, and TSan relies on its pthread interceptors there.
+#   address,undefined  ASan + UBSan; any UB report aborts the test
+#   thread             TSan (cannot be combined with address)
+set(VYCOR_SANITIZE "" CACHE STRING
+    "Build with sanitizers: 'address,undefined', 'address', 'undefined', or 'thread'")
+option(VYCOR_FUZZ "Build the libFuzzer targets under fuzz/ (clang only)" OFF)
+if(VYCOR_FUZZ AND NOT VYCOR_SANITIZE)
+  # libFuzzer without ASan finds crashes only; out-of-bounds reads that do
+  # not fault would go unnoticed.
+  set(VYCOR_SANITIZE "address,undefined" CACHE STRING "" FORCE)
+endif()
+if(VYCOR_SANITIZE)
+  if(MSVC)
+    message(FATAL_ERROR "VYCOR_SANITIZE is supported with clang and gcc only")
+  endif()
+  if(VYCOR_SANITIZE MATCHES "thread" AND VYCOR_SANITIZE MATCHES "address")
+    message(FATAL_ERROR "VYCOR_SANITIZE: thread cannot be combined with address")
+  endif()
+  set(VYCOR_SANITIZE_FLAGS -fsanitize=${VYCOR_SANITIZE} -fno-omit-frame-pointer)
+  if(VYCOR_SANITIZE MATCHES "undefined")
+    # A UB report fails the run instead of scrolling past in the log.
+    list(APPEND VYCOR_SANITIZE_FLAGS -fno-sanitize-recover=undefined)
+  endif()
+  add_compile_options(${VYCOR_SANITIZE_FLAGS})
+  add_link_options(${VYCOR_SANITIZE_FLAGS})
+  message(STATUS "Sanitizers: ${VYCOR_SANITIZE}")
+endif()
+if(VYCOR_FUZZ)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "VYCOR_FUZZ needs clang (libFuzzer); configure with "
+                        "-DCMAKE_CXX_COMPILER=clang++")
+  endif()
+  if(VYCOR_SANITIZE MATCHES "thread")
+    message(FATAL_ERROR "VYCOR_FUZZ runs under address,undefined, not thread")
+  endif()
+  # Coverage instrumentation for everything; only the fuzz executables
+  # link libFuzzer's main (fuzz/CMakeLists.txt). The ASan runtime provides
+  # the coverage callbacks to the other executables.
+  add_compile_options(-fsanitize=fuzzer-no-link)
+endif()
+
 add_subdirectory(src)
 
 option(VYCOR_BUILD_TESTS "Build tests (requires network for Catch2)" ON)
 if(VYCOR_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(VYCOR_FUZZ)
+  add_subdirectory(fuzz)
 endif()

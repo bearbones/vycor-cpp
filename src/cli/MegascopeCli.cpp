@@ -14,7 +14,9 @@
 // limitations under the License.
 
 #include "vycor/cli/MegascopeCli.h"
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/cli/BakeConfig.h"
 #include "vycor/cli/SourceSelection.h"
@@ -224,7 +226,8 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
                     *value + "'");
       args[key] = n;
     } else if (spec->type == "array") {
-      llvm::json::Value item(value->str());
+      // Command-line bytes need not be UTF-8; JSON values must (Utf8.h).
+      llvm::json::Value item(validUtf8(*value));
       if (spec->itemType == "integer") {
         int64_t n = 0;
         if (value->getAsInteger(10, n))
@@ -240,7 +243,7 @@ parseToolArgs(const ToolEntry &tool, llvm::ArrayRef<std::string> argv,
       }
       arr->push_back(std::move(item));
     } else {
-      args[key] = value->str();
+      args[key] = validUtf8(*value);
     }
   }
 
@@ -750,7 +753,7 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
             const CommonOpts &common, OutputFormat format,
             llvm::raw_ostream &out, llvm::raw_ostream &err) {
   llvm::json::Object o;
-  o["index"] = indexPath.str();
+  o["index"] = validUtf8(indexPath);
   o["format_version"] = static_cast<int64_t>(SnapshotIO::kFormatVersion);
   uint64_t bytes = 0;
   if (!llvm::sys::fs::file_size(indexPath, bytes))
@@ -762,19 +765,26 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   o["edges"] = static_cast<int64_t>(snap.summary.edges);
   o["call_sites"] = static_cast<int64_t>(snap.summary.callSites);
   o["channel_sites"] = static_cast<int64_t>(snap.summary.channelSites);
-  o["entry_points"] = llvm::json::Array(snap.meta.entryPoints);
+  // The meta keeps its strings as written (Utf8.h): converted here.
+  auto texts = [](const std::vector<std::string> &v) {
+    llvm::json::Array a;
+    for (const auto &s : v)
+      a.push_back(validUtf8(s));
+    return a;
+  };
+  o["entry_points"] = texts(snap.meta.entryPoints);
 
   llvm::json::Object cfg;
-  cfg["collapse_paths"] = llvm::json::Array(snap.meta.collapsePaths);
-  cfg["lock_types"] = llvm::json::Array(snap.meta.lockAllowlist);
+  cfg["collapse_paths"] = texts(snap.meta.collapsePaths);
+  cfg["lock_types"] = texts(snap.meta.lockAllowlist);
   cfg["lock_builtins"] = snap.meta.lockBuiltins;
   llvm::json::Array channelTypes;
   for (const auto &ct : snap.meta.channelTypes) {
     llvm::json::Object c;
-    c["type"] = ct.qualifiedTypeName;
-    c["category"] = ct.category;
-    c["produce"] = llvm::json::Array(ct.produceMethods);
-    c["consume"] = llvm::json::Array(ct.consumeMethods);
+    c["type"] = validUtf8(ct.qualifiedTypeName);
+    c["category"] = validUtf8(ct.category);
+    c["produce"] = texts(ct.produceMethods);
+    c["consume"] = texts(ct.consumeMethods);
     channelTypes.push_back(llvm::json::Value(std::move(c)));
   }
   cfg["channel_types"] = std::move(channelTypes);
@@ -784,16 +794,16 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   // produced and how much of the requested scope it holds. Both come from
   // the meta section alone.
   llvm::json::Object prov;
-  prov["analyzer"] = snap.meta.provenance.analyzer;
-  prov["toolchain"] = snap.meta.provenance.toolchain;
-  prov["environment"] = snap.meta.provenance.environment;
+  prov["analyzer"] = validUtf8(snap.meta.provenance.analyzer);
+  prov["toolchain"] = validUtf8(snap.meta.provenance.toolchain);
+  prov["environment"] = validUtf8(snap.meta.provenance.environment);
   prov["bake_start_ns"] =
       static_cast<int64_t>(snap.meta.provenance.bakeStartNs);
   // The reference a tool payload's indexScope.bake carries.
   const IndexFacts facts =
       IndexFacts::of(snap.meta, IndexFreshness::Unchecked);
   if (!facts.bake.empty())
-    prov["bake"] = facts.bake;
+    prov["bake"] = validUtf8(facts.bake);
   o["provenance"] = std::move(prov);
   // info never compares the index with the sources.
   o["freshness"] = "unchecked";
@@ -811,7 +821,7 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
     for (size_t i = 0; i < snap.meta.files.size(); ++i) {
       const auto &fs = snap.meta.files[i];
       llvm::json::Object f;
-      f["path"] = fs.path;
+      f["path"] = validUtf8(fs.path);
       f["mtime_ns"] = static_cast<int64_t>(fs.mtimeNs);
       f["size"] = static_cast<int64_t>(fs.size);
       const TuOutcome outcome = i < snap.meta.outcomes.size()
@@ -819,9 +829,9 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
                                     : TuOutcome{};
       f["status"] = tuStatusName(outcome.status);
       if (!outcome.detail.empty())
-        f["detail"] = outcome.detail;
+        f["detail"] = validUtf8(outcome.detail);
       f["fingerprint"] = i < snap.meta.fingerprints.size()
-                             ? snap.meta.fingerprints[i]
+                             ? validUtf8(snap.meta.fingerprints[i])
                              : std::string();
       files.push_back(llvm::json::Value(std::move(f)));
     }
@@ -834,6 +844,8 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
                             common.pretty, out, err);
   return code == kExitEmpty ? kExitResults : code;
 }
+
+} // namespace
 
 int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
              std::istream &in, llvm::raw_ostream &out) {
@@ -897,8 +909,6 @@ int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
   }
   return kExitResults;
 }
-
-} // namespace
 
 // ============================================================================
 // Ephemeral mode (§2.1)
@@ -977,7 +987,7 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   const auto t0 = std::chrono::steady_clock::now();
   auto baked = bakeIndexes(*compDb, *files, collapsePaths, threads, nullptr,
                            "", lockCfg, nullptr, nullptr, channelCfg);
-  auto *snap = new SnapshotData;
+  auto *snap = retainUntilExit(new SnapshotData);
   snap->graph = std::move(baked.graph);
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
@@ -1266,8 +1276,8 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
       return kExitIndex;
     }
     SnapshotLoadStats loadStats;
-    auto *snapHolder = new std::optional<SnapshotData>(
-        SnapshotIO::load(indexPath, &loadStats, LoadMode::ReadOnly, needs));
+    auto *snapHolder = retainUntilExit(new std::optional<SnapshotData>(
+        SnapshotIO::load(indexPath, &loadStats, LoadMode::ReadOnly, needs)));
     if (!*snapHolder) {
       err << "megascope: cannot load index " << indexPath << ": "
           << loadStats.error << " (re-run `megascope index`)\n";

@@ -538,6 +538,43 @@ TEST_CASE("snapshot load rejects bad input", "[snapshot]") {
     CHECK_FALSE(SnapshotIO::load(path).has_value());
     std::remove(path.c_str());
   }
+
+  // fuzz_snapshot finding: a bad id inside a record failed the reader,
+  // but the next count was still read and trusted without its "no more
+  // elements than bytes left" bound, so a Mutable load reserved an edge
+  // map for ~4 billion entries (out of memory) instead of refusing the
+  // section.
+  SECTION("a count read after a bad id cannot size an allocation") {
+    auto path = tempSnapshotPath("stickyfail");
+    CallGraph g;
+    g.addNode({"only", "/src/a.cpp", 1, false, false, "ZZMarkerClass"},
+              "/src/a.cpp");
+    REQUIRE(SnapshotIO::save(path, g, ControlFlowIndex(), makeMeta()));
+    std::ifstream in(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    in.close();
+    // The node record ends: enclosingClass, contributor count (1), the
+    // contributor's TU id; the edge count follows (no edges).
+    auto pos = bytes.find("ZZMarkerClass");
+    REQUIRE(pos != std::string::npos);
+    const size_t contribCount = pos + 13, tuId = contribCount + 4,
+                 edgeCount = tuId + 4;
+    REQUIRE(testing::snapshotU64At(bytes, contribCount) % (1ull << 32) == 1);
+    auto put32 = [&](size_t at, uint32_t v) {
+      for (int i = 0; i < 4; ++i)
+        bytes[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+    };
+    put32(tuId, 0xFFFFFFF0u);      // no such interned string
+    put32(edgeCount, 0xFFFFFFF0u); // far more edges than bytes left
+    testing::resealSnapshot(bytes);
+    std::ofstream(path, std::ios::binary) << bytes;
+    SnapshotLoadStats stats;
+    CHECK_FALSE(SnapshotIO::load(path, &stats, LoadMode::Mutable));
+    CHECK(stats.error.find("section 'graph' does not decode") !=
+          std::string::npos);
+    std::remove(path.c_str());
+  }
 }
 
 TEST_CASE("stampFiles flags missing files with zero stamps", "[snapshot]") {

@@ -16,6 +16,7 @@
 #include "vycor/callgraph/Snapshot.h"
 
 #include "vycor/callgraph/AtomicFile.h"
+#include "vycor/callgraph/Utf8.h"
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -67,6 +68,9 @@ void putLenStr(std::string &out, const std::string &s) {
 // ----------------------------------------------------------------------------
 // Bounds-checked reader. Any overrun or bad index flips ok to false; callers
 // check once at section boundaries and treat failure as a corrupt snapshot.
+// Failure is sticky: once ok is false every read returns zero/empty, so a
+// count read after an earlier failure (a bad id inside a record, say) can
+// never size an allocation from unchecked bytes.
 // ----------------------------------------------------------------------------
 
 struct Reader {
@@ -74,19 +78,24 @@ struct Reader {
   const char *end;
   bool ok = true;
 
-  uint8_t u8() {
-    if (p + 1 > end) {
+  /// Whether `n` more bytes can be read (false once the reader failed).
+  bool need(uint64_t n) {
+    if (!ok || n > static_cast<uint64_t>(end - p)) {
       ok = false;
-      return 0;
+      return false;
     }
+    return true;
+  }
+
+  uint8_t u8() {
+    if (!need(1))
+      return 0;
     return static_cast<uint8_t>(*p++);
   }
 
   uint32_t u32() {
-    if (p + 4 > end) {
-      ok = false;
+    if (!need(4))
       return 0;
-    }
     uint32_t v = 0;
     for (int i = 0; i < 4; ++i)
       v |= static_cast<uint32_t>(static_cast<uint8_t>(*p++)) << (8 * i);
@@ -94,10 +103,8 @@ struct Reader {
   }
 
   uint64_t u64() {
-    if (p + 8 > end) {
-      ok = false;
+    if (!need(8))
       return 0;
-    }
     uint64_t v = 0;
     for (int i = 0; i < 8; ++i)
       v |= static_cast<uint64_t>(static_cast<uint8_t>(*p++)) << (8 * i);
@@ -106,17 +113,24 @@ struct Reader {
 
   /// Raw bytes of the given length.
   std::string bytes(uint32_t len) {
-    if (p + len > end) {
-      ok = false;
+    if (!need(len))
       return std::string();
-    }
     std::string s(p, p + len);
     p += len;
     return s;
   }
 
-  /// Inline length-prefixed string.
+  /// Inline length-prefixed string, as stored.
   std::string lenStr() { return bytes(u32()); }
+
+  /// Inline length-prefixed string bound for an index: made valid UTF-8
+  /// like every index string (Utf8.h). The meta keeps lenStr's raw bytes
+  /// (TU paths are stat'ed on warm start).
+  std::string text() {
+    std::string s = lenStr();
+    makeValidUtf8(s);
+    return s;
+  }
 
   /// Sanity bound for element counts: a count can never exceed the number
   /// of remaining bytes (every element is at least one byte).
@@ -941,12 +955,12 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         SId nameId = gid(r.u32());
         SId displayId = gid(r.u32());
         CallGraphNode node;
-        node.file = r.lenStr();
+        node.file = r.text();
         node.line = r.u32();
         uint8_t flags = r.u8();
         node.isEntryPoint = (flags & 1) != 0;
         node.isVirtual = (flags & 2) != 0;
-        node.enclosingClass = r.lenStr();
+        node.enclosingClass = r.text();
         uint32_t contribCount = r.count();
         if (!r.ok)
           break;
@@ -1104,17 +1118,17 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         set.reserve(tryCount);
         for (uint32_t t = 0; r.ok && t < tryCount; ++t) {
           TryCatchScope scope;
-          scope.tryLocation = r.lenStr();
-          scope.enclosingFunction = r.lenStr();
+          scope.tryLocation = r.text();
+          scope.enclosingFunction = r.text();
           scope.nestingDepth = r.u32();
           uint32_t handlerCount = r.count();
           for (uint32_t h = 0; r.ok && h < handlerCount; ++h) {
             CatchHandlerInfo info;
-            info.caughtType = r.lenStr();
+            info.caughtType = r.text();
             info.isCatchAll = r.u8() != 0;
             info.rethrows = r.u8() != 0;
-            info.location = r.lenStr();
-            info.bodySummary = r.lenStr();
+            info.location = r.text();
+            info.bodySummary = r.text();
             scope.handlers.push_back(std::move(info));
           }
           set.push_back(std::move(scope));
@@ -1130,8 +1144,8 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         set.reserve(guardCount);
         for (uint32_t gi = 0; r.ok && gi < guardCount; ++gi) {
           ConditionalGuard guard;
-          guard.conditionText = r.lenStr();
-          guard.location = r.lenStr();
+          guard.conditionText = r.text();
+          guard.location = r.text();
           guard.inTrueBranch = r.u8() != 0;
           guard.isAssertion = r.u8() != 0;
           set.push_back(std::move(guard));
@@ -1248,19 +1262,19 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
       uint32_t count = r.count();
       for (uint32_t i = 0; r.ok && i < count; ++i) {
         ChannelSite site;
-        site.channelId = r.lenStr();
-        site.channelTypeName = r.lenStr();
-        site.category = r.lenStr();
+        site.channelId = r.text();
+        site.channelTypeName = r.text();
+        site.category = r.text();
         site.op = static_cast<ChannelOperation>(r.u8());
-        site.siteFunctionUsr = r.lenStr();
-        site.siteFunctionDisplay = r.lenStr();
-        site.callSite = r.lenStr();
+        site.siteFunctionUsr = r.text();
+        site.siteFunctionDisplay = r.text();
+        site.callSite = r.text();
         uint32_t refs = r.u32();
         uint32_t guardCount = r.count();
         for (uint32_t g = 0; r.ok && g < guardCount; ++g) {
           ConditionalGuard guard;
-          guard.conditionText = r.lenStr();
-          guard.location = r.lenStr();
+          guard.conditionText = r.text();
+          guard.location = r.text();
           guard.inTrueBranch = r.u8() != 0;
           guard.isAssertion = r.u8() != 0;
           site.enclosingGuards.push_back(std::move(guard));
@@ -1269,8 +1283,10 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         std::vector<std::string> tus;
         tus.reserve(tuCount);
         for (uint32_t t = 0; r.ok && t < tuCount; ++t)
-          tus.push_back(r.lenStr());
-        if (!r.ok || refs == 0) {
+          tus.push_back(r.text());
+        // Every recorded TU is one registration: a site cannot have
+        // fewer registrations than contributors.
+        if (!r.ok || refs == 0 || refs < tus.size()) {
           r.ok = false;
           break;
         }

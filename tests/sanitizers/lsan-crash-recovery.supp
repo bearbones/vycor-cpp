@@ -1,0 +1,15 @@
+# LeakSanitizer suppressions for the tests that crash a parse on purpose
+# (the [crash-guard] tests; tests/CMakeLists.txt applies this file to
+# them alone through LSAN_OPTIONS).
+#
+# LLVM's CrashRecoveryContext recovers a crashed parse by jumping out of
+# the signal handler back into runCrashGuarded: the frames of the crashed
+# ClangTool::run (its CompilerInstance, ASTContext, FileManager, VFS
+# overlays, the frontend action) are abandoned without running their
+# destructors, and nothing references their heap allocations afterwards.
+# That is the documented cost of in-process crash containment in LLVM,
+# not a leak this repository can free. The TU-local indexes vycor itself
+# abandons are retained explicitly (callgraph/RetainUntilExit.h) and need
+# no entry here. Every other test, and any leak outside a guarded parse
+# in these tests, is still reported.
+leak:vycor::runCrashGuarded

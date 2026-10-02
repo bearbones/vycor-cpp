@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/Utf8.h"
 
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -290,6 +291,22 @@ void ControlFlowIndex::addCallSiteContext(CallSiteContext ctx) {
                                      interner_.intern(l.varName),
                                      interner_.intern(l.declLocation), l.kind});
 
+  // The set tables store their strings inline: valid UTF-8 like every
+  // index string (Utf8.h; the interner converts the rest).
+  for (auto &scope : ctx.enclosingTryCatches) {
+    makeValidUtf8(scope.tryLocation);
+    makeValidUtf8(scope.enclosingFunction);
+    for (auto &h : scope.handlers) {
+      makeValidUtf8(h.caughtType);
+      makeValidUtf8(h.location);
+      makeValidUtf8(h.bodySummary);
+    }
+  }
+  for (auto &g : ctx.enclosingGuards) {
+    makeValidUtf8(g.conditionText);
+    makeValidUtf8(g.location);
+  }
+
   std::string scopeKey = ctx.enclosingTryCatches.empty()
                              ? std::string()
                              : scopeSetKey(ctx.enclosingTryCatches);
@@ -461,8 +478,10 @@ std::pair<uint32_t, uint32_t> ControlFlowIndex::mappedRange(const char *order,
 }
 
 std::string ControlFlowIndex::stringOf(SId id) const {
+  // A mapped string is read straight from the file, so it is converted
+  // here rather than at load (Utf8.h).
   if (mapped_)
-    return std::string(mappedString(id));
+    return validUtf8(mappedString(id));
   if (id >= interner_.size())
     return std::string();
   return interner_.resolve(id);

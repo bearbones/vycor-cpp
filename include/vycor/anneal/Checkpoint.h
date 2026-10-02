@@ -106,6 +106,11 @@ struct AnnealIndexPayload {
 // validity key for phase-2 records (see above).
 uint64_t annealStampSetHash(const std::vector<FileStamp> &stamps);
 
+// The checksum framing every journal record and shard entry (FNV-1a 32
+// over the payload bytes). Public for the fuzz harnesses (fuzz/), which
+// reseal mutated records so the decoders behind the check are reached.
+uint32_t annealRecordChecksum(const char *data, size_t size);
+
 class AnnealCheckpoint {
 public:
   static constexpr uint8_t kPhaseIndex = 1;

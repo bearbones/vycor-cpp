@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/ChannelIndex.h"
+#include "vycor/callgraph/Utf8.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -38,7 +39,22 @@ ChannelIndex &ChannelIndex::operator=(ChannelIndex &&other) noexcept {
   return *this;
 }
 
-void ChannelIndex::addSite(ChannelSite site) {
+void ChannelIndex::addSite(ChannelSite site) { addSiteRefs(std::move(site), 1); }
+
+void ChannelIndex::addSiteRefs(ChannelSite site, uint32_t count) {
+  if (count == 0)
+    return;
+  // Valid UTF-8 like every index string (Utf8.h); removeTUs converts its
+  // TU paths the same way.
+  for (std::string *s : {&site.channelId, &site.channelTypeName,
+                         &site.category, &site.siteFunctionUsr,
+                         &site.siteFunctionDisplay, &site.callSite,
+                         &site.tuPath})
+    makeValidUtf8(*s);
+  for (auto &g : site.enclosingGuards) {
+    makeValidUtf8(g.conditionText);
+    makeValidUtf8(g.location);
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   SiteKey key{site.channelId, site.callSite, site.siteFunctionUsr, site.op};
   std::string tuPath = site.tuPath;
@@ -49,14 +65,14 @@ void ChannelIndex::addSite(ChannelSite site) {
     // Identical site already stored (e.g. a header-inlined function indexed
     // by several TUs): register another contributor instead of duplicating.
     idx = it->second;
-    ++sites_[idx].refs;
+    sites_[idx].refs += count;
   } else {
     idx = sites_.size();
     std::string channelId = site.channelId;
     std::string funcUsr = site.siteFunctionUsr;
     std::string funcDisplay = site.siteFunctionDisplay;
     bool differentDisplay = funcDisplay != funcUsr;
-    sites_.push_back(StoredSite{std::move(site), 1, true});
+    sites_.push_back(StoredSite{std::move(site), count, true});
     index_.emplace(key, idx);
     byChannel_[channelId].push_back(idx);
     byFunctionUsr_[funcUsr].push_back(idx);
@@ -70,7 +86,7 @@ void ChannelIndex::addSite(ChannelSite site) {
   // site can be (and, for header-inlined code, will be) contributed by
   // several TUs, and removeTU needs to know about each one.
   if (!tuPath.empty())
-    byTu_[tuPath].push_back(idx);
+    byTu_[tuPath].insert(byTu_[tuPath].end(), count, idx);
 }
 
 std::vector<ChannelSite>
@@ -152,23 +168,52 @@ void ChannelIndex::absorb(const ChannelIndex &shard) {
   if (&shard == this)
     return;
 
-  // Snapshot the shard's live sites under its own lock first: addSite below
-  // takes this->mutex_ itself, so we must not still be holding shard.mutex_
-  // (or this->mutex_) when we call it.
+  // Snapshot the shard's live sites, and per site the TU of each of its
+  // registrations (byTu_), under the shard's own lock first: addSiteRefs
+  // below takes this->mutex_ itself, so we must not still be holding
+  // shard.mutex_ (or this->mutex_) when we call it.
   std::vector<StoredSite> shardSites;
+  std::vector<std::vector<std::string>> siteTus;
   {
     std::lock_guard<std::mutex> lockShard(shard.mutex_);
     shardSites.assign(shard.sites_.begin(), shard.sites_.end());
+    siteTus.resize(shardSites.size());
+    for (const auto &[tuPath, idxs] : shard.byTu_)
+      for (size_t idx : idxs)
+        if (idx < siteTus.size())
+          siteTus[idx].push_back(tuPath);
   }
 
-  for (const auto &stored : shardSites) {
-    if (!stored.live)
+  // Replay each registration under the TU that made it, so this index's
+  // dedup/refcount/byTu_ bookkeeping ends up identical to what it would be
+  // had they happened directly against `this`. (Replaying all `refs` of a
+  // site under its first TU, as this once did, lost the other
+  // contributors: removeTU of a second TU released nothing.)
+  for (size_t i = 0; i < shardSites.size(); ++i) {
+    const StoredSite &stored = shardSites[i];
+    if (!stored.live || stored.refs == 0)
       continue;
-    // Replay each constituent registration (refs of them) so this index's
-    // own dedup/refcount/byTu_ bookkeeping ends up identical to what it
-    // would be had those registrations happened directly against `this`.
-    for (uint32_t r = 0; r < stored.refs; ++r)
-      addSite(stored.site);
+    std::vector<std::string> &tus = siteTus[i];
+    std::sort(tus.begin(), tus.end()); // deterministic first contributor
+    uint32_t replayed = 0;
+    for (size_t t = 0; t < tus.size() && replayed < stored.refs;) {
+      // Runs of the same TU (one TU registering a site several times)
+      // in one call.
+      size_t end = t;
+      while (end < tus.size() && tus[end] == tus[t])
+        ++end;
+      const uint32_t n = static_cast<uint32_t>(
+          std::min<size_t>(end - t, stored.refs - replayed));
+      ChannelSite site = stored.site;
+      site.tuPath = tus[t];
+      addSiteRefs(std::move(site), n);
+      replayed += n;
+      t = end;
+    }
+    // Registrations no TU recorded (provenance-less producers).
+    ChannelSite site = stored.site;
+    site.tuPath.clear();
+    addSiteRefs(std::move(site), stored.refs - replayed);
   }
 }
 
@@ -185,8 +230,8 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   std::unordered_set<size_t> dead;
   std::unordered_set<std::string> affectedChannels, affectedFuncUsr,
       affectedFuncDisplay;
-  for (const auto &tuPath : tuPaths) {
-    auto tit = byTu_.find(tuPath);
+  for (const auto &rawPath : tuPaths) {
+    auto tit = byTu_.find(validUtf8(rawPath));
     if (tit == byTu_.end())
       continue;
     for (size_t idx : tit->second) {

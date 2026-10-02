@@ -134,6 +134,14 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
                           llvm::raw_ostream &out, llvm::raw_ostream &err,
                           std::istream &in);
 
+/// `megascope batch`'s request loop: one NDJSON request
+/// `{"tool":..,"args":{..},"id":..}` per line of `in`, one response line
+/// per request on `out` (blank lines skipped; a malformed line answers
+/// with a usage error naming its line number and the loop goes on).
+/// Returns kExitResults.
+int runBatch(const std::vector<ToolEntry> &tools, const ToolContext &ctx,
+             std::istream &in, llvm::raw_ostream &out);
+
 /// `megascope diff --before A --after B ...` (docs/change-impact.md):
 /// the semantic diff of two saved indexes, optionally with a route diff
 /// (--to) and the impact of the changed functions (--impact). `args` are

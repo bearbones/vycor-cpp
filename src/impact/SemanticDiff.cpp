@@ -15,6 +15,7 @@
 
 #include "vycor/impact/SemanticDiff.h"
 
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/query/Serialize.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -439,7 +440,9 @@ namespace {
 std::string bakeRef(const SnapshotMeta &meta) {
   if (meta.provenance.environment.empty())
     return "";
-  return meta.provenance.environment + "@" +
+  // The meta keeps its strings as written; what is reported is valid
+  // UTF-8 (callgraph/Utf8.h).
+  return validUtf8(meta.provenance.environment) + "@" +
          std::to_string(meta.provenance.bakeStartNs);
 }
 
@@ -449,8 +452,8 @@ SideScope scopeOf(const SnapshotMeta *meta) {
     return s;
   s.bake = bakeRef(*meta);
   s.coverage = coverageOf(*meta);
-  s.analyzer = meta->provenance.analyzer;
-  s.toolchain = meta->provenance.toolchain;
+  s.analyzer = validUtf8(meta->provenance.analyzer);
+  s.toolchain = validUtf8(meta->provenance.toolchain);
   return s;
 }
 
@@ -505,22 +508,24 @@ Comparability checkComparability(const SnapshotMeta *before,
     c.comparable = false;
   if (before->provenance.analyzer != after->provenance.analyzer) {
     c.analyzerSame = false;
-    c.reasons.push_back("analyzer differs (" + before->provenance.analyzer +
-                        " vs " + after->provenance.analyzer +
+    c.reasons.push_back("analyzer differs (" +
+                        validUtf8(before->provenance.analyzer) + " vs " +
+                        validUtf8(after->provenance.analyzer) +
                         "): the model itself may differ");
   }
   if (before->provenance.toolchain != after->provenance.toolchain) {
     c.toolchainSame = false;
-    c.reasons.push_back("toolchain differs (" + before->provenance.toolchain +
-                        " vs " + after->provenance.toolchain +
+    c.reasons.push_back("toolchain differs (" +
+                        validUtf8(before->provenance.toolchain) + " vs " +
+                        validUtf8(after->provenance.toolchain) +
                         "): the frontend may resolve differently");
   }
 
   std::set<std::string> filesBefore, filesAfter;
   for (const auto &f : before->files)
-    filesBefore.insert(f.path);
+    filesBefore.insert(validUtf8(f.path));
   for (const auto &f : after->files)
-    filesAfter.insert(f.path);
+    filesAfter.insert(validUtf8(f.path));
   std::set_difference(filesBefore.begin(), filesBefore.end(),
                       filesAfter.begin(), filesAfter.end(),
                       std::back_inserter(c.tusOnlyBefore));
@@ -531,9 +536,9 @@ Comparability checkComparability(const SnapshotMeta *before,
                      std::vector<std::string> &partial) {
     for (const auto &[path, outcome] : SnapshotIO::outcomesOf(meta)) {
       if (outcome.status == TuStatus::Partial)
-        partial.push_back(path);
+        partial.push_back(validUtf8(path));
       else if (outcome.status != TuStatus::Indexed)
-        failed.push_back(path);
+        failed.push_back(validUtf8(path));
     }
     std::sort(failed.begin(), failed.end());
     std::sort(partial.begin(), partial.end());
