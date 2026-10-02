@@ -52,7 +52,8 @@ Scenarios, each over a scratch project written by this script:
   trailing_suppression
                   `code; // vycor: ignore[...]` covers its own line only;
   worker_timeout  a TU whose worker timed out reports `timeout` on the
-                  run that hit it and on every --checkpoint resume.
+                  run that hit it and on every --checkpoint resume;
+  output_failure  an unwritable --output still prints the TU summary.
 
 Also a ctest: `ctest -R anneal_gate`.
 
@@ -887,12 +888,23 @@ class Check:
         self.expect(name, len(rows) == 2 and rows[0] == rows[1],
                     f"the resumed run reports differently: {rows}")
 
+    def output_failure(self) -> None:
+        name = "output_failure"
+        d = self.project(name, {"clean.cpp": CLEAN, "broken.cpp": BROKEN})
+        # Under a regular file: no directory can be created there.
+        code, _, err = self.anneal(d, "--output",
+                                   str(d / "clean.cpp" / "out.txt"),
+                                   sources=["clean.cpp", "broken.cpp"])
+        self.expect(name, code == 2 and "1 failed" in err and
+                    "broken.cpp" in err and "--output" in err,
+                    f"exit {code}, stderr {err[-400:]!r}")
+
 
 SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
              "changed_lines", "source_list", "checkpoint_recovery",
              "baseline_counts", "relative_compile_dir", "git_config",
-             "trailing_suppression", "worker_timeout"]
+             "trailing_suppression", "worker_timeout", "output_failure"]
 
 
 def main() -> int:

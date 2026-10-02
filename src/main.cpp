@@ -1154,12 +1154,13 @@ int main(int argc, const char **argv) {
       else
         vycor::renderText(run, os);
     };
+    // The TU summary is printed whatever happens to the report, so a run
+    // whose --output cannot be written still names its failed TUs.
+    std::string outputError;
+    bool outputWritten = true;
     if (!AnnealOutput.empty()) {
-      std::string error;
-      if (!vycor::writeFileAtomically(AnnealOutput, render, &error)) {
-        llvm::errs() << "anneal: --output: " << error << "\n";
-        return kUsage;
-      }
+      outputWritten =
+          vycor::writeFileAtomically(AnnealOutput, render, &outputError);
     } else {
       render(llvm::outs());
       llvm::outs().flush();
@@ -1169,6 +1170,10 @@ int main(int argc, const char **argv) {
       llvm::errs() << "anneal: WARNING: " << failedTus
                    << " TU(s) failed; findings in them may be missing "
                       "(--allow-parse-failures)\n";
+    if (!outputWritten) {
+      llvm::errs() << "anneal: --output: " << outputError << "\n";
+      return kUsage;
+    }
 
     // A baseline write accepts the current findings: only a parse failure
     // still fails the run.

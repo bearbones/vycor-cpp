@@ -279,9 +279,12 @@ findings alone. `--fail-on none` makes findings never fail the run;
 findings and exits 0 (or 3 on a parse failure, and then writes
 nothing). Findings suppressed inline, matched by `--baseline`, or
 outside the changed lines (`--patch-file`, `--git-base`) are not
-reported and do not count. Every run prints a summary on stderr: the
-TU counts (`N TU(s): A analyzed, F failed`) naming each failed TU and
-its status, and what the suppressions, baseline, and changed-lines
+reported and do not count; the baseline counts occurrences per
+fingerprint, so a new copy of a baselined finding is reported
+(`docs/checks/README.md`, "Baselines"). Every run prints a summary on
+stderr, also when `--output` cannot be written (which then exits 2):
+the TU counts (`N TU(s): A analyzed, F failed`) naming each failed TU
+and its status, and what the suppressions, baseline, and changed-lines
 filter removed.
 
 A TU's status is never carried over from a `--checkpoint` journal when
