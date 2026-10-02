@@ -498,6 +498,9 @@ Sanitizer and fuzz options (top-level `CMakeLists.txt`):
   so far: `fuzz/README.md`.
 - Both need the compiler's sanitizer runtimes (`libclang-rt-<N>-dev` for
   clang on Debian/Ubuntu).
+- `VYCOR_FUZZ` picks `address,undefined` in a normal variable, not the
+  cache: reconfiguring the same build directory with `-DVYCOR_FUZZ=OFF`
+  builds unsanitized again.
 
 ---
 

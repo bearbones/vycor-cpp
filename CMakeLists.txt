@@ -144,20 +144,29 @@ endif()
 set(VYCOR_SANITIZE "" CACHE STRING
     "Build with sanitizers: 'address,undefined', 'address', 'undefined', or 'thread'")
 option(VYCOR_FUZZ "Build the libFuzzer targets under fuzz/ (clang only)" OFF)
-if(VYCOR_FUZZ AND NOT VYCOR_SANITIZE)
+if(VYCOR_FUZZ AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(FATAL_ERROR "VYCOR_FUZZ needs clang (libFuzzer); configure with "
+                      "-DCMAKE_CXX_COMPILER=clang++")
+endif()
+# The sanitizers this configuration builds with. A normal variable, so the
+# cache keeps only what was asked for: VYCOR_FUZZ's default below does not
+# outlive VYCOR_FUZZ (reconfiguring with -DVYCOR_FUZZ=OFF builds
+# unsanitized again).
+set(_vycor_sanitize "${VYCOR_SANITIZE}")
+if(VYCOR_FUZZ AND NOT _vycor_sanitize)
   # libFuzzer without ASan finds crashes only; out-of-bounds reads that do
   # not fault would go unnoticed.
-  set(VYCOR_SANITIZE "address,undefined" CACHE STRING "" FORCE)
+  set(_vycor_sanitize "address,undefined")
 endif()
-if(VYCOR_SANITIZE)
+if(_vycor_sanitize)
   if(MSVC)
     message(FATAL_ERROR "VYCOR_SANITIZE is supported with clang and gcc only")
   endif()
-  if(VYCOR_SANITIZE MATCHES "thread" AND VYCOR_SANITIZE MATCHES "address")
+  if(_vycor_sanitize MATCHES "thread" AND _vycor_sanitize MATCHES "address")
     message(FATAL_ERROR "VYCOR_SANITIZE: thread cannot be combined with address")
   endif()
-  set(VYCOR_SANITIZE_FLAGS -fsanitize=${VYCOR_SANITIZE} -fno-omit-frame-pointer)
-  if(VYCOR_SANITIZE MATCHES "undefined")
+  set(VYCOR_SANITIZE_FLAGS -fsanitize=${_vycor_sanitize} -fno-omit-frame-pointer)
+  if(_vycor_sanitize MATCHES "undefined")
     # A UB report fails the run instead of scrolling past in the log.
     list(APPEND VYCOR_SANITIZE_FLAGS -fno-sanitize-recover=undefined)
   endif()
@@ -166,14 +175,10 @@ if(VYCOR_SANITIZE)
   # Runtime defaults, linked into every executable (see the file).
   set(VYCOR_SANITIZER_SOURCES
       "${CMAKE_CURRENT_SOURCE_DIR}/src/compat/SanitizerDefaults.cpp")
-  message(STATUS "Sanitizers: ${VYCOR_SANITIZE}")
+  message(STATUS "Sanitizers: ${_vycor_sanitize}")
 endif()
 if(VYCOR_FUZZ)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "VYCOR_FUZZ needs clang (libFuzzer); configure with "
-                        "-DCMAKE_CXX_COMPILER=clang++")
-  endif()
-  if(VYCOR_SANITIZE MATCHES "thread")
+  if(_vycor_sanitize MATCHES "thread")
     message(FATAL_ERROR "VYCOR_FUZZ runs under address,undefined, not thread")
   endif()
   # Coverage instrumentation for everything; only the fuzz executables
