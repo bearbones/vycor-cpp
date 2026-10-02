@@ -319,8 +319,10 @@ second each.
 
 ## Follow-ups
 
-- **Anneal finding deltas** are not part of this package: `anneal`
-  has no stable finding identity or export contract to diff against;
-  one has to exist before "new findings since base" can be honest.
+- **Anneal finding deltas** are not part of this package. `anneal`
+  now has a stable finding identity and an export contract
+  (`docs/checks/README.md`, "Finding identity"; `--format json`), and
+  covers "new findings since base" itself with `--baseline` and the
+  changed-lines filter (`--patch-file`, `--git-base`).
 - The Git adapter maps after-side ranges only; a rename detected by
   `git diff -M` is reported as a removed and an added file.

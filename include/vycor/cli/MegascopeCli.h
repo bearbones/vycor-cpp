@@ -152,4 +152,12 @@ int runDiffVerb(llvm::ArrayRef<std::string> args, OutputFormat format,
 int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
                     std::istream &in, llvm::raw_ostream &err);
 
+/// `git [-C repo] diff -U0 --no-color --no-ext-diff <base> [<head>] --`:
+/// its output in `patch`. An empty `head` diffs against the working tree;
+/// an empty `repo` runs in the current directory. Shared by
+/// impact-of-change and anneal's changed-lines mode.
+bool gitDiffText(const std::string &repo, const std::string &base,
+                 const std::string &head, std::string &patch,
+                 std::string &error);
+
 } // namespace vycor

@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -53,10 +54,14 @@ class IndexWriteLock;
 //
 // Records are validated per-TU against FileStamps (mtime+size, the same
 // currency megascope snapshots use), so between-runs source edits
-// invalidate exactly the affected records. Attempt records written BEFORE
-// each parse make repeated fatal deaths (OOM kill, poisoned TU) detectable:
-// a TU with kMaxAttempts starts and no completion on record is skipped
-// with a warning instead of killing every resume at the same place.
+// invalidate exactly the affected records; a record of a parse that did
+// not end Indexed never replays (the TU is parsed again), and the phase-2
+// validity hash covers each TU's phase-1 outcome. Attempt records written
+// BEFORE each parse make repeated fatal deaths (OOM kill, poisoned TU)
+// detectable: a TU with kMaxAttempts starts and no completion on record is
+// skipped with a warning instead of killing every resume at the same
+// place, reported with the outcome its last attempt was journaled with
+// (an isolated worker's crash or timeout), else as crashed.
 //
 // Crash-safety model: each record is length-prefixed and checksummed, and
 // the journal is flushed after every append. A record cut short by a kill
@@ -133,50 +138,83 @@ public:
 
   // Attempts recorded for (phase, tu) with exactly this stamp since the
   // last completion record for that phase+tu. A changed stamp (edited
-  // file) or an intervening completion resets the count to zero.
+  // file) or an intervening completion resets the count to zero. `why`,
+  // when non-null, receives the outcome the latest attempt was recorded
+  // with (a worker crash or timeout), or nullopt for a bare attempt (an
+  // in-process parse that never completed).
   unsigned attempts(uint8_t phase, const std::string &tu,
-                    const FileStamp &stamp) const;
+                    const FileStamp &stamp,
+                    std::optional<TuOutcome> *why = nullptr) const;
 
   // Replays the TU's phase-1 contribution into `into` when a record with a
-  // matching stamp exists; returns false (and touches nothing) otherwise.
+  // matching stamp exists and that parse was clean; returns false (and
+  // touches nothing) otherwise. A TU whose recorded parse failed (partial,
+  // skipped) is a miss and is parsed again, so fixing the cause clears the
+  // failure — megascope's rule (callgraph/TuOutcome.h). Only the
+  // attempts-exhausted skip (attempts()) outlives a failure.
+  // `outcome`, when non-null, receives how the recorded parse ended.
   bool replayPhase1(const std::string &tu, const FileStamp &stamp,
-                    GlobalIndex &into) const;
+                    GlobalIndex &into, TuOutcome *outcome = nullptr) const;
 
   // Appends the TU's phase-2 diagnostics to `out` when a record with a
-  // matching stamp AND matching index-set hash exists.
+  // matching stamp AND matching index-set hash exists and that parse was
+  // clean (as replayPhase1).
   bool replayPhase2(const std::string &tu, const FileStamp &stamp,
-                    uint64_t indexSetHash,
-                    std::vector<Diagnostic> &out) const;
+                    uint64_t indexSetHash, std::vector<Diagnostic> &out,
+                    TuOutcome *outcome = nullptr) const;
 
   // ---- appends (thread-safe; each record flushed before returning) ------
 
+  // `why`, when set, is the outcome that used the attempt up (journaled
+  // with it, so a resume that skips the TU reports it the same way).
   void recordAttempt(uint8_t phase, const std::string &tu,
-                     const FileStamp &stamp);
+                     const FileStamp &stamp,
+                     const std::optional<TuOutcome> &why = std::nullopt);
+  // `outcome` is how the parse ended (a TU whose parse reported errors is
+  // recorded too, so a resume reports it the same way).
   void recordPhase1(const std::string &tu, const FileStamp &stamp,
-                    const GlobalIndex &shard);
+                    const GlobalIndex &shard,
+                    const TuOutcome &outcome = kCleanParse);
   void recordPhase1(const std::string &tu, const FileStamp &stamp,
-                    const AnnealIndexPayload &payload);
+                    const AnnealIndexPayload &payload,
+                    const TuOutcome &outcome = kCleanParse);
   void recordPhase2(const std::string &tu, const FileStamp &stamp,
                     uint64_t indexSetHash,
-                    const std::vector<Diagnostic> &diags);
+                    const std::vector<Diagnostic> &diags,
+                    const TuOutcome &outcome = kCleanParse);
+
+  static const TuOutcome kCleanParse;
 
 private:
   AnnealCheckpoint() = default;
 
   struct Phase1Record {
     FileStamp stamp;
+    TuOutcome outcome;
     AnnealIndexPayload payload;
   };
   struct Phase2Record {
     FileStamp stamp;
     uint64_t indexSetHash = 0;
+    TuOutcome outcome;
     std::vector<Diagnostic> diagnostics;
   };
   // Most-recent attempt tracking; see attempts().
   struct AttemptState {
     FileStamp stamp;
     unsigned count = 0;
+    std::optional<TuOutcome> why; // of the latest attempt
   };
+  static void countAttempt(AttemptState &state, const FileStamp &stamp,
+                           const std::optional<TuOutcome> &why) {
+    if (state.stamp == stamp) {
+      ++state.count;
+    } else {
+      state.stamp = stamp;
+      state.count = 1;
+    }
+    state.why = why;
+  }
 
   // Parses the journal byte stream (past the header) into the maps above.
   // Returns the length of the prefix that holds whole, valid records:
@@ -210,23 +248,34 @@ private:
 // in-process path.
 // ============================================================================
 
+// Every shard entry also carries how the TU's parse ended: `outcomes` is
+// parallel to `tus` (an entry it does not cover is written as skipped,
+// never as clean), and a reader's
+// `onOutcome`, when set, is called for each entry before `fn`.
+using AnnealOutcomeFn =
+    std::function<void(const std::string &tu, const TuOutcome &outcome)>;
+
 // Phase-1 index shard: each entry is (tuPath, that TU's contribution).
 bool writeAnnealIndexShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus);
+    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus,
+    const std::vector<TuOutcome> &outcomes);
 bool readAnnealIndexShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             const AnnealIndexPayload &payload)> &fn);
+                             const AnnealIndexPayload &payload)> &fn,
+    const AnnealOutcomeFn &onOutcome = nullptr);
 
 // Phase-2 diagnostics shard: each entry is (tuPath, its diagnostics).
 bool writeAnnealDiagShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus);
+    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus,
+    const std::vector<TuOutcome> &outcomes);
 bool readAnnealDiagShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             std::vector<Diagnostic> diags)> &fn);
+                             std::vector<Diagnostic> diags)> &fn,
+    const AnnealOutcomeFn &onOutcome = nullptr);
 
 // Full merged index, for the parent -> analyze-worker handoff
 // (anneal --analyze-worker --global-index <file>).

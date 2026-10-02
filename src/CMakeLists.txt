@@ -5,6 +5,7 @@ add_library(vycor_lib
   anneal/Checkpoint.cpp
   anneal/CheckSet.cpp
   anneal/DeadCodeAnalyzer.cpp
+  anneal/Report.cpp
   morph/MatcherEngine.cpp
   morph/TemplateEngine.cpp
   morph/RulesParser.cpp
