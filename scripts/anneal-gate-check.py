@@ -40,6 +40,10 @@ Scenarios, each over a scratch project written by this script:
                   a TU that failed under --checkpoint is parsed again on
                   the next run, so creating its missing header clears exit
                   3 (and the declarations it gains reach the other TUs);
+  relative_compile_dir
+                  a compile command whose file is relative to its
+                  directory (Meson's `../src/x.cpp`): the finding's file,
+                  its suppression, its fingerprint, and the SARIF uri;
   worker_timeout  a TU whose worker timed out reports `timeout` on the
                   run that hit it and on every --checkpoint resume.
 
@@ -688,6 +692,53 @@ class Check:
         self.expect(name, code == 1 and again == fresh,
                     f"second resume: exit {code}")
 
+    def relative_compile_dir(self) -> None:
+        name = "relative_compile_dir"
+        fps = []
+        for copy in ("first", "second"):
+            p = self.root / f"{name}_{copy}" / "p"
+            (p / "src").mkdir(parents=True)
+            (p / "build").mkdir()
+            use = USE.replace("  scale(v, 3.14);",
+                              "  scale(v, 3.14);\n"
+                              "  // vycor: ignore[adl-visibility]\n"
+                              "  scale(v, 3.14);")
+            for rel, text in {"core.hpp": CORE, "ext.hpp": EXT,
+                              "use.cpp": use, "other.cpp": OTHER}.items():
+                (p / "src" / rel).write_text(text)
+            entries = [{"directory": str(p / "build"),
+                        "file": f"../src/{f}",
+                        "arguments": ["clang++", "-std=c++17", "-c",
+                                      f"../src/{f}"]}
+                       for f in ("use.cpp", "other.cpp")]
+            (p / "build" / "compile_commands.json").write_text(
+                json.dumps(entries))
+            argv = [str(self.binary), "anneal", "--build-path", "build",
+                    "--source", "src/use.cpp", "--source", "src/other.cpp"]
+            r = subprocess.run(argv + ["--format", "json"],
+                               capture_output=True, text=True, cwd=p)
+            try:
+                doc = json.loads(r.stdout)
+            except json.JSONDecodeError:
+                self.expect(name, False, f"not JSON: {r.stderr[-300:]!r}")
+                return
+            found = [(f["file"], f["line"]) for f in doc.get("findings", [])]
+            self.expect(name, r.returncode == 1 and
+                        found == [("src/use.cpp", 4)] and
+                        doc.get("summary", {}).get("suppressed") == 1,
+                        f"{copy}: exit {r.returncode}, findings {found}, "
+                        f"{doc.get('summary')} (expected src/use.cpp:4 "
+                        f"reported, line 6 suppressed)")
+            fps += [f["fingerprint"] for f in doc.get("findings", [])]
+            r = subprocess.run(argv + ["--format", "sarif"],
+                               capture_output=True, text=True, cwd=p)
+            uris = re.findall(r'"uri": ?"([^"]*)"', r.stdout)
+            self.expect(name, "src/use.cpp" in uris,
+                        f"{copy}: SARIF uris {uris} (expected src/use.cpp "
+                        f"under %SRCROOT%)")
+        self.expect(name, len(fps) == 2 and fps[0] == fps[1],
+                    f"the fingerprint depends on the checkout: {fps}")
+
     def worker_timeout(self) -> None:
         name = "worker_timeout"
         slow = ("constexpr long spin() { long s = 0;\n"
@@ -719,7 +770,7 @@ class Check:
 SCENARIOS = ["parse_failure", "exit_codes", "formats", "sarif_schema",
              "modes", "fingerprints", "baseline", "suppressions",
              "changed_lines", "source_list", "checkpoint_recovery",
-             "worker_timeout"]
+             "relative_compile_dir", "worker_timeout"]
 
 
 def main() -> int:

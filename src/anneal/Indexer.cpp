@@ -27,6 +27,8 @@
 
 #include <algorithm>
 
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace vycor {
@@ -401,7 +403,7 @@ void IndexerVisitor::maybeRecordHeaderStatic(clang::VarDecl *decl) {
                   (type->isPointerType() &&
                    type->getPointeeType().isConstQualified());
   if (auto mainFile = sm_.getFileEntryRefForID(sm_.getMainFileID()))
-    entry.tuPaths.push_back(std::string(mainFile->getName()));
+    entry.tuPaths.push_back(absoluteFileName(sm_, mainFile->getName()));
   index_.addHeaderStatic(entry);
 }
 
@@ -689,11 +691,22 @@ unsigned IndexerVisitor::countStmts(const clang::Stmt *s,
   return count;
 }
 
+std::string absoluteFileName(const clang::SourceManager &sm,
+                             llvm::StringRef name) {
+  // "<built-in>", "<scratch space>": not files.
+  if (name.empty() || name.starts_with("<"))
+    return name.str();
+  llvm::SmallString<256> path(name);
+  sm.getFileManager().makeAbsolutePath(path);
+  llvm::sys::path::remove_dots(path, /*remove_dot_dot=*/true);
+  return std::string(path);
+}
+
 std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
   auto fileEntry = sm_.getFileEntryRefForID(sm_.getFileID(
       sm_.getSpellingLoc(loc)));
   if (fileEntry)
-    return std::string(fileEntry->getName());
+    return absoluteFileName(sm_, fileEntry->getName());
   return "<unknown>";
 }
 

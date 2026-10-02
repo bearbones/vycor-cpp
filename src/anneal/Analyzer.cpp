@@ -473,7 +473,7 @@ void AnalyzerVisitor::populateIncludedFiles() const {
 
   // Collect all files that are part of this translation unit.
   for (auto it = sm_.fileinfo_begin(); it != sm_.fileinfo_end(); ++it) {
-    includedFiles_.insert(std::string(it->first.getName()));
+    includedFiles_.insert(absoluteFileName(sm_, it->first.getName()));
   }
 }
 
@@ -484,10 +484,10 @@ bool AnalyzerVisitor::isFileIncluded(const std::string &path) const {
 std::string
 AnalyzerVisitor::formatLocation(clang::SourceLocation loc) const {
   auto spellingLoc = sm_.getSpellingLoc(loc);
-  auto file = sm_.getFilename(spellingLoc);
+  auto file = absoluteFileName(sm_, sm_.getFilename(spellingLoc));
   unsigned line = sm_.getSpellingLineNumber(spellingLoc);
   unsigned col = sm_.getSpellingColumnNumber(spellingLoc);
-  return std::string(file) + ":" + std::to_string(line) + ":" +
+  return file + ":" + std::to_string(line) + ":" +
          std::to_string(col);
 }
 
@@ -496,7 +496,7 @@ AnalyzerVisitor::getFilePath(clang::SourceLocation loc) const {
   auto fileEntry = sm_.getFileEntryRefForID(
       sm_.getFileID(sm_.getSpellingLoc(loc)));
   if (fileEntry)
-    return std::string(fileEntry->getName());
+    return absoluteFileName(sm_, fileEntry->getName());
   return "<unknown>";
 }
 

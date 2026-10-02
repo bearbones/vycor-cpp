@@ -25,10 +25,13 @@
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>
+#include <clang/Tooling/JSONCompilationDatabase.h>
 
 #include <algorithm>
 #include <atomic>
@@ -836,6 +839,38 @@ TEST_CASE("Declarations a re-parsed TU gains invalidate the other TUs' "
         std::vector<std::string>{"user_a.cpp|indexed|", "gen.cpp|indexed|"});
   REQUIRE(resumed.size() == 1);
   CHECK(resumed[0].kind == Diagnostic::ADL_Fallback);
+}
+
+TEST_CASE("Locations are absolute against the TU's compile directory",
+          "[AnnealOutcomes]") {
+  // A Meson-style database: `directory` is the build directory and `file`
+  // is relative to it. Every recorded path must name the real file, not
+  // one resolved against wherever anneal runs.
+  ScratchFixture fx;
+  const std::string buildDir = fx.dir + "/build";
+  REQUIRE(!llvm::sys::fs::create_directory(buildDir));
+  llvm::json::Array entries;
+  for (const char *f : {"user_a.cpp", "user_b.cpp"})
+    entries.push_back(llvm::json::Object{
+        {"directory", fx.path("build")},
+        {"file", std::string("../") + f},
+        {"arguments", llvm::json::Array{"clang++", "-std=c++17", "-c",
+                                        std::string("../") + f}}});
+  std::string error;
+  auto compDb = clang::tooling::JSONCompilationDatabase::loadFromBuffer(
+      llvm::formatv("{0}", llvm::json::Value(std::move(entries))).str(),
+      error, clang::tooling::JSONCommandLineSyntax::AutoDetect);
+  REQUIRE(compDb);
+
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  auto diags = runAnalysis(*compDb,
+                           {fx.path("user_a.cpp"), fx.path("user_b.cpp")},
+                           opts);
+  llvm::sys::fs::remove(buildDir);
+  REQUIRE(diags.size() == 1);
+  CHECK(diags[0].callLocation == fx.path("user_a.cpp") + ":5:3");
+  CHECK(diags[0].missingHeader == fx.path("ext.hpp"));
 }
 
 TEST_CASE("An attempt record carries the outcome that used it up",

@@ -34,6 +34,15 @@ namespace vycor {
 std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
                                const clang::ASTContext &context);
 
+// A file name as the frontend spelled it, made absolute against the TU's
+// compile directory (the FileManager's working directory) with dots
+// removed. Every path anneal records goes through this, so a relative
+// compile-command entry (`directory: build`, `file: ../src/x.cpp`, as Meson
+// writes them) or a relative -I names one file the same way in every TU
+// and in the report, whatever directory anneal itself runs from.
+std::string absoluteFileName(const clang::SourceManager &sm,
+                             llvm::StringRef name);
+
 // AST visitor that collects function overloads and deduction guides
 // into a GlobalIndex.
 class IndexerVisitor : public clang::RecursiveASTVisitor<IndexerVisitor> {
