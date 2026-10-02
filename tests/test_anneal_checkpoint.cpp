@@ -594,14 +594,18 @@ TEST_CASE("A diagnostic kind outside the enum is refused and not loaded",
 
   SECTION("diagnostics shard") {
     CheckpointFileGuard shard("anneal_shard_badkind.bin");
-    REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}}));
+    REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}},
+                                 {AnnealCheckpoint::kCleanParse}));
     std::string bytes = slurp(shard.path);
     // magic, version, count; tu "a.cpp"; payload length; then the
-    // payload: diagnostic count, kind, ...; the checksum follows it.
+    // payload: the TU's outcome, diagnostic count, kind, location, ...;
+    // the checksum follows it. The kind sits just before its location.
     const size_t lenAt = 12 + 4 + 5, payload = lenAt + 4;
     const uint32_t len = u32At(bytes, lenAt);
-    REQUIRE(u32At(bytes, payload) == 1);
-    putU32At(bytes, payload + 4, 32);
+    const size_t loc = bytes.find("ZZloc.cpp");
+    REQUIRE(loc != std::string::npos);
+    REQUIRE(u32At(bytes, loc - 12) == 1); // the diagnostic count
+    putU32At(bytes, loc - 8, 32);
     putU32At(bytes, payload + len,
              annealRecordChecksum(bytes.data() + payload, len));
     std::ofstream(shard.path, std::ios::binary | std::ios::trunc) << bytes;

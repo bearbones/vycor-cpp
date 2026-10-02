@@ -279,9 +279,12 @@ void use_b() {
   auto diags = runAnalysis(*db, {a, b}, opts, &merged);
   writeSeed("checkpoint/journal", "\x01" + readFile(opts.checkpointPath));
 
+  const std::vector<TuOutcome> clean{TuOutcome{TuStatus::Indexed, ""}};
   if (!writeAnnealIndexShard(fuzz::scratchPath("index.shard"),
-                             {{a, AnnealIndexPayload::capture(merged)}}) ||
-      !writeAnnealDiagShard(fuzz::scratchPath("diag.shard"), {{a, diags}}) ||
+                             {{a, AnnealIndexPayload::capture(merged)}},
+                             clean) ||
+      !writeAnnealDiagShard(fuzz::scratchPath("diag.shard"), {{a, diags}},
+                            clean) ||
       !writeGlobalIndexFile(fuzz::scratchPath("global.index"), merged)) {
     std::fprintf(stderr, "fuzz_seeds: cannot write the shard seeds\n");
     std::exit(1);

@@ -109,23 +109,33 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   switch (which) {
   case 0: {
     std::vector<std::pair<std::string, AnnealIndexPayload>> tus;
-    if (readAnnealIndexShard(path, [&](const std::string &tu,
-                                       const AnnealIndexPayload &payload) {
-          payload.applyTo(index);
-          tus.emplace_back(tu, payload);
-        }))
-      (void)writeAnnealIndexShard(rewritten, tus);
+    std::vector<TuOutcome> outcomes;
+    if (readAnnealIndexShard(
+            path,
+            [&](const std::string &tu, const AnnealIndexPayload &payload) {
+              payload.applyTo(index);
+              tus.emplace_back(tu, payload);
+            },
+            [&](const std::string &, const TuOutcome &outcome) {
+              outcomes.push_back(outcome);
+            }))
+      (void)writeAnnealIndexShard(rewritten, tus, outcomes);
     runIndexChecks(index, diags);
     break;
   }
   case 1: {
     std::vector<std::pair<std::string, std::vector<Diagnostic>>> tus;
-    if (readAnnealDiagShard(path, [&](const std::string &tu,
-                                      std::vector<Diagnostic> got) {
-          diags.insert(diags.end(), got.begin(), got.end());
-          tus.emplace_back(tu, std::move(got));
-        }))
-      (void)writeAnnealDiagShard(rewritten, tus);
+    std::vector<TuOutcome> outcomes;
+    if (readAnnealDiagShard(
+            path,
+            [&](const std::string &tu, std::vector<Diagnostic> got) {
+              diags.insert(diags.end(), got.begin(), got.end());
+              tus.emplace_back(tu, std::move(got));
+            },
+            [&](const std::string &, const TuOutcome &outcome) {
+              outcomes.push_back(outcome);
+            }))
+      (void)writeAnnealDiagShard(rewritten, tus, outcomes);
     break;
   }
   default:
