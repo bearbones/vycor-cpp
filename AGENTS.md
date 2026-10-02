@@ -56,9 +56,35 @@ The codebase is split into four feature areas:
 | `Indexer.h/.cpp` | Phase-1 AST visitor: walks every translation unit and populates `GlobalIndex` |
 | `Analyzer.h/.cpp` | Phase-2 AST visitor: compares each TU's resolved names against `GlobalIndex`; emits `Diagnostic` entries for fragile resolutions |
 | `Checkpoint.h/.cpp` | `--checkpoint` journal: append-only per-TU record of phase-1 index contributions and phase-2 diagnostics, so a killed run resumes without re-parsing finished TUs |
+| `Report.h/.cpp` | The CI-gate report: `buildFindings` (check name, severity, root-relative location, fingerprint, duplicate merge), inline suppressions, baselines, the changed-lines filter, `renderText`/`renderJson`/`renderSarif`/`renderSummary`, and `annealExitCode` |
 
 The main entry point is `vycor::runAnalysis(compDb, files)` defined in
-`Analyzer.h`. It orchestrates both phases and returns a `vector<Diagnostic>`.
+`Analyzer.h`. It orchestrates both phases and returns a `vector<Diagnostic>`;
+an optional `AnalysisReport *` receives every TU's parse outcome
+(`TuOutcome`, the worse of its two phases: `Indexed`, `Partial` for a
+parse that reported errors, `Skipped`, `Crashed` for a TU the checkpoint
+poisoned, `Poisoned`/`TimedOut` for an isolated worker that died or
+hung). Checkpoint records and worker shards carry the outcome
+(journal and shard format v9), so in-process, resumed, and isolated runs
+report the same rows.
+
+**anneal as a CI gate** (`anneal/Report.h`, contract in
+`docs/result-contract.md` "anneal exit codes" and
+`docs/checks/README.md` "Finding identity"): the CLI turns the
+diagnostics into findings (check name from the kind or the org check's
+`name()`, a per-check severity, the location relative to
+`--project-root`, a fingerprint of check + kind + root-relative file +
+the entities involved — `Diagnostic::entities`, else
+resolved/better declaration and missing header, never a line number),
+drops those an inline `// vycor: ignore[check]` covers, those in
+`--baseline`, and those outside the changed lines (`--patch-file`,
+`--git-base`), renders `--format text|json|sarif`, and exits 0 clean,
+1 findings at or above `--fail-on`, 2 usage, 3 a TU that did not parse
+cleanly (unless `--allow-parse-failures`). The JSON report is
+byte-identical across in-process, `--checkpoint`, and
+`--isolate-workers` runs (`scripts/anneal-gate-check.py`, ctest
+`anneal_gate`; SARIF validated against the vendored
+`tests/data/sarif-schema-2.1.0.json`).
 
 Both phases run per-TU on a worker pool (`AnalysisOptions::threadCount`,
 same 0=hardware/1=serial semantics as `bakeIndexes`; per-file diagnostic
@@ -85,7 +111,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (journal/shard format v2).
+and worker shards (since journal/shard format v2; v9 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `anneal --index-worker` /
@@ -354,7 +380,11 @@ built. Full guide: `docs/EXTENDING.md`.
 Key semantics:
 - Custom anneal checks run per TU **after** the built-in `AnalyzerVisitor`
   (in `AnalyzerConsumer::HandleTranslationUnit`); one fresh instance per
-  TU; emit `Diagnostic::Custom` with `checkName`.
+  TU; emit `Diagnostic::Custom` with `checkName` (left empty, the
+  analyzer fills in the emitting check's `name()`). The name is also the
+  finding's fingerprint input and SARIF rule id (`anneal/Report.h`);
+  filling `Diagnostic::entities` gives the fingerprint a stable identity
+  (otherwise the message, minus line references, is used).
 - Registry lock/channel types are merged into the CLI-built
   `LockTypeConfig`/`ChannelTypeConfig` in `main.cpp`
   (`mergeExtensionConfig`, CLI-first order, deduped) — so they participate
@@ -375,7 +405,8 @@ objects (`prism` is gone; `vycor-cpp prism ...` prints the megascope
 equivalents and exits 2):
 
 ```
-vycor-cpp anneal     --build-path <dir> --source <files...> [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
+vycor-cpp anneal     --build-path <dir> (--source <file>... | --source-list <file|->) [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
+                     [--format text|json|sarif] [--output <file>] [--fail-on note|warning|error|none] [--allow-parse-failures] [--baseline <file>] [--write-baseline <file>] [--patch-file <file|-> | --git-base <rev> [--git-head <rev>]] [--project-root <dir>] [-v]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]

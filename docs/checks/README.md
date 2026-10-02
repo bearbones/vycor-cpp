@@ -50,20 +50,26 @@ initial seeding and may evolve. Organizations can define their own groups
 
 ## Built-in checks
 
-| Check | Default | Groups | Summary |
-|---|---|---|---|
-| [adl-visibility](adl-visibility.md) | on | — | Fragile ADL resolutions: an invisible overload would win or tie |
-| [ctad-visibility](ctad-visibility.md) | on | — | CTAD deducing differently because a deduction guide is not included |
-| [specialization-visibility](specialization-visibility.md) | on | — | TU instantiates a primary template whose explicit specialization exists elsewhere (IFNDR) |
-| [default-arg-divergence](default-arg-divergence.md) | on | — | Declaration sites that disagree on a parameter's default argument |
-| [static-init-order](static-init-order.md) | on | — | Dynamic initializers reading another TU's dynamically-initialized global (SIOF) |
-| [header-static-duplication](header-static-duplication.md) | on | — | Mutable header-defined statics materialized by multiple TUs (forked per-TU state) |
-| [exception-spec-divergence](exception-spec-divergence.md) | on | — | Declaration sites that disagree on whether a function can throw |
-| [static-init-hazards](static-init-hazards.md) | off | compute-heavy | Static initializers reaching dlopen/dlsym or thread create/join (loader-lock deadlock risk) |
-| [exception-escape](exception-escape.md) | off | noisy | noexcept functions that can transitively reach an uncaught throw across TUs |
-| [odr-violations](odr-violations.md) | off | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
-| [coverage-properties](coverage-properties.md) | off | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
-| [dead-code](dead-code.md) | off | compute-heavy | Functions unreachable from the entry points via the call graph |
+| Check | Default | Severity | Groups | Summary |
+|---|---|---|---|---|
+| [adl-visibility](adl-visibility.md) | on | warning | — | Fragile ADL resolutions: an invisible overload would win or tie |
+| [ctad-visibility](ctad-visibility.md) | on | warning | — | CTAD deducing differently because a deduction guide is not included |
+| [specialization-visibility](specialization-visibility.md) | on | error | — | TU instantiates a primary template whose explicit specialization exists elsewhere (IFNDR) |
+| [default-arg-divergence](default-arg-divergence.md) | on | warning | — | Declaration sites that disagree on a parameter's default argument |
+| [static-init-order](static-init-order.md) | on | warning | — | Dynamic initializers reading another TU's dynamically-initialized global (SIOF) |
+| [header-static-duplication](header-static-duplication.md) | on | warning | — | Mutable header-defined statics materialized by multiple TUs (forked per-TU state) |
+| [exception-spec-divergence](exception-spec-divergence.md) | on | error | — | Declaration sites that disagree on whether a function can throw |
+| [static-init-hazards](static-init-hazards.md) | off | warning | compute-heavy | Static initializers reaching dlopen/dlsym or thread create/join (loader-lock deadlock risk) |
+| [exception-escape](exception-escape.md) | off | note | noisy | noexcept functions that can transitively reach an uncaught throw across TUs |
+| [odr-violations](odr-violations.md) | off | error | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
+| [coverage-properties](coverage-properties.md) | off | note | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
+| [dead-code](dead-code.md) | off | note | compute-heavy | Functions unreachable from the entry points via the call graph |
+
+Severity is the SARIF `level` and what `--fail-on` compares against:
+`error` for ill-formed programs (IFNDR, ODR), `warning` for proven
+hazards, `note` for leads that need triage. Two kinds are notes
+whatever their check: `ADL_SameScore` (`--warn-same-score`) and
+`DeadCode_Optimistic`. Organization checks are warnings.
 
 ## Organization checks
 
@@ -71,3 +77,60 @@ Checks registered from `ext/` (per-TU `AnnealCheck` or cross-TU
 `IndexCheck`) participate in the same selection by their `name()`, default
 to enabled, and should ship their own page under the fork's `docs/checks/`.
 See [docs/EXTENDING.md](../EXTENDING.md).
+
+They inherit everything below through `name()`: it is the finding's
+check name, the fingerprint's check input, and the SARIF rule id (with
+no `helpUri`, since the page lives in the fork). A Custom diagnostic
+whose check left `checkName` empty is attributed to the check that
+emitted it.
+
+## Finding identity
+
+Every finding carries a **fingerprint**, the identity that baselines
+(`--baseline`), the JSON report, and SARIF `partialFingerprints`
+(`vycorFingerprint/v1`) use. Version 1 is the first 16 hex digits of
+xxh3-64 over, NUL-separated:
+
+1. `vycor-finding/v1`;
+2. the check name (`adl-visibility`, or an organization check's
+   `name()`);
+3. the kind (`ADL_Fallback`, `ODR_DuplicateDefinition`, ...);
+4. the finding's file relative to the project root (`--project-root`,
+   default the working directory), `/`-separated;
+5. the identity of the entities involved: the qualified names,
+   signatures, or USRs the check records (`Diagnostic::entities`); for
+   the ADL, CTAD, coverage, and dead-code checks, the resolved and the
+   better declaration and the missing header (relative to the root);
+   for a check that records neither, the message with every
+   `:<line>[:<col>]` removed.
+
+No line or column number enters, so inserting or deleting unrelated
+lines above a finding leaves its fingerprint unchanged; renaming an
+entity involved, or moving the finding to another file, changes it.
+Moving the checkout elsewhere does not (paths are root-relative).
+
+Two findings that still share a fingerprint (the same fragile call
+written twice in one file) are numbered in line order: the second
+gets `-1` appended, the third `-2`. Fixing one of two such findings
+leaves one stale baseline entry; the numbering shifts, so which of the
+two entries reads as stale is not meaningful. Exact duplicates (the
+same header finding reached through several TUs) are merged into one
+finding before numbering.
+
+## Suppressing a finding
+
+A comment on the finding's line or the line above it:
+
+```cpp
+// vycor: ignore[adl-visibility]
+scale(v, 3.14);
+scale(v, 2.5); // vycor: ignore[adl-visibility, odr-violations]
+// vycor: ignore[*]
+scale(v, 1.5);
+```
+
+`*` suppresses every check. Suppressed findings are counted in the
+summary (`suppressed`) and do not affect the exit code. `-v` lists
+suppressions that suppressed nothing, in the analyzed TUs and the files
+holding findings. For many historical findings at once, use a baseline
+(`--write-baseline` / `--baseline`) instead.

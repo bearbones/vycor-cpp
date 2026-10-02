@@ -256,6 +256,46 @@ ambiguous). One mapping changed: an `unavailable` error exited 1 before
 (it was an error with no reserved prefix); it is an index problem and
 now exits 3.
 
+### anneal exit codes
+
+`vycor-cpp anneal` is not a megascope tool and has no `status`
+payload, but its exit codes follow the same pattern (0 clean, 1
+findings, 2 usage, 3 incomplete facts) so one CI script can read both:
+
+| Condition | Exit |
+|---|---|
+| every requested TU parsed cleanly, no finding at or above `--fail-on` | 0 |
+| a reported finding at or above `--fail-on` (default `note`: any finding) | 1 |
+| usage or configuration error: an unknown flag or flag value, no `--source`/`--source-list`, an unreadable build path, checks config, baseline, list, or patch, an unknown check name, an unwritable `--output` | 2 |
+| a requested TU did not parse cleanly (errors, no usable compile command, crashed or timed-out worker, poisoned in the checkpoint), unless `--allow-parse-failures` | 3 |
+
+Parse failures take precedence over findings: an incomplete analysis
+exits 3 even when it also found something, and it never prints
+`anneal: no issues found.`. With `--allow-parse-failures` the failed
+TUs are a warning on stderr and the exit code is decided by the
+findings alone. `--fail-on none` makes findings never fail the run;
+`--fail-on warning` / `error` raise the bar (severities per check in
+`docs/checks/README.md`). A `--write-baseline` run accepts the current
+findings and exits 0 (or 3 on a parse failure, and then writes
+nothing). Findings suppressed inline, matched by `--baseline`, or
+outside the changed lines (`--patch-file`, `--git-base`) are not
+reported and do not count. Every run prints a summary on stderr: the
+TU counts (`N TU(s): A analyzed, F failed`) naming each failed TU and
+its status, and what the suppressions, baseline, and changed-lines
+filter removed.
+
+The JSON report (`--format json`) carries the same facts: `summary`
+(`tus`, `analyzed`, `failed`, `findings`, `suppressed`, plus
+`baselined`/`staleBaseline` with `--baseline` and `outsideChanges` with
+a patch), `tus` (one row per requested TU in source order: `file`,
+`status` — `analyzed`, `partial`, `skipped`, `crashed`, `poisoned`,
+`timeout` — and `detail` when not analyzed), `findings` (`check`,
+`kind`, `severity`, `file`, `line`, `column`, `message`,
+`fingerprint`), `staleBaseline` with `--baseline`, and
+`unusedSuppressions` under `-v`. The document is byte-identical
+whether the run was in-process, resumed from `--checkpoint`, or run
+under `--isolate-workers`.
+
 ### Transports
 
 - **CLI, `--format json`**: the payload, with `status` and

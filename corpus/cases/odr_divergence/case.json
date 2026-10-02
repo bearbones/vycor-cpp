@@ -21,10 +21,10 @@
     "1"
    ],
    "expect": {
-    "exit": 0,
+    "exit": 1,
     "lines": {
      "present": [
-      "ODR violation: 'magic'",
+      "\\[odr-violations\\] ODR violation: 'magic'",
       "ODR violation: 'dup'",
       "ODR violation: 'Cfg'"
      ],

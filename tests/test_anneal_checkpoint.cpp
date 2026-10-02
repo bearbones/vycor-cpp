@@ -416,6 +416,7 @@ makeInProcessRunner(const clang::tooling::CompilationDatabase &compDb,
     std::ofstream err(stderrPath);
     if (phase == AnnealCheckpoint::kPhaseIndex) {
       std::vector<std::pair<std::string, AnnealIndexPayload>> shards;
+      std::vector<TuOutcome> outcomes;
       for (const auto &f : batch) {
         err << "WORKER-TU " << f << "\n";
         err.flush();
@@ -424,15 +425,16 @@ makeInProcessRunner(const clang::tooling::CompilationDatabase &compDb,
         GlobalIndex shard;
         auto tool = makeClangTool(compDb, {f});
         IndexerActionFactory factory(shard);
-        tool.run(&factory);
+        outcomes.push_back(outcomeForToolStatus(tool.run(&factory)));
         shards.emplace_back(f, AnnealIndexPayload::capture(shard));
       }
-      return writeAnnealIndexShard(shardPath, shards) ? 0 : 1;
+      return writeAnnealIndexShard(shardPath, shards, outcomes) ? 0 : 1;
     }
     GlobalIndex index;
     if (!readGlobalIndexFile(globalIndexPath, index))
       return 1;
     std::vector<std::pair<std::string, std::vector<Diagnostic>>> perTu;
+    std::vector<TuOutcome> outcomes;
     for (const auto &f : batch) {
       err << "WORKER-TU " << f << "\n";
       err.flush();
@@ -441,10 +443,10 @@ makeInProcessRunner(const clang::tooling::CompilationDatabase &compDb,
       std::vector<Diagnostic> local;
       auto tool = makeClangTool(compDb, {f});
       AnalyzerActionFactory factory(index, local, workerOpts);
-      tool.run(&factory);
+      outcomes.push_back(outcomeForToolStatus(tool.run(&factory)));
       perTu.emplace_back(f, std::move(local));
     }
-    return writeAnnealDiagShard(shardPath, perTu) ? 0 : 1;
+    return writeAnnealDiagShard(shardPath, perTu, outcomes) ? 0 : 1;
   };
 }
 
@@ -629,4 +631,144 @@ TEST_CASE("A TU the isolated dispatcher poisoned is skipped on resume",
   auto warm = runAnalysis(compDb, files, isolated);
   CHECK(invocations.load() == 0);
   CHECK(sortedKeys(warm) == sortedKeys(cold));
+}
+
+// ---- per-TU outcomes (anneal as a CI gate) ---------------------------------
+
+namespace {
+
+// The scratch fixture plus a TU whose parse fails (a missing include).
+struct BrokenTuFixture : ScratchFixture {
+  BrokenTuFixture() {
+    write("broken.cpp", "#include \"no-such-header.hpp\"\nint broken();\n");
+  }
+  ~BrokenTuFixture() { std::remove((dir + "/broken.cpp").c_str()); }
+  std::vector<std::string> filesWithBroken() const {
+    auto f = files();
+    f.push_back(path("broken.cpp"));
+    return f;
+  }
+};
+
+std::vector<std::string>
+outcomeRows(const AnalysisReport &report) {
+  std::vector<std::string> rows;
+  for (const auto &[file, outcome] : report.tus)
+    rows.push_back(llvm::sys::path::filename(file).str() + "|" +
+                   tuStatusName(outcome.status) + "|" + outcome.detail);
+  return rows;
+}
+
+} // namespace
+
+TEST_CASE("runAnalysis reports every TU's parse outcome in source order",
+          "[AnnealOutcomes]") {
+  BrokenTuFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.filesWithBroken();
+
+  AnalysisOptions opts;
+  opts.threadCount = 2;
+  AnalysisReport report;
+  auto diags = runAnalysis(compDb, files, opts, nullptr, &report);
+  CHECK(!diags.empty()); // the clean TUs are still analyzed
+  CHECK(outcomeRows(report) ==
+        std::vector<std::string>{"user_a.cpp|indexed|", "user_b.cpp|indexed|",
+                                 "user_c.cpp|indexed|",
+                                 "broken.cpp|partial|parse errors"});
+}
+
+TEST_CASE("Outcomes are identical in-process, resumed from a checkpoint, and "
+          "from isolated workers",
+          "[AnnealOutcomes]") {
+  BrokenTuFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.filesWithBroken();
+
+  AnalysisOptions plain;
+  plain.threadCount = 1;
+  AnalysisReport expected;
+  auto expectedDiags = runAnalysis(compDb, files, plain, nullptr, &expected);
+
+  SECTION("checkpoint: cold, then replayed without a parse") {
+    CheckpointFileGuard ckpt("anneal_ckpt_outcomes.vycj");
+    AnalysisOptions opts = plain;
+    opts.checkpointPath = ckpt.path;
+    AnalysisReport cold, warm;
+    auto coldDiags = runAnalysis(compDb, files, opts, nullptr, &cold);
+    auto warmDiags = runAnalysis(compDb, files, opts, nullptr, &warm);
+    CHECK(outcomeRows(cold) == outcomeRows(expected));
+    CHECK(outcomeRows(warm) == outcomeRows(expected));
+    CHECK(sortedKeys(warmDiags) == sortedKeys(expectedDiags));
+  }
+
+  SECTION("isolated workers, with and without the checkpoint") {
+    CheckpointFileGuard ckpt("anneal_ckpt_outcomes_iso.vycj");
+    AnalysisOptions opts = plain;
+    opts.workerCount = 2;
+    opts.isolatedRunner = makeInProcessRunner(compDb, plain);
+    AnalysisReport isolated;
+    runAnalysis(compDb, files, opts, nullptr, &isolated);
+    CHECK(outcomeRows(isolated) == outcomeRows(expected));
+
+    opts.checkpointPath = ckpt.path;
+    AnalysisReport cold, warm;
+    runAnalysis(compDb, files, opts, nullptr, &cold);
+    runAnalysis(compDb, files, opts, nullptr, &warm);
+    CHECK(outcomeRows(cold) == outcomeRows(expected));
+    CHECK(outcomeRows(warm) == outcomeRows(expected));
+  }
+}
+
+TEST_CASE("A TU that crashes its worker is reported poisoned",
+          "[AnnealOutcomes]") {
+  ScratchFixture fx;
+  auto compDb = fx.db();
+  auto files = fx.files();
+
+  AnalysisOptions plain;
+  plain.threadCount = 1;
+  AnalysisOptions isolated = plain;
+  isolated.workerCount = 2;
+  isolated.isolatedRunner =
+      makeInProcessRunner(compDb, plain, nullptr, /*crashOn=*/files[2]);
+  AnalysisReport report;
+  runAnalysis(compDb, files, isolated, nullptr, &report);
+  CHECK(outcomeRows(report) ==
+        std::vector<std::string>{"user_a.cpp|indexed|", "user_b.cpp|indexed|",
+                                 "user_c.cpp|poisoned|worker crashed"});
+}
+
+TEST_CASE("Shards carry each TU's outcome", "[AnnealOutcomes]") {
+  CheckpointFileGuard shard("anneal_shard_outcomes.bin");
+  Diagnostic d;
+  d.kind = Diagnostic::Custom;
+  d.checkName = "org-check";
+  d.entities = {"ns::f(int)", "ns::g()"};
+  REQUIRE(writeAnnealDiagShard(shard.path, {{"a.cpp", {d}}, {"b.cpp", {}}},
+                               {{TuStatus::Indexed, ""},
+                                {TuStatus::Partial, "parse errors"}}));
+  std::vector<std::string> seen;
+  REQUIRE(readAnnealDiagShard(
+      shard.path,
+      [&](const std::string &tu, std::vector<Diagnostic> diags) {
+        if (tu == "a.cpp") {
+          REQUIRE(diags.size() == 1);
+          CHECK(diags[0].entities == d.entities);
+        }
+      },
+      [&](const std::string &tu, const TuOutcome &outcome) {
+        seen.push_back(tu + "|" + tuStatusName(outcome.status));
+      }));
+  CHECK(seen == std::vector<std::string>{"a.cpp|indexed", "b.cpp|partial"});
+
+  // Without outcomes every entry reads as a clean parse.
+  REQUIRE(writeAnnealIndexShard(shard.path, {{"c.cpp", {}}}));
+  seen.clear();
+  REQUIRE(readAnnealIndexShard(
+      shard.path, [](const std::string &, const AnnealIndexPayload &) {},
+      [&](const std::string &tu, const TuOutcome &outcome) {
+        seen.push_back(tu + "|" + tuStatusName(outcome.status));
+      }));
+  CHECK(seen == std::vector<std::string>{"c.cpp|indexed"});
 }

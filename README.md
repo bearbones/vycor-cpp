@@ -171,16 +171,21 @@ resolved call sites against the global index (phase 2).
 ```bash
 ./build/vycor-cpp anneal \
   --build-path /path/to/compile_commands_dir \
-  --source file1.cpp file2.cpp
+  --source file1.cpp --source file2.cpp
 ```
 
-Output example:
+Output example (paths relative to `--project-root`, default the working
+directory; one finding per line, the check name in brackets):
 
 ```
-src/logic.cpp:42:5: Fragile ADL resolution: MathLib::scale(Vector, double) exists in
-    Extension.hpp but is not visible here. The current call resolves to
+src/logic.cpp:42:5: [adl-visibility] Fragile ADL resolution: MathLib::scale(Vector, double)
+    exists in Extension.hpp but is not visible here. The current call resolves to
     MathLib::scale(Vector, int). Include Extension.hpp or explicitly qualify the call.
 ```
+
+A summary goes to stderr: `N TU(s): A analyzed, F failed`, naming every
+TU that did not parse cleanly. A run with a failed TU never prints
+`anneal: no issues found.`.
 
 **ODR violation detection** (`--odr-diag`): linkers reject duplicate
 *strong* symbols, but mismatched *vague-linkage* definitions — inline
@@ -191,7 +196,7 @@ the whole project, catching both the two-headers-define-the-same-thing
 case and the subtler one-header-whose-body-depends-on-`-D`-flags case:
 
 ```
-./limits.hpp:2: ODR violation: 'limits' at ./limits.hpp:2 compiles to 2 different
+limits.hpp:2: [odr-violations] ODR violation: 'limits' at ./limits.hpp:2 compiles to 2 different
     definitions across TUs — its body depends on preprocessor state that differs
     between compile commands. Every TU must see an identical definition.
 ```
@@ -234,9 +239,104 @@ scratch directory. All of these compose.
 ```bash
 ./build/vycor-cpp anneal \
   --build-path /path/to/compile_commands_dir \
-  --source file1.cpp file2.cpp \
+  --source file1.cpp --source file2.cpp \
   --threads 0 --checkpoint /tmp/anneal.vycj
 ```
+
+#### anneal as a CI gate
+
+| Flag | Effect |
+|---|---|
+| `--source-list <file\|->` | TUs one per line (`#` comments), unioned with `--source` |
+| `--format text\|json\|sarif` | `file:line:col: [check] message` lines, a JSON report, or SARIF 2.1.0 |
+| `--output <file>` | write the report there instead of stdout |
+| `--fail-on note\|warning\|error\|none` | the severity that fails the run (default `note`: any finding) |
+| `--allow-parse-failures` | a TU that fails to parse is a warning instead of exit 3 |
+| `--write-baseline <file>` | record the current findings' fingerprints (the run exits 0) |
+| `--baseline <file>` | report only findings not in the baseline, and count the stale entries |
+| `--patch-file <file\|->`, `--git-base <rev> [--git-head <rev>]` | report only findings on changed lines |
+| `--project-root <dir>` | what paths and fingerprints are relative to (default: the working directory) |
+| `-v` | also list inline suppressions that suppressed nothing |
+
+Exit codes: **0** clean, **1** findings at or above `--fail-on`, **2**
+usage or configuration error, **3** a requested TU did not parse cleanly
+(it takes precedence over 1). Details next to megascope's in
+[docs/result-contract.md](docs/result-contract.md#anneal-exit-codes).
+
+Each finding has a **fingerprint** (check name + the entities involved +
+the file relative to the project root, never a line number), so it
+survives unrelated edits — see
+[docs/checks/README.md](docs/checks/README.md#finding-identity). Adopt
+anneal on an existing codebase by recording today's findings once:
+
+```bash
+vycor-cpp anneal --build-path build --source-list tus.txt \
+  --write-baseline .vycor-anneal-baseline.json
+# later runs fail only on new findings, and say which baseline entries
+# are fixed so the file can shrink:
+vycor-cpp anneal --build-path build --source-list tus.txt \
+  --baseline .vycor-anneal-baseline.json
+```
+
+Silence one finding in the source with a comment on its line or the
+line above: `// vycor: ignore[adl-visibility]` (several:
+`ignore[adl-visibility, odr-violations]`; every check: `ignore[*]`).
+
+A GitHub Actions job that gates pull requests and uploads the findings
+to code scanning (the SARIF has one rule per check, with a link to its
+page, and a `partialFingerprints` entry per result so alerts follow the
+code across edits):
+
+```yaml
+name: anneal
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # upload-sarif
+
+jobs:
+  anneal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vycor-cpp
+        env:
+          VYCOR: vycor-cpp-v0.2.0-linux-x86_64-llvm18
+        run: |
+          sudo apt-get install -y libclang-cpp18 libllvm18 clang-18
+          curl -sSfL "https://github.com/bearbones/vycor-cpp/releases/download/v0.2.0/$VYCOR.tar.gz" | tar xz
+          echo "$PWD/$VYCOR/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (writes compile_commands.json)
+        run: cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: anneal
+        run: |
+          jq -r '.[].file' build/compile_commands.json | sort -u > tus.txt
+          vycor-cpp anneal --build-path build --source-list tus.txt \
+            --baseline .vycor-anneal-baseline.json \
+            --format sarif --output anneal.sarif
+
+      - name: Upload SARIF
+        if: always() && hashFiles('anneal.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: anneal.sarif
+          category: vycor-anneal
+```
+
+The `anneal` step fails the job on a new finding (exit 1) or a TU that
+did not parse (exit 3); the upload runs either way. To gate only on the
+lines a pull request touches instead of a baseline, check out with
+`fetch-depth: 0` and pass `--git-base origin/${{ github.base_ref }}`.
+anneal's checks are cross-TU, so analyze the whole compilation database
+(as above) rather than only the changed files: `--source-list` with a
+changed-file list misses findings whose evidence is in unchanged TUs.
 
 ### morph — Apply Transformations
 

@@ -334,6 +334,11 @@ struct Diagnostic {
   std::string missingHeader; // which header to include
   std::string message;       // human-readable diagnostic
   std::string checkName;     // for Kind::Custom: AnnealCheck::name()
+  // The identity of the entities involved (qualified names, signatures,
+  // USRs) for checks whose resolvedDecl/betterDecl do not carry it. Feeds
+  // the finding fingerprint (anneal/Report.h) and never holds a line
+  // number, so the fingerprint survives unrelated edits.
+  std::vector<std::string> entities;
 };
 
 // Project-wide database of all function overloads and deduction guides.

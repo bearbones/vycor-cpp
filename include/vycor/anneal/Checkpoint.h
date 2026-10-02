@@ -139,37 +139,47 @@ public:
 
   // Replays the TU's phase-1 contribution into `into` when a record with a
   // matching stamp exists; returns false (and touches nothing) otherwise.
+  // `outcome`, when non-null, receives how the recorded parse ended.
   bool replayPhase1(const std::string &tu, const FileStamp &stamp,
-                    GlobalIndex &into) const;
+                    GlobalIndex &into, TuOutcome *outcome = nullptr) const;
 
   // Appends the TU's phase-2 diagnostics to `out` when a record with a
   // matching stamp AND matching index-set hash exists.
   bool replayPhase2(const std::string &tu, const FileStamp &stamp,
-                    uint64_t indexSetHash,
-                    std::vector<Diagnostic> &out) const;
+                    uint64_t indexSetHash, std::vector<Diagnostic> &out,
+                    TuOutcome *outcome = nullptr) const;
 
   // ---- appends (thread-safe; each record flushed before returning) ------
 
   void recordAttempt(uint8_t phase, const std::string &tu,
                      const FileStamp &stamp);
+  // `outcome` is how the parse ended (a TU whose parse reported errors is
+  // recorded too, so a resume reports it the same way).
   void recordPhase1(const std::string &tu, const FileStamp &stamp,
-                    const GlobalIndex &shard);
+                    const GlobalIndex &shard,
+                    const TuOutcome &outcome = kCleanParse);
   void recordPhase1(const std::string &tu, const FileStamp &stamp,
-                    const AnnealIndexPayload &payload);
+                    const AnnealIndexPayload &payload,
+                    const TuOutcome &outcome = kCleanParse);
   void recordPhase2(const std::string &tu, const FileStamp &stamp,
                     uint64_t indexSetHash,
-                    const std::vector<Diagnostic> &diags);
+                    const std::vector<Diagnostic> &diags,
+                    const TuOutcome &outcome = kCleanParse);
+
+  static const TuOutcome kCleanParse;
 
 private:
   AnnealCheckpoint() = default;
 
   struct Phase1Record {
     FileStamp stamp;
+    TuOutcome outcome;
     AnnealIndexPayload payload;
   };
   struct Phase2Record {
     FileStamp stamp;
     uint64_t indexSetHash = 0;
+    TuOutcome outcome;
     std::vector<Diagnostic> diagnostics;
   };
   // Most-recent attempt tracking; see attempts().
@@ -210,23 +220,33 @@ private:
 // in-process path.
 // ============================================================================
 
+// Every shard entry also carries how the TU's parse ended: `outcomes` is
+// parallel to `tus` (empty = every parse clean), and a reader's
+// `onOutcome`, when set, is called for each entry before `fn`.
+using AnnealOutcomeFn =
+    std::function<void(const std::string &tu, const TuOutcome &outcome)>;
+
 // Phase-1 index shard: each entry is (tuPath, that TU's contribution).
 bool writeAnnealIndexShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus);
+    const std::vector<std::pair<std::string, AnnealIndexPayload>> &tus,
+    const std::vector<TuOutcome> &outcomes = {});
 bool readAnnealIndexShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             const AnnealIndexPayload &payload)> &fn);
+                             const AnnealIndexPayload &payload)> &fn,
+    const AnnealOutcomeFn &onOutcome = nullptr);
 
 // Phase-2 diagnostics shard: each entry is (tuPath, its diagnostics).
 bool writeAnnealDiagShard(
     const std::string &path,
-    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus);
+    const std::vector<std::pair<std::string, std::vector<Diagnostic>>> &tus,
+    const std::vector<TuOutcome> &outcomes = {});
 bool readAnnealDiagShard(
     const std::string &path,
     const std::function<void(const std::string &tu,
-                             std::vector<Diagnostic> diags)> &fn);
+                             std::vector<Diagnostic> diags)> &fn,
+    const AnnealOutcomeFn &onOutcome = nullptr);
 
 // Full merged index, for the parent -> analyze-worker handoff
 // (anneal --analyze-worker --global-index <file>).

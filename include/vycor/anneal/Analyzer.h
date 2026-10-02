@@ -16,6 +16,7 @@
 #pragma once
 
 #include "vycor/anneal/GlobalIndex.h"
+#include "vycor/callgraph/TuOutcome.h"
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -296,6 +297,26 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
                               const CallGraph &graph,
                               std::vector<Diagnostic> &diagnostics);
 
+// How each requested TU's parses ended, in sourceFiles order. Filled by
+// runAnalysis when the caller passes one: the worse of the TU's phase-1
+// and phase-2 outcomes (TuStatus::Indexed = both parses were clean,
+// Partial = a parse reported errors, Skipped = no compile command,
+// Crashed = its in-process parse died kMaxAttempts times on record in the
+// checkpoint, Poisoned/TimedOut = its isolated worker crashed / hung).
+// Replayed checkpoint records and worker shards carry the outcome the
+// original parse had, so every execution mode reports the same rows.
+struct AnalysisReport {
+  std::vector<std::pair<std::string, TuOutcome>> tus;
+};
+
+// The worse of two outcomes for one TU (Indexed < Partial < Skipped <
+// Crashed/Poisoned/TimedOut); `a` wins ties.
+const TuOutcome &worseOutcome(const TuOutcome &a, const TuOutcome &b);
+
+// ClangTool::run's status as an outcome: 0 clean, 1 the parse reported
+// errors, 2 no compile command.
+TuOutcome outcomeForToolStatus(int status);
+
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are
 // emitted and whether the convertibility model is consulted.
@@ -303,11 +324,13 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
 // it, later phases read it), letting the caller keep the merged index
 // alive for post-analysis passes that need more context than phase 1.5
 // has — the CLI hands it to analyzeStaticInitHazards together with a call
-// graph. Pass a fresh GlobalIndex.
+// graph. Pass a fresh GlobalIndex. When reportOut is non-null it receives
+// every TU's outcome (AnalysisReport above).
 std::vector<Diagnostic>
 runAnalysis(const clang::tooling::CompilationDatabase &compDb,
             const std::vector<std::string> &sourceFiles,
-            const AnalysisOptions &opts, GlobalIndex *indexOut = nullptr);
+            const AnalysisOptions &opts, GlobalIndex *indexOut = nullptr,
+            AnalysisReport *reportOut = nullptr);
 
 // Legacy bool-shape overload preserved for callers that only want to toggle
 // the coverage diagnostics. Delegates to the AnalysisOptions variant.
