@@ -1,0 +1,190 @@
+# Copyright (c) 2026 The vycor-cpp Authors
+#
+# Working Buck2 example demonstrating:
+#   1. Per-TU call-graph artifacts (.vycs per translation unit)
+#   2. Per-target call-graph artifacts (.vycs per library/binary target)
+#   3. Global call-graph index artifacts (.vycs merged across diamond deps)
+#   4. Hermetic megascope query and check static-analysis build actions
+
+load(
+    "@vycor//buck2:vycor.bzl",
+    "vycor_check",
+    "vycor_global_index",
+    "vycor_query",
+    "vycor_target_index",
+    "vycor_tu_index",
+)
+
+# ---------------------------------------------------------------------------
+# 1. Explicit single-TU call-graph artifact (`buck2 build //:logger_tu`)
+# ---------------------------------------------------------------------------
+vycor_tu_index(
+    name = "logger_tu",
+    src = "src/logger.cpp",
+    exported_headers = ["include/core/logger.h"],
+    include_dirs = ["include"],
+    cxx_standard = "c++17",
+    out = "logger.tu.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 2. Per-library call-graph index targets (`core_vycor` and `engine_vycor`)
+#
+#    Build per-target index:
+#      buck2 build //:core_vycor
+#      buck2 build //:engine_vycor
+#
+#    Build all per-TU shards of a library:
+#      buck2 build //:core_vycor[tu]
+#
+#    Build a single TU's shard within a library:
+#      buck2 build //:core_vycor[tu/src/logger.cpp]
+# ---------------------------------------------------------------------------
+vycor_target_index(
+    name = "headers_only_vycor",
+    srcs = [],
+    exported_headers = [
+        "include/core/logger.h",
+    ],
+    exported_include_dirs = [
+        "include",
+    ],
+    cxx_standard = "c++17",
+)
+
+vycor_target_index(
+    name = "core_vycor",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+    ],
+    exported_headers = [
+        "include/core/logger.h",
+    ],
+    exported_include_dirs = [
+        "include",
+    ],
+    include_dirs = ["include"],
+    deps = [
+        ":headers_only_vycor",
+    ],
+    cxx_standard = "c++17",
+    out = "core.vycs",
+)
+
+vycor_target_index(
+    name = "engine_vycor",
+    srcs = [
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    exported_headers = [
+        "include/engine/pipeline.h",
+    ],
+    exported_include_dirs = [
+        "include",
+    ],
+    include_dirs = ["include"],
+    deps = [
+        ":core_vycor",
+    ],
+    cxx_standard = "c++17",
+    out = "engine.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 3. Binary target index (`app_vycor`) with diamond dependency on `core_vycor`
+#    (`app_vycor` -> `engine_vycor` -> `core_vycor` AND `app_vycor` -> `core_vycor`)
+#
+#    - Per-target index (just main.cpp):  buck2 build //:app_vycor
+#    - Transitive global index subtarget: buck2 build //:app_vycor[global]
+# ---------------------------------------------------------------------------
+vycor_target_index(
+    name = "app_vycor",
+    srcs = [
+        "src/main.cpp",
+    ],
+    include_dirs = ["include"],
+    deps = [
+        ":core_vycor",
+        ":engine_vycor",
+    ],
+    entry_points = ["main"],
+    cxx_standard = "c++17",
+    out = "app.target.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 4. Global call-graph index across all targets (`buck2 build //:global_index`)
+# ---------------------------------------------------------------------------
+vycor_global_index(
+    name = "global_index",
+    deps = [
+        ":app_vycor",
+    ],
+    entry_points = ["main"],
+    merge_granularity = "target",
+    out = "megascope.global.vycs",
+)
+
+# Alternative global index merging leaf per-TU .vycs shards directly:
+vycor_global_index(
+    name = "global_tu_index",
+    deps = [
+        ":app_vycor",
+    ],
+    entry_points = ["main"],
+    merge_granularity = "tu",
+    out = "megascope.global_from_tu.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 5. Hermetic query & static-analysis actions over the global index
+# ---------------------------------------------------------------------------
+vycor_query(
+    name = "call_graph_summary",
+    index = ":global_index",
+    tool = "graph-summary",
+    out = "call_graph_summary.json",
+)
+
+vycor_query(
+    name = "dead_code_report",
+    index = ":global_index",
+    tool = "analyze-dead-code",
+    entry_points = ["main"],
+    out = "dead_code_report.json",
+)
+
+vycor_query(
+    name = "exception_safety_report",
+    index = ":global_index",
+    tool = "query-exception-safety",
+    tool_flags = [
+        "--function",
+        "engine::runWorkerStep",
+        "--exception-type",
+        "std::runtime_error",
+    ],
+    entry_points = ["main"],
+    out = "exception_safety_report.json",
+)
+
+vycor_check(
+    name = "app_check",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+        "src/main.cpp",
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    headers = [
+        "include/core/logger.h",
+        "include/engine/pipeline.h",
+    ],
+    include_dirs = ["include"],
+    cxx_standard = "c++17",
+    format = "sarif",
+    out = "app_check.sarif",
+)

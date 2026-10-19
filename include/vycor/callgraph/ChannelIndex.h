@@ -166,6 +166,7 @@ private:
   // doesn't expose) to serialize/restore snapshot warm-start state exactly
   // like CallGraph/ControlFlowIndex already do.
   friend class SnapshotIO;
+  friend class MegascopeBridge;
 
   struct StoredSite {
     ChannelSite site;

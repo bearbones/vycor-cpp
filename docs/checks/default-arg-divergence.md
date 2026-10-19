@@ -16,7 +16,7 @@ only exists *across* TUs. The program compiles and links everywhere, and
 `log("msg")` quietly means `log("msg", 1)` in one TU and `log("msg", 2)`
 in another.
 
-anneal indexes every written-out default (declarations that merely inherit
+check indexes every written-out default (declarations that merely inherit
 a default from an earlier redeclaration in the same TU are skipped) and
 compares the spellings across sites project-wide.
 

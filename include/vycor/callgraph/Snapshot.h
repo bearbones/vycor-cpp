@@ -347,6 +347,36 @@ public:
   /// outcome recorded"): a parse that never reported back must not pass
   /// for a healthy cached TU.
   static void recordOutcomes(SnapshotMeta &meta, const TuOutcomes &outcomes);
+
+  /// Options for SnapshotIO::merge (`megascope merge`).
+  struct MergeOptions {
+    MergeOptions() : entryPoints(), allowMismatch(false) {}
+    /// Override entry points on the merged index (empty = union of the
+    /// inputs' recorded entry points in order of first appearance).
+    std::vector<std::string> entryPoints;
+    /// Allow merging snapshots whose build configuration (collapsePaths,
+    /// lockAllowlist, lockBuiltins, channelTypes) or bake environment
+    /// fingerprint differs. When false (the default), a mismatch returns
+    /// nullopt with `error` naming the conflicting input.
+    bool allowMismatch;
+  };
+
+  /// Merge one or more saved `.vycs` snapshots (`inputPaths`) into a
+  /// single SnapshotData in memory (for build systems such as Buck2 that
+  /// produce per-TU `.vycs` shards, merge them into per-target `.vycs`
+  /// artifacts, and merge target artifacts into a global `.vycs` index).
+  /// Overlapping TUs across inputs (e.g. diamond dependencies in a build
+  /// graph) are handled idempotently: the first snapshot's facts for a TU
+  /// are kept and any duplicate TU contribution in later snapshots is
+  /// stripped before absorbing, so edge reference counts, call-site
+  /// contexts, channel sites, and file/dependency tables are never
+  /// double-counted. Returns nullopt on an empty input list, a load
+  /// failure, or a configuration mismatch (when !options.allowMismatch),
+  /// setting `error` to a human-readable diagnostic.
+  static std::optional<SnapshotData>
+  merge(const std::vector<std::string> &inputPaths,
+        const MergeOptions &options = MergeOptions(),
+        std::string *error = nullptr);
 };
 
 } // namespace vycor

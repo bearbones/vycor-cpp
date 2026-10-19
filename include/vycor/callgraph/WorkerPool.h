@@ -38,7 +38,7 @@ namespace vycor {
 // and the batch is re-dispatched without it.
 //
 // The dispatcher is a bake strategy over CallGraph/ControlFlowIndex/
-// SnapshotIO; anneal reuses it through dispatchIsolated.
+// SnapshotIO; check reuses it through dispatchIsolated.
 // ============================================================================
 
 /// Everything needed to reconstruct a worker's megascope argv. The worker
@@ -55,10 +55,13 @@ struct BakeWorkerConfig {
   /// JSON first, then org-config/registry types, deduped). Empty = off.
   std::string channelTypesJson;
   std::string orgConfig;
+  /// Direct compiler flags passed after `--` on the command line.
+  std::vector<std::string> fixedCompileArgs;
+  bool hasFixedCompileArgs = false;
 };
 
 /// Resource limits for one worker process (--worker-timeout,
-/// --worker-memory-limit). Shared by the megascope bake and anneal.
+/// --worker-memory-limit). Shared by the megascope bake and check.
 struct WorkerLimits {
   /// Seconds a worker may go without starting its next TU (a new
   /// `WORKER-TU` stderr marker) before it is killed and its batch handled
@@ -105,7 +108,7 @@ using WorkerRunner = std::function<int(const std::vector<std::string> &batch,
                                        const std::string &shardPath,
                                        const std::string &stderrPath)>;
 
-/// Generic dispatcher core, shared by the megascope bake and the anneal
+/// Generic dispatcher core, shared by the megascope bake and the check
 /// isolated phases. Batches `files`, keeps <= `workers` runner invocations
 /// in flight, and calls `consumeShard(shardPath, batchTus, wallMs)` on the
 /// calling thread for each batch whose runner exited 0 — return false to
@@ -158,7 +161,7 @@ BakedIndexes bakeIsolated(const std::string &selfExe, const BakeWorkerConfig &cf
                           const WorkerLimits &limits = {});
 
 /// Create a unique directory <system temp>/<base>-XXXXXX (base
-/// vycor-workers, vycor-anneal-workers) for one dispatch run. On failure
+/// vycor-workers, vycor-check-workers) for one dispatch run. On failure
 /// returns the error and `out` names the attempted prefix.
 std::error_code createWorkerShardDir(llvm::StringRef base,
                                      llvm::SmallVectorImpl<char> &out);

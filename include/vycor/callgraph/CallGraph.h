@@ -350,6 +350,7 @@ private:
   // nodeContributors_) and edge storage that have no public accessors;
   // deserialization goes through the public API.
   friend class SnapshotIO;
+  friend class MegascopeBridge;
 
   mutable std::mutex mutex_;
   StringInterner interner_;

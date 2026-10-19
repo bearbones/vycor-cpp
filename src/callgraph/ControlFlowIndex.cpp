@@ -861,8 +861,11 @@ size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   // TU paths are raw bytes (the compilation database's spelling); the
   // index holds their index text (Utf8.h).
   std::vector<std::string> tuTexts;
+  tuTexts.reserve(tuPaths.size());
   for (const auto &tuPath : tuPaths)
     tuTexts.push_back(toIndexText(tuPath));
+  std::sort(tuTexts.begin(), tuTexts.end());
+  tuTexts.erase(std::unique(tuTexts.begin(), tuTexts.end()), tuTexts.end());
   for (const auto &tuPath : tuTexts) {
     prefixes.push_back(tuPath + ":");
     if (auto tuId = interner_.find(tuPath)) {
@@ -930,14 +933,12 @@ size_t ControlFlowIndex::removeTUs(const std::vector<std::string> &tuPaths) {
     if (it->second.empty())
       bySite_.erase(it);
   }
-  if (!dead.empty()) {
-    for (const auto &tuPath : tuTexts) {
-      if (auto tuId = interner_.find(tuPath)) {
-        auto it = byTu_.find(*tuId);
-        if (it != byTu_.end())
-          byTu_.erase(it);
-      }
+  for (const auto &tuPath : tuTexts) {
+    if (auto tuId = interner_.find(tuPath)) {
+      byTu_.erase(*tuId);
     }
+  }
+  if (!dead.empty()) {
     scrub(noProvenance_);
   }
   return removed;

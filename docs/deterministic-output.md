@@ -1,7 +1,6 @@
 # Deterministic output
 
-Status: implemented on `main`. Owner: package D of
-`docs/plans/2026-09-next/`. This page says, for every list a megascope
+This page says, for every list a megascope
 tool emits, whether its order is part of the contract and what key
 orders it, and which outputs are sets whose order a consumer must not
 rely on. `docs/result-contract.md` is the envelope; `docs/path-analysis.md`

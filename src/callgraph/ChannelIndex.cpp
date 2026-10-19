@@ -69,6 +69,10 @@ void ChannelIndex::addSiteRefs(ChannelSite site, uint32_t count) {
     // by several TUs): register another contributor instead of duplicating.
     idx = it->second;
     sites_[idx].refs += count;
+    if (!tuPath.empty() &&
+        (sites_[idx].site.tuPath.empty() || tuPath < sites_[idx].site.tuPath)) {
+      sites_[idx].site.tuPath = tuPath;
+    }
   } else {
     idx = sites_.size();
     std::string channelId = site.channelId;
@@ -232,19 +236,25 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   // Release every TU's registrations first, then scrub each affected
   // index vector once for the whole set (mirrors CallGraph::removeTUs).
   std::unordered_set<size_t> dead;
+  std::unordered_set<size_t> survivingNeedTuRefresh;
   std::unordered_set<std::string> affectedChannels, affectedFuncUsr,
       affectedFuncDisplay;
   for (const auto &rawPath : tuPaths) {
-    auto tit = byTu_.find(toIndexText(rawPath)); // raw bytes (Utf8.h)
+    const std::string tuText = toIndexText(rawPath); // raw bytes (Utf8.h)
+    auto tit = byTu_.find(tuText);
     if (tit == byTu_.end())
       continue;
     for (size_t idx : tit->second) {
       StoredSite &se = sites_[idx];
       if (se.refs == 0)
         continue; // already tombstoned
-      if (--se.refs > 0)
+      if (--se.refs > 0) {
+        if (se.site.tuPath == tuText)
+          survivingNeedTuRefresh.insert(idx);
         continue; // other contributors remain
+      }
 
+      survivingNeedTuRefresh.erase(idx);
       dead.insert(idx);
       affectedChannels.insert(se.site.channelId);
       affectedFuncUsr.insert(se.site.siteFunctionUsr);
@@ -258,6 +268,20 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
       ++removed;
     }
     byTu_.erase(tit);
+  }
+
+  if (!survivingNeedTuRefresh.empty()) {
+    for (size_t idx : survivingNeedTuRefresh)
+      sites_[idx].site.tuPath.clear();
+    for (const auto &[remTu, idxs] : byTu_) {
+      for (size_t idx : idxs) {
+        if (!survivingNeedTuRefresh.count(idx))
+          continue;
+        std::string &cur = sites_[idx].site.tuPath;
+        if (cur.empty() || remTu < cur)
+          cur = remTu;
+      }
+    }
   }
 
   auto scrub = [&dead](std::vector<size_t> &v) {

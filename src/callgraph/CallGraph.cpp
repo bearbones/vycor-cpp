@@ -776,10 +776,12 @@ size_t CallGraph::removeTUs(const std::vector<std::string> &tuPaths) {
     return 0;
   }
   std::vector<SId> tuIds;
+  std::unordered_set<SId> seenTuIds;
   // TU paths are raw bytes (the compilation database's spelling).
   for (const auto &tuPath : tuPaths)
     if (auto tuId = interner_.find(toIndexText(tuPath)))
-      tuIds.push_back(*tuId);
+      if (seenTuIds.insert(*tuId).second)
+        tuIds.push_back(*tuId);
   size_t removed = 0;
 
   // Two passes: release every TU's registrations and mark dead edges

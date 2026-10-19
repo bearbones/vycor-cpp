@@ -11,7 +11,7 @@ this repository. Read it before making changes.
 and source-to-source transformation. It uses Clang's AST (Abstract Syntax
 Tree) infrastructure to:
 
-1. **Detect fragile ADL/CTAD resolutions** (`anneal`) — header-order-sensitive
+1. **Detect fragile ADL/CTAD resolutions** (`check`) — header-order-sensitive
    name lookups that silently resolve to different declarations depending on
    what is included.
 2. **Apply AST matcher transformations** (`morph`) — rule-driven rewrites of
@@ -33,7 +33,7 @@ analysis).
 
 Glass and optics. **vycor** is the Corning glass family the C++ tool draws
 its name from (sibling to Pyrex, more demanding spec); the `-cpp` suffix
-leaves the bare `vycor` for a future Python sibling. **anneal** relieves
+leaves the bare `vycor` for a future Python sibling. **check** relieves
 latent stress — ADL/CTAD fragility. **morph** reshapes amorphous structure —
 AST transforms. **megascope** is the persistent far-seeing instrument — the
 cross-TU index and its query verbs (its ephemeral mode absorbed **prism**,
@@ -45,10 +45,10 @@ which decomposed one point into its components — call-site control flow).
 
 The codebase is split into four feature areas:
 
-### `anneal` — ADL/CTAD Analysis
+### `check` — ADL/CTAD Analysis
 
-**Headers:** `include/vycor/anneal/`
-**Sources:** `src/anneal/`
+**Headers:** `include/vycor/check/`
+**Sources:** `src/check/`
 
 | File | Purpose |
 |---|---|
@@ -56,7 +56,7 @@ The codebase is split into four feature areas:
 | `Indexer.h/.cpp` | Phase-1 AST visitor: walks every translation unit and populates `GlobalIndex` |
 | `Analyzer.h/.cpp` | Phase-2 AST visitor: compares each TU's resolved names against `GlobalIndex`; emits `Diagnostic` entries for fragile resolutions |
 | `Checkpoint.h/.cpp` | `--checkpoint` journal: append-only per-TU record of phase-1 index contributions and phase-2 diagnostics, so a killed run resumes without re-parsing finished TUs |
-| `Report.h/.cpp` | The CI-gate report: `buildFindings` (check name, severity, root-relative location, fingerprint, duplicate merge), inline suppressions, baselines, the changed-lines filter, `renderText`/`renderJson`/`renderSarif`/`renderSummary`, and `annealExitCode` |
+| `Report.h/.cpp` | The CI-gate report: `buildFindings` (check name, severity, root-relative location, fingerprint, duplicate merge), inline suppressions, baselines, the changed-lines filter, `renderText`/`renderJson`/`renderSarif`/`renderSummary`, and `checkExitCode` |
 
 The main entry point is `vycor::runAnalysis(compDb, files)` defined in
 `Analyzer.h`. It orchestrates both phases and returns a `vector<Diagnostic>`;
@@ -71,10 +71,10 @@ report the same rows. Only a clean (`Indexed`) phase record replays; a
 TU that failed is parsed again on resume, and only the
 attempts-exhausted skip outlives a failure (reported with the journaled
 outcome). Every path the indexer and analyzer record is absolute against
-the TU's compile directory (`absoluteFileName`, `anneal/Indexer.h`).
+the TU's compile directory (`absoluteFileName`, `check/Indexer.h`).
 
-**anneal as a CI gate** (`anneal/Report.h`, contract in
-`docs/result-contract.md` "anneal exit codes" and
+**check as a CI gate** (`check/Report.h`, contract in
+`docs/result-contract.md` "check exit codes" and
 `docs/checks/README.md` "Finding identity"): the CLI turns the
 diagnostics into findings (check name from the kind or the org check's
 `name()`, a per-check severity, the location relative to
@@ -91,8 +91,8 @@ those outside the changed lines (`--patch-file`,
 1 findings at or above `--fail-on`, 2 usage, 3 a TU that did not parse
 cleanly (unless `--allow-parse-failures`). The JSON report is
 byte-identical across in-process, `--checkpoint`, and
-`--isolate-workers` runs (`scripts/anneal-gate-check.py`, ctest
-`anneal_gate`; SARIF validated against the vendored
+`--isolate-workers` runs (`scripts/check-gate-check.py`, ctest
+`check_gate`; SARIF validated against the vendored
 `tests/data/sarif-schema-2.1.0.json`).
 
 Both phases run per-TU on a worker pool (`AnalysisOptions::threadCount`,
@@ -106,7 +106,7 @@ invalidates them all — one TU's diagnostics depend on every other TU's
 declarations), stamps are mtime+size (`FileStamp`), an options-fingerprint
 mismatch discards the journal wholesale, and a TU whose parse fatally died
 twice (attempt records, no completion) is skipped as poisoned instead of
-re-killing every resume. See `anneal/Checkpoint.h`.
+re-killing every resume. See `check/Checkpoint.h`.
 
 `--odr-diag` adds cross-TU ODR violation detection: phase 1 records a
 `clang::ODRHash` per vague-linkage definition (inline functions, in-class
@@ -123,7 +123,7 @@ mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
 and worker shards (since journal/shard format v2; v10 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
-workers (megascope's model): the parent spawns `anneal --index-worker` /
+workers (megascope's model): the parent spawns `check --index-worker` /
 `--analyze-worker` batches through the generic `dispatchIsolated`
 dispatcher (`callgraph/WorkerPool.h` — batching, WORKER-TU poison markers,
 crash/bisect, shared with the megascope bake), phase-1 workers write
@@ -161,11 +161,11 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
-| `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and anneal: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
+| `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
-| `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (anneal shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
+| `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
 `bakeIndexes(compDb, files, ...)` runs all three visitor phases —
@@ -189,8 +189,7 @@ Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
 are preserved. This reduces noise from utility/math headers while keeping entry points visible.
 
-**Crash and hang containment** (`docs/design-f12-subprocess-workers.md`,
-"Failure modes"): `megascope index` bakes in subprocess workers
+**Crash and hang containment**: `megascope index` bakes in subprocess workers
 by default whenever `--threads` is not 1 and `--pch-dir` is unset
 (`--isolate-workers=false` opts out). A worker that starts no new TU for
 `--worker-timeout` seconds (default 600) is killed and handled as a
@@ -248,8 +247,9 @@ Contract and worked examples: `docs/change-impact.md`.
 | File | Purpose |
 |---|---|
 | `BakeConfig.h/.cpp` | `parseChannelTypesJson`, `loadOrgConfigIfSet`, `mergeExtensionConfig` — the bake configuration shared by `main.cpp`'s verbs and the ephemeral query mode |
-| `MegascopeCli.h/.cpp` | The query verbs (`<tool>`, `call`, `tools`, `info`, `batch`, `dump`): `parseToolArgs` derives `--flags` from each tool's JSON Schema (strings take a value, integers parse, booleans are bare, arrays repeat; hyphens and underscores interchangeable; `--args '<json>'` seeds), `emitToolResult` implements the output contract (compact JSON / `--pretty` / `--format ndjson` with a leading `{"_summary":...}` line / `--format tsv` with sorted columns) and `exitCodeFor` the exit codes, derived from the payload's typed `status` (0 results, 1 empty or not found, 2 usage, 3 index missing or unavailable facts, 4 ambiguous; `docs/result-contract.md`); `resolveIndexPath` is the `--index` → `$VYCOR_INDEX` → `<build-path>/.vycor/megascope.vycs` → `./.vycor/megascope.vycs` chain; `dump` streams every call-site context and channel site through `ControlFlowIndex::forEachContext` (ndjson default, or one json document via `llvm::json::OStream`); ephemeral mode (`--source`/`--source-list`/`--source-re` with `--build-path`) runs `selectSources` + `bakeIndexes` in memory and answers from that, no index read or written |
+| `MegascopeCli.h/.cpp` | The query and index-reducer verbs (`<tool>`, `call`, `tools`, `info`, `batch`, `dump`, `merge`): `parseToolArgs` derives `--flags` from each tool's JSON Schema (strings take a value, integers parse, booleans are bare, arrays repeat; hyphens and underscores interchangeable; `--args '<json>'` seeds), `emitToolResult` implements the output contract (compact JSON / `--pretty` / `--format ndjson` with a leading `{"_summary":...}` line / `--format tsv` with sorted columns) and `exitCodeFor` the exit codes, derived from the payload's typed `status` (0 results, 1 empty or not found, 2 usage, 3 index missing or unavailable facts, 4 ambiguous; `docs/result-contract.md`); `resolveIndexPath` is the `--index` → `$VYCOR_INDEX` → `<build-path>/.vycor/megascope.vycs` → `./.vycor/megascope.vycs` chain; `dump` streams every call-site context and channel site through `ControlFlowIndex::forEachContext` (ndjson default, or one json document via `llvm::json::OStream`); `merge` (`runMergeVerb` → `SnapshotIO::merge`) combines per-TU or per-target `.vycs` shards into one saved index (`--output`, `--input`, `--input-list`, `--allow-mismatch`, `--no-wait`, diamond-dependency TU deduplication); ephemeral mode (`--source`/`--source-list`/`--source-re` with `--build-path` or `-- <compile-flags...>`) runs `selectSources` + `bakeIndexes` in memory and answers from that, no index read or written |
 | `DiffVerb.cpp` | the `diff` verb: loads `--before` and `--after` saved indexes, refuses non-comparable pairs unless `--allow-mismatch`, `--to` adds the route diff, `--impact` the walk from the changed functions; `seedImpactPatch` turns `--patch-file` / `--git-base` `--git-head` into `impact_of_change`'s `patch` argument |
+| `SourceSelection.h/.cpp` | `selectSources`, `canonicalPath`, `absolutePath`, and `loadCompilationDatabase(buildPath, fixedArgs, error)` (supports direct compiler flags after `--` via `FixedCompilationDatabase`, a compilation database JSON file path via `JSONCompilationDatabase::loadFromFile`, or a build directory via `CompilationDatabase::loadFromDirectory`) |
 
 The query verbs load the index with `LoadMode::ReadOnly`
 (`callgraph/Snapshot.h`): the edge dedup map and per-TU provenance that
@@ -275,16 +275,27 @@ its records either: the section keeps them sorted by call site with
 by-caller / by-callee orders and a string-sorted id table after them,
 and `ControlFlowIndex` answers every query from the mapped file
 (`isMapped()`; `docs/control-flow-access.md` has the layout, the
-measurements behind it, and the parity tests). `index` and
+measurements behind it, and the parity tests). `index`, `merge`, and
 worker shards load `Mutable` and everything — the records decoded into
 the resident form, the orders skipped. The bake's `--entry-point` list
 is recorded in the meta and is the default for queries that pass none.
 
-`main.cpp` peels the verb off argv before `llvm::cl` runs: query verbs
-never touch `llvm::cl`; `index` shares the bake option block with the
-verb-less `--bake-worker` form the isolated bake spawns (any other
+`main.cpp` peels the verb off argv (and peels direct compiler flags after
+`--` into `fixedCompileArgs`) before `llvm::cl` runs: query verbs (and
+`merge`) never touch `llvm::cl`; `index` shares the bake option block with
+the verb-less `--bake-worker` form the isolated bake spawns (any other
 verb-less invocation is a usage error, and `serve` prints its removal
-notice). `megascope index` prints a one-line JSON summary on stdout.
+notice). `megascope index` and `megascope merge` print a one-line JSON
+summary on stdout.
+
+**Buck2 integration** (`buck2/vycor.bzl`, `buck2/vycor.bxl`, `buck2/README.md`,
+`examples/buck2_megascope/`): Starlark rules (`vycor_tu_index`,
+`vycor_target_index`, `vycor_global_index`, `vycor_query`,
+`vycor_check`), wrapper macros (`vycor_cxx_library`,
+`vycor_cxx_binary`), and BXL scripts (`index`, `check`) that produce
+`.vycs` artifacts per translation unit, per library/binary target, and
+for the global index using `VycorIndexTSet` (`transitive_set`) and
+`megascope merge`.
 
 TU selection (`SourceSelection.h/.cpp`): `--source` and `--source-list`
 entries are unioned; `--source-re` and `--skip-paths` narrow the base
@@ -324,7 +335,7 @@ and the drop + dirty set is removed in one `removeTUs` call per index
 kind of refresh equals a clean rebuild, in-process and isolated.
 
 Write integrity (`docs/index-provenance.md`, format v13): every index,
-anneal journal header, and worker shard is published through
+check journal header, and worker shard is published through
 `writeFileAtomically` (`callgraph/AtomicFile.h`: unique temp file in the
 target directory, fsync, rename, directory fsync; temp removed and
 stream error cleared on failure). `index` holds an advisory
@@ -334,7 +345,7 @@ verifies the header checksum and each decoded section's xxh3 checksum
 and names the damaged section in `SnapshotLoadStats::error`; `info`
 verifies all sections (`SnapshotIO::verify`). A bake that parsed none of
 its TUs is never saved (`SnapshotIO::unpublishableBake`; `index` exits
-1). The anneal journal is truncated to its last valid record before
+1). The check journal is truncated to its last valid record before
 appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
@@ -379,7 +390,7 @@ and report `total` / `truncated` / `nextOffset`.
 
 | File | Purpose |
 |---|---|
-| `Extensions.h/.cpp` | `ExtensionRegistry` (process-wide): custom `AnnealCheck`s, lock/channel type registration, guard classifiers (feature flags). Macros `VYCOR_REGISTER_ANNEAL_CHECK` / `VYCOR_EXTENSION_SETUP` |
+| `Extensions.h/.cpp` | `ExtensionRegistry` (process-wide): custom `Check`s, lock/channel type registration, guard classifiers (feature flags). Macros `VYCOR_REGISTER_CHECK` / `VYCOR_EXTENSION_SETUP` |
 | `OrgConfig.h/.cpp` | `--org-config` JSON: declarative lock/channel types, feature-flag patterns, collapse paths, disabled checks |
 
 The scheme exists so organization forks never edit upstream files (clean
@@ -391,11 +402,11 @@ static-init registrars in an archive would be dropped by the linker).
 built. Full guide: `docs/EXTENDING.md`.
 
 Key semantics:
-- Custom anneal checks run per TU **after** the built-in `AnalyzerVisitor`
+- Custom check checks run per TU **after** the built-in `AnalyzerVisitor`
   (in `AnalyzerConsumer::HandleTranslationUnit`); one fresh instance per
   TU; emit `Diagnostic::Custom` with `checkName` (left empty, the
   analyzer fills in the emitting check's `name()`). The name is also the
-  finding's fingerprint input and SARIF rule id (`anneal/Report.h`);
+  finding's fingerprint input and SARIF rule id (`check/Report.h`);
   filling `Diagnostic::entities` gives the fingerprint a stable identity
   (otherwise the message, minus line references, is used).
 - Registry lock/channel types are merged into the CLI-built
@@ -418,7 +429,7 @@ objects (`prism` is gone; `vycor-cpp prism ...` prints the megascope
 equivalents and exits 2):
 
 ```
-vycor-cpp anneal     --build-path <dir> (--source <file>... | --source-list <file|->) [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
+vycor-cpp check     --build-path <dir> (--source <file>... | --source-list <file|->) [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
                      [--format text|json|sarif] [--output <file>] [--fail-on note|warning|error|none] [--allow-parse-failures] [--baseline <file>] [--write-baseline <file>] [--patch-file <file|-> | --git-base <rev> [--git-head <rev>]] [--project-root <dir>] [-v]
 vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
 vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
@@ -430,21 +441,21 @@ vycor-cpp megascope diff    --before <index> --after <index> [--to <name>] [--im
 vycor-cpp megascope tools | info [--files] | help
 ```
 
-`--org-config` (anneal/megascope) loads the organization config JSON
+`--org-config` (check/megascope) loads the organization config JSON
 (see `include/vycor/ext/OrgConfig.h` and `docs/EXTENDING.md`); its
 lock/channel types and collapse paths merge with the equivalent CLI flags.
 
-**Named checks (anneal):** every analysis is a named check with a page
+**Named checks (check):** every analysis is a named check with a page
 under `docs/checks/` (see `docs/checks/README.md` for the list, groups,
 and defaults). Selection sources in order (later wins): a
-`.vycor-anneal.json` found walking up from the working directory (or
+`.vycor-check.json` found walking up from the working directory (or
 `--checks-config <file>`), the `--checks=<spec>` flag (clang-tidy style:
 `all,-noisy`, `-name` disables, groups expand), then the legacy toggles
 (`--odr-diag`, `--coverage-diag`, `--dead-code`) as appended enables. The
-resolver lives in `anneal/CheckSet.h/.cpp`; unknown names are a hard
+resolver lives in `check/CheckSet.h/.cpp`; unknown names are a hard
 error; main.cpp maps the resolved set onto `AnalysisOptions` booleans and
 forwards it to isolated workers as `--checks=-all,<resolved...>`.
-Organization checks (per-TU `AnnealCheck` and merged-index `IndexCheck`,
+Organization checks (per-TU `Check` and merged-index `IndexCheck`,
 `ext/Extensions.h`) join the same namespace via `name()`; org groups via
 `registry.addCheckGroup`.
 
@@ -485,7 +496,7 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   --version` report both the vycor-cpp version and the embedded LLVM
   version. See `COMPATIBILITY.md` "Tagging and releases" for the version/tag
   scheme this feeds.
-- Iterates `VYCOR_SUPPORTED_LLVM_VERSIONS` (currently `21 20 18`,
+- Iterates `VYCOR_SUPPORTED_LLVM_VERSIONS` (currently `22 21 20 18`,
   newest first) via `find_package()`. The CI matrix in
   `.github/workflows/ci.yml` mirrors this list.
 - Falls back to `extern/llvm-project` submodule if no system package matches.
@@ -500,7 +511,7 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
-- Builds `vycor_lib` from `anneal/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, and `ext/*.cpp`.
+- Builds `vycor_lib` from `check/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, and `ext/*.cpp`.
 - Builds `vycor-cpp` executable from `main.cpp` plus a `CONFIGURE_DEPENDS`
   glob of top-level `ext/*.cpp` (organization slot-in — attached to the
   executable, not the archive, so static registrars survive linking).
@@ -637,7 +648,7 @@ correctly (the CMake build sets it automatically via a compile definition).
 
 ---
 
-## Adding a New Analysis to anneal
+## Adding a New Analysis to check
 
 1. **If new data is needed globally**, extend `GlobalIndex` (`GlobalIndex.h`
    and `GlobalIndex.cpp`) with a new entry struct and lookup method.
@@ -727,7 +738,7 @@ prefix (`fix/`, `feat/`, `docs/`, etc.) and a short description, e.g.
 
 Commit convention: descriptive imperative messages, no ticket numbers required.
 
-Long-lived `release/llvm-18`, `release/llvm-20`, `release/llvm-21` branches
+Long-lived `release/llvm-18`, `release/llvm-20`, `release/llvm-21`, `release/llvm-22` branches
 track each supported LLVM major; bug fixes are cherry-picked from `main` to
 each applicable release branch via the `backport/llvm-NN` PR label. See
 `COMPATIBILITY.md` for the full cherry-pick policy.
@@ -747,20 +758,13 @@ relying on a real tag push.
 
 ---
 
-## Current TODOs
+## Ephemeral Work Artifacts Policy (No Plans or Momentary Notes in VCS)
 
-| Area | TODO |
-|---|---|
-| `morph` CLI | Parse `--rules-json` and populate `TransformPipeline` passes |
-| `TransformPipeline` | Apply replacements to disk between passes (not just collect) |
-| `TransformPipeline` | Write final replacements to disk when `!dryRun` |
-| Tests | Implement full integration tests in `test_transforms.cpp` (currently stubs) |
-| Matcher DSL | Define and document the JSON schema for rules files |
-| `find_call_chain` | Annotate path edges with try/catch depth and caught types |
-| `call-site-context` | Include catch handler type and body summary in response |
-| Concurrency | `query_raii_scopes_at_callsite` — list RAII objects live at a call site |
-| Concurrency | `query_locks_held(function)` — trace callers to find implicit locks |
-| Concurrency | `query_same_lock(fn_a, fn_b)` — confirm two functions share a lock |
+Temporary development artifacts must stay temporary or go into **GitHub Issues**, never into version control:
+- **Never commit** momentary design notes (`docs/design-*.md`), task/work-package plans (`docs/plans/**`, `docs/tasks/**`, `docs/handoffs/**`), architecture/CLI reviews (`docs/*-review.md`), root-cause/diagnosis writeups, or roadmap/TODO scratch files (`ROADMAP.md`, `docs/issues/**`).
+- **Keep `docs/` strictly for durable, user- or contributor-facing reference documentation** that describes the current system as built (`docs/checks/**`, `docs/EXTENDING.md`, `docs/megascope-usage.md`, and the contract specifications).
+- **Track planned work, follow-ups, design proposals, and open questions in GitHub Issues** (`gh issue create` / `gh issue edit`).
+- **Use untracked scratch directories** (`scratch/` or `/tmp/`) for temporary scripts, benchmark logs, and working notes during a session.
 
 ---
 
@@ -774,7 +778,7 @@ only, not a namespace boundary.
 
 ## External Dependencies
 
-- **LLVM/Clang 18, 20, or 21** — system package preferred (`find_package`),
+- **LLVM/Clang 18, 20, 21, or 22** — system package preferred (`find_package`),
   git submodule at `extern/llvm-project` as fallback. Selectable via
   `CMAKE_PREFIX_PATH=/usr/lib/llvm-NN`.
 - **Catch2 v3.10+** (tests only) — resolved in three tiers: pre-existing

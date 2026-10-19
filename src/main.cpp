@@ -13,12 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/CheckSet.h"
-#include "vycor/anneal/Checkpoint.h"
-#include "vycor/anneal/DeadCodeAnalyzer.h"
-#include "vycor/anneal/Indexer.h"
-#include "vycor/anneal/Report.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/CheckSet.h"
+#include "vycor/check/Checkpoint.h"
+#include "vycor/check/DeadCodeAnalyzer.h"
+#include "vycor/check/Indexer.h"
+#include "vycor/check/Report.h"
 #include "vycor/callgraph/BuildStats.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
@@ -31,6 +31,7 @@
 #include "vycor/callgraph/AtomicFile.h"
 #include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/Interrupt.h"
+#include "vycor/callgraph/MegascopeBridge.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/callgraph/Utf8.h"
 #include "vycor/callgraph/WorkerPool.h"
@@ -86,7 +87,7 @@ loadSectionsJson(const vycor::SnapshotLoadStats &stats) {
 // ---------------------------------------------------------------------------
 
 static llvm::cl::SubCommand
-    AnnealCmd("anneal",
+    CheckCmd("check",
               "Analyze sources for fragile ADL/CTAD resolutions");
 
 static llvm::cl::SubCommand
@@ -96,7 +97,8 @@ static llvm::cl::SubCommand
 static llvm::cl::SubCommand
     MegascopeCmd("megascope",
                  "Index a project's call graph and query it (verbs: index, "
-                 "tools, info, batch, dump, diff, <tool>; `megascope help`)");
+                 "merge, tools, info, batch, dump, diff, <tool>; "
+                 "`megascope help`)");
 
 // ---------------------------------------------------------------------------
 // options common to all subcommands
@@ -116,78 +118,80 @@ static llvm::cl::list<std::string>
         llvm::cl::sub(llvm::cl::SubCommand::getAll()));
 
 // ---------------------------------------------------------------------------
-// anneal options
+// check options
 // ---------------------------------------------------------------------------
 
 static llvm::cl::opt<std::string>
-    AnnealBuildPath("build-path",
-                    llvm::cl::desc("Directory containing compile_commands.json"),
-                    llvm::cl::value_desc("dir"),
-                    llvm::cl::sub(AnnealCmd));
+    CheckBuildPath("build-path",
+                    llvm::cl::desc("Directory containing compile_commands.json "
+                                   "(or path to a compilation database file; "
+                                   "optional when compile flags follow '--')"),
+                    llvm::cl::value_desc("dir|file"),
+                    llvm::cl::sub(CheckCmd));
 
 static llvm::cl::list<std::string>
-    AnnealSourceFiles("source",
+    CheckSourceFiles("source",
                       llvm::cl::desc("Source files to analyze"),
                       llvm::cl::value_desc("file"),
                       // Required-ness enforced manually in main(): parse-time
                       // OneOrMore would break --list-checks.
                       llvm::cl::ZeroOrMore,
-                      llvm::cl::sub(AnnealCmd));
+                      llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealCoverageDiag("coverage-diag",
+    CheckCoverageDiag("coverage-diag",
                        llvm::cl::desc("Enable coverage instrumentation diagnostics"),
-                       llvm::cl::sub(AnnealCmd));
+                       llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealListChecks("list-checks",
+    CheckListChecks("list-checks",
         llvm::cl::desc("Print every known check (built-in and organization) "
                        "with defaults, groups, and summaries, then exit"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealChecks("checks",
+    CheckSpec("checks",
         llvm::cl::desc("Comma-separated check specification applied after "
-                       "any .vycor-anneal.json: names enable, -names "
+                       "any .vycor-check.json: names enable, -names "
                        "disable, group names (e.g. all, noisy, "
                        "compute-heavy) expand. See docs/checks/README.md."),
         llvm::cl::value_desc("spec"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealChecksConfig("checks-config",
+    CheckConfig("checks-config",
         llvm::cl::desc("Explicit checks-config file (default: search for "
-                       ".vycor-anneal.json from the working directory "
+                       ".vycor-check.json from the working directory "
                        "upward)"),
         llvm::cl::value_desc("file"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealOdrDiag("odr-diag",
+    CheckOdrDiag("odr-diag",
         llvm::cl::desc("Detect ODR violations among vague-linkage "
                        "definitions (inline functions, in-class method "
                        "bodies, class definitions) across TUs — the class "
                        "of mismatch linkers merge silently instead of "
                        "diagnosing"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealDeadCode("dead-code",
+    CheckDeadCode("dead-code",
                    llvm::cl::desc("Enable dead code analysis via call graph"),
-                   llvm::cl::sub(AnnealCmd));
+                   llvm::cl::sub(CheckCmd));
 
 static llvm::cl::list<std::string>
-    AnnealEntryPoints("entry-point",
+    CheckEntryPoints("entry-point",
                       llvm::cl::desc("Entry point function names (default: main)"),
                       llvm::cl::value_desc("name"),
-                      llvm::cl::sub(AnnealCmd));
+                      llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealWarnSameScore("warn-same-score",
+    CheckWarnSameScore("warn-same-score",
                         llvm::cl::desc("Warn on ADL candidates that tie the "
                                        "resolved overload on every argument "
                                        "position"),
-                        llvm::cl::sub(AnnealCmd));
+                        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
     MegascopeNoWait("no-wait",
@@ -198,78 +202,78 @@ static llvm::cl::opt<bool>
         llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<unsigned>
-    AnnealThreads("threads",
+    CheckThreads("threads",
         llvm::cl::desc("Number of threads for the per-TU analysis phases "
                        "(0 = hardware_concurrency, 1 = serial)"),
         llvm::cl::init(0),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealIsolateWorkers("isolate-workers",
+    CheckIsolateWorkers("isolate-workers",
         llvm::cl::desc("Run the per-TU parses in worker subprocesses (a "
                        "crashing TU costs only that TU; composes with "
                        "--checkpoint)"),
         llvm::cl::init(false),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<unsigned>
-    AnnealWorkers("workers",
+    CheckWorkers("workers",
         llvm::cl::desc("Number of worker processes for --isolate-workers "
                        "(0 = the --threads value)"),
         llvm::cl::init(0),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<unsigned>
-    AnnealWorkerTimeout("worker-timeout",
+    CheckWorkerTimeout("worker-timeout",
         llvm::cl::desc("With --isolate-workers: kill a worker that starts "
                        "no new TU for this many seconds and record the TU "
                        "it was parsing as timed out (0 = no timeout)"),
         llvm::cl::value_desc("seconds"),
         llvm::cl::init(vycor::WorkerLimits{}.timeoutSeconds),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<unsigned>
-    AnnealWorkerMemoryLimit("worker-memory-limit",
+    CheckWorkerMemoryLimit("worker-memory-limit",
         llvm::cl::desc("With --isolate-workers: per-worker data-segment "
                        "limit in MiB; a worker that exceeds it dies and its "
                        "TU is poisoned (0 = no limit)"),
         llvm::cl::value_desc("MiB"),
         llvm::cl::init(0),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 // Worker-mode plumbing (spawned by the --isolate-workers parent; not part
 // of the user-facing surface). Mirrors megascope's --bake-worker.
 static llvm::cl::opt<bool>
-    AnnealIndexWorker("index-worker",
+    CheckIndexWorker("index-worker",
         llvm::cl::desc("Internal: index the --source list and write an "
-                       "anneal index shard instead of analyzing"),
+                       "check index shard instead of analyzing"),
         llvm::cl::Hidden,
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealAnalyzeWorker("analyze-worker",
+    CheckAnalyzeWorker("analyze-worker",
         llvm::cl::desc("Internal: analyze the --source list against "
                        "--global-index and write a diagnostics shard"),
         llvm::cl::Hidden,
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealWorkerOut("worker-out",
+    CheckWorkerOut("worker-out",
         llvm::cl::desc("Internal: shard output path for worker modes"),
         llvm::cl::value_desc("file"),
         llvm::cl::Hidden,
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealGlobalIndexIn("global-index",
+    CheckGlobalIndexIn("global-index",
         llvm::cl::desc("Internal: merged-index handoff file for "
                        "--analyze-worker"),
         llvm::cl::value_desc("file"),
         llvm::cl::Hidden,
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealCheckpointFile("checkpoint",
+    CheckCheckpointFile("checkpoint",
         llvm::cl::desc("Journal per-TU progress to this file and resume "
                        "from it on the next run: a killed run picks up "
                        "where it left off, and a TU whose parse fatally "
@@ -277,104 +281,117 @@ static llvm::cl::opt<std::string>
                        "resume. Source edits invalidate exactly the "
                        "affected entries."),
         llvm::cl::value_desc("file"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealOrgConfig("org-config",
+    CheckOrgConfig("org-config",
         llvm::cl::desc("Organization config JSON (lock/channel types, "
                        "feature-flag patterns, disabled checks — see "
                        "docs/EXTENDING.md)"),
         llvm::cl::value_desc("file"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealSourceList("source-list",
+    CheckSourceList("source-list",
         llvm::cl::desc("Read source files from this file, one per line "
                        "('-' = stdin, '#' comments); unioned with --source"),
         llvm::cl::value_desc("file|-"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealFormat("format",
+    CheckFormat("format",
         llvm::cl::desc("Report format: text (file:line:col: [check] "
                        "message), json, or sarif (SARIF 2.1.0)"),
         llvm::cl::value_desc("text|json|sarif"), llvm::cl::init("text"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealOutput("output",
+    CheckOutput("output",
         llvm::cl::desc("Write the report to this file instead of stdout"),
-        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("file"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealFailOn("fail-on",
+    CheckFailOn("fail-on",
         llvm::cl::desc("Exit 1 when a reported finding is at or above this "
                        "severity: note (any finding, the default), warning, "
                        "error, or none"),
         llvm::cl::value_desc("severity"), llvm::cl::init("note"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealAllowParseFailures("allow-parse-failures",
+    CheckAllowParseFailures("allow-parse-failures",
         llvm::cl::desc("Report TUs that failed to parse as a warning instead "
                        "of exiting 3"),
-        llvm::cl::sub(AnnealCmd));
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealBaseline("baseline",
+    CheckBaseline("baseline",
         llvm::cl::desc("Suppress the findings recorded in this baseline "
                        "file and report only new ones, plus a count of "
                        "baseline entries no longer found"),
-        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("file"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealWriteBaseline("write-baseline",
+    CheckWriteBaseline("write-baseline",
         llvm::cl::desc("Record the current findings' fingerprints in this "
                        "baseline file (the run then exits 0 unless a TU "
                        "failed)"),
-        llvm::cl::value_desc("file"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("file"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealPatchFile("patch-file",
+    CheckPatchFile("patch-file",
         llvm::cl::desc("Report only findings on lines this unified diff "
                        "changes ('-' = stdin)"),
-        llvm::cl::value_desc("file|-"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("file|-"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealGitBase("git-base",
+    CheckGitBase("git-base",
         llvm::cl::desc("Report only findings on lines changed since this "
                        "revision (`git diff <rev> [--git-head]`, run in "
                        "--project-root)"),
-        llvm::cl::value_desc("rev"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("rev"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealGitHead("git-head",
+    CheckGitHead("git-head",
         llvm::cl::desc("With --git-base: the revision to diff against "
                        "(default: the working tree)"),
-        llvm::cl::value_desc("rev"), llvm::cl::sub(AnnealCmd));
+        llvm::cl::value_desc("rev"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<std::string>
-    AnnealProjectRoot("project-root",
+    CheckProjectRoot("project-root",
         llvm::cl::desc("Directory finding paths and fingerprints are "
-                       "relative to (default: the working directory)"),
-        llvm::cl::value_desc("dir"), llvm::cl::sub(AnnealCmd));
+                       "relative to (default: inferred git/common root)"),
+        llvm::cl::value_desc("dir"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
-    AnnealVerbose("verbose",
+    CheckAbsolutePaths("absolute-paths",
+        llvm::cl::desc("Emit absolute file paths in findings and messages "
+                       "instead of repo-relative paths"),
+        llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<bool>
+    CheckExceptionEscapeCallSiteLocations(
+        "exception-escape-call-site-locations",
+        llvm::cl::desc("Include (file:line) locations for call sites along "
+                       "exception-escape call chains"),
+        llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<bool>
+    CheckVerbose("verbose",
         llvm::cl::desc("Also report inline suppressions that suppressed "
                        "nothing"),
-        llvm::cl::sub(AnnealCmd));
-static llvm::cl::alias AnnealVerboseShort("v",
+        llvm::cl::sub(CheckCmd));
+static llvm::cl::alias CheckVerboseShort("v",
                                           llvm::cl::desc("Alias for --verbose"),
-                                          llvm::cl::aliasopt(AnnealVerbose));
+                                          llvm::cl::aliasopt(CheckVerbose));
 
 static llvm::cl::opt<bool>
-    AnnealModelConvertibility("model-convertibility",
+    CheckModelConvertibility("model-convertibility",
                               llvm::cl::desc("Use indexed type relations "
                                              "(inheritance, converting ctors, "
                                              "conversion operators) to decide "
                                              "candidate viability"),
-                              llvm::cl::sub(AnnealCmd));
+                              llvm::cl::sub(CheckCmd));
 
 // ---------------------------------------------------------------------------
 // morph options
@@ -389,9 +406,10 @@ static llvm::cl::opt<std::string>
 static llvm::cl::list<std::string>
     MorphBuildPaths("build-path",
                      llvm::cl::desc("Directory containing compile_commands.json"
-                                    " (may be repeated; first match wins)"),
+                                    " (may be repeated; optional when compile "
+                                    "flags follow '--')"),
                      llvm::cl::value_desc("dir"),
-                     llvm::cl::OneOrMore,
+                     llvm::cl::ZeroOrMore,
                      llvm::cl::sub(MorphCmd));
 
 static llvm::cl::list<std::string>
@@ -412,8 +430,10 @@ static llvm::cl::opt<bool>
 
 static llvm::cl::opt<std::string>
     MegascopeBuildPath("build-path",
-                 llvm::cl::desc("Directory containing compile_commands.json"),
-                 llvm::cl::value_desc("dir"),
+                 llvm::cl::desc("Directory containing compile_commands.json "
+                                "(or path to a compilation database file; "
+                                "optional when compile flags follow '--')"),
+                 llvm::cl::value_desc("dir|file"),
                  llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::list<std::string>
@@ -508,16 +528,33 @@ static llvm::cl::opt<std::string>
     MegascopeIndex("index",
         llvm::cl::desc("Index file: load the baked graph if present "
                        "(re-indexing only changed TUs) and save after "
-                       "building. Default: "
-                       "<build-path>/.vycor/megascope.vycs"),
+                       "building. Supports .vycs, .mgsc, and .shard.json. "
+                       "Default: <build-path>/.vycor/megascope.vycs"),
         llvm::cl::value_desc("file"),
         llvm::cl::sub(MegascopeCmd));
 
-// Older spelling; cl::alias must not carry cl::sub (it inherits
-// MegascopeIndex's subcommand).
+// Older spelling and cross-tool --output / -o aliases; cl::alias must not
+// carry cl::sub (it inherits MegascopeIndex's subcommand).
 static llvm::cl::alias
     MegascopeSnapshotAlias("snapshot", llvm::cl::desc("Alias for --index"),
                      llvm::cl::aliasopt(MegascopeIndex), llvm::cl::NotHidden);
+static llvm::cl::alias
+    MegascopeOutputAlias("output", llvm::cl::desc("Alias for --index"),
+                         llvm::cl::aliasopt(MegascopeIndex),
+                         llvm::cl::NotHidden);
+
+static llvm::cl::opt<std::string>
+    MegascopeEmitShard("emit-shard",
+        llvm::cl::desc("Write megascope ModuleShard JSON to this file "
+                       "('-' for stdout)"),
+        llvm::cl::value_desc("file|-"),
+        llvm::cl::sub(MegascopeCmd));
+
+static llvm::cl::opt<std::string>
+    MegascopeEmitMgsc("emit-mgsc",
+        llvm::cl::desc("Write a binary megascope .mgsc snapshot to this file"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(MegascopeCmd));
 
 static llvm::cl::opt<bool>
     MegascopeVerbose("v",
@@ -676,51 +713,69 @@ int main(int argc, const char **argv) {
     }
   }
 
+  // Peel direct compiler flags after `--` (FixedCompilationDatabase mode for
+  // Buck2/Bazel per-TU and per-target actions) before llvm::cl parses options.
+  bool hasFixedCompileArgs = false;
+  std::vector<std::string> fixedCompileArgs;
+  std::vector<const char *> clArgv;
+  clArgv.reserve(static_cast<size_t>(argc));
+  for (int i = 0; i < argc; ++i) {
+    if (llvm::StringRef(argv[i]) == "--") {
+      hasFixedCompileArgs = true;
+      for (int j = i + 1; j < argc; ++j)
+        fixedCompileArgs.emplace_back(argv[j]);
+      break;
+    }
+    clArgv.push_back(argv[i]);
+  }
+  argc = static_cast<int>(clArgv.size());
+  argv = clArgv.data();
+
   llvm::cl::AddExtraVersionPrinter([](llvm::raw_ostream &os) {
     os << "vycor-cpp version " << VYCOR_VERSION_STRING << "\n";
     os << "Host compiler: " << VYCOR_HOST_COMPILER_ID << " "
        << VYCOR_HOST_COMPILER_VERSION << "\n";
   });
 
-  // A malformed command line exits 2 for anneal (its usage code — exit 1
+  // A malformed command line exits 2 for check (its usage code — exit 1
   // means findings there) and 1, as before, for everything else.
-  const bool annealArgv = argc > 1 && llvm::StringRef(argv[1]) == "anneal";
+  const bool checkArgv = argc > 1 && llvm::StringRef(argv[1]) == "check";
   if (!llvm::cl::ParseCommandLineOptions(
           argc, argv,
           "vycor-cpp: AST-based C++ analysis and transformation tool\n"
           "\nSubcommands:\n"
-          "  anneal     Detect fragile ADL/CTAD resolution across translation "
+          "  check     Detect fragile ADL/CTAD resolution across translation "
           "units\n"
           "  morph     Apply rule-driven AST matcher transformations\n"
           "  megascope  Index a project's call graph and query it "
           "(`megascope help`)\n",
           &llvm::errs()))
-    return annealArgv ? vycor::kAnnealExitUsage : 1;
+    return checkArgv ? vycor::kCheckExitUsage : 1;
 
   vycor::appendGlobalExtraArgs({ExtraArgs.begin(), ExtraArgs.end()});
 
   // SIGINT/SIGTERM: a parent kills its workers and removes its scratch
   // files; a worker dies with its parent (callgraph/Interrupt.h). Before
   // any thread exists, so every later thread inherits the blocked mask.
-  if (MegascopeBakeWorker || AnnealIndexWorker || AnnealAnalyzeWorker) {
+  if (MegascopeBakeWorker || CheckIndexWorker || CheckAnalyzeWorker) {
     vycor::bindWorkerToParent();
     // A worker that crashes (or aborts at --worker-memory-limit) must die,
     // so the parent's marker/poison/bisect path handles the TU
     // (callgraph/CrashGuard.h).
     vycor::disableCrashGuard();
-  } else if (AnnealCmd || MegascopeCmd)
+  } else if (CheckCmd || MegascopeCmd)
     vycor::installInterruptHandler();
 
-  // ---- anneal ---------------------------------------------------------------
-  if (AnnealCmd) {
-    if (AnnealListChecks) {
+  // ---- check ---------------------------------------------------------------
+  if (CheckCmd) {
+    if (CheckListChecks) {
       // Org registrations (ext/ static init + --org-config) participate.
       vycor::OrgConfig listOrgCfg;
-      if (!loadOrgConfigIfSet(AnnealOrgConfig, listOrgCfg))
-        return vycor::kAnnealExitUsage;
+      if (!loadOrgConfigIfSet(CheckOrgConfig, listOrgCfg))
+        return vycor::kCheckExitUsage;
       auto defaults = vycor::defaultCheckSet();
-      llvm::outs() << "anneal checks (docs/checks/<name>.md):\n";
-      for (const auto &check : vycor::builtinAnnealChecks()) {
+      llvm::outs() << "checks (docs/checks/<name>.md):\n";
+      for (const auto &check : vycor::builtinChecks()) {
         llvm::outs() << llvm::format("  %-28s %-4s", check.name.c_str(),
                                      defaults.count(check.name) ? "on"
                                                                 : "off");
@@ -740,7 +795,7 @@ int main(int argc, const char **argv) {
       }
       llvm::outs() << "groups: all";
       std::set<std::string> groupNames;
-      for (const auto &check : vycor::builtinAnnealChecks())
+      for (const auto &check : vycor::builtinChecks())
         for (const auto &group : check.groups)
           groupNames.insert(group);
       for (const auto &kv :
@@ -751,46 +806,49 @@ int main(int argc, const char **argv) {
       llvm::outs() << "\n";
       return 0;
     }
-    // Usage errors exit 2 (docs/result-contract.md, "anneal exit codes").
-    const int kUsage = vycor::kAnnealExitUsage;
-    if (AnnealBuildPath.empty()) {
-      llvm::errs() << "anneal: --build-path is required\n";
+    // Usage errors exit 2 (docs/result-contract.md, "check exit codes").
+    const int kUsage = vycor::kCheckExitUsage;
+    if (CheckBuildPath.empty() && !hasFixedCompileArgs) {
+      llvm::errs() << "check: --build-path is required (or pass compile flags "
+                      "after '--')\n";
       return kUsage;
     }
-    if (AnnealFormat != "text" && AnnealFormat != "json" &&
-        AnnealFormat != "sarif") {
-      llvm::errs() << "anneal: --format must be text, json, or sarif (got '"
-                   << AnnealFormat << "')\n";
+    if (CheckFormat != "text" && CheckFormat != "json" &&
+        CheckFormat != "sarif") {
+      llvm::errs() << "check: --format must be text, json, or sarif (got '"
+                   << CheckFormat << "')\n";
       return kUsage;
     }
     std::optional<vycor::Severity> failOn;
-    if (!vycor::parseFailOn(AnnealFailOn, failOn)) {
-      llvm::errs() << "anneal: --fail-on must be note, warning, error, or "
+    if (!vycor::parseFailOn(CheckFailOn, failOn)) {
+      llvm::errs() << "check: --fail-on must be note, warning, error, or "
                       "none (got '"
-                   << AnnealFailOn << "')\n";
+                   << CheckFailOn << "')\n";
       return kUsage;
     }
-    if (!AnnealPatchFile.empty() && !AnnealGitBase.empty()) {
-      llvm::errs() << "anneal: --patch-file and --git-base are "
+    if (!CheckPatchFile.empty() && !CheckGitBase.empty()) {
+      llvm::errs() << "check: --patch-file and --git-base are "
                       "alternatives\n";
       return kUsage;
     }
-    if (!AnnealGitHead.empty() && AnnealGitBase.empty()) {
-      llvm::errs() << "anneal: --git-head requires --git-base\n";
+    if (!CheckGitHead.empty() && CheckGitBase.empty()) {
+      llvm::errs() << "check: --git-head requires --git-base\n";
       return kUsage;
     }
-    if (AnnealSourceList == "-" && AnnealPatchFile == "-") {
-      llvm::errs() << "anneal: --source-list - and --patch-file - cannot "
+    if (CheckSourceList == "-" && CheckPatchFile == "-") {
+      llvm::errs() << "check: --source-list - and --patch-file - cannot "
                       "both read stdin\n";
       return kUsage;
     }
 
     std::string dbError;
-    auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-        AnnealBuildPath, dbError);
+    auto compDb = vycor::loadCompilationDatabase(
+        CheckBuildPath, fixedCompileArgs, dbError, hasFixedCompileArgs);
     if (!compDb) {
-      llvm::errs() << "anneal: error loading compilation database from "
-                   << AnnealBuildPath << ": " << dbError << "\n";
+      llvm::errs() << "check: error loading compilation database from "
+                   << (CheckBuildPath.empty() ? "<command-line>"
+                                               : std::string(CheckBuildPath))
+                   << ": " << dbError << "\n";
       return kUsage;
     }
 
@@ -800,56 +858,56 @@ int main(int argc, const char **argv) {
     std::vector<std::string> files;
     {
       vycor::SourceSelection selection;
-      selection.explicitFiles.assign(AnnealSourceFiles.begin(),
-                                     AnnealSourceFiles.end());
-      selection.listFile = AnnealSourceList;
+      selection.explicitFiles.assign(CheckSourceFiles.begin(),
+                                     CheckSourceFiles.end());
+      selection.listFile = CheckSourceList;
       if (selection.explicitFiles.empty() && selection.listFile.empty()) {
-        llvm::errs() << "anneal: at least one --source file (or "
+        llvm::errs() << "check: at least one --source file (or "
                         "--source-list) is required\n";
         return kUsage;
       }
       auto selected = vycor::selectSources(*compDb, selection, std::cin);
       if (!selected) {
-        llvm::errs() << "anneal: " << llvm::toString(selected.takeError())
+        llvm::errs() << "check: " << llvm::toString(selected.takeError())
                      << "\n";
         return kUsage;
       }
       files = std::move(*selected);
       if (files.empty()) {
-        llvm::errs() << "anneal: the source list names no files\n";
+        llvm::errs() << "check: the source list names no files\n";
         return kUsage;
       }
     }
 
     vycor::OrgConfig orgCfg;
-    if (!loadOrgConfigIfSet(AnnealOrgConfig, orgCfg))
+    if (!loadOrgConfigIfSet(CheckOrgConfig, orgCfg))
       return kUsage;
 
-    // ---- named-check selection (--checks / .vycor-anneal.json) -----------
+    // ---- named-check selection (--checks / .vycor-check.json) -----------
     // Sources in order, later winning: discovered/explicit config file,
     // --checks, then the legacy toggle flags as appended enables.
     std::set<std::string> enabledChecks = vycor::defaultCheckSet();
     {
       std::vector<std::string> spec;
-      std::string cfgPath = !AnnealChecksConfig.empty()
-                                ? std::string(AnnealChecksConfig)
+      std::string cfgPath = !CheckConfig.empty()
+                                ? std::string(CheckConfig)
                                 : vycor::findChecksConfig(".");
       if (!cfgPath.empty()) {
         auto buf = llvm::MemoryBuffer::getFile(cfgPath);
         if (!buf) {
-          llvm::errs() << "anneal: checks-config: cannot read " << cfgPath
+          llvm::errs() << "check: checks-config: cannot read " << cfgPath
                        << ": " << buf.getError().message() << "\n";
           return kUsage;
         }
         std::string err;
         if (!vycor::parseChecksConfigJson(
                 std::string((*buf)->getBuffer()), spec, err)) {
-          llvm::errs() << "anneal: checks-config: " << cfgPath << ": " << err
+          llvm::errs() << "check: checks-config: " << cfgPath << ": " << err
                        << "\n";
           return kUsage;
         }
       }
-      std::string cli = AnnealChecks;
+      std::string cli = CheckSpec;
       size_t pos = 0;
       while (pos != std::string::npos && pos < cli.size()) {
         size_t comma = cli.find(',', pos);
@@ -863,15 +921,15 @@ int main(int argc, const char **argv) {
           spec.push_back(entry);
         pos = comma == std::string::npos ? std::string::npos : comma + 1;
       }
-      if (AnnealCoverageDiag)
+      if (CheckCoverageDiag)
         spec.push_back("coverage-properties");
-      if (AnnealOdrDiag)
+      if (CheckOdrDiag)
         spec.push_back("odr-violations");
-      if (AnnealDeadCode)
+      if (CheckDeadCode)
         spec.push_back("dead-code");
       std::string err;
       if (!vycor::resolveCheckSpec(spec, enabledChecks, err)) {
-        llvm::errs() << "anneal: checks: " << err << "\n";
+        llvm::errs() << "check: checks: " << err << "\n";
         return kUsage;
       }
     }
@@ -893,29 +951,40 @@ int main(int argc, const char **argv) {
         enabledChecks.count("exception-spec-divergence") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
-    opts.warnSameScore = AnnealWarnSameScore;
-    opts.modelConvertibility = AnnealModelConvertibility;
+    opts.warnSameScore = CheckWarnSameScore;
+    opts.modelConvertibility = CheckModelConvertibility;
+    opts.includeCallSiteLocations = CheckExceptionEscapeCallSiteLocations;
+    opts.absolutePaths = CheckAbsolutePaths;
     // Organization checks not in the enabled set are disabled, on top of
     // the org config's own disable list.
-    opts.disabledChecks = orgCfg.disabledAnnealChecks;
+    opts.disabledChecks = orgCfg.disabledChecks;
     for (const auto &name :
          vycor::ExtensionRegistry::instance().allCheckNames())
       if (!enabledChecks.count(name))
         opts.disabledChecks.push_back(name);
-    opts.threadCount = AnnealThreads;
-    opts.checkpointPath = AnnealCheckpointFile;
+    opts.threadCount = CheckThreads;
+    opts.checkpointPath = CheckCheckpointFile;
+
+    std::string projectRoot;
+    {
+      llvm::SmallString<256> cwd;
+      llvm::sys::fs::current_path(cwd);
+      projectRoot = vycor::inferProjectRoot(CheckProjectRoot, CheckBuildPath,
+                                            files, cwd);
+    }
+    opts.projectRoot = projectRoot;
 
     // ---- worker modes (spawned by an --isolate-workers parent) -----------
     // Single-threaded over the batch so the last WORKER-TU stderr marker is
     // an exact poison identifier; write the shard, exit. Mirrors
     // megascope's --bake-worker.
-    if (AnnealIndexWorker || AnnealAnalyzeWorker) {
-      if (AnnealWorkerOut.empty()) {
-        llvm::errs() << "anneal: worker mode requires --worker-out\n";
+    if (CheckIndexWorker || CheckAnalyzeWorker) {
+      if (CheckWorkerOut.empty()) {
+        llvm::errs() << "check: worker mode requires --worker-out\n";
         return 1;
       }
-      if (AnnealIndexWorker) {
-        std::vector<std::pair<std::string, vycor::AnnealIndexPayload>> shards;
+      if (CheckIndexWorker) {
+        std::vector<std::pair<std::string, vycor::CheckIndexPayload>> shards;
         std::vector<vycor::TuOutcome> outcomes;
         shards.reserve(files.size());
         for (const auto &file : files) {
@@ -926,19 +995,19 @@ int main(int argc, const char **argv) {
             shard, opts.enableOdrDiag,
             opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag);
           outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
-          shards.emplace_back(file, vycor::AnnealIndexPayload::capture(shard));
+          shards.emplace_back(file, vycor::CheckIndexPayload::capture(shard));
         }
-        if (!vycor::writeAnnealIndexShard(AnnealWorkerOut, shards,
+        if (!vycor::writeCheckIndexShard(CheckWorkerOut, shards,
                                           outcomes)) {
-          llvm::errs() << "anneal: worker: cannot write shard to "
-                       << AnnealWorkerOut << "\n";
+          llvm::errs() << "check: worker: cannot write shard to "
+                       << CheckWorkerOut << "\n";
           return 1;
         }
       } else {
         vycor::GlobalIndex indexIn;
-        if (AnnealGlobalIndexIn.empty() ||
-            !vycor::readGlobalIndexFile(AnnealGlobalIndexIn, indexIn)) {
-          llvm::errs() << "anneal: worker: --analyze-worker requires a "
+        if (CheckGlobalIndexIn.empty() ||
+            !vycor::readGlobalIndexFile(CheckGlobalIndexIn, indexIn)) {
+          llvm::errs() << "check: worker: --analyze-worker requires a "
                           "readable --global-index\n";
           return 1;
         }
@@ -954,9 +1023,9 @@ int main(int argc, const char **argv) {
           outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           perTu.emplace_back(file, std::move(local));
         }
-        if (!vycor::writeAnnealDiagShard(AnnealWorkerOut, perTu, outcomes)) {
-          llvm::errs() << "anneal: worker: cannot write shard to "
-                       << AnnealWorkerOut << "\n";
+        if (!vycor::writeCheckDiagShard(CheckWorkerOut, perTu, outcomes)) {
+          llvm::errs() << "check: worker: cannot write shard to "
+                       << CheckWorkerOut << "\n";
           return 1;
         }
       }
@@ -964,48 +1033,60 @@ int main(int argc, const char **argv) {
     }
 
     // ---- parent-side worker isolation ------------------------------------
-    if (AnnealIsolateWorkers) {
+    if (CheckIsolateWorkers) {
       static int selfExeAnchor; // address anchors getMainExecutable
       std::string selfExe =
           llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
       opts.workerCount =
-          AnnealWorkers ? AnnealWorkers.getValue() : AnnealThreads.getValue();
+          CheckWorkers ? CheckWorkers.getValue() : CheckThreads.getValue();
       // Fully-resolved check set for workers: "-all" first so worker-side
       // defaults and any discovered config file are overridden.
       std::string workerChecks = "-all";
       for (const auto &name : enabledChecks)
         workerChecks += "," + name;
       vycor::WorkerLimits limits;
-      limits.timeoutSeconds = AnnealWorkerTimeout;
-      limits.memoryLimitMB = AnnealWorkerMemoryLimit;
-      opts.isolatedRunner = [selfExe, workerChecks, limits](uint8_t phase,
-                                      const std::string &globalIndexPath,
-                                      const std::vector<std::string> &batch,
-                                      const std::string &shardPath,
-                                      const std::string &stderrPath) -> int {
+      limits.timeoutSeconds = CheckWorkerTimeout;
+      limits.memoryLimitMB = CheckWorkerMemoryLimit;
+      opts.isolatedRunner = [selfExe, workerChecks, limits, projectRoot,
+                             fixedCompileArgs, hasFixedCompileArgs](
+                                uint8_t phase,
+                                const std::string &globalIndexPath,
+                                const std::vector<std::string> &batch,
+                                const std::string &shardPath,
+                                const std::string &stderrPath) -> int {
         std::vector<std::string> workerArgv;
-        workerArgv.reserve(14 + 2 * batch.size());
+        workerArgv.reserve(18 + 2 * batch.size() + fixedCompileArgs.size());
         workerArgv.push_back(selfExe);
-        workerArgv.push_back("anneal");
-        workerArgv.push_back(phase == vycor::AnnealCheckpoint::kPhaseIndex
+        workerArgv.push_back("check");
+        workerArgv.push_back(phase == vycor::CheckCheckpoint::kPhaseIndex
                                  ? "--index-worker"
                                  : "--analyze-worker");
         workerArgv.push_back("--worker-out");
         workerArgv.push_back(shardPath);
-        workerArgv.push_back("--build-path");
-        workerArgv.push_back(AnnealBuildPath);
+        if (!CheckBuildPath.empty()) {
+          workerArgv.push_back("--build-path");
+          workerArgv.push_back(CheckBuildPath);
+        }
+        if (!projectRoot.empty()) {
+          workerArgv.push_back("--project-root");
+          workerArgv.push_back(projectRoot);
+        }
         if (!globalIndexPath.empty()) {
           workerArgv.push_back("--global-index");
           workerArgv.push_back(globalIndexPath);
         }
-        if (AnnealWarnSameScore)
+        if (CheckWarnSameScore)
           workerArgv.push_back("--warn-same-score");
-        if (AnnealModelConvertibility)
+        if (CheckModelConvertibility)
           workerArgv.push_back("--model-convertibility");
+        if (CheckExceptionEscapeCallSiteLocations)
+          workerArgv.push_back("--exception-escape-call-site-locations");
+        if (CheckAbsolutePaths)
+          workerArgv.push_back("--absolute-paths");
         workerArgv.push_back("--checks=" + workerChecks);
-        if (!AnnealOrgConfig.empty()) {
+        if (!CheckOrgConfig.empty()) {
           workerArgv.push_back("--org-config");
-          workerArgv.push_back(AnnealOrgConfig);
+          workerArgv.push_back(CheckOrgConfig);
         }
         for (const auto &a : vycor::globalExtraArgs())
           workerArgv.push_back("--extra-arg=" + a);
@@ -1013,40 +1094,36 @@ int main(int argc, const char **argv) {
           workerArgv.push_back("--source");
           workerArgv.push_back(f);
         }
+        if (hasFixedCompileArgs || !fixedCompileArgs.empty()) {
+          workerArgv.push_back("--");
+          for (const auto &a : fixedCompileArgs)
+            workerArgv.push_back(a);
+        }
 
         return vycor::runWorkerProcess(workerArgv, stderrPath, limits,
-                                       "anneal");
+                                       "check");
       };
     }
 
     // The changed-lines filter and the baseline are read before the
     // analysis runs, so a bad path fails fast instead of after it.
-    std::string projectRoot;
-    {
-      llvm::SmallString<256> cwd;
-      llvm::sys::fs::current_path(cwd);
-      projectRoot = vycor::absolutePath(
-          AnnealProjectRoot.empty() ? llvm::StringRef(cwd)
-                                    : llvm::StringRef(AnnealProjectRoot),
-          cwd);
-    }
     std::optional<std::vector<vycor::PatchRange>> changedRanges;
-    if (!AnnealPatchFile.empty() || !AnnealGitBase.empty()) {
+    if (!CheckPatchFile.empty() || !CheckGitBase.empty()) {
       std::string patch, error;
-      if (!AnnealGitBase.empty()) {
-        if (!vycor::gitDiffText(projectRoot, AnnealGitBase, AnnealGitHead,
+      if (!CheckGitBase.empty()) {
+        if (!vycor::gitDiffText(projectRoot, CheckGitBase, CheckGitHead,
                                 patch, error)) {
-          llvm::errs() << "anneal: " << error << "\n";
+          llvm::errs() << "check: " << error << "\n";
           return kUsage;
         }
-      } else if (AnnealPatchFile == "-") {
+      } else if (CheckPatchFile == "-") {
         patch.assign(std::istreambuf_iterator<char>(std::cin),
                      std::istreambuf_iterator<char>());
       } else {
-        auto buf = llvm::MemoryBuffer::getFile(AnnealPatchFile);
+        auto buf = llvm::MemoryBuffer::getFile(CheckPatchFile);
         if (!buf) {
-          llvm::errs() << "anneal: cannot read --patch-file "
-                       << AnnealPatchFile << ": "
+          llvm::errs() << "check: cannot read --patch-file "
+                       << CheckPatchFile << ": "
                        << buf.getError().message() << "\n";
           return kUsage;
         }
@@ -1055,11 +1132,11 @@ int main(int argc, const char **argv) {
       changedRanges = vycor::parseUnifiedDiff(patch);
     }
     std::optional<std::vector<vycor::BaselineEntry>> baseline;
-    if (!AnnealBaseline.empty()) {
+    if (!CheckBaseline.empty()) {
       baseline.emplace();
       std::string error;
-      if (!vycor::readBaselineFile(AnnealBaseline, *baseline, error)) {
-        llvm::errs() << "anneal: --baseline: " << error << "\n";
+      if (!vycor::readBaselineFile(CheckBaseline, *baseline, error)) {
+        llvm::errs() << "check: --baseline: " << error << "\n";
         return kUsage;
       }
     }
@@ -1075,12 +1152,47 @@ int main(int argc, const char **argv) {
     const bool wantDeadCode = enabledChecks.count("dead-code") > 0;
     const bool wantInitHazards =
         enabledChecks.count("static-init-hazards") > 0;
-    if (wantDeadCode || wantInitHazards) {
-      auto graph = vycor::buildCallGraph(*compDb, files);
+    bool hasInitHazardRoots = false;
+    if (wantInitHazards) {
+      mergedIndex.forEachStaticInit([&](const vycor::StaticInitEntry &e) {
+        if (e.dynamicInit && (e.isConstructorFn || !e.calledFunctions.empty()))
+          hasInitHazardRoots = true;
+      });
+    }
+    if (wantDeadCode || hasInitHazardRoots) {
+      vycor::CallGraph graph;
+      bool loadedFromSnap = false;
+      if (!CheckBuildPath.empty()) {
+        std::string snapPath = vycor::defaultIndexPath(CheckBuildPath);
+        if (auto snap = vycor::SnapshotIO::load(
+                snapPath, nullptr, vycor::LoadMode::ReadOnly,
+                vycor::kSectionGraph)) {
+          if (!wantDeadCode || snap->meta.files.size() == files.size()) {
+            auto stamps = vycor::SnapshotIO::stampFiles(files);
+            auto dirty = vycor::SnapshotIO::dirtyTUs(snap->meta, stamps);
+            bool allClean = !dirty.empty();
+            for (bool d : dirty) {
+              if (d) {
+                allClean = false;
+                break;
+              }
+            }
+            if (allClean) {
+              graph = std::move(snap->graph);
+              loadedFromSnap = true;
+            }
+          }
+        }
+      }
+      if (!loadedFromSnap) {
+        const unsigned cgThreads =
+            CheckIsolateWorkers ? opts.workerCount : opts.threadCount;
+        graph = vycor::buildCallGraph(*compDb, files, {}, cgThreads);
+      }
 
       if (wantDeadCode) {
-        std::vector<std::string> entryPoints(AnnealEntryPoints.begin(),
-                                             AnnealEntryPoints.end());
+        std::vector<std::string> entryPoints(CheckEntryPoints.begin(),
+                                             CheckEntryPoints.end());
         if (entryPoints.empty())
           entryPoints.push_back("main");
 
@@ -1093,44 +1205,46 @@ int main(int argc, const char **argv) {
           diagnostics.push_back(diag);
         }
       }
-      if (wantInitHazards)
+      if (hasInitHazardRoots)
         vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
     }
 
     // Never report on a run an interrupt cut short (callgraph/Interrupt.h).
     vycor::exitIfInterrupted();
 
-    // ---- the report (anneal/Report.h) ------------------------------------
-    vycor::AnnealRun run;
+    // ---- the report (check/Report.h) ------------------------------------
+    vycor::CheckRun run;
     run.projectRoot = projectRoot;
+    run.absolutePaths = CheckAbsolutePaths;
     run.tus = std::move(analysisReport.tus);
     run.checks.assign(enabledChecks.begin(), enabledChecks.end());
     run.toolVersion = VYCOR_VERSION_STRING;
-    run.reportUnusedSuppressions = AnnealVerbose;
-    run.findings = vycor::buildFindings(diagnostics, projectRoot);
+    run.reportUnusedSuppressions = CheckVerbose;
+    run.findings =
+        vycor::buildFindings(diagnostics, projectRoot, CheckAbsolutePaths);
     // The analyzed TUs are scanned for unused suppressions only under -v.
     run.suppressed = vycor::applyInlineSuppressions(
         run.findings,
-        AnnealVerbose ? files : std::vector<std::string>{}, projectRoot,
+        CheckVerbose ? files : std::vector<std::string>{}, projectRoot,
         run.unusedSuppressions);
     const size_t failedTus = vycor::failedTuCount(run);
 
     bool baselineWritten = false;
-    if (!AnnealWriteBaseline.empty()) {
-      if (failedTus && !AnnealAllowParseFailures) {
-        llvm::errs() << "anneal: --write-baseline: not written — " << failedTus
+    if (!CheckWriteBaseline.empty()) {
+      if (failedTus && !CheckAllowParseFailures) {
+        llvm::errs() << "check: --write-baseline: not written — " << failedTus
                      << " TU(s) failed to parse, so the findings are "
                         "incomplete (--allow-parse-failures writes it "
                         "anyway)\n";
       } else {
         std::string error;
-        if (!vycor::writeBaselineFile(AnnealWriteBaseline, run.findings,
+        if (!vycor::writeBaselineFile(CheckWriteBaseline, run.findings,
                                       error)) {
-          llvm::errs() << "anneal: --write-baseline: " << error << "\n";
+          llvm::errs() << "check: --write-baseline: " << error << "\n";
           return kUsage;
         }
-        llvm::errs() << "anneal: wrote " << run.findings.size()
-                     << " finding(s) to the baseline " << AnnealWriteBaseline
+        llvm::errs() << "check: wrote " << run.findings.size()
+                     << " finding(s) to the baseline " << CheckWriteBaseline
                      << "\n";
         baselineWritten = true;
       }
@@ -1148,9 +1262,9 @@ int main(int argc, const char **argv) {
     }
 
     auto render = [&](llvm::raw_ostream &os) {
-      if (AnnealFormat == "json")
+      if (CheckFormat == "json")
         vycor::renderJson(run, os);
-      else if (AnnealFormat == "sarif")
+      else if (CheckFormat == "sarif")
         vycor::renderSarif(run, os);
       else
         vycor::renderText(run, os);
@@ -1159,28 +1273,28 @@ int main(int argc, const char **argv) {
     // whose --output cannot be written still names its failed TUs.
     std::string outputError;
     bool outputWritten = true;
-    if (!AnnealOutput.empty()) {
+    if (!CheckOutput.empty()) {
       outputWritten =
-          vycor::writeFileAtomically(AnnealOutput, render, &outputError);
+          vycor::writeFileAtomically(CheckOutput, render, &outputError);
     } else {
       render(llvm::outs());
       llvm::outs().flush();
     }
     vycor::renderSummary(run, llvm::errs());
-    if (failedTus && AnnealAllowParseFailures)
-      llvm::errs() << "anneal: WARNING: " << failedTus
+    if (failedTus && CheckAllowParseFailures)
+      llvm::errs() << "check: WARNING: " << failedTus
                    << " TU(s) failed; findings in them may be missing "
                       "(--allow-parse-failures)\n";
     if (!outputWritten) {
-      llvm::errs() << "anneal: --output: " << outputError << "\n";
+      llvm::errs() << "check: --output: " << outputError << "\n";
       return kUsage;
     }
 
     // A baseline write accepts the current findings: only a parse failure
     // still fails the run.
-    return vycor::annealExitCode(run,
+    return vycor::checkExitCode(run,
                                  baselineWritten ? std::nullopt : failOn,
-                                 AnnealAllowParseFailures);
+                                 CheckAllowParseFailures);
   }
 
   // ---- morph ---------------------------------------------------------------
@@ -1191,6 +1305,11 @@ int main(int argc, const char **argv) {
     }
     if (MorphSourceFiles.empty()) {
       llvm::errs() << "morph: at least one --source file is required\n";
+      return 1;
+    }
+    if (MorphBuildPaths.empty() && !hasFixedCompileArgs) {
+      llvm::errs() << "morph: --build-path is required (or pass compile flags "
+                      "after '--')\n";
       return 1;
     }
 
@@ -1216,7 +1335,8 @@ int main(int argc, const char **argv) {
                                         MorphBuildPaths.end());
     std::vector<std::string> files(MorphSourceFiles.begin(),
                                    MorphSourceFiles.end());
-    return pipeline.execute(buildPaths, files, MorphDryRun);
+    return pipeline.execute(buildPaths, files, MorphDryRun, fixedCompileArgs,
+                            hasFixedCompileArgs);
   }
 
   // ---- megascope -------------------------------------------------------------
@@ -1227,27 +1347,40 @@ int main(int argc, const char **argv) {
                       "help` for the query verbs\n";
       return vycor::kExitUsage;
     }
-    if (MegascopeBuildPath.empty()) {
-      llvm::errs() << "megascope: --build-path is required\n";
+    if (MegascopeBuildPath.empty() && !hasFixedCompileArgs) {
+      llvm::errs() << "megascope: --build-path is required (or pass compile "
+                      "flags after '--')\n";
       return 1;
     }
 
     // The index location defaults to <build-path>/.vycor/megascope.vycs —
     // not $VYCOR_INDEX, which is a query-side convenience and must never
     // become a write target (see resolveIndexPath). A bake worker writes
-    // only its shard (--worker-out).
+    // only its shard (--worker-out). When --emit-shard or --emit-mgsc is
+    // passed without --index, only the requested shard/mgsc output is written.
     std::string indexPath = MegascopeIndex;
     if (MegascopeBakeWorker)
       indexPath.clear();
-    else if (indexPath.empty())
+    else if (indexPath.empty() && MegascopeEmitShard.empty() &&
+             MegascopeEmitMgsc.empty())
       indexPath = vycor::defaultIndexPath(MegascopeBuildPath);
 
+    const bool indexIsMgsc =
+        !indexPath.empty() &&
+        vycor::MegascopeBridge::isMegascopeSnapshotPath(indexPath);
+    const bool indexIsShardJson =
+        !indexPath.empty() &&
+        vycor::MegascopeBridge::isMegascopeShardJsonPath(indexPath);
+
     std::string dbError;
-    auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-        MegascopeBuildPath, dbError);
+    auto compDb = vycor::loadCompilationDatabase(
+        MegascopeBuildPath, fixedCompileArgs, dbError, hasFixedCompileArgs);
     if (!compDb) {
       llvm::errs() << "megascope: error loading compilation database from "
-                   << MegascopeBuildPath << ": " << dbError << "\n";
+                   << (MegascopeBuildPath.empty()
+                           ? "<command-line>"
+                           : std::string(MegascopeBuildPath))
+                   << ": " << dbError << "\n";
       return 1;
     }
 
@@ -1295,7 +1428,8 @@ int main(int argc, const char **argv) {
                      << " temp file(s) left by an interrupted save\n";
       }
     }
-    if (!indexPath.empty() && !MegascopeBakeWorker) {
+    if (!indexPath.empty() && !MegascopeBakeWorker && !indexIsMgsc &&
+        !indexIsShardJson) {
       auto t0 = StatsClock::now();
       // Meta and header counts only: enough for TU selection and the
       // dirty check. The graph is decoded further down only when a warm
@@ -1486,6 +1620,8 @@ int main(int argc, const char **argv) {
         llvm::sys::fs::getMainExecutable(argv[0], &selfExeAnchor);
     vycor::BakeWorkerConfig bakeCfg;
     bakeCfg.buildPath = MegascopeBuildPath;
+    bakeCfg.fixedCompileArgs = fixedCompileArgs;
+    bakeCfg.hasFixedCompileArgs = hasFixedCompileArgs;
     bakeCfg.collapsePaths = collapsePaths;
     bakeCfg.extraArgs = vycor::globalExtraArgs();
     bakeCfg.sysroot = sysroot;
@@ -1604,7 +1740,8 @@ int main(int argc, const char **argv) {
           needFullBuild = false;
           snapLoaded = true;
 
-          if (toDrop.empty() && toBake.empty() && MegascopeDumpNodes.empty()) {
+          if (toDrop.empty() && toBake.empty() && MegascopeDumpNodes.empty() &&
+              MegascopeEmitShard.empty() && MegascopeEmitMgsc.empty()) {
             // Nothing to refresh and nobody to hand the graph to: report
             // the header counts and leave the sections undecoded.
             graphSkipped = true;
@@ -1701,7 +1838,8 @@ int main(int argc, const char **argv) {
             }
           }
         }
-      } else if (llvm::sys::fs::exists(indexPath)) {
+      } else if (llvm::sys::fs::exists(indexPath) && !indexIsMgsc &&
+                 !indexIsShardJson) {
         llvm::errs() << "megascope: cannot load index " << indexPath << " ("
                      << snapLoadStats.error << ") — full build\n";
       } else {
@@ -1742,7 +1880,8 @@ int main(int argc, const char **argv) {
                                              : channels.size();
 
     bool saveFailed = false;
-    if (!indexesChanged) {
+    if (!indexesChanged && MegascopeEmitShard.empty() &&
+        MegascopeEmitMgsc.empty()) {
       llvm::errs() << "megascope: index unchanged — skipping re-save\n";
       // Nothing re-indexed: the coverage is what the index records
       // (failed TUs left as recorded included).
@@ -1781,15 +1920,68 @@ int main(int argc, const char **argv) {
         saveFailed = true;
         llvm::errs() << "megascope: ERROR: " << bakeRefusal << " — "
                      << indexPath << " is left as it was\n";
-      } else if (vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
-                                         channels, &saveError)) {
-        snapSaveMs = msSince(snapSaveStart);
-        llvm::errs() << "megascope: index saved to " << indexPath << "\n";
       } else {
-        saveFailed = true;
-        llvm::errs() << "megascope: WARNING: could not save index to "
-                     << indexPath << ": " << saveError
-                     << " (the previous index is left as it was)\n";
+        if (!indexPath.empty() && indexesChanged) {
+          bool savedOk = false;
+          if (indexIsShardJson) {
+            savedOk = vycor::MegascopeBridge::saveShardJson(
+                indexPath, graph, cfIndex, meta, channels, &saveError);
+          } else if (indexIsMgsc) {
+            savedOk = vycor::MegascopeBridge::saveSnapshot(
+                indexPath, graph, cfIndex, meta, channels, &saveError);
+          } else {
+            savedOk = vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
+                                              channels, &saveError);
+          }
+          if (savedOk) {
+            snapSaveMs = msSince(snapSaveStart);
+            llvm::errs() << "megascope: index saved to " << indexPath << "\n";
+          } else {
+            saveFailed = true;
+            llvm::errs() << "megascope: WARNING: could not save index to "
+                         << indexPath << ": " << saveError
+                         << " (the previous index is left as it was)\n";
+          }
+        }
+        if (!MegascopeEmitShard.empty()) {
+          if (MegascopeEmitShard == "-") {
+            llvm::outs() << ((files.size() <= 1)
+                                 ? vycor::MegascopeBridge::toShardJson(
+                                       graph, cfIndex, channels, meta,
+                                       /*pretty=*/true)
+                                 : vycor::MegascopeBridge::toShardsJson(
+                                       graph, cfIndex, channels, meta,
+                                       /*pretty=*/true));
+            if (indexPath.empty() && MegascopeEmitMgsc.empty())
+              return saveFailed ? 1 : 0;
+          } else {
+            std::string shardErr;
+            if (!vycor::MegascopeBridge::saveShardJson(
+                    MegascopeEmitShard, graph, cfIndex, meta, channels,
+                    &shardErr)) {
+              saveFailed = true;
+              llvm::errs() << "megascope: ERROR: could not write shard JSON to "
+                           << MegascopeEmitShard << ": " << shardErr << "\n";
+            } else {
+              llvm::errs() << "megascope: shard JSON saved to "
+                           << MegascopeEmitShard << "\n";
+            }
+          }
+        }
+        if (!MegascopeEmitMgsc.empty()) {
+          std::string mgscErr;
+          if (!vycor::MegascopeBridge::saveSnapshot(
+                  MegascopeEmitMgsc, graph, cfIndex, meta, channels,
+                  &mgscErr)) {
+            saveFailed = true;
+            llvm::errs() << "megascope: ERROR: could not write .mgsc snapshot "
+                            "to "
+                         << MegascopeEmitMgsc << ": " << mgscErr << "\n";
+          } else {
+            llvm::errs() << "megascope: .mgsc snapshot saved to "
+                         << MegascopeEmitMgsc << "\n";
+          }
+        }
       }
     }
 
@@ -1908,8 +2100,13 @@ int main(int argc, const char **argv) {
     // The index file is the product: failing to write it is the error.
     if (saveFailed)
       return 1;
+    std::string reportedIndexPath =
+        !indexPath.empty() ? indexPath
+        : (!MegascopeEmitMgsc.empty() ? std::string(MegascopeEmitMgsc)
+                                      : std::string(MegascopeEmitShard));
     llvm::json::Object summary;
-    summary["index"] = vycor::toIndexText(indexPath); // raw path (Utf8.h)
+    summary["index"] =
+        vycor::toIndexText(reportedIndexPath); // raw path (Utf8.h)
     summary["mode"] = needFullBuild ? "cold" : "warm";
     summary["files"] = static_cast<int64_t>(files.size());
     summary["refreshed"] = static_cast<int64_t>(warmRefreshed);
@@ -1928,7 +2125,7 @@ int main(int argc, const char **argv) {
     return 0;
   }
 
-  llvm::errs() << "No subcommand specified. Use 'anneal', 'morph', "
+  llvm::errs() << "No subcommand specified. Use 'check', 'morph', "
                   "or 'megascope'.\n"
                << "Run with --help for usage information.\n";
   return 1;

@@ -14,10 +14,12 @@
 // limitations under the License.
 
 #include "vycor/cli/MegascopeCli.h"
-#include "vycor/callgraph/Utf8.h"
+#include "vycor/callgraph/AtomicFile.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/MegascopeBridge.h"
 #include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/callgraph/Snapshot.h"
+#include "vycor/callgraph/Utf8.h"
 #include "vycor/cli/BakeConfig.h"
 #include "vycor/cli/SourceSelection.h"
 #include "vycor/query/Serialize.h"
@@ -28,14 +30,17 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace vycor {
 
@@ -44,8 +49,14 @@ namespace vycor {
 // ============================================================================
 
 std::string defaultIndexPath(llvm::StringRef buildPath) {
-  llvm::SmallString<256> p(buildPath.empty() ? llvm::StringRef(".")
-                                             : buildPath);
+  llvm::StringRef baseDir =
+      buildPath.empty() ? llvm::StringRef(".") : buildPath;
+  if (!buildPath.empty() && llvm::sys::fs::is_regular_file(buildPath)) {
+    baseDir = llvm::sys::path::parent_path(buildPath);
+    if (baseDir.empty())
+      baseDir = ".";
+  }
+  llvm::SmallString<256> p(baseDir);
   llvm::sys::path::append(p, ".vycor", "megascope.vycs");
   return p.str().str();
 }
@@ -558,7 +569,9 @@ struct CommonOpts {
   std::vector<std::string> collapsePaths;
   std::string threads;
   std::string orgConfig;
-  std::vector<std::string> rest; // everything else, in order
+  bool hasFixedCompileArgs = false;          // whether `--` was given
+  std::vector<std::string> fixedCompileArgs; // after `--`
+  std::vector<std::string> rest;             // everything else, in order
 
   bool ephemeral() const {
     return !sources.empty() || !sourceList.empty() || !sourceRe.empty();
@@ -573,6 +586,12 @@ llvm::Expected<CommonOpts> splitCommonFlags(llvm::ArrayRef<std::string> argv,
   CommonOpts o;
   for (size_t i = 0; i < argv.size(); ++i) {
     llvm::StringRef a = argv[i];
+    if (a == "--") {
+      o.hasFixedCompileArgs = true;
+      for (size_t j = i + 1; j < argv.size(); ++j)
+        o.fixedCompileArgs.push_back(argv[j]);
+      break;
+    }
     if (a == "-h" || a == "--help") {
       o.help = true;
       continue;
@@ -661,10 +680,13 @@ void printVerbHelp(llvm::raw_ostream &os) {
         "\n"
         "Verbs:\n"
         "  index     Bake the call graph and control-flow index for a\n"
-        "            compilation database and save it (--build-path;\n"
+        "            compilation database (or compile flags after `--`)\n"
+        "            and save it (--build-path;\n"
         "            --source/--source-list/--source-re/--skip-paths\n"
         "            select TUs, default: the TUs already in the index,\n"
         "            else the whole database; `megascope index --help`)\n"
+        "  merge     Combine per-TU or per-target .vycs shards into one\n"
+        "            index: --output OUT [IN.vycs ...] [--input-list F]\n"
         "  <tool>    Run one query tool against a saved index, e.g.\n"
         "            `megascope get-callers --name Foo::bar`\n"
         "  call      Run a tool from a JSON argument object:\n"
@@ -680,10 +702,11 @@ void printVerbHelp(llvm::raw_ostream &os) {
         "\n"
         "Query verbs read the index from --index, $VYCOR_INDEX,\n"
         "<build-path>/.vycor/megascope.vycs, or ./.vycor/megascope.vycs.\n"
-        "Given --source/--source-list/--source-re (with --build-path) they\n"
-        "bake the selected TUs in memory instead and answer from that; no\n"
-        "index is read or written (--skip-paths, --collapse-paths,\n"
-        "--threads, and --org-config qualify the bake as for `index`).\n"
+        "Given --source/--source-list/--source-re (with --build-path or\n"
+        "`-- <compile-flags...>`) they bake the selected TUs in memory\n"
+        "instead and answer from that; no index is read or written\n"
+        "(--skip-paths, --collapse-paths, --threads, and --org-config\n"
+        "qualify the bake as for `index`).\n"
         "Run `megascope <tool> --help` for a tool's flags.\n"
         "\n"
         "Every payload carries `status` (ok, ambiguous, usage_error,\n"
@@ -714,6 +737,23 @@ int runTools(const std::vector<ToolEntry> &tools, const CommonOpts &common,
   if (!common.rest.empty()) {
     err << "megascope tools: unexpected argument '" << common.rest.front()
         << "'\n";
+    return kExitUsage;
+  }
+  const char *stray =
+      !common.index.empty()           ? "--index"
+      : !common.buildPath.empty()     ? "--build-path"
+      : !common.argsJson.empty()      ? "--args"
+      : !common.entryPoints.empty()   ? "--entry-point"
+      : common.ephemeral()            ? "--source/--source-list/--source-re"
+      : !common.skipPaths.empty()     ? "--skip-paths"
+      : !common.collapsePaths.empty() ? "--collapse-paths"
+      : !common.threads.empty()       ? "--threads"
+      : !common.orgConfig.empty()     ? "--org-config"
+      : common.hasFixedCompileArgs    ? "-- <compile-flags>"
+                                      : nullptr;
+  if (stray) {
+    err << "megascope tools: " << stray
+        << " does not apply to `megascope tools`\n";
     return kExitUsage;
   }
   if (common.format.empty()) {
@@ -931,9 +971,9 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
            "file\n";
     return kExitUsage;
   }
-  if (common.buildPath.empty()) {
+  if (common.buildPath.empty() && !common.hasFixedCompileArgs) {
     err << prefix << "--build-path is required with --source/--source-list/"
-                     "--source-re\n";
+                     "--source-re (or pass compile flags after '--')\n";
     return kExitUsage;
   }
   if (verb == "info") {
@@ -954,11 +994,13 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   }
 
   std::string dbError;
-  auto compDb = clang::tooling::CompilationDatabase::loadFromDirectory(
-      common.buildPath, dbError);
+  auto compDb = loadCompilationDatabase(common.buildPath,
+                                        common.fixedCompileArgs, dbError,
+                                        common.hasFixedCompileArgs);
   if (!compDb) {
     err << "megascope: cannot load compilation database from "
-        << common.buildPath << ": " << dbError << "\n";
+        << (common.buildPath.empty() ? "<command-line>" : common.buildPath)
+        << ": " << dbError << "\n";
     return kExitIndex;
   }
   SourceSelection sel;
@@ -972,7 +1014,8 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
     return kExitUsage;
   }
   if (files->empty()) {
-    err << "megascope: the selection matches no TU of " << common.buildPath
+    err << "megascope: the selection matches no TU of "
+        << (common.buildPath.empty() ? "<command-line>" : common.buildPath)
         << "\n";
     return kExitIndex;
   }
@@ -1019,6 +1062,317 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
         << llvm::format("%.1f", ms) << " ms\n";
   }
   snapOut = snap;
+  return kExitResults;
+}
+
+// ============================================================================
+// merge
+// ============================================================================
+
+namespace {
+
+struct MergeOpts {
+  std::string output;
+  std::vector<std::string> inputs;
+  std::vector<std::string> inputLists;
+  bool allowMismatch = false;
+  bool noWait = false;
+};
+
+llvm::Expected<MergeOpts> parseMergeFlags(llvm::ArrayRef<std::string> argv) {
+  MergeOpts o;
+  for (size_t i = 0; i < argv.size(); ++i) {
+    llvm::StringRef a = argv[i];
+    if (!a.starts_with("-")) {
+      o.inputs.push_back(a.str());
+      continue;
+    }
+    if (a == "-o") {
+      if (i + 1 >= argv.size())
+        return usageError("flag '-o' requires a value");
+      o.output = argv[++i];
+      continue;
+    }
+    if (a.starts_with("-o") && !a.starts_with("--")) {
+      o.output = a.drop_front(2).str();
+      continue;
+    }
+    if (!a.starts_with("--"))
+      return usageError("unknown flag '" + a + "'");
+
+    auto [rawKey, inlineVal] = a.drop_front(2).split('=');
+    const bool hasInline = a.contains('=');
+    std::string key = rawKey.str();
+    std::replace(key.begin(), key.end(), '_', '-');
+
+    if (key == "allow-mismatch" || key == "no-wait") {
+      bool *flag = (key == "allow-mismatch") ? &o.allowMismatch : &o.noWait;
+      if (hasInline) {
+        if (inlineVal == "true" || inlineVal == "1")
+          *flag = true;
+        else if (inlineVal == "false" || inlineVal == "0")
+          *flag = false;
+        else
+          return usageError("flag '--" + key + "' expects true or false");
+      } else {
+        *flag = true;
+      }
+      continue;
+    }
+
+    if (key == "output" || key == "input" || key == "input-list") {
+      llvm::StringRef value;
+      if (hasInline) {
+        value = inlineVal;
+      } else if (i + 1 < argv.size() &&
+                 !llvm::StringRef(argv[i + 1]).starts_with("--")) {
+        value = argv[++i];
+      } else {
+        return usageError("flag '--" + key + "' requires a value");
+      }
+      if (key == "output")
+        o.output = value.str();
+      else if (key == "input")
+        o.inputs.push_back(value.str());
+      else if (key == "input-list")
+        o.inputLists.push_back(value.str());
+      continue;
+    }
+
+    return usageError("unknown flag '" + a + "'");
+  }
+  return o;
+}
+
+void printMergeHelp(llvm::raw_ostream &os) {
+  os << "Usage: vycor-cpp megascope merge --output <out.vycs> [in.vycs ...] "
+        "[flags]\n\n"
+        "Combine per-TU or per-target .vycs snapshot shards into one merged\n"
+        "index. Overlapping TUs (e.g. from diamond target dependencies) are\n"
+        "deduplicated idempotently.\n\n"
+        "Flags:\n"
+        "  --output, -o <file>   Output .vycs index path (--index is an alias)\n"
+        "  --input <file>        Input .vycs shard path (repeatable; positional\n"
+        "                        arguments are also accepted)\n"
+        "  --input-list <file>   File listing input .vycs paths, one per line\n"
+        "                        ('-' = stdin, '#' comments; repeatable)\n"
+        "  --entry-point <name>  Override merged entry points (repeatable)\n"
+        "  --allow-mismatch      Allow merging shards whose build configuration\n"
+        "                        or bake environment differs\n"
+        "  --no-wait             Fail immediately if another writer holds the\n"
+        "                        output index lock\n"
+        "  --pretty              Indent JSON summary output\n"
+        "  -v, --verbose         Progress on stderr\n";
+}
+
+} // namespace
+
+int runMergeVerb(llvm::ArrayRef<std::string> args, llvm::StringRef indexFlag,
+                 bool pretty, bool verbose,
+                 const std::vector<std::string> &entryPoints,
+                 std::istream &in, llvm::raw_ostream &out,
+                 llvm::raw_ostream &err) {
+  auto parsed = parseMergeFlags(args);
+  if (!parsed) {
+    err << "megascope merge: " << llvm::toString(parsed.takeError()) << "\n";
+    return kExitUsage;
+  }
+  MergeOpts o = std::move(*parsed);
+  if (!indexFlag.empty() && !o.output.empty() && indexFlag != o.output) {
+    err << "megascope merge: cannot specify both --output and --index with "
+           "different paths\n";
+    return kExitUsage;
+  }
+  if (o.output.empty())
+    o.output = indexFlag.str();
+  if (o.output.empty()) {
+    err << "megascope merge: --output <file> (or --index <file>) is required\n";
+    return kExitUsage;
+  }
+
+  bool stdinConsumed = false;
+  for (const std::string &listPath : o.inputLists) {
+    std::string content;
+    if (listPath == "-") {
+      if (stdinConsumed) {
+        err << "megascope merge: '--input-list -' can only be specified once\n";
+        return kExitUsage;
+      }
+      stdinConsumed = true;
+      content.assign(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+    } else {
+      auto buf = llvm::MemoryBuffer::getFile(listPath);
+      if (!buf) {
+        err << "megascope merge: cannot read --input-list " << listPath << ": "
+            << buf.getError().message() << "\n";
+        return kExitUsage;
+      }
+      content = (*buf)->getBuffer().str();
+    }
+    llvm::StringRef rest(content);
+    while (!rest.empty()) {
+      auto [line, next] = rest.split('\n');
+      rest = next;
+      llvm::StringRef trimmed = line.split('#').first.trim();
+      if (!trimmed.empty())
+        o.inputs.push_back(trimmed.str());
+    }
+  }
+
+  // Deduplicate identical input paths while preserving order.
+  std::vector<std::string> uniqueInputs;
+  uniqueInputs.reserve(o.inputs.size());
+  std::unordered_set<std::string> seenInputs;
+  for (const auto &inp : o.inputs) {
+    if (seenInputs.insert(inp).second)
+      uniqueInputs.push_back(inp);
+  }
+  o.inputs = std::move(uniqueInputs);
+
+  if (o.inputs.empty()) {
+    err << "megascope merge: at least one input .vycs index is required (via "
+           "positional arguments, --input, or --input-list)\n";
+    return kExitUsage;
+  }
+
+  const auto t0 = std::chrono::steady_clock::now();
+  std::string lockError;
+  bool busy = false;
+  auto writeLock = IndexWriteLock::acquire(
+      o.output, !o.noWait, &lockError, &busy,
+      [&](const std::string &lock) {
+        err << "megascope merge: waiting for another writer holding " << lock
+            << " (pass --no-wait to fail instead)...\n";
+      });
+  if (!writeLock && busy) {
+    err << "megascope merge: " << lockError << "\n";
+    return kExitIndex;
+  }
+  if (!writeLock) {
+    err << "megascope merge: WARNING: " << lockError
+        << " — continuing without the write lock\n";
+  } else {
+    removeStaleAtomicTemps(o.output);
+  }
+
+  const bool useMegascopeMerge =
+      MegascopeBridge::isMegascopeSnapshotPath(o.output) ||
+      std::any_of(o.inputs.begin(), o.inputs.end(), [](const std::string &inp) {
+        return MegascopeBridge::isMegascopeSnapshotPath(inp) ||
+               MegascopeBridge::isMegascopeShardJsonPath(inp);
+      });
+
+  if (useMegascopeMerge) {
+    std::string mergeError;
+    if (!MegascopeBridge::mergeSnapshots(o.output, o.inputs, entryPoints, {},
+                                         &mergeError)) {
+      err << "megascope merge: " << mergeError << "\n";
+      return kExitIndex;
+    }
+
+    int64_t filesCount = 0, indexedCount = 0, partialCount = 0, failedCount = 0;
+    int64_t nodesCount = 0, edgesCount = 0, callSitesCount = 0,
+            channelSitesCount = 0;
+    std::string infoOut, infoErr;
+    if (MegascopeBridge::runVerbJson("info", llvm::json::Object(), o.output, "",
+                                     infoOut, infoErr) == 0) {
+      if (auto parsedInfo = llvm::json::parse(infoOut)) {
+        if (const auto *root = parsedInfo->getAsObject()) {
+          if (const auto *scope = root->getObject("indexScope")) {
+            filesCount = scope->getInteger("requested").value_or(0);
+            indexedCount = scope->getInteger("indexed").value_or(0);
+            partialCount = scope->getInteger("partial").value_or(0);
+            failedCount = scope->getInteger("failed").value_or(0);
+          }
+          if (const auto *sum = root->getObject("summary")) {
+            if (filesCount == 0) {
+              filesCount = sum->getInteger("module_count")
+                               .value_or(sum->getInteger("modules").value_or(0));
+            }
+            nodesCount = sum->getInteger("entity_count")
+                             .value_or(sum->getInteger("entities").value_or(0));
+            edgesCount =
+                sum->getInteger("call_edge_count")
+                    .value_or(sum->getInteger("call_edges").value_or(0));
+            callSitesCount =
+                sum->getInteger("context_count")
+                    .value_or(sum->getInteger("context_records").value_or(0));
+            channelSitesCount = sum->getInteger("channel_sites").value_or(0);
+          }
+        }
+      }
+    }
+
+    if (verbose) {
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      err << "megascope merge: merged " << o.inputs.size() << " shard(s) ("
+          << filesCount << " modules/TUs, " << nodesCount << " entities, "
+          << edgesCount << " edges, " << callSitesCount << " call sites) into "
+          << o.output << " in " << llvm::format("%.1f", ms) << " ms\n";
+    }
+
+    llvm::json::Object summary;
+    summary["index"] = toIndexText(o.output);
+    summary["mode"] = "merge";
+    summary["inputs"] = static_cast<int64_t>(o.inputs.size());
+    summary["files"] = filesCount;
+    summary["indexed"] = indexedCount;
+    summary["partial"] = partialCount;
+    summary["failed"] = failedCount;
+    summary["nodes"] = nodesCount;
+    summary["edges"] = edgesCount;
+    summary["call_sites"] = callSitesCount;
+    summary["channel_sites"] = channelSitesCount;
+    writeJson(out, llvm::json::Value(std::move(summary)), pretty);
+    return kExitResults;
+  }
+
+  SnapshotIO::MergeOptions mergeOpts;
+  mergeOpts.allowMismatch = o.allowMismatch;
+  mergeOpts.entryPoints = entryPoints;
+  std::string mergeError;
+  auto merged = SnapshotIO::merge(o.inputs, mergeOpts, &mergeError);
+  if (!merged) {
+    err << "megascope merge: " << mergeError << "\n";
+    return kExitIndex;
+  }
+
+  std::string saveError;
+  if (!SnapshotIO::save(o.output, merged->graph, merged->cfIndex, merged->meta,
+                        merged->channels, &saveError)) {
+    err << "megascope merge: cannot save merged index to " << o.output << ": "
+        << saveError << "\n";
+    return kExitIndex;
+  }
+
+  const IndexCoverage cov = coverageOf(merged->meta);
+  if (verbose) {
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    err << "megascope merge: merged " << o.inputs.size() << " shard(s) ("
+        << merged->meta.files.size() << " TUs, " << merged->summary.nodes
+        << " nodes, " << merged->summary.edges << " edges, "
+        << merged->summary.callSites << " call sites) into " << o.output
+        << " in " << llvm::format("%.1f", ms) << " ms\n";
+  }
+
+  llvm::json::Object summary;
+  summary["index"] = toIndexText(o.output);
+  summary["mode"] = "merge";
+  summary["inputs"] = static_cast<int64_t>(o.inputs.size());
+  summary["files"] = static_cast<int64_t>(merged->meta.files.size());
+  summary["indexed"] = static_cast<int64_t>(cov.indexed);
+  summary["partial"] = static_cast<int64_t>(cov.partial);
+  summary["failed"] = static_cast<int64_t>(cov.failed);
+  summary["nodes"] = static_cast<int64_t>(merged->summary.nodes);
+  summary["edges"] = static_cast<int64_t>(merged->summary.edges);
+  summary["call_sites"] = static_cast<int64_t>(merged->summary.callSites);
+  summary["channel_sites"] = static_cast<int64_t>(merged->summary.channelSites);
+  writeJson(out, llvm::json::Value(std::move(summary)), pretty);
   return kExitResults;
 }
 
@@ -1112,6 +1466,35 @@ static int runDump(const SnapshotData &snap, const CommonOpts &common,
   return callSiteCount + channelSiteCount > 0 ? kExitResults : kExitEmpty;
 }
 
+static llvm::Expected<llvm::json::Object>
+parseGenericMegascopeArgs(llvm::ArrayRef<std::string> argv,
+                          llvm::json::Object seed) {
+  llvm::json::Object args = std::move(seed);
+  for (size_t i = 0; i < argv.size(); ++i) {
+    llvm::StringRef a = argv[i];
+    if (!a.starts_with("--") || a.size() == 2)
+      return usageError("unexpected argument '" + a + "'");
+    llvm::StringRef body = a.drop_front(2);
+    const bool hasInline = body.contains('=');
+    auto [rawKey, inlineVal] = body.split('=');
+    std::string key = canonicalToolName(rawKey);
+    if (!hasInline &&
+        (i + 1 >= argv.size() ||
+         llvm::StringRef(argv[i + 1]).starts_with("--"))) {
+      args[key] = true;
+      continue;
+    }
+    llvm::StringRef val = hasInline ? inlineVal : llvm::StringRef(argv[++i]);
+    if (val == "true")
+      args[key] = true;
+    else if (val == "false")
+      args[key] = false;
+    else
+      args[key] = lookupText(val);
+  }
+  return args;
+}
+
 int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
                           llvm::raw_ostream &out, llvm::raw_ostream &err,
                           std::istream &in) {
@@ -1140,8 +1523,236 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
     toolName = canonicalToolName(typed);
     tail = tail.drop_front();
   } else if (verb != "tools" && verb != "info" && verb != "batch" &&
-             verb != "dump" && verb != "diff") {
+             verb != "dump" && verb != "diff" && verb != "merge") {
     toolName = canonicalToolName(verb);
+  }
+
+  auto common = splitCommonFlags(tail, verb == "info");
+  if (!common) {
+    err << "megascope " << verb << ": " << llvm::toString(common.takeError())
+        << "\n";
+    return kExitUsage;
+  }
+
+  // If the target index (or diff --before/--after) is a megascope .mgsc/.pyrx
+  // binary snapshot or .shard.json, delegate to libmegascope via MegascopeBridge.
+  if (!common->ephemeral() && verb != "tools" && verb != "merge" &&
+      !common->help) {
+    if (verb == "diff") {
+      llvm::json::Object diffArgs;
+      if (auto parsedArgs =
+              parseGenericMegascopeArgs(common->rest, llvm::json::Object())) {
+        diffArgs = std::move(*parsedArgs);
+      }
+      auto beforeStr = diffArgs.getString("before");
+      auto afterStr = diffArgs.getString("after");
+      if ((beforeStr && MegascopeBridge::isMegascopeSnapshotPath(*beforeStr)) ||
+          (afterStr && MegascopeBridge::isMegascopeSnapshotPath(*afterStr))) {
+        diffArgs["format"] =
+            common->format.empty() ? "json" : common->format;
+        diffArgs["pretty"] = common->pretty;
+        std::string outStr, errStr;
+        int rc = MegascopeBridge::runVerbJson("diff", diffArgs, "", "", outStr,
+                                              errStr);
+        if (!outStr.empty())
+          out << outStr;
+        if (!errStr.empty())
+          err << "megascope diff: " << errStr << "\n";
+        return rc;
+      }
+    } else {
+      const char *envIdx = std::getenv("VYCOR_INDEX");
+      std::string candidateIndex = resolveIndexPath(
+          common->index, envIdx ? envIdx : "", common->buildPath);
+      if (MegascopeBridge::isMegascopeSnapshotPath(candidateIndex) ||
+          MegascopeBridge::isMegascopeShardJsonPath(candidateIndex)) {
+        const char *stray =
+            !common->skipPaths.empty()          ? "--skip-paths"
+            : !common->collapsePaths.empty()    ? "--collapse-paths"
+            : !common->threads.empty()          ? "--threads"
+            : !common->orgConfig.empty()        ? "--org-config"
+            : common->hasFixedCompileArgs       ? "-- <compile-flags>"
+                                                : nullptr;
+        if (stray) {
+          err << "megascope " << verb << ": " << stray
+              << " only applies with --source/--source-list/--source-re (the "
+                 "in-memory bake); a saved index carries its own\n";
+          return kExitUsage;
+        }
+        if (verb == "batch") {
+          if (!common->argsJson.empty()) {
+            err << "megascope batch: --args only applies to tool queries\n";
+            return kExitUsage;
+          }
+          if (!common->rest.empty()) {
+            err << "megascope batch: unexpected argument '"
+                << common->rest.front() << "'\n";
+            return kExitUsage;
+          }
+        }
+        if (!llvm::sys::fs::exists(candidateIndex)) {
+          err << "megascope: no index at " << candidateIndex << "\n";
+          return kExitIndex;
+        }
+        if (verb == "batch") {
+          std::string shardJsonContent;
+          std::string indexPathArg;
+          if (MegascopeBridge::isMegascopeShardJsonPath(candidateIndex)) {
+            auto bufOrErr = llvm::MemoryBuffer::getFile(candidateIndex);
+            if (!bufOrErr) {
+              err << "megascope: cannot read shard JSON " << candidateIndex
+                  << "\n";
+              return kExitIndex;
+            }
+            shardJsonContent = (*bufOrErr)->getBuffer().str();
+          } else {
+            indexPathArg = candidateIndex;
+            std::string probeOut, probeErr;
+            if (MegascopeBridge::runVerbJson("info", llvm::json::Object(),
+                                             indexPathArg, "", probeOut,
+                                             probeErr) == kExitIndex) {
+              err << "megascope: cannot load index " << candidateIndex << ": "
+                  << probeErr << "\n";
+              return kExitIndex;
+            }
+          }
+
+          std::string line;
+          size_t lineNo = 0;
+          while (std::getline(in, line)) {
+            ++lineNo;
+            if (llvm::StringRef(line).trim().empty())
+              continue;
+            llvm::json::Object resp;
+            auto emit = [&]() {
+              out << llvm::json::Value(std::move(resp)) << "\n";
+              out.flush();
+            };
+            auto batchError = [&](const llvm::Twine &msg) {
+              resp["error"] = ("line " + llvm::Twine(lineNo) + ": " + msg).str();
+              resp["status"] = resultStatusName(ResultStatus::UsageError);
+              resp["exit"] = static_cast<int64_t>(kExitUsage);
+              emit();
+            };
+
+            auto parsed = llvm::json::parse(line);
+            if (!parsed) {
+              batchError(llvm::toString(parsed.takeError()));
+              continue;
+            }
+            const auto *req = parsed->getAsObject();
+            if (!req) {
+              batchError("request must be a JSON object");
+              continue;
+            }
+            if (const auto *id = req->get("id"))
+              resp["id"] = *id;
+            auto reqTool = req->getString("tool");
+            if (!reqTool) {
+              batchError("missing 'tool'");
+              continue;
+            }
+            const std::string canon = canonicalToolName(*reqTool);
+            resp["tool"] = canon;
+            llvm::json::Object args;
+            if (const auto *a = req->getObject("args"))
+              args = *a;
+            else if (const auto *a = req->getObject("arguments"))
+              args = *a;
+            if (auto cid = args.getString("channel_id")) {
+              if (!args.get("channel"))
+                args["channel"] = *cid;
+            }
+            args["format"] = "json";
+            args["pretty"] = false;
+            if (!common->entryPoints.empty()) {
+              llvm::json::Array eps;
+              for (const auto &ep : common->entryPoints)
+                eps.push_back(ep);
+              args["entry_points"] = std::move(eps);
+            }
+
+            std::string outStr, errStr;
+            int rc = MegascopeBridge::runVerbJson(
+                canon, args, indexPathArg, shardJsonContent, outStr, errStr);
+            if (outStr.empty()) {
+              batchError(errStr.empty() ? ("unknown tool '" + *reqTool + "'")
+                                        : llvm::Twine(errStr));
+              continue;
+            }
+            auto payload = llvm::json::parse(outStr);
+            if (!payload) {
+              batchError(llvm::toString(payload.takeError()));
+              continue;
+            }
+            std::string statusStr = resultStatusName(statusOf(*payload));
+            if (const auto *pObj = payload->getAsObject()) {
+              if (auto s = pObj->getString("status"))
+                statusStr = s->str();
+            }
+            resp["status"] = statusStr;
+            resp["exit"] = static_cast<int64_t>(rc);
+            resp["result"] = std::move(*payload);
+            emit();
+          }
+          return kExitResults;
+        }
+
+        llvm::json::Object seed;
+        if (!common->argsJson.empty()) {
+          auto parsed = llvm::json::parse(common->argsJson);
+          if (!parsed || !parsed->getAsObject()) {
+            err << "megascope " << typed << ": --args must be a JSON object\n";
+            return kExitUsage;
+          }
+          seed = std::move(*parsed->getAsObject());
+        }
+        auto parsedArgs = parseGenericMegascopeArgs(common->rest, std::move(seed));
+        if (!parsedArgs) {
+          err << "megascope " << typed << ": "
+              << llvm::toString(parsedArgs.takeError()) << "\n";
+          return kExitUsage;
+        }
+        llvm::json::Object mgscArgs = std::move(*parsedArgs);
+        if (auto cid = mgscArgs.getString("channel_id")) {
+          if (!mgscArgs.get("channel"))
+            mgscArgs["channel"] = *cid;
+        }
+        mgscArgs["format"] =
+            common->format.empty() ? "json" : common->format;
+        mgscArgs["pretty"] = common->pretty;
+        if (!common->entryPoints.empty()) {
+          llvm::json::Array eps;
+          for (const auto &ep : common->entryPoints)
+            eps.push_back(ep);
+          mgscArgs["entry_points"] = std::move(eps);
+        }
+
+        std::string effectiveVerb =
+            toolName.empty() ? verb.str() : toolName;
+        std::string outStr, errStr;
+        int rc = 0;
+        if (MegascopeBridge::isMegascopeShardJsonPath(candidateIndex)) {
+          auto bufOrErr = llvm::MemoryBuffer::getFile(candidateIndex);
+          if (!bufOrErr) {
+            err << "megascope: cannot read shard JSON " << candidateIndex
+                << "\n";
+            return kExitIndex;
+          }
+          rc = MegascopeBridge::runVerbJson(
+              effectiveVerb, mgscArgs, "", (*bufOrErr)->getBuffer(), outStr,
+              errStr);
+        } else {
+          rc = MegascopeBridge::runVerbJson(effectiveVerb, mgscArgs,
+                                            candidateIndex, "", outStr, errStr);
+        }
+        if (!outStr.empty())
+          out << outStr;
+        if (!errStr.empty())
+          err << "megascope " << typed << ": " << errStr << "\n";
+        return rc;
+      }
+    }
   }
 
   const ToolEntry *tool = nullptr;
@@ -1151,32 +1762,50 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
         tool = &t;
     if (!tool) {
       err << "megascope: unknown verb or tool '" << typed
-          << "'. Verbs: index, tools, info, batch, dump, diff, "
+          << "'. Verbs: index, merge, tools, info, batch, dump, diff, "
              "call, <tool>; "
              "run `vycor-cpp megascope tools` for the tool list.\n";
       return kExitUsage;
     }
   }
 
-  auto common = splitCommonFlags(tail, verb == "info");
-  if (!common) {
-    err << "megascope " << verb << ": " << llvm::toString(common.takeError())
-        << "\n";
-    return kExitUsage;
-  }
   if (common->help) {
     if (tool)
       printToolHelp(*tool, out);
+    else if (verb == "merge")
+      printMergeHelp(out);
     else
       printVerbHelp(out);
     return kExitResults;
   }
   if (verb == "tools")
     return runTools(tools, *common, out, err);
+  if (verb == "merge") {
+    if (common->ephemeral() || !common->buildPath.empty() ||
+        common->hasFixedCompileArgs || !common->skipPaths.empty() ||
+        !common->collapsePaths.empty() || !common->threads.empty() ||
+        !common->orgConfig.empty() || !common->argsJson.empty()) {
+      err << "megascope merge: merges saved .vycs indexes; it does not take "
+             "--build-path, --args, or the ephemeral source/bake flags\n";
+      return kExitUsage;
+    }
+    if (!common->format.empty() && common->format != "json") {
+      err << "megascope merge: only --format json is supported (got '"
+          << common->format << "')\n";
+      return kExitUsage;
+    }
+    return runMergeVerb(common->rest, common->index, common->pretty,
+                        common->verbose, common->entryPoints, in, out, err);
+  }
   if (verb == "diff") {
-    if (common->ephemeral() || !common->index.empty()) {
+    if (common->ephemeral() || !common->index.empty() ||
+        !common->buildPath.empty() || common->hasFixedCompileArgs ||
+        !common->skipPaths.empty() || !common->collapsePaths.empty() ||
+        !common->threads.empty() || !common->orgConfig.empty() ||
+        !common->argsJson.empty()) {
       err << "megascope diff: takes --before and --after indexes, not "
-             "--index or the ephemeral selection flags\n";
+             "--index, --build-path, --args, or the ephemeral selection/bake "
+             "flags\n";
       return kExitUsage;
     }
     auto fmt = parseFormat(common->format.empty() ? "json" : common->format);
@@ -1226,10 +1855,16 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
       return kExitUsage;
     }
     toolArgs = std::move(*parsed);
-  } else if (!common->rest.empty()) {
-    err << "megascope " << verb << ": unexpected argument '"
-        << common->rest.front() << "'\n";
-    return kExitUsage;
+  } else {
+    if (!common->argsJson.empty()) {
+      err << "megascope " << verb << ": --args only applies to tool queries\n";
+      return kExitUsage;
+    }
+    if (!common->rest.empty()) {
+      err << "megascope " << verb << ": unexpected argument '"
+          << common->rest.front() << "'\n";
+      return kExitUsage;
+    }
   }
 
   // Decode only what the verb reads: info wants the meta section, batch
@@ -1256,11 +1891,12 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
   } else {
     // The bake qualifiers mean nothing against a saved index; silently
     // ignoring them would hide a forgotten --source.
-    const char *stray = !common->skipPaths.empty()       ? "--skip-paths"
-                        : !common->collapsePaths.empty() ? "--collapse-paths"
-                        : !common->threads.empty()       ? "--threads"
-                        : !common->orgConfig.empty()     ? "--org-config"
-                                                         : nullptr;
+    const char *stray = !common->skipPaths.empty()          ? "--skip-paths"
+                        : !common->collapsePaths.empty()    ? "--collapse-paths"
+                        : !common->threads.empty()          ? "--threads"
+                        : !common->orgConfig.empty()        ? "--org-config"
+                        : common->hasFixedCompileArgs       ? "-- <compile-flags>"
+                                                            : nullptr;
     if (stray) {
       err << "megascope " << verb << ": " << stray
           << " only applies with --source/--source-list/--source-re (the "

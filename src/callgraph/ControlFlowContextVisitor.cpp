@@ -246,29 +246,71 @@ public:
 
   bool TraverseFunctionDecl(clang::FunctionDecl *decl) {
     funcStack_.push_back(decl);
+    const size_t savedAssertions = assertionGuards_.size();
     bool result = RecursiveASTVisitor::TraverseFunctionDecl(decl);
+    assertionGuards_.resize(savedAssertions);
     funcStack_.pop_back();
     return result;
   }
 
   bool TraverseCXXMethodDecl(clang::CXXMethodDecl *decl) {
     funcStack_.push_back(decl);
+    const size_t savedAssertions = assertionGuards_.size();
     bool result = RecursiveASTVisitor::TraverseCXXMethodDecl(decl);
+    assertionGuards_.resize(savedAssertions);
     funcStack_.pop_back();
     return result;
   }
 
   bool TraverseCXXConstructorDecl(clang::CXXConstructorDecl *decl) {
     funcStack_.push_back(decl);
+    const size_t savedAssertions = assertionGuards_.size();
     bool result = RecursiveASTVisitor::TraverseCXXConstructorDecl(decl);
+    assertionGuards_.resize(savedAssertions);
     funcStack_.pop_back();
     return result;
   }
 
   bool TraverseCXXDestructorDecl(clang::CXXDestructorDecl *decl) {
     funcStack_.push_back(decl);
+    const size_t savedAssertions = assertionGuards_.size();
     bool result = RecursiveASTVisitor::TraverseCXXDestructorDecl(decl);
+    assertionGuards_.resize(savedAssertions);
     funcStack_.pop_back();
+    return result;
+  }
+
+  bool TraverseCXXConversionDecl(clang::CXXConversionDecl *decl) {
+    funcStack_.push_back(decl);
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseCXXConversionDecl(decl);
+    assertionGuards_.resize(savedAssertions);
+    funcStack_.pop_back();
+    return result;
+  }
+
+  bool TraverseLambdaExpr(clang::LambdaExpr *expr) {
+    auto *op = expr->getCallOperator();
+    if (op)
+      funcStack_.push_back(op);
+    std::vector<std::vector<RaiiLocal>> savedScopes;
+    std::vector<TryScopeEntry> savedTries;
+    std::vector<GuardEntry> savedGuards;
+    std::vector<GuardEntry> savedAssertions;
+    const bool savedInsideCatch = insideCatchBlock_;
+    savedScopes.swap(scopeStack_);
+    savedTries.swap(tryScopeStack_);
+    savedGuards.swap(guardStack_);
+    savedAssertions.swap(assertionGuards_);
+    insideCatchBlock_ = false;
+    bool result = RecursiveASTVisitor::TraverseLambdaExpr(expr);
+    scopeStack_.swap(savedScopes);
+    tryScopeStack_.swap(savedTries);
+    guardStack_.swap(savedGuards);
+    assertionGuards_.swap(savedAssertions);
+    insideCatchBlock_ = savedInsideCatch;
+    if (op)
+      funcStack_.pop_back();
     return result;
   }
 
@@ -328,8 +370,45 @@ public:
 
   bool TraverseCompoundStmt(clang::CompoundStmt *stmt) {
     scopeStack_.push_back({});
+    const size_t savedAssertions = assertionGuards_.size();
     bool result = RecursiveASTVisitor::TraverseCompoundStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
     scopeStack_.pop_back();
+    return result;
+  }
+
+  bool TraverseWhileStmt(clang::WhileStmt *stmt) {
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseWhileStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
+    return result;
+  }
+
+  bool TraverseDoStmt(clang::DoStmt *stmt) {
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseDoStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
+    return result;
+  }
+
+  bool TraverseForStmt(clang::ForStmt *stmt) {
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseForStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
+    return result;
+  }
+
+  bool TraverseCXXForRangeStmt(clang::CXXForRangeStmt *stmt) {
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseCXXForRangeStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
+    return result;
+  }
+
+  bool TraverseSwitchStmt(clang::SwitchStmt *stmt) {
+    const size_t savedAssertions = assertionGuards_.size();
+    bool result = RecursiveASTVisitor::TraverseSwitchStmt(stmt);
+    assertionGuards_.resize(savedAssertions);
     return result;
   }
 
@@ -376,15 +455,19 @@ public:
     // Traverse the then-branch with guard context.
     guard.inTrueBranch = true;
     guardStack_.push_back(guard);
+    const size_t savedThenAssertions = assertionGuards_.size();
     if (stmt->getThen())
       TraverseStmt(stmt->getThen());
+    assertionGuards_.resize(savedThenAssertions);
     guardStack_.pop_back();
 
     // Traverse the else-branch with negated guard context.
     if (stmt->getElse()) {
       guard.inTrueBranch = false;
       guardStack_.push_back(guard);
+      const size_t savedElseAssertions = assertionGuards_.size();
       TraverseStmt(stmt->getElse());
+      assertionGuards_.resize(savedElseAssertions);
       guardStack_.pop_back();
     }
 
@@ -512,7 +595,31 @@ private:
   Ident getCurrentFunction() const {
     if (funcStack_.empty())
       return {};
-    return usrs_.identFor(funcStack_.back());
+    auto *top = funcStack_.back();
+    if (auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(top)) {
+      if (md->getParent() && md->getParent()->isLambda()) {
+        std::string enclosing;
+        for (auto it = funcStack_.rbegin() + 1; it != funcStack_.rend(); ++it) {
+          auto *fd = *it;
+          if (auto *mm = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
+            if (mm->getParent() && mm->getParent()->isLambda())
+              continue;
+          }
+          enclosing = fd->getQualifiedNameAsString();
+          break;
+        }
+        std::string site =
+            formatLocationHelper(sm_, md->getParent()->getBeginLoc());
+        std::string parent =
+            enclosing.empty() ? std::string("<tu>") : enclosing;
+        std::string name = "lambda#" + site + "#" + parent;
+        Ident id;
+        id.usr = "vycor-lambda:" + name;
+        id.display = std::move(name);
+        return id;
+      }
+    }
+    return usrs_.identFor(top);
   }
 
   std::string formatLocation(clang::SourceLocation loc) const {
@@ -1145,7 +1252,8 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
                   const LockTypeConfig *lockCfg,
                   const ChannelTypeConfig *channelCfg,
                   const PchCache *pchCache, const std::string &sysroot,
-                  DependencySink *depSink, int *crashSignal) {
+                  DependencySink *depSink, int *crashSignal,
+                  bool moveIntoEmpty = false) {
   auto local = std::make_unique<BakedIndexes>();
   DependencySink localDeps;
   localDeps.deps = &local->deps;
@@ -1159,10 +1267,17 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
     retainUntilExit(local.release()); // torn: see above
     return status;
   }
-  graph.absorb(local->graph);
-  cfIndex.absorb(local->cfIndex);
-  if (channels)
-    channels->absorb(local->channels);
+  if (moveIntoEmpty) {
+    graph = std::move(local->graph);
+    cfIndex = std::move(local->cfIndex);
+    if (channels)
+      *channels = std::move(local->channels);
+  } else {
+    graph.absorb(local->graph);
+    cfIndex.absorb(local->cfIndex);
+    if (channels)
+      channels->absorb(local->channels);
+  }
   if (depSink && depSink->deps) {
     std::lock_guard<std::mutex> lock(depSink->mutex);
     for (auto &kv : local->deps)
@@ -1229,13 +1344,18 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
     }
     pool.wait();
   } else {
+    bool firstClean = true;
     for (const auto &file : files) {
       bakeRun(
           file,
           [&](int *sig) {
-            return bakeTuLocally(out.graph, out.cfIndex, &out.channels, compDb,
-                                 file, collapsePtr, &lockCfg, channelCfgPtr,
-                                 pchCache, sysroot, &depSink, sig);
+            int st = bakeTuLocally(out.graph, out.cfIndex, &out.channels,
+                                   compDb, file, collapsePtr, &lockCfg,
+                                   channelCfgPtr, pchCache, sysroot, &depSink,
+                                   sig, /*moveIntoEmpty=*/firstClean);
+            if (st != -1)
+              firstClean = false;
+            return st;
           },
           0, stats, preTu, &outcomeSink);
     }
@@ -1259,6 +1379,32 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                  << "--gcc-install-dir=/usr/lib/gcc/<triple>/<ver>)\n";
   }
 
+  return out;
+}
+
+BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
+                          const std::vector<std::string> &collapsePaths,
+                          const LockTypeConfig &lockCfg,
+                          const ChannelTypeConfig &channelCfg) {
+  BakedIndexes out;
+  CollapseFilter collapseFilter(collapsePaths);
+  const CollapseFilter *collapsePtr =
+      collapseFilter.empty() ? nullptr : &collapseFilter;
+  const ChannelTypeConfig *channelCfgPtr =
+      channelCfg.registeredTypes.empty() ? nullptr : &channelCfg;
+  DependencySink depSink;
+  depSink.deps = &out.deps;
+
+  BakeEdgeAndContextConsumer consumer(
+      out.graph, out.cfIndex, ctx.getSourceManager(), collapsePtr, &lockCfg,
+      channelCfgPtr, channelCfgPtr ? &out.channels : nullptr, tuPath,
+      &depSink);
+  consumer.HandleTranslationUnit(ctx);
+
+  if (ctx.getDiagnostics().hasErrorOccurred())
+    out.outcomes[tuPath] = TuOutcome{TuStatus::Partial, "parse errors"};
+  else
+    out.outcomes[tuPath] = TuOutcome{TuStatus::Indexed, ""};
   return out;
 }
 

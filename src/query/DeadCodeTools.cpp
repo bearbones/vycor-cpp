@@ -31,7 +31,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/check/DeadCodeAnalyzer.h"
 
 namespace vycor {
 

@@ -27,7 +27,7 @@ the whole program silently flips between them. Classic real-world instance:
 a `std::hash<MyType>` specialization in `MyTypeHash.hpp` that most — but
 not all — TUs with an `unordered_map<MyType, ...>` include.
 
-anneal's phase-1 index records every explicit specialization in the
+check's phase-1 index records every explicit specialization in the
 project; phase 2 walks each TU's implicit instantiations and reports the
 ones whose matching specialization is not visible there.
 
@@ -52,11 +52,17 @@ int good() { return Traits<int>::id(); }  // uses the specialization
 
 ```
 tu_bad.cpp:3:22: IFNDR: this TU instantiates the primary template 'Traits<int>'
-    but an explicit specialization exists at traits_int.hpp:4 and is not visible
-    here. TUs will disagree about which definition to use. Include
-    traits_int.hpp before the first use, or declare the specialization in the
-    primary template's header.
+    but an explicit specialization exists at traits_int.hpp:4 (resolves to
+    explicit specialization body { static int id() { return 1; } }) and is not
+    visible here. TUs will disagree about which definition to use. Make the
+    template specialization visible to both TUs.
 ```
+
+When the explicit specialization inherits from a base class (for example,
+`template <> struct fmt::formatter<MyType> : fmt::ostream_formatter {};`), the
+diagnostic reports `(resolves to specialization inheriting fmt::ostream_formatter)`
+so you can immediately see how the explicit specialization resolves compared to
+the primary template.
 
 ## Notes and limitations
 
@@ -74,7 +80,8 @@ tu_bad.cpp:3:22: IFNDR: this TU instantiates the primary template 'Traits<int>'
 
 ## Remediation
 
-Either include the specialization's header everywhere the template can be
-instantiated (usually: declare the specialization in the same header as
-whatever it specializes for), or stop specializing and use a different
-customization point.
+Make the template specialization visible to every TU that instantiates the
+template: move the specialization out of `.cc`/`.cpp` files into a shared
+header included before the first use (ideally the same header as the type it
+specializes for or the primary template's header), or stop specializing and use
+a different customization point.

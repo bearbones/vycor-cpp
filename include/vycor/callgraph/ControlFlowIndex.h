@@ -42,6 +42,7 @@ class MemoryBuffer;
 } // namespace llvm
 
 namespace clang {
+class ASTContext;
 namespace tooling {
 class CompilationDatabase;
 } // namespace tooling
@@ -320,6 +321,7 @@ public:
 
 private:
   friend class SnapshotIO;
+  friend class MegascopeBridge;
 
   // Interned form of RaiiLocal: three ids into interner_ plus the kind.
   struct StoredRaiiLocal {
@@ -531,5 +533,13 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          std::function<void(const std::string &)> preTu =
                              nullptr,
                          const ChannelTypeConfig &channelCfg = {});
+
+// Index an already-parsed ASTContext in a single pass (used by the Clang
+// frontend plugin vycor_megascope_plugin to emit per-TU .vycs snapshots
+// during normal compilation without re-parsing).
+BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
+                          const std::vector<std::string> &collapsePaths = {},
+                          const LockTypeConfig &lockCfg = {},
+                          const ChannelTypeConfig &channelCfg = {});
 
 } // namespace vycor

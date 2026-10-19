@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include "vycor/anneal/GlobalIndex.h"
+#include "vycor/check/GlobalIndex.h"
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ConditionalGuard.h"
 
@@ -41,18 +41,18 @@ namespace vycor {
 //   - in code, by dropping .cpp files into the top-level ext/ directory,
 //     which the build compiles directly into the executable. Those files
 //     register hooks with ExtensionRegistry at static-initialization time
-//     (VYCOR_REGISTER_ANNEAL_CHECK, or an ExtensionRegistrar block).
+//     (VYCOR_REGISTER_CHECK, or an ExtensionRegistrar block).
 // ============================================================================
 
-// An organization-specific anneal check. One instance is created per TU
+// An organization-specific check check. One instance is created per TU
 // (via the registered factory), so per-TU state in members needs no reset.
 // Runs after the built-in AnalyzerVisitor traversal of the same TU; push
 // findings into `out` with kind = Diagnostic::Custom and checkName = name().
-class AnnealCheck {
+class Check {
 public:
-  virtual ~AnnealCheck() = default;
+  virtual ~Check() = default;
 
-  // Stable identifier, used by OrgConfig::disabledAnnealChecks and surfaced
+  // Stable identifier, used by OrgConfig::disabledChecks and surfaced
   // in Diagnostic::checkName. Convention: short-kebab-case.
   virtual std::string name() const = 0;
 
@@ -60,11 +60,11 @@ public:
                        std::vector<Diagnostic> &out) = 0;
 };
 
-using AnnealCheckFactory = std::function<std::unique_ptr<AnnealCheck>()>;
+using CheckFactory = std::function<std::unique_ptr<Check>()>;
 
 // An organization check over the MERGED cross-TU GlobalIndex (phase 1.5,
 // like the built-in coverage/ODR analyses): sees every TU's declarations
-// at once, unlike AnnealCheck which runs per TU with AST access. The
+// at once, unlike Check which runs per TU with AST access. The
 // natural home for "must agree across TUs" invariants — e.g. "every IPC
 // message struct is defined identically in client and server trees", or
 // project-specific specialization/registration completeness rules.
@@ -108,7 +108,7 @@ public:
   static ExtensionRegistry &instance();
 
   // ---- registration --------------------------------------------------------
-  void addAnnealCheck(AnnealCheckFactory factory);
+  void addCheck(CheckFactory factory);
   void addIndexCheck(IndexCheckFactory factory);
   void addLockTypes(std::vector<std::string> qualifiedNames);
   void addChannelTypes(std::vector<ChannelTypeSpec> specs);
@@ -124,7 +124,7 @@ public:
   // Register (or extend) a named check group usable in --checks
   // specifications, e.g. addCheckGroup("myorg-strict", {"no-legacy-alloc",
   // "ipc-struct-parity"}). The built-in groups ("all", "noisy",
-  // "compute-heavy", ...) live in anneal/CheckSet.cpp; org groups may
+  // "compute-heavy", ...) live in check/CheckSet.cpp; org groups may
   // reference built-in and org check names alike.
   void addCheckGroup(const std::string &group,
                      std::vector<std::string> checkNames);
@@ -139,8 +139,8 @@ public:
 
   // ---- consumption ---------------------------------------------------------
   // Fresh check instances, skipping any whose name() is in `disabled`.
-  std::vector<std::unique_ptr<AnnealCheck>>
-  createAnnealChecks(const std::vector<std::string> &disabled = {}) const;
+  std::vector<std::unique_ptr<Check>>
+  createChecks(const std::vector<std::string> &disabled = {}) const;
   std::vector<std::unique_ptr<IndexCheck>>
   createIndexChecks(const std::vector<std::string> &disabled = {}) const;
 
@@ -171,7 +171,7 @@ public:
 private:
   ExtensionRegistry() = default;
 
-  std::vector<AnnealCheckFactory> checkFactories_;
+  std::vector<CheckFactory> checkFactories_;
   std::vector<IndexCheckFactory> indexCheckFactories_;
   std::vector<std::string> lockTypes_;
   std::vector<std::string> staticInitHazards_;
@@ -184,21 +184,21 @@ private:
 // guard-serialization points (`megascope dump`, the query tools).
 std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g);
 
-// Registers an AnnealCheck subclass (default-constructible) at static-init
+// Registers an Check subclass (default-constructible) at static-init
 // time. Use at namespace scope in an ext/*.cpp file:
-//   class NoLegacyApiCheck : public vycor::AnnealCheck { ... };
-//   VYCOR_REGISTER_ANNEAL_CHECK(NoLegacyApiCheck)
-#define VYCOR_REGISTER_ANNEAL_CHECK(CheckClass)                                \
+//   class NoLegacyApiCheck : public vycor::Check { ... };
+//   VYCOR_REGISTER_CHECK(NoLegacyApiCheck)
+#define VYCOR_REGISTER_CHECK(CheckClass)                                \
   namespace {                                                                  \
-  const bool vycorAnnealCheckRegistrar_##CheckClass = [] {                     \
-    ::vycor::ExtensionRegistry::instance().addAnnealCheck(                     \
+  const bool vycorCheckRegistrar_##CheckClass = [] {                     \
+    ::vycor::ExtensionRegistry::instance().addCheck(                     \
         [] { return std::make_unique<CheckClass>(); });                        \
     return true;                                                               \
   }();                                                                         \
   }
 
 // Registers an IndexCheck subclass (default-constructible) — the merged
-// cross-TU counterpart of VYCOR_REGISTER_ANNEAL_CHECK.
+// cross-TU counterpart of VYCOR_REGISTER_CHECK.
 #define VYCOR_REGISTER_INDEX_CHECK(CheckClass)                                 \
   namespace {                                                                  \
   const bool vycorIndexCheckRegistrar_##CheckClass = [] {                      \

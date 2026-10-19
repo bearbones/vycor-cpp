@@ -1,7 +1,7 @@
 # Extending vycor-cpp for your organization
 
 This guide is for organizations that fork or mirror this repository and
-want to add their own analysis semantics — custom anneal checks, in-house
+want to add their own analysis semantics — custom check checks, in-house
 lock types, feature-flag conventions, channel/queue types — **without
 editing any upstream file**. Everything org-specific lives in two places
 you own outright:
@@ -10,7 +10,7 @@ you own outright:
    compilation needed. Covers lock types, channel types, feature-flag
    patterns, collapse paths, and disabling checks.
 2. **The `ext/` directory** — compiled C++ slot-in for anything that needs
-   AST access (custom anneal checks, arbitrary guard classifiers).
+   AST access (custom check checks, arbitrary guard classifiers).
 
 Because upstream never touches `ext/` contents (only `ext/README.md` and
 `ext/examples/` are tracked) and never claims the `--org-config` file
@@ -26,7 +26,7 @@ config.
 ## Tier 1: the org config file (`--org-config`)
 
 A single JSON file, typically checked into your fork (convention:
-`ext/vycor.org.json`, but any path works) and passed to `anneal` and
+`ext/vycor.org.json`, but any path works) and passed to `check` and
 `megascope`:
 
 ```bash
@@ -52,7 +52,7 @@ loudly — see `include/vycor/ext/OrgConfig.h`):
     { "pattern": "isFeatureEnabled\\(\"([A-Za-z0-9_.-]+)\"\\)", "nameGroup": 1 }
   ],
   "collapsePaths": ["ThirdParty/Math"],
-  "disabledAnnealChecks": ["some-ext-check"]
+  "disabledChecks": ["some-ext-check"]
 }
 ```
 
@@ -106,10 +106,10 @@ adding or changing patterns does not invalidate megascope `--snapshot`
 warm starts. (Changing `lockTypes`/`channelTypes` *does* invalidate a
 snapshot, deliberately: they alter what gets indexed.)
 
-### `collapsePaths`, `disabledAnnealChecks`
+### `collapsePaths`, `disabledChecks`
 
 `collapsePaths` entries merge with `--collapse-paths` flags.
-`disabledAnnealChecks` suppresses compiled `ext/` checks by their
+`disabledChecks` suppresses compiled `ext/` checks by their
 `name()` — useful for staged rollouts of a new check across a large fork.
 
 ---
@@ -127,15 +127,15 @@ A complete working example lives at `ext/examples/ExampleOrgExtension.cpp`
 (the `examples/` subdirectory is deliberately outside the glob; copy the
 file up one level to activate it).
 
-### Custom anneal checks
+### Custom check checks
 
-Implement `vycor::AnnealCheck` (`include/vycor/ext/Extensions.h`) and
+Implement `vycor::Check` (`include/vycor/ext/Extensions.h`) and
 register it:
 
 ```cpp
 #include "vycor/ext/Extensions.h"
 
-class NoLegacyAllocatorCheck : public vycor::AnnealCheck {
+class NoLegacyAllocatorCheck : public vycor::Check {
 public:
   std::string name() const override { return "no-legacy-allocator"; }
   void checkTU(clang::ASTContext &context, const vycor::GlobalIndex &index,
@@ -146,22 +146,22 @@ public:
   }
 };
 
-VYCOR_REGISTER_ANNEAL_CHECK(NoLegacyAllocatorCheck)
+VYCOR_REGISTER_CHECK(NoLegacyAllocatorCheck)
 ```
 
 Semantics:
 
 - One fresh instance per TU (the factory is invoked per TU), so member
   state needs no reset between TUs.
-- Runs inside `vycor-cpp anneal`, per TU, **after** the built-in
+- Runs inside `vycor-cpp check`, per TU, **after** the built-in
   ADL/CTAD analysis of that TU. The two-phase pipeline still applies: the
   `GlobalIndex` you receive was fully populated by phase 1 across all TUs.
-- Diagnostics go through the standard anneal report: text
+- Diagnostics go through the standard check report: text
   (`location: [name] message`), JSON, and SARIF, where `name()` is the
   rule id (one rule per enabled check, `warning` level, no `helpUri`).
   Inline `// vycor: ignore[name]` suppressions, baselines, and
   `--fail-on` apply to them like any built-in finding.
-- `name()` is the stable ID used by `disabledAnnealChecks`, `--checks`,
+- `name()` is the stable ID used by `disabledChecks`, `--checks`,
   and the finding fingerprint (`docs/checks/README.md`, "Finding
   identity"); keep it kebab-case and don't rename casually — a rename
   changes every fingerprint, so baselined findings come back as new. A
@@ -266,8 +266,8 @@ composition (main): registry lock/channel types merged into the CLI-built
                     duplicates dropped); org collapsePaths appended
 index build:        merged configs drive RAII/lock and channel indexing
                     (and land in snapshot meta for warm-start validation)
-anneal per TU:      built-in analyzer, then each registered AnnealCheck
-                    not listed in disabledAnnealChecks
+check per TU:      built-in analyzer, then each registered Check
+                    not listed in disabledChecks
 query/serialize:    guard classifiers annotate guards in megascope dump,
                     query_call_site_context, the path tools, and
                     channel-site listings

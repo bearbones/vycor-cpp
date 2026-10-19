@@ -14,9 +14,9 @@
 // limitations under the License.
 
 // test_check_set.cpp — the named-check selection layer (--checks /
-// .vycor-anneal.json): spec resolution, groups, config parsing, discovery.
+// .vycor-check.json): spec resolution, groups, config parsing, discovery.
 
-#include "vycor/anneal/CheckSet.h"
+#include "vycor/check/CheckSet.h"
 #include "vycor/ext/Extensions.h"
 
 #include "llvm/Support/FileSystem.h"
@@ -140,13 +140,13 @@ TEST_CASE("findChecksConfig walks up from the start directory", "[CheckSet]") {
   const std::string nested = root + "/a/b";
   REQUIRE(!llvm::sys::fs::create_directories(nested));
   {
-    std::ofstream out(root + "/.vycor-anneal.json");
+    std::ofstream out(root + "/.vycor-check.json");
     out << R"({"checks": ["all"]})";
   }
 
   auto found = findChecksConfig(nested);
   REQUIRE(!found.empty());
-  CHECK(found.find(".vycor-anneal.json") != std::string::npos);
+  CHECK(found.find(".vycor-check.json") != std::string::npos);
 
   // Nothing above an isolated tree without the file.
   const std::string bare = "check_cfg_bare/x";
@@ -156,7 +156,7 @@ TEST_CASE("findChecksConfig walks up from the start directory", "[CheckSet]") {
   auto other = findChecksConfig(bare);
   CHECK(other.find("check_cfg_root") == std::string::npos);
 
-  std::remove((root + "/.vycor-anneal.json").c_str());
+  std::remove((root + "/.vycor-check.json").c_str());
   llvm::sys::fs::remove(nested);
   llvm::sys::fs::remove(root + "/a");
   llvm::sys::fs::remove(root);

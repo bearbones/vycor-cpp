@@ -25,8 +25,8 @@ then checks, against the real binary:
   sigint     SIGINT to `megascope index` mid-bake: the process dies by
              SIGINT, every worker it had running is gone, and no
              vycor-workers-* directory is left.
-  sigterm    SIGTERM to `anneal --isolate-workers` mid-analysis: same, for
-             the anneal dispatcher (vycor-anneal-workers-*).
+  sigterm    SIGTERM to `check --isolate-workers` mid-analysis: same, for
+             the check dispatcher (vycor-check-workers-*).
 
 The scratch TMPDIR makes the worker directories observable. Also a ctest:
 `ctest -R interrupt_cleanup`.
@@ -86,7 +86,7 @@ def make_project(root: Path, slow: list[str]) -> Path:
 def worker_dirs(tmp: Path) -> list[str]:
     return sorted(p.name for p in tmp.iterdir()
                   if p.name.startswith(("vycor-workers-",
-                                        "vycor-anneal-workers-")))
+                                        "vycor-check-workers-")))
 
 
 def children_of(pid: int) -> list[int]:
@@ -222,7 +222,7 @@ def main() -> int:
                 signal.SIGINT, "sigint", args.verbose)),
             ("sigterm", lambda r: check_signal(
                 binary, r,
-                ["anneal", "--build-path", "@PROJ@", "--source",
+                ["check", "--build-path", "@PROJ@", "--source",
                  "@PROJ@/slow1.cpp", "--source", "@PROJ@/slow2.cpp",
                  "--isolate-workers", "--workers", "2", "--worker-timeout",
                  "0"],

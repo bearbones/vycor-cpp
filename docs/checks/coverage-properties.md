@@ -13,7 +13,7 @@ Coverage instrumentation fate is decided per TU by GVA linkage
 (`GVA_DiscardableODR` methods land in COMDAT sections the linker may
 discard, taking their counters with them). Which copy survives — and
 whether it was instrumented — depends on cross-TU emission decisions no
-single-TU tool can see. anneal indexes the linkage-relevant properties of
+single-TU tool can see. check indexes the linkage-relevant properties of
 every method project-wide and reports classes whose siblings diverge:
 
 - **`Coverage_GVAMismatch`** — sibling methods with different GVA linkage.

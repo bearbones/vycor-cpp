@@ -27,7 +27,7 @@ namespace vycor {
 
 // ============================================================================
 // Crash- and race-safe file publication, shared by the index save
-// (SnapshotIO::save), the anneal checkpoint journal, and the worker shard
+// (SnapshotIO::save), the check checkpoint journal, and the worker shard
 // and handoff files.
 // ============================================================================
 

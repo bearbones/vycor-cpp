@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/morph/TransformPipeline.h"
+#include "vycor/cli/SourceSelection.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Core/Replacement.h"
@@ -75,15 +76,31 @@ void TransformPipeline::addPass(std::vector<TransformRule> rules) {
 
 int TransformPipeline::execute(const std::vector<std::string> &buildPaths,
                                const std::vector<std::string> &sourceFiles,
-                               bool dryRun) {
+                               bool dryRun,
+                               const std::vector<std::string> &fixedCompileArgs,
+                               bool hasFixedCompileArgs) {
+  if (buildPaths.empty() && !hasFixedCompileArgs && fixedCompileArgs.empty()) {
+    llvm::errs() << "Error: at least one build path or '-- <compile-flags>' is "
+                    "required\n";
+    return 1;
+  }
   FallbackCompilationDatabase compDb;
   for (const auto &path : buildPaths) {
     std::string dbLoadError;
-    auto db = clang::tooling::CompilationDatabase::loadFromDirectory(
-        path, dbLoadError);
+    auto db = loadCompilationDatabase(path, {}, dbLoadError);
     if (!db) {
       llvm::errs() << "Error loading compilation database from " << path
                    << ": " << dbLoadError << "\n";
+      return 1;
+    }
+    compDb.add(std::move(db));
+  }
+  if (hasFixedCompileArgs || !fixedCompileArgs.empty()) {
+    std::string dbLoadError;
+    auto db = loadCompilationDatabase("", fixedCompileArgs, dbLoadError, true);
+    if (!db) {
+      llvm::errs() << "Error loading fixed compilation database: "
+                   << dbLoadError << "\n";
       return 1;
     }
     compDb.add(std::move(db));

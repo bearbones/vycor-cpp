@@ -13,7 +13,7 @@ clang-tidy's `bugprone-exception-escape` analyzes one TU: it can see a
 happen to live in the same TU. The moment the call chain crosses a TU
 boundary — `safeApi() noexcept` in `root.cpp` calling `mid()` in
 `mid.cpp` calling `deepThrow()` in `thrower.cpp` — the single-TU view
-ends at a declaration and the analysis goes silent. anneal's per-function
+ends at a declaration and the analysis goes silent. check's per-function
 call summaries (collected during the same phase-1 parse, no extra cost
 beyond enabling the check) cross the boundary.
 
@@ -38,6 +38,16 @@ root.cpp:3: Exception escape: noexcept function 'app::safeApi' (root.cpp:3) can
     inside, or drop the noexcept.
 ```
 
+Pass `--exception-escape-call-site-locations` to include `(file:line)` locations
+for every call site along the chain and the uncaught `throw` site:
+
+```
+root.cpp:3: Exception escape: noexcept function 'app::safeApi' (root.cpp:3) can
+    reach a throw in 'app::deepThrow' (thrower.cpp:9) (app::mid (root.cpp:4) ->
+    app::deepThrow (mid.cpp:7)) with no intervening handler — an escaping
+    exception calls std::terminate. Catch it inside, or drop the noexcept.
+```
+
 ## Why it is grouped `noisy`
 
 The summaries are name-level: overload sets sharing a qualified name are
@@ -52,3 +62,21 @@ Treat findings as strong leads, not verdicts. Enable with
 Catch the exception inside the noexcept function, stop the callee from
 throwing, or remove the `noexcept` if termination is not the intended
 contract.
+
+## Inline suppression
+
+When `std::terminate` on an escaping exception is the deliberate contract (for
+example, at a C ABI boundary, a destructor that treats failure as fatal, or a
+`noexcept` wrapper around an invariant check), suppress the finding on the
+`noexcept` function definition using `// vycor-disable-next-line exception-escape`
+(or `// vycor: ignore[exception-escape]`):
+
+```cpp
+// vycor-disable-next-line exception-escape
+void safeApi() noexcept {
+  mid();
+}
+```
+
+You can also place a trailing `// vycor-disable-line exception-escape` or
+`// vycor: ignore[exception-escape]` comment on the function signature line itself.

@@ -1,0 +1,346 @@
+# Copyright (c) 2026 The vycor-cpp Authors
+# Original author: Alex Mason
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""BXL (Buck2 Extension Language) scripts for zero-config vycor-cpp indexing and analysis.
+
+Usage without modifying existing `BUCK` files:
+
+  # Produce per-TU .vycs shards, per-target .vycs indexes, and a merged global
+  # .vycs index across any Buck2 target pattern:
+  buck2 bxl //buck2:vycor.bxl:index -- --targets //src/...
+
+  # Run vycor-cpp check across all C/C++ targets in a subgraph and emit a
+  # SARIF report:
+  buck2 bxl //buck2:vycor.bxl:check -- --targets //src/... --format sarif
+"""
+
+_CXX_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx", ".c++", ".C", ".m", ".mm")
+
+def _is_cxx_source(short_path: str) -> bool:
+    for ext in _CXX_EXTENSIONS:
+        if short_path.endswith(ext):
+            return True
+    return False
+
+def _extract_artifacts(val) -> list:
+    if val == None:
+        return []
+    t = type(val)
+    if t == "list" or t == "tuple":
+        out = []
+        for item in val:
+            if type(item) == "tuple" and len(item) >= 1:
+                out.append(item[0])
+            else:
+                out.append(item)
+        return out
+    if t == "dict":
+        return list(val.values())
+    return []
+
+def _extract_strings(val) -> list[str]:
+    if val == None:
+        return []
+    if type(val) == "list" or type(val) == "tuple":
+        return [str(x) for x in val if type(x) == "string"]
+    return []
+
+def _sanitize_label(raw_target) -> str:
+    s = str(raw_target.label.raw_target())
+    for ch in ("//", ":", "/"):
+        s = s.replace(ch, "_")
+    return s.strip("_")
+
+def _collect_cxx_targets(ctx: bxl.Context, target_patterns: list[str]) -> list:
+    roots = ctx.cquery().eval(" + ".join(target_patterns))
+    all_nodes = ctx.cquery().deps(roots)
+    cxx_nodes = []
+    for node in all_nodes:
+        attrs = node.attrs_lazy()
+        srcs_attr = attrs.get("srcs")
+        if srcs_attr == None:
+            continue
+        srcs = _extract_artifacts(srcs_attr.value())
+        cxx_srcs = [s for s in srcs if _is_cxx_source(s.short_path)]
+        if cxx_srcs:
+            cxx_nodes.append((node, attrs, cxx_srcs))
+    return cxx_nodes
+
+def _emit_json(ctx: bxl.Context, payload):
+    if hasattr(ctx.output, "print_json"):
+        ctx.output.print_json(payload)
+    else:
+        ctx.output.print(json.encode(payload))
+
+def _target_compile_flags(node, attrs, cxx_std: str, transitive_headers: list, transitive_include_dirs: list[str]) -> cmd_args:
+    flags = cmd_args("-std=" + cxx_std)
+    pkg = node.label.package
+    if pkg:
+        flags.add("-I" + pkg)
+    flags.add("-I.")
+    for inc in transitive_include_dirs:
+        flags.add("-I" + inc)
+
+    for attr_name in ("preprocessor_flags", "exported_preprocessor_flags", "compiler_flags", "exported_compiler_flags"):
+        a = attrs.get(attr_name)
+        if a != None:
+            for f in _extract_strings(a.value()):
+                flags.add(f)
+
+    if transitive_headers:
+        flags.add(cmd_args(hidden = transitive_headers))
+    return flags
+
+def _index_impl(ctx: bxl.Context):
+    bxl_actions = ctx.bxl_actions().actions
+    vycor_exe = ctx.cli_args.vycor_executable
+    cxx_std = ctx.cli_args.cxx_standard
+
+    cxx_nodes = _collect_cxx_targets(ctx, ctx.cli_args.targets)
+    if not cxx_nodes:
+        _emit_json(ctx, {
+            "error": "No C/C++ targets with sources matched the given --targets patterns.",
+            "targets": ctx.cli_args.targets,
+        })
+        return
+
+    # Gather all headers and package include directories across the subgraph so
+    # each per-TU action has complete header visibility in its sandbox.
+    all_headers = []
+    seen_hdrs = {}
+    include_dirs = []
+    seen_pkgs = {}
+    for node, attrs, _ in cxx_nodes:
+        pkg = node.label.package
+        if pkg and pkg not in seen_pkgs:
+            seen_pkgs[pkg] = True
+            include_dirs.append(pkg)
+            include_dirs.append(pkg + "/include")
+        for hdr_attr in ("headers", "exported_headers"):
+            ha = attrs.get(hdr_attr)
+            if ha != None:
+                for h in _extract_artifacts(ha.value()):
+                    key = getattr(h, "short_path", str(h))
+                    if key not in seen_hdrs:
+                        seen_hdrs[key] = True
+                        all_headers.append(h)
+
+    all_tu_outputs = {}
+    target_outputs = {}
+    target_artifact_list = []
+
+    for node, attrs, cxx_srcs in cxx_nodes:
+        label_str = str(node.label.raw_target())
+        safe_name = _sanitize_label(node)
+        compile_flags = _target_compile_flags(node, attrs, cxx_std, all_headers, include_dirs)
+
+        tu_shards = []
+        tu_map = {}
+        ext = ctx.cli_args.index_format
+        if ext.startswith("."):
+            ext = ext[1:]
+        if not ext:
+            ext = "vycs"
+        merge_ext = "mgsc" if ext == "shard.json" else ext
+        for src in cxx_srcs:
+            rel = src.short_path
+            tu_out = bxl_actions.declare_output("tu/" + safe_name + "/" + rel + "." + ext)
+            cmd = cmd_args(
+                vycor_exe,
+                "megascope",
+                "index",
+                "--threads",
+                "1",
+                "--no-wait",
+                "--index",
+                tu_out.as_output(),
+                "--source",
+                src,
+            )
+            for pat in ctx.cli_args.collapse_paths:
+                cmd.add("--collapse-paths", pat)
+            for ep in ctx.cli_args.entry_points:
+                cmd.add("--entry-point", ep)
+            cmd.add("--")
+            cmd.add(compile_flags)
+            bxl_actions.run(
+                cmd,
+                category = "vycor_bxl_tu_index",
+                identifier = safe_name + ":" + rel,
+            )
+            tu_shards.append(tu_out)
+            tu_map[rel] = ctx.output.ensure(tu_out)
+
+        all_tu_outputs[label_str] = tu_map
+
+        # Merge the target's per-TU shards into a per-target .vycs / .mgsc artifact.
+        target_out = bxl_actions.declare_output("targets/" + safe_name + "." + merge_ext)
+        if len(tu_shards) == 1 and ext == merge_ext:
+            bxl_actions.copy_file(target_out.as_output(), tu_shards[0])
+        else:
+            tu_list_file = bxl_actions.write("targets/" + safe_name + ".tu.list", cmd_args(tu_shards))
+            merge_cmd = cmd_args(
+                vycor_exe,
+                "megascope",
+                "merge",
+                "--no-wait",
+                "--output",
+                target_out.as_output(),
+                "--input-list",
+                tu_list_file,
+                hidden = tu_shards,
+            )
+            for ep in ctx.cli_args.entry_points:
+                merge_cmd.add("--entry-point", ep)
+            bxl_actions.run(
+                merge_cmd,
+                category = "vycor_bxl_target_merge",
+                identifier = safe_name,
+            )
+
+        target_artifact_list.append(target_out)
+        target_outputs[label_str] = ctx.output.ensure(target_out)
+
+    # Merge all per-target artifacts into the global .vycs / .mgsc artifact.
+    ext = ctx.cli_args.index_format
+    if ext.startswith("."):
+        ext = ext[1:]
+    merge_ext = "mgsc" if ext == "shard.json" else (ext if ext else "vycs")
+    global_out = bxl_actions.declare_output("global/megascope." + merge_ext)
+    if len(target_artifact_list) == 1:
+        bxl_actions.copy_file(global_out.as_output(), target_artifact_list[0])
+    else:
+        global_list_file = bxl_actions.write("global/targets.list", cmd_args(target_artifact_list))
+        global_cmd = cmd_args(
+            vycor_exe,
+            "megascope",
+            "merge",
+            "--no-wait",
+            "--output",
+            global_out.as_output(),
+            "--input-list",
+            global_list_file,
+            hidden = target_artifact_list,
+        )
+        for ep in ctx.cli_args.entry_points:
+            global_cmd.add("--entry-point", ep)
+        bxl_actions.run(
+            global_cmd,
+            category = "vycor_bxl_global_merge",
+            identifier = "global",
+        )
+
+    ensured_global = ctx.output.ensure(global_out)
+    _emit_json(ctx, {
+        "global_index": ensured_global,
+        "target_indexes": target_outputs,
+        "tu_shards": all_tu_outputs,
+    })
+
+index = bxl_main(
+    impl = _index_impl,
+    doc = "Builds per-TU .vycs/.mgsc/.shard.json shards, per-target indexes, and a merged global index for any Buck2 C/C++ target pattern.",
+    cli_args = {
+        "collapse_paths": cli_args.list(cli_args.string(), default = [], doc = "Path patterns to collapse in the call graph."),
+        "cxx_standard": cli_args.string(default = "c++17", doc = "Default C++ standard flag."),
+        "entry_points": cli_args.list(cli_args.string(), default = ["main"], doc = "Entry-point function names."),
+        "index_format": cli_args.string(default = "vycs", doc = "Output shard/snapshot format extension: 'vycs', 'mgsc', or 'shard.json'."),
+        "targets": cli_args.list(cli_args.string(), default = ["//..."], doc = "Target patterns to index."),
+        "vycor_executable": cli_args.string(default = "vycor-cpp", doc = "Path or binary name of vycor-cpp."),
+    },
+)
+
+def _check_impl(ctx: bxl.Context):
+    bxl_actions = ctx.bxl_actions().actions
+    vycor_exe = ctx.cli_args.vycor_executable
+    cxx_std = ctx.cli_args.cxx_standard
+
+    cxx_nodes = _collect_cxx_targets(ctx, ctx.cli_args.targets)
+    if not cxx_nodes:
+        _emit_json(ctx, {
+            "error": "No C/C++ targets with sources matched the given --targets patterns.",
+            "targets": ctx.cli_args.targets,
+        })
+        return
+
+    all_srcs = []
+    seen_srcs = {}
+    all_headers = []
+    seen_hdrs = {}
+    include_dirs = []
+    seen_pkgs = {}
+    for node, attrs, cxx_srcs in cxx_nodes:
+        for s in cxx_srcs:
+            skey = getattr(s, "short_path", str(s))
+            if skey not in seen_srcs:
+                seen_srcs[skey] = True
+                all_srcs.append(s)
+        pkg = node.label.package
+        if pkg and pkg not in seen_pkgs:
+            seen_pkgs[pkg] = True
+            include_dirs.append(pkg)
+            include_dirs.append(pkg + "/include")
+        for hdr_attr in ("headers", "exported_headers"):
+            ha = attrs.get(hdr_attr)
+            if ha != None:
+                for h in _extract_artifacts(ha.value()):
+                    hkey = getattr(h, "short_path", str(h))
+                    if hkey not in seen_hdrs:
+                        seen_hdrs[hkey] = True
+                        all_headers.append(h)
+
+    ext = "sarif" if ctx.cli_args.format == "sarif" else ("json" if ctx.cli_args.format == "json" else "txt")
+    report_out = bxl_actions.declare_output("check/report." + ext)
+    src_list = bxl_actions.write("check/sources.list", all_srcs)
+
+    cmd = cmd_args(
+        vycor_exe,
+        "check",
+        "--format",
+        ctx.cli_args.format,
+        "--fail-on",
+        ctx.cli_args.fail_on,
+        "--output",
+        report_out.as_output(),
+        "--source-list",
+        src_list,
+        hidden = all_srcs + all_headers,
+    )
+    if ctx.cli_args.checks:
+        cmd.add("--checks=" + ctx.cli_args.checks)
+    cmd.add("--", "-std=" + cxx_std, "-I.")
+    for inc in include_dirs:
+        cmd.add("-I" + inc)
+
+    bxl_actions.run(
+        cmd,
+        category = "vycor_bxl_check",
+        identifier = "check",
+    )
+    ensured_report = ctx.output.ensure(report_out)
+    _emit_json(ctx, {"report": ensured_report})
+
+check = bxl_main(
+    impl = _check_impl,
+    doc = "Runs vycor-cpp check across all C/C++ targets matching --targets and writes a SARIF/JSON/text report.",
+    cli_args = {
+        "checks": cli_args.string(default = "", doc = "Comma-separated check specification passed to --checks."),
+        "cxx_standard": cli_args.string(default = "c++17", doc = "Default C++ standard flag."),
+        "fail_on": cli_args.string(default = "none", doc = "Severity threshold to fail the action: note, warning, error, or none."),
+        "format": cli_args.string(default = "sarif", doc = "Report format: sarif, json, or text."),
+        "targets": cli_args.list(cli_args.string(), default = ["//..."], doc = "Target patterns to analyze."),
+        "vycor_executable": cli_args.string(default = "vycor-cpp", doc = "Path or binary name of vycor-cpp."),
+    },
+)

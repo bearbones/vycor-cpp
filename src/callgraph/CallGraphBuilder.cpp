@@ -262,6 +262,14 @@ bool CallGraphIndexerVisitor::TraverseCXXDestructorDecl(
   return result;
 }
 
+bool CallGraphIndexerVisitor::TraverseCXXConversionDecl(
+    clang::CXXConversionDecl *decl) {
+  funcStack_.push_back(decl);
+  bool result = RecursiveASTVisitor::TraverseCXXConversionDecl(decl);
+  funcStack_.pop_back();
+  return result;
+}
+
 bool CallGraphIndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   if (decl->isImplicit())
     return true;
@@ -311,9 +319,10 @@ bool CallGraphIndexerVisitor::VisitCXXRecordDecl(
     if (!method->isVirtual() || method->isImplicit())
       continue;
 
+    std::string methodUsr = usrs_.identFor(method).usr;
     for (auto *overridden : method->overridden_methods()) {
       graph_.addMethodOverride(usrs_.identFor(overridden).usr,
-                               usrs_.identFor(method).usr, tuPath_);
+                               methodUsr, tuPath_);
     }
   }
 
@@ -550,6 +559,14 @@ bool CallGraphEdgeVisitor::TraverseCXXDestructorDecl(
     clang::CXXDestructorDecl *decl) {
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseCXXDestructorDecl(decl);
+  funcStack_.pop_back();
+  return result;
+}
+
+bool CallGraphEdgeVisitor::TraverseCXXConversionDecl(
+    clang::CXXConversionDecl *decl) {
+  funcStack_.push_back(decl);
+  bool result = RecursiveASTVisitor::TraverseCXXConversionDecl(decl);
   funcStack_.pop_back();
   return result;
 }

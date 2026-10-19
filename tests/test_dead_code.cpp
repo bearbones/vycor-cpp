@@ -17,7 +17,7 @@
 
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CallGraphBuilder.h"
-#include "vycor/anneal/DeadCodeAnalyzer.h"
+#include "vycor/check/DeadCodeAnalyzer.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <clang/Tooling/CompilationDatabase.h>

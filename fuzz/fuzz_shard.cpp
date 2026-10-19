@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// fuzz_shard — the files anneal --isolate-workers passes between
-// processes: phase-1 index shards (readAnnealIndexShard), phase-2
-// diagnostics shards (readAnnealDiagShard), and the merged-index handoff
+// fuzz_shard — the files check --isolate-workers passes between
+// processes: phase-1 index shards (readCheckIndexShard), phase-2
+// diagnostics shards (readCheckDiagShard), and the merged-index handoff
 // (readGlobalIndexFile). (megascope's bake shards are index files: see
 // fuzz_snapshot, whose Mutable leg is the shard merge.)
 //
@@ -29,9 +29,9 @@
 
 #include "FuzzCommon.h"
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/Checkpoint.h"
-#include "vycor/anneal/GlobalIndex.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/Checkpoint.h"
+#include "vycor/check/GlobalIndex.h"
 
 #include <cstdint>
 #include <cstring>
@@ -68,7 +68,7 @@ void reseal(std::string &image) {
     if (image.size() - payload < static_cast<size_t>(len) + 4)
       return;
     st32(image, payload + len,
-         annealRecordChecksum(image.data() + payload, len));
+         checkRecordChecksum(image.data() + payload, len));
     pos = payload + len + 4;
   }
 }
@@ -108,25 +108,25 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   std::vector<Diagnostic> diags;
   switch (which) {
   case 0: {
-    std::vector<std::pair<std::string, AnnealIndexPayload>> tus;
+    std::vector<std::pair<std::string, CheckIndexPayload>> tus;
     std::vector<TuOutcome> outcomes;
-    if (readAnnealIndexShard(
+    if (readCheckIndexShard(
             path,
-            [&](const std::string &tu, const AnnealIndexPayload &payload) {
+            [&](const std::string &tu, const CheckIndexPayload &payload) {
               payload.applyTo(index);
               tus.emplace_back(tu, payload);
             },
             [&](const std::string &, const TuOutcome &outcome) {
               outcomes.push_back(outcome);
             }))
-      (void)writeAnnealIndexShard(rewritten, tus, outcomes);
+      (void)writeCheckIndexShard(rewritten, tus, outcomes);
     runIndexChecks(index, diags);
     break;
   }
   case 1: {
     std::vector<std::pair<std::string, std::vector<Diagnostic>>> tus;
     std::vector<TuOutcome> outcomes;
-    if (readAnnealDiagShard(
+    if (readCheckDiagShard(
             path,
             [&](const std::string &tu, std::vector<Diagnostic> got) {
               diags.insert(diags.end(), got.begin(), got.end());
@@ -135,7 +135,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             [&](const std::string &, const TuOutcome &outcome) {
               outcomes.push_back(outcome);
             }))
-      (void)writeAnnealDiagShard(rewritten, tus, outcomes);
+      (void)writeCheckDiagShard(rewritten, tus, outcomes);
     break;
   }
   default:

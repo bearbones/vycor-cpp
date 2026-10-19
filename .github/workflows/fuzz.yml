@@ -49,16 +49,16 @@ jobs:
           set -euo pipefail
           common='^(fuzz/(CMakeLists\.txt|FuzzCommon\.h|fuzz_seeds\.cpp)|\.github/workflows/fuzz\.yml|(src/)?CMakeLists\.txt)$'
           # Code a target executes, beyond its parser: the snapshot target
-          # runs every tool, dump and save over what it loads; the anneal
+          # runs every tool, dump and save over what it loads; the check
           # targets run every index-only check and write back; batch loads a
           # real index and answers every tool.
           index='src/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile)\.cpp|include/vycor/callgraph/(Snapshot|ControlFlowIndex|CallGraph|ChannelIndex|PathSearch|ControlFlowOracle|AtomicFile|StringInterner|Utf8)\.h'
           tools='src/(query|impact)/.*|include/vycor/(query|impact)/.*'
-          anneal='src/anneal/(Checkpoint|GlobalIndex|Analyzer)\.cpp|include/vycor/anneal/(Checkpoint|GlobalIndex|Analyzer)\.h|src/callgraph/AtomicFile\.cpp|include/vycor/callgraph/AtomicFile\.h'
+          check='src/check/(Checkpoint|GlobalIndex|Analyzer)\.cpp|include/vycor/check/(Checkpoint|GlobalIndex|Analyzer)\.h|src/callgraph/AtomicFile\.cpp|include/vycor/callgraph/AtomicFile\.h'
           declare -A paths=(
             [snapshot]="^(${index}|${tools}|tests/SnapshotBytes\.h|fuzz/fuzz_snapshot\.cpp)\$"
-            [checkpoint]="^(${anneal}|fuzz/fuzz_checkpoint\.cpp)\$"
-            [shard]="^(${anneal}|fuzz/fuzz_shard\.cpp)\$"
+            [checkpoint]="^(${check}|fuzz/fuzz_checkpoint\.cpp)\$"
+            [shard]="^(${check}|fuzz/fuzz_shard\.cpp)\$"
             [batch]="^(${index}|${tools}|src/cli/MegascopeCli\.cpp|include/vycor/cli/MegascopeCli\.h|fuzz/fuzz_batch\.cpp)\$"
           )
           targets=""

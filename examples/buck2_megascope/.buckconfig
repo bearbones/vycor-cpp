@@ -1,0 +1,6 @@
+[repositories]
+root = .
+vycor = ../..
+
+[project]
+ignore = .git, buck-out

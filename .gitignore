@@ -63,3 +63,9 @@ bench-out/
 
 # megascope default index location (megascope index --build-path <dir>)
 .vycor/
+*.vycs.lock
+*.vycj.lock
+
+# Buck2 build outputs and daemon state
+buck-out/
+.buckd/

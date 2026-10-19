@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/GlobalIndex.h"
-#include "vycor/anneal/Indexer.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/GlobalIndex.h"
+#include "vycor/check/Indexer.h"
 
 #include "clang/Tooling/Tooling.h"
 

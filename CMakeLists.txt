@@ -20,7 +20,7 @@ configure_file(
 # --- Organization override hook ---
 # Forks can add cmake/org-overrides.cmake to customize dependency resolution,
 # set CMAKE_PREFIX_PATH, define wrapper targets, etc. This file is gitignored
-# upstream and committed in org forks. See docs/toolchain-portability.md.
+# upstream and committed in org forks. See docs/EXTENDING.md.
 include(cmake/org-overrides.cmake OPTIONAL)
 
 # --- Options ---
@@ -31,32 +31,81 @@ set(VYCOR_DEFAULT_CLANG "clang++" CACHE STRING
 # --- LLVM/Clang: prefer system packages, fall back to submodule ---
 # Supported LLVM versions, checked in order (newest first).
 # To add a new version, append it to this list.
-set(VYCOR_SUPPORTED_LLVM_VERSIONS 21 20 18)
+set(VYCOR_SUPPORTED_LLVM_VERSIONS 22 21 20 18)
 
 set(LLVM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/extern/llvm-project/llvm")
+
+# If the caller explicitly pinned LLVM via LLVM_DIR or CMAKE_PREFIX_PATH,
+# honor that first before probing default /usr/lib/llvm-NN locations.
+if(LLVM_DIR OR CMAKE_PREFIX_PATH)
+  if(CMAKE_PREFIX_PATH)
+    foreach(_pfx IN LISTS CMAKE_PREFIX_PATH)
+      if(EXISTS "${_pfx}/lib/cmake/llvm/LLVMConfig.cmake")
+        set(LLVM_DIR "${_pfx}/lib/cmake/llvm" CACHE PATH "" FORCE)
+        break()
+      endif()
+    endforeach()
+  endif()
+  find_package(LLVM CONFIG QUIET
+    PATHS ${LLVM_DIR} ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES lib/cmake/llvm
+    NO_DEFAULT_PATH)
+  if(LLVM_FOUND)
+    list(FIND VYCOR_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
+    if(_idx GREATER_EQUAL 0)
+      unset(Clang_DIR CACHE)
+      find_package(Clang CONFIG QUIET
+        PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+              "${LLVM_DIR}/../clang"
+        NO_DEFAULT_PATH)
+      if(NOT Clang_FOUND)
+        find_package(Clang CONFIG QUIET
+          HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+                "${LLVM_DIR}/../clang")
+      endif()
+    else()
+      message(WARNING "Found LLVM ${LLVM_PACKAGE_VERSION}, but only versions "
+              "${VYCOR_SUPPORTED_LLVM_VERSIONS} are supported.")
+    endif()
+    if(NOT Clang_FOUND)
+      unset(LLVM_FOUND)
+      unset(LLVM_DIR CACHE)
+      unset(LLVM_INSTALL_PREFIX)
+      unset(Clang_FOUND)
+      unset(Clang_DIR CACHE)
+    endif()
+  endif()
+endif()
 
 # Try each supported version by probing well-known install paths.
 # LLVM's version-compat file requires major.minor to match exactly, so we
 # search without a version constraint and verify the major version ourselves.
-foreach(_ver IN LISTS VYCOR_SUPPORTED_LLVM_VERSIONS)
-  find_package(LLVM CONFIG QUIET
-    PATHS "/usr/lib/llvm-${_ver}/lib/cmake/llvm"
-    NO_DEFAULT_PATH)
-  if(LLVM_FOUND AND LLVM_VERSION_MAJOR STREQUAL "${_ver}")
-    find_package(Clang CONFIG QUIET
-      HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
-            "${LLVM_DIR}/../clang")
-    if(Clang_FOUND)
-      break()
+if(NOT LLVM_FOUND)
+  foreach(_ver IN LISTS VYCOR_SUPPORTED_LLVM_VERSIONS)
+    if(EXISTS "/usr/lib/llvm-${_ver}/lib/cmake/llvm/LLVMConfig.cmake")
+      set(LLVM_DIR "/usr/lib/llvm-${_ver}/lib/cmake/llvm" CACHE PATH "" FORCE)
     endif()
-  endif()
-  # Reset state so the next iteration starts clean.
-  unset(LLVM_FOUND)
-  unset(LLVM_DIR CACHE)
-  unset(LLVM_INSTALL_PREFIX)
-  unset(Clang_FOUND)
-  unset(Clang_DIR CACHE)
-endforeach()
+    find_package(LLVM CONFIG QUIET
+      PATHS "/usr/lib/llvm-${_ver}/lib/cmake/llvm"
+      NO_DEFAULT_PATH)
+    if(LLVM_FOUND AND LLVM_VERSION_MAJOR STREQUAL "${_ver}")
+      unset(Clang_DIR CACHE)
+      find_package(Clang CONFIG QUIET
+        PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+              "${LLVM_DIR}/../clang"
+        NO_DEFAULT_PATH)
+      if(Clang_FOUND)
+        break()
+      endif()
+    endif()
+    # Reset state so the next iteration starts clean.
+    unset(LLVM_FOUND)
+    unset(LLVM_DIR CACHE)
+    unset(LLVM_INSTALL_PREFIX)
+    unset(Clang_FOUND)
+    unset(Clang_DIR CACHE)
+  endforeach()
+endif()
 
 # If the well-known paths didn't work, try CMAKE_PREFIX_PATH / system paths.
 if(NOT LLVM_FOUND)
@@ -64,6 +113,7 @@ if(NOT LLVM_FOUND)
   if(LLVM_FOUND)
     list(FIND VYCOR_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
     if(_idx GREATER_EQUAL 0)
+      unset(Clang_DIR CACHE)
       find_package(Clang CONFIG QUIET
         HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
               "${LLVM_DIR}/../clang")

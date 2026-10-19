@@ -19,7 +19,7 @@
 // stack without its fix — the before/after record is in the PR that added
 // this file.
 
-#include "vycor/anneal/Analyzer.h"
+#include "vycor/check/Analyzer.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
@@ -87,7 +87,7 @@ struct ScratchDir {
 // A fake worker: prints a WORKER-TU marker per TU (every `pause` seconds),
 // hangs forever on any TU whose path contains "hang", and otherwise exits 0
 // after copying `shard` (when given) to its --worker-out path. Accepts both
-// a bare TU list and the production megascope/anneal argv.
+// a bare TU list and the production megascope/check argv.
 std::string fakeWorkerScript(const ScratchDir &d, const std::string &shard,
                              const char *pause = "0") {
   return d.write("fake-worker.sh",
@@ -98,7 +98,7 @@ std::string fakeWorkerScript(const ScratchDir &d, const std::string &shard,
                              "  case \"$1\" in\n"
                              "    --worker-out) out=\"$2\"; shift ;;\n"
                              "    --source) tus=\"$tus $2\"; shift ;;\n"
-                             "    -*|megascope|anneal) ;;\n"
+                             "    -*|megascope|check) ;;\n"
                              "    *) tus=\"$tus $1\" ;;\n"
                              "  esac\n"
                              "  shift\n"
@@ -194,7 +194,7 @@ TEST_CASE("bakeIsolated: a hung megascope worker is recorded as timeout",
   CHECK_FALSE(out.outcomes.count("/tu/ok.cpp")); // clean: shard had none
 }
 
-TEST_CASE("anneal isolatedRunner: a hung worker does not hang the analysis",
+TEST_CASE("check isolatedRunner: a hung worker does not hang the analysis",
           "[containment][worker-timeout]") {
   ScratchDir d;
   const std::string script = fakeWorkerScript(d, "");
@@ -208,7 +208,7 @@ TEST_CASE("anneal isolatedRunner: a hung worker does not hang the analysis",
                             const std::string &, const std::string &log) {
     std::vector<std::string> argv{script};
     argv.insert(argv.end(), batch.begin(), batch.end());
-    int rc = runWorkerProcess(argv, log, limits, "anneal");
+    int rc = runWorkerProcess(argv, log, limits, "check");
     if (rc == kWorkerTimedOut)
       ++timedOut;
     return rc;

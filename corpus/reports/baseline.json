@@ -5125,7 +5125,7 @@
   },
   {
    "name": "odr_divergence",
-   "title": "Vague-linkage definitions that differ across TUs (anneal --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
+   "title": "Vague-linkage definitions that differ across TUs (check --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
    "commands": [
     {
      "argv": [
@@ -5149,7 +5149,7 @@
     },
     {
      "argv": [
-      "anneal",
+      "check",
       "--odr-diag",
       "--threads",
       "1",
@@ -5163,7 +5163,7 @@
     },
     {
      "argv": [
-      "anneal",
+      "check",
       "--threads",
       "1",
       "--build-path",
@@ -5201,7 +5201,7 @@
       {
        "id": "odr-diag",
        "argv": [
-        "anneal",
+        "check",
         "--odr-diag",
         "--threads",
         "1",
@@ -5277,7 +5277,7 @@
       {
        "id": "no-odr-without-the-check",
        "argv": [
-        "anneal",
+        "check",
         "--threads",
         "1",
         "--build-path",
@@ -5291,7 +5291,7 @@
         "exit": 0,
         "lines": {
          "present": [
-          "^anneal: no issues found"
+          "^check: no issues found"
          ],
          "absent": [
           "ODR violation"
@@ -5301,7 +5301,7 @@
        "observed": {
         "exit": 0,
         "payload": null,
-        "stdout": "anneal: no issues found.\n"
+        "stdout": "check: no issues found.\n"
        },
        "declared": {},
        "checks": [
@@ -5313,7 +5313,7 @@
         {
          "kind": "line-present",
          "ok": true,
-         "detail": "expected a line matching '^anneal: no issues found'"
+         "detail": "expected a line matching '^check: no issues found'"
         },
         {
          "kind": "line-absent",

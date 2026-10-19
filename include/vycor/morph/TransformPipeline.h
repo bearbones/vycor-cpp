@@ -35,7 +35,9 @@ public:
   // tried in order for each source file (first match wins).
   // Returns 0 on success, nonzero on failure.
   int execute(const std::vector<std::string> &buildPaths,
-              const std::vector<std::string> &sourceFiles, bool dryRun = false);
+              const std::vector<std::string> &sourceFiles, bool dryRun = false,
+              const std::vector<std::string> &fixedCompileArgs = {},
+              bool hasFixedCompileArgs = false);
 
   // Retrieve all accumulated replacements across all passes, keyed by file.
   const std::map<std::string, clang::tooling::Replacements> &

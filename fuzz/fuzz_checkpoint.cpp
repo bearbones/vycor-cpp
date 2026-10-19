@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// fuzz_checkpoint — anneal's --checkpoint journal: open (header check,
+// fuzz_checkpoint — check's --checkpoint journal: open (header check,
 // record load, damaged-tail truncation) and replay.
 //
 // Input: one flags byte, then the journal file image. The journal header's
@@ -28,9 +28,9 @@
 
 #include "FuzzCommon.h"
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/Checkpoint.h"
-#include "vycor/anneal/GlobalIndex.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/Checkpoint.h"
+#include "vycor/check/GlobalIndex.h"
 
 #include <cstdint>
 #include <cstring>
@@ -82,7 +82,7 @@ std::vector<Named> walkRecords(std::string &image, bool reseal) {
       break;
     if (reseal)
       st32(image, payload + len,
-           annealRecordChecksum(image.data() + payload, len));
+           checkRecordChecksum(image.data() + payload, len));
     // attempt: phase u8, tu str, mtime u64, size u64
     // phase 1: tu str, mtime u64, size u64, ...
     // phase 2: tu str, mtime u64, size u64, indexSetHash u64, ...
@@ -127,14 +127,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   const std::string path = fuzz::scratchPath("journal.ckpt");
   fuzz::writeScratch(path, image);
 
-  auto ckpt = AnnealCheckpoint::open(path, fingerprint);
+  auto ckpt = CheckCheckpoint::open(path, fingerprint);
   if (!ckpt)
     return 0;
   GlobalIndex index;
   std::vector<Diagnostic> diags;
   for (const auto &n : named) {
-    (void)ckpt->attempts(AnnealCheckpoint::kPhaseIndex, n.stamp.path, n.stamp);
-    (void)ckpt->attempts(AnnealCheckpoint::kPhaseAnalyze, n.stamp.path,
+    (void)ckpt->attempts(CheckCheckpoint::kPhaseIndex, n.stamp.path, n.stamp);
+    (void)ckpt->attempts(CheckCheckpoint::kPhaseAnalyze, n.stamp.path,
                          n.stamp);
     (void)ckpt->replayPhase1(n.stamp.path, n.stamp, index);
     (void)ckpt->replayPhase2(n.stamp.path, n.stamp, n.indexSetHash, diags);
@@ -155,8 +155,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   // Appending after a load: lands behind the last valid record.
   FileStamp stamp;
   stamp.path = "fuzz.cpp";
-  ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, stamp.path, stamp);
+  ckpt->recordAttempt(CheckCheckpoint::kPhaseIndex, stamp.path, stamp);
   ckpt.reset();
-  (void)AnnealCheckpoint::open(path, fingerprint);
+  (void)CheckCheckpoint::open(path, fingerprint);
   return 0;
 }

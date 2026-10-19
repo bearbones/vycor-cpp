@@ -53,23 +53,17 @@ TEST_CASE("Example files are loadable", "[transforms][smoke]") {
     CHECK_FALSE(expected.empty());
     CHECK(input != expected);
   }
+
+  SECTION("TransformPipeline executes with fixed compile args and no build-path") {
+    vycor::TransformPipeline pipeline;
+    std::string inputPath =
+        std::string(PROJECT_SOURCE_DIR) + "/examples/macro_split/input.cpp";
+    CHECK(pipeline.execute({}, {inputPath}, /*dryRun=*/true, {"-std=c++17"},
+                           /*hasFixedCompileArgs=*/true) == 0);
+    CHECK(pipeline.execute({}, {inputPath}, /*dryRun=*/true, {},
+                           /*hasFixedCompileArgs=*/true) == 0);
+    CHECK(pipeline.execute({}, {inputPath}, /*dryRun=*/true, {},
+                           /*hasFixedCompileArgs=*/false) != 0);
+  }
 }
 
-// Placeholder for future integration tests that will run actual transforms
-// on the example inputs and compare against expected outputs.
-//
-// TEST_CASE("Macro split transform", "[transforms][macro_split]") {
-//   // 1. Load examples/macro_split/input.cpp
-//   // 2. Set up transform rules for boolean macro splitting
-//   // 3. Run MatcherEngine on the input
-//   // 4. Apply replacements
-//   // 5. Compare result to examples/macro_split/expected.cpp
-// }
-//
-// TEST_CASE("Builder to struct transform", "[transforms][builder_to_struct]") {
-//   // 1. Load examples/builder_to_struct/input.cpp
-//   // 2. Set up transform rules for builder-to-struct conversion
-//   // 3. Run MatcherEngine on the input
-//   // 4. Apply replacements
-//   // 5. Compare result to examples/builder_to_struct/expected.cpp
-// }

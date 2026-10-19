@@ -21,7 +21,11 @@
 #include "vycor/callgraph/ControlFlowOracle.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <clang/Tooling/CompilationDatabase.h>
 #include <clang/Tooling/Tooling.h>
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 #include <string>
 
 using namespace vycor;
@@ -522,3 +526,138 @@ TEST_CASE("Exception type matching through hierarchy",
     CHECK(result.protection == Protection::AlwaysCaught);
   }
 }
+
+TEST_CASE("Assertion guards are scoped to their lexical block and function",
+          "[prism][visitor][assertions]") {
+  llvm::SmallString<128> tmpPath;
+  REQUIRE(!llvm::sys::fs::createTemporaryFile("vycor-assert-scope", "cpp",
+                                              tmpPath));
+  std::string srcPath = std::string(tmpPath.str());
+  {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(srcPath, ec);
+    REQUIRE(!ec);
+    os << R"cpp(
+      void DCHECK(bool cond) {}
+      void insideBlock() {}
+      void afterBlock() {}
+      void inElseBranch() {}
+      void inLambda() {}
+      void inSecondFunc() {}
+
+      void firstFunc(int x) {
+        {
+          DCHECK(x > 0);
+          insideBlock();
+        }
+        if (x > 10)
+          DCHECK(x > 20);
+        else
+          inElseBranch();
+        while (x > 100)
+          DCHECK(x > 200);
+        auto fn = [x]() {
+          DCHECK(x > 300);
+          inLambda();
+        };
+        (void)fn;
+        afterBlock();
+      }
+
+      void secondFunc(int y) {
+        inSecondFunc();
+      }
+    )cpp";
+  }
+
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  auto baked = bakeIndexes(compDb, {srcPath}, {}, 1);
+  llvm::sys::fs::remove(srcPath);
+
+  auto insideCtxs = baked.cfIndex.contextsForCallee("insideBlock");
+  REQUIRE(insideCtxs.size() == 1);
+  REQUIRE(insideCtxs[0].enclosingGuards.size() == 1);
+  CHECK(insideCtxs[0].enclosingGuards[0].isAssertion);
+  CHECK(insideCtxs[0].enclosingGuards[0].conditionText == "x > 0");
+
+  auto lambdaCtxs = baked.cfIndex.contextsForCallee("inLambda");
+  REQUIRE(lambdaCtxs.size() == 1);
+  CHECK(lambdaCtxs[0].callerName.rfind("lambda#", 0) == 0);
+  CHECK(lambdaCtxs[0].callerUsr.rfind("vycor-lambda:lambda#", 0) == 0);
+  REQUIRE(lambdaCtxs[0].enclosingGuards.size() == 1);
+  CHECK(lambdaCtxs[0].enclosingGuards[0].isAssertion);
+  CHECK(lambdaCtxs[0].enclosingGuards[0].conditionText == "x > 300");
+
+  // Assertion inside the inner block, if-then branch, while loop, or lambda
+  // must not leak to sibling else-branch, outer block after the inner block,
+  // or secondFunc.
+  auto elseCtxs = baked.cfIndex.contextsForCallee("inElseBranch");
+  REQUIRE(elseCtxs.size() == 1);
+  for (const auto &g : elseCtxs[0].enclosingGuards)
+    CHECK_FALSE(g.isAssertion);
+
+  auto afterCtxs = baked.cfIndex.contextsForCallee("afterBlock");
+  REQUIRE(afterCtxs.size() == 1);
+  CHECK(afterCtxs[0].enclosingGuards.empty());
+
+  auto secondCtxs = baked.cfIndex.contextsForCallee("inSecondFunc");
+  REQUIRE(secondCtxs.size() == 1);
+  CHECK(secondCtxs[0].enclosingGuards.empty());
+}
+
+TEST_CASE("CXXConversionDecl pushes its own function scope in graph and CF visitors",
+          "[prism][visitor][conversion]") {
+  llvm::SmallString<128> tmpPath;
+  REQUIRE(!llvm::sys::fs::createTemporaryFile("vycor-conv-decl", "cpp",
+                                              tmpPath));
+  std::string srcPath = std::string(tmpPath.str());
+  {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(srcPath, ec);
+    REQUIRE(!ec);
+    os << R"cpp(
+      int computeValue() { return 42; }
+      void outerHelper() {}
+      void outerFunc() {
+        struct LocalConverter {
+          operator int() const {
+            return computeValue();
+          }
+        };
+        LocalConverter c;
+        int v = c;
+        (void)v;
+        outerHelper();
+      }
+    )cpp";
+  }
+
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  auto baked = bakeIndexes(compDb, {srcPath}, {}, 1);
+  llvm::sys::fs::remove(srcPath);
+
+  auto callers = baked.graph.callersOf("computeValue");
+  REQUIRE(callers.size() == 1);
+  CHECK(callers[0].callerName.find("operator int") != std::string::npos);
+
+  auto cfCtxs = baked.cfIndex.contextsForCallee("computeValue");
+  REQUIRE(cfCtxs.size() == 1);
+  CHECK(cfCtxs[0].callerName.find("operator int") != std::string::npos);
+}
+
+TEST_CASE("ControlFlowIndex::removeTUs deduplicates TU paths",
+          "[prism][index]") {
+  ControlFlowIndex index;
+  CallSiteContext ctx;
+  ctx.callerName = "f";
+  ctx.calleeName = "g";
+  ctx.callSite = "/src/a.cpp:10:3";
+  ctx.tuPath = "/src/a.cpp";
+  index.addCallSiteContext(std::move(ctx));
+  REQUIRE(index.size() == 1);
+
+  size_t removed = index.removeTUs({"/src/a.cpp", "/src/a.cpp"});
+  CHECK(removed == 1);
+  CHECK(index.size() == 0);
+}
+

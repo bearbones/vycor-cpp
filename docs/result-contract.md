@@ -1,10 +1,9 @@
 # Shared result and completeness contract
 
-Status: implemented on `main`. Owner: package C of
-`docs/plans/2026-09-next/`. This page is the contract every megascope
+This page is the contract every megascope
 transport (the CLI verbs and `batch`) follows for a
-tool result, and the interface the diff/impact tools (package E) and the
-validation corpus (package D) build on.
+tool result, and the interface the diff/impact tools and the
+validation corpus build on.
 
 Modules: `include/vycor/query/Tools.h` (`ResultStatus`, `IndexFacts`,
 `ToolContext::facts`, the typed error constructors, `runTool`,
@@ -292,9 +291,9 @@ ambiguous). One mapping changed: an `unavailable` error exited 1 before
 (it was an error with no reserved prefix); it is an index problem and
 now exits 3.
 
-### anneal exit codes
+### check exit codes
 
-`vycor-cpp anneal` is not a megascope tool and has no `status`
+`vycor-cpp check` is not a megascope tool and has no `status`
 payload, but its exit codes follow the same pattern (0 clean, 1
 findings, 2 usage, 3 incomplete facts) so one CI script can read both:
 
@@ -307,7 +306,7 @@ findings, 2 usage, 3 incomplete facts) so one CI script can read both:
 
 Parse failures take precedence over findings: an incomplete analysis
 exits 3 even when it also found something, and it never prints
-`anneal: no issues found.`. With `--allow-parse-failures` the failed
+`check: no issues found.`. With `--allow-parse-failures` the failed
 TUs are a warning on stderr and the exit code is decided by the
 findings alone. `--fail-on none` makes findings never fail the run;
 `--fail-on warning` / `error` raise the bar (severities per check in
@@ -385,8 +384,7 @@ Scripts that classified errors by message prefix should read `status`;
 the prefixes still happen to hold for the current messages but are no
 longer a contract.
 
-Unknown identities, paging, and aliases (package K of
-`docs/plans/2026-09-hardening/`) changed these; the exit codes did not:
+Unknown identities, paging, and aliases:
 
 - an unknown function name or usr is `not_found` (exit 1, as before)
   where it was `ok` with an empty record list, on every

@@ -28,7 +28,7 @@ usually burns days, because nothing crashed and the stack is inside the
 loader.
 
 No single-TU tool can see this: the `dlopen` is typically several calls
-deep, across files, from an initializer that looks harmless. anneal has
+deep, across files, from an initializer that looks harmless. check has
 the initializer roots (phase-1 index) and the cross-TU call graph, so the
 reachability question is answerable at PR time.
 
@@ -55,7 +55,7 @@ loader.cpp:9: Static-init hazard: the dynamic initializer of 'myorg::gLoader'
 ## Usage
 
 ```bash
-vycor-cpp anneal --build-path build --source ... --checks=static-init-hazards
+vycor-cpp check --build-path build --source ... --checks=static-init-hazards
 ```
 
 Grouped **compute-heavy**: it builds the full cross-TU call graph (shared

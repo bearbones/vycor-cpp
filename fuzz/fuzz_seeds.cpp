@@ -20,7 +20,7 @@
 //
 //   <out>/snapshot/   index files (flag byte 0x01 = reseal), baked from a
 //                     small all-features TU
-//   <out>/checkpoint/ an anneal journal (flag byte 0x01 = reseal) from a
+//   <out>/checkpoint/ an check journal (flag byte 0x01 = reseal) from a
 //                     cold run over an ADL-fragile fixture
 //   <out>/shard/      an index shard, a diagnostics shard, and a merged
 //                     index handoff file (flag byte 0x04 = reseal)
@@ -32,9 +32,9 @@
 
 #include "FuzzCommon.h"
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/Checkpoint.h"
-#include "vycor/anneal/GlobalIndex.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/Checkpoint.h"
+#include "vycor/check/GlobalIndex.h"
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/query/Tools.h"
 
@@ -197,12 +197,12 @@ void snapshotSeeds(std::string &deepChainsIndex) {
   // batch seeds draw their arguments from it.
 }
 
-// tests/test_anneal_checkpoint.cpp's fixture shape: user_a.cpp sees only
+// tests/test_check_checkpoint.cpp's fixture shape: user_a.cpp sees only
 // core.hpp's int overload while user_b.cpp's ext.hpp adds a double one (an
 // ADL fallback), plus an inline function and a default argument the two
 // TUs define differently (ODR, default-arg divergence), a dynamic
 // initializer, and a noexcept function reaching a throw.
-void annealSeeds() {
+void checkSeeds() {
   writeSource("core.hpp", R"cpp(
 #pragma once
 namespace MathLib {
@@ -280,10 +280,10 @@ void use_b() {
   writeSeed("checkpoint/journal", "\x01" + readFile(opts.checkpointPath));
 
   const std::vector<TuOutcome> clean{TuOutcome{TuStatus::Indexed, ""}};
-  if (!writeAnnealIndexShard(fuzz::scratchPath("index.shard"),
-                             {{a, AnnealIndexPayload::capture(merged)}},
+  if (!writeCheckIndexShard(fuzz::scratchPath("index.shard"),
+                             {{a, CheckIndexPayload::capture(merged)}},
                              clean) ||
-      !writeAnnealDiagShard(fuzz::scratchPath("diag.shard"), {{a, diags}},
+      !writeCheckDiagShard(fuzz::scratchPath("diag.shard"), {{a, diags}},
                             clean) ||
       !writeGlobalIndexFile(fuzz::scratchPath("global.index"), merged)) {
     std::fprintf(stderr, "fuzz_seeds: cannot write the shard seeds\n");
@@ -347,7 +347,7 @@ int main(int argc, char **argv) {
   gOut = argv[1];
   std::string deepChainsIndex;
   snapshotSeeds(deepChainsIndex);
-  annealSeeds();
+  checkSeeds();
   batchSeeds(deepChainsIndex);
   return 0;
 }

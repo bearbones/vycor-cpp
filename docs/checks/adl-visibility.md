@@ -15,7 +15,7 @@ header this TU didn't include and would have won. The program compiles,
 links, and calls the wrong overload — silently, and differently per TU
 depending on include order.
 
-anneal's phase 1 indexes every overload in the project; phase 2 re-ranks
+check's phase 1 indexes every overload in the project; phase 2 re-ranks
 each ADL call site against the *global* candidate set:
 
 - **`ADL_Fallback`** — an invisible overload Pareto-dominates the one the

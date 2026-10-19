@@ -1,8 +1,8 @@
 # Fuzz targets
 
 libFuzzer targets for the parsers that read bytes vycor-cpp did not just
-write itself: index files on disk, the anneal checkpoint journal, the files
-anneal's isolated workers pass to their parent, and `megascope batch`'s
+write itself: index files on disk, the check checkpoint journal, the files
+check's isolated workers pass to their parent, and `megascope batch`'s
 request stream. Built only with `-DVYCOR_FUZZ=ON` under clang, which also
 turns on `VYCOR_SANITIZE=address,undefined` unless another sanitizer set
 is given (`thread` is refused).
@@ -10,8 +10,8 @@ is given (`thread` is refused).
 | Target | Parser | What an accepted input is put through |
 |---|---|---|
 | `fuzz_snapshot` | `SnapshotIO::load` (`src/callgraph/Snapshot.cpp`, the mapped control-flow section in `ControlFlowIndex.cpp`) | Mutable: absorbed into fresh indexes (the isolated bake's shard merge), its TUs removed, saved and reloaded (a warm refresh). ReadOnly: every registered tool, and the `dump` walk over every context and channel site |
-| `fuzz_checkpoint` | `AnnealCheckpoint::open` (`src/anneal/Checkpoint.cpp`) | every TU a record names replayed the way a resumed `runAnalysis` does, the index-only checks over the replayed index, then an append and a reopen |
-| `fuzz_shard` | `readAnnealIndexShard`, `readAnnealDiagShard`, `readGlobalIndexFile` | payloads applied to a `GlobalIndex` and the index-only checks run; written back out through the shard writers |
+| `fuzz_checkpoint` | `CheckCheckpoint::open` (`src/check/Checkpoint.cpp`) | every TU a record names replayed the way a resumed `runAnalysis` does, the index-only checks over the replayed index, then an append and a reopen |
+| `fuzz_shard` | `readCheckIndexShard`, `readCheckDiagShard`, `readGlobalIndexFile` | payloads applied to a `GlobalIndex` and the index-only checks run; written back out through the shard writers |
 | `fuzz_batch` | `runBatch` (`src/cli/MegascopeCli.cpp`) | answered against an `examples/deep_chains` index loaded ReadOnly; every input is also held to the batch contract (one JSON response with `status` and `exit` per request line) |
 
 Input formats: `fuzz_snapshot`, `fuzz_checkpoint` and `fuzz_shard` take one
@@ -63,8 +63,8 @@ clang in use (Debian/Ubuntu: `libclang-rt-<N>-dev`).
 the change touches runs for 60 seconds. The path lists in the workflow
 cover what each target executes, not only its parser: the snapshot and
 batch targets run every tool (`src/query/`, `src/impact/`, the path
-search and oracle), the anneal targets run every index-only check
-(`src/anneal/Analyzer.cpp`) and write through `AtomicFile.cpp`.
+search and oracle), the check targets run every index-only check
+(`src/check/Analyzer.cpp`) and write through `AtomicFile.cpp`.
 Nightly, every target runs for 20 minutes; the grown corpora are
 minimized (`-merge=1`) and kept in the Actions cache. A failing input
 fails the job and is uploaded as an artifact.
@@ -79,4 +79,4 @@ fuzzer (it fails before the fix):
 | `fuzz_snapshot` | a count read after a failed id check skipped its bound and sized an allocation (out of memory) | `test_snapshot.cpp` "a count read after a bad id cannot size an allocation" |
 | `fuzz_snapshot` | a string that is not UTF-8 reached `llvm::json` (assertion); real Latin-1 paths and source text do the same. Fixed by storing index text (`callgraph/Utf8.h`, an exact escape; a first fix that replaced bytes with U+FFFD merged distinct paths and USRs) | `test_utf8_strings.cpp`; ctest `utf8_paths` (`scripts/utf8-paths-check.py`) for the CLI |
 | `fuzz_snapshot` | a channel site's refcount was merged one `addSite` per count (timeout), and a multi-TU site lost all but its first TU | `test_channel_index.cpp` "ChannelIndex absorb replays each registration under its own TU", "a loaded channel site's refcount is checked and merged in one step" |
-| `fuzz_checkpoint` | a diagnostic kind outside `Diagnostic::Kind` was cast into the enum (UBSan) | `test_anneal_checkpoint.cpp` "A diagnostic kind outside the enum is refused and not loaded" |
+| `fuzz_checkpoint` | a diagnostic kind outside `Diagnostic::Kind` was cast into the enum (UBSan) | `test_check_checkpoint.cpp` "A diagnostic kind outside the enum is refused and not loaded" |

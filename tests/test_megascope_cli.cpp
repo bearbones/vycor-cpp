@@ -18,13 +18,16 @@
 // end to end against a saved index.
 
 #include "vycor/cli/MegascopeCli.h"
+#include "vycor/callgraph/MegascopeBridge.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/query/Tools.h"
 
+#include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -742,6 +745,12 @@ TEST_CASE("tools lists every registered tool", "[megascope][cli]") {
 
   auto stray = run({"tools", "extra"});
   CHECK(stray.code == kExitUsage);
+  CHECK(run({"tools", "--index", "/x.vycs"}).code == kExitUsage);
+  CHECK(run({"tools", "--build-path", "/b"}).code == kExitUsage);
+  CHECK(run({"tools", "--threads", "2"}).code == kExitUsage);
+  CHECK(run({"tools", "--args", "{}"}).code == kExitUsage);
+  CHECK(run({"tools", "--entry-point", "main"}).code == kExitUsage);
+  CHECK(run({"tools", "--", "-std=c++17"}).code == kExitUsage);
 }
 
 // ============================================================================
@@ -974,4 +983,965 @@ TEST_CASE("query verbs bake in memory when given --source",
     CHECK(stray.code == kExitUsage);
     CHECK(stray.err.find("--threads only applies") != std::string::npos);
   }
+
+  SECTION("ephemeral bake accepts direct compile flags after '--'") {
+    auto r = run({"get-callees", "--source", build.base + "main.cpp",
+                  "--name", "main", "--threads", "1", "--", "-std=c++17",
+                  "-I" + build.base, "-c", "-o", "/tmp/ignored.o"});
+    CHECK(r.code == kExitResults);
+    auto obj = parseObject(r.out);
+    REQUIRE(obj.getArray("callees") != nullptr);
+    CHECK(!obj.getArray("callees")->empty());
+  }
 }
+
+TEST_CASE("megascope merge combines shards into a queryable index",
+          "[megascope][cli][merge]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-cli-merge", dir));
+  const std::string base = std::string(dir) + "/";
+
+  const std::string shardA = base + "tu_a.vycs";
+  {
+    CallGraph g;
+    g.addNode({"main", "/src/a.cpp", 10, false, false, ""}, "/src/a.cpp");
+    g.addNode({"helper", "/src/b.cpp", 20, false, false, ""}, "/src/a.cpp");
+    g.addEdge({"main", "helper", EdgeKind::DirectCall, Confidence::Proven,
+               "/src/a.cpp:12:3", 0},
+              "/src/a.cpp");
+    ControlFlowIndex cf;
+    SnapshotMeta m;
+    m.files = {{"/src/a.cpp", 1000, 128}};
+    m.fingerprints = {"fp-a"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+    m.entryPoints = {"main"};
+    m.provenance.analyzer = "vycor-test";
+    m.provenance.toolchain = "clang-test";
+    m.provenance.environment = "env-same";
+    m.provenance.bakeStartNs = 100;
+    REQUIRE(SnapshotIO::save(shardA, g, cf, m));
+  }
+
+  const std::string shardB = base + "tu_b.vycs";
+  {
+    CallGraph g;
+    g.addNode({"helper", "/src/b.cpp", 20, false, false, ""}, "/src/b.cpp");
+    g.addNode({"leaf", "/src/b.cpp", 30, false, false, ""}, "/src/b.cpp");
+    g.addEdge({"helper", "leaf", EdgeKind::DirectCall, Confidence::Proven,
+               "/src/b.cpp:22:3", 0},
+              "/src/b.cpp");
+    ControlFlowIndex cf;
+    SnapshotMeta m;
+    m.files = {{"/src/b.cpp", 2000, 256}};
+    m.fingerprints = {"fp-b"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+    m.entryPoints = {"main"};
+    m.provenance.analyzer = "vycor-test";
+    m.provenance.toolchain = "clang-test";
+    m.provenance.environment = "env-same";
+    m.provenance.bakeStartNs = 200;
+    REQUIRE(SnapshotIO::save(shardB, g, cf, m));
+  }
+
+  SECTION("positional inputs and --output produce a queryable merged index") {
+    const std::string mergedPath = base + "merged.vycs";
+    auto r = run({"merge", "--output", mergedPath, shardA, shardB, "-v"});
+    CHECK(r.code == kExitResults);
+    CHECK(r.err.find("merged 2 shard(s)") != std::string::npos);
+    auto summary = parseObject(r.out);
+    CHECK(summary.getString("mode") == "merge");
+    CHECK(summary.getInteger("inputs") == 2);
+    CHECK(summary.getInteger("files") == 2);
+    CHECK(summary.getInteger("indexed") == 2);
+    CHECK(summary.getInteger("nodes") == 3);
+    CHECK(summary.getInteger("edges") == 2);
+
+    auto info = run({"info", "--index", mergedPath, "--files"});
+    CHECK(info.code == kExitResults);
+    auto infoObj = parseObject(info.out);
+    CHECK(infoObj.getInteger("file_count") == 2);
+    CHECK(infoObj.getInteger("nodes") == 3);
+    CHECK(infoObj.getInteger("edges") == 2);
+
+    auto chain = run({"find-call-chain", "--index", mergedPath, "--from",
+                      "main", "--to", "leaf"});
+    CHECK(chain.code == kExitResults);
+  }
+
+  SECTION("--input-list from file and stdin with --entry-point") {
+    const std::string listFile = base + "shards.list";
+    {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(listFile, ec);
+      REQUIRE(!ec);
+      os << "# Buck2 shard list\n" << shardA << "\n\n  " << shardB << "  \n";
+    }
+    const std::string mergedPath = base + "from_list.vycs";
+    auto r = run({"merge", "-o", mergedPath, "--input-list", listFile,
+                  "--entry-point", "custom_main"});
+    CHECK(r.code == kExitResults);
+
+    const std::string stdinMerged = base + "from_stdin.vycs";
+    auto rStdin = run({"merge", "--index", stdinMerged, "--input-list", "-"},
+                      shardA + "\n" + shardB + "\n");
+    CHECK(rStdin.code == kExitResults);
+    CHECK(parseObject(rStdin.out).getInteger("files") == 2);
+  }
+
+  SECTION("usage and mismatch errors") {
+    CHECK(run({"merge", "--help"}).code == kExitResults);
+    CHECK(run({"merge", shardA}).code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs"}).code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "a.vycs", "--index",
+               base + "b.vycs", shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--build-path", "/b",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--threads", "2",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--skip-paths", "foo",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--args", "{}",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--format", "tsv",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", "--unknown-flag",
+               shardA})
+              .code == kExitUsage);
+    CHECK(run({"merge", "--output", base + "out.vycs", shardA, "--"}).code ==
+          kExitUsage);
+    CHECK(run({"diff", "--before", shardA, "--after", shardB, "--build-path",
+               "/b"})
+              .code == kExitUsage);
+    CHECK(run({"diff", "--before", shardA, "--after", shardB, "--threads", "2"})
+              .code == kExitUsage);
+    CHECK(run({"diff", "--before", shardA, "--after", shardB, "--args", "{}"})
+              .code == kExitUsage);
+    CHECK(run({"diff", "--before", shardA, "--after", shardB, "--"}).code ==
+          kExitUsage);
+    CHECK(run({"info", "--index", shardA, "--args", "{}"}).code == kExitUsage);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+
+#if defined(VYCOR_MEGASCOPE_PLUGIN_PATH) && defined(VYCOR_DEFAULT_CLANG)
+TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clang++ -c compilation",
+          "[megascope][plugin]") {
+  const std::string pluginPath = VYCOR_MEGASCOPE_PLUGIN_PATH;
+  const std::string clangPath = VYCOR_DEFAULT_CLANG;
+  REQUIRE(llvm::sys::fs::exists(pluginPath));
+  REQUIRE(llvm::sys::fs::exists(clangPath));
+
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-plugin-test", dir));
+  const std::string base = std::string(dir) + "/";
+  const std::string fixture =
+      std::string(PROJECT_SOURCE_DIR) + "/examples/deep_chains/";
+
+  for (const char *tu : {"main.cpp", "pipeline.cpp"}) {
+    const std::string srcPath = fixture + tu;
+    const std::string objPath = base + tu + ".o";
+    const std::string vycsPath = base + "custom_" + tu + ".vycs";
+    const std::string fpluginArg = "-fplugin=" + pluginPath;
+    const std::string fpluginOut = "--output=" + vycsPath;
+    std::vector<llvm::StringRef> args = {
+        clangPath,
+        "-std=c++17",
+        "-I",
+        fixture,
+        "-c",
+        srcPath,
+        "-o",
+        objPath,
+        fpluginArg,
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        fpluginOut,
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        "--entry-point=main",
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        "--no-wait",
+    };
+
+    int rc = llvm::sys::ExecuteAndWait(clangPath, args);
+    REQUIRE(rc == 0);
+    CHECK(llvm::sys::fs::exists(objPath));
+    CHECK(llvm::sys::fs::exists(vycsPath));
+
+    auto snap = SnapshotIO::load(vycsPath, nullptr, LoadMode::ReadOnly);
+    REQUIRE(snap.has_value());
+
+    clang::tooling::FixedCompilationDatabase compDb(
+        fixture, {"-std=c++17", "-I" + fixture});
+    auto ref = bakeIndexes(compDb, {srcPath}, {}, 1);
+    CHECK(snap->graph.nodeCount() == ref.graph.nodeCount());
+    CHECK(snap->graph.edgeCount() == ref.graph.edgeCount());
+    CHECK(snap->cfIndex.size() == ref.cfIndex.size());
+  }
+
+  // Merge the two plugin-emitted per-TU shards and run a cross-TU query.
+  const std::string mergedPath = base + "merged.vycs";
+  auto m = run({"merge", "--output", mergedPath, base + "custom_main.cpp.vycs",
+                base + "custom_pipeline.cpp.vycs"});
+  CHECK(m.code == kExitResults);
+
+  auto chain = run({"find-call-chain", "--index", mergedPath, "--from", "main",
+                    "--to", "stage1_ingest"});
+  CHECK(chain.code == kExitResults);
+
+  // Explicit `-Xclang -load ... -Xclang -add-plugin -Xclang vycor-megascope`
+  // and driver `-fplugin-arg-vycor-megascope-...` / `-fplugin-arg-vycor_megascope-...`
+  {
+    const std::string srcPath = fixture + "pipeline.cpp";
+    const std::string objPath = base + "add_plugin.o";
+    const std::string vycsPath = base + "add_plugin.vycs";
+    const std::string outFlag =
+        "-fplugin-arg-vycor-megascope---output=" + vycsPath;
+    std::vector<llvm::StringRef> args = {
+        clangPath,
+        "-std=c++17",
+        "-I",
+        fixture,
+        "-c",
+        srcPath,
+        "-o",
+        objPath,
+        "-Xclang",
+        "-load",
+        "-Xclang",
+        pluginPath,
+        "-Xclang",
+        "-add-plugin",
+        "-Xclang",
+        "vycor-megascope",
+        outFlag,
+        "-fplugin-arg-vycor_megascope---no-wait",
+    };
+    int rc = llvm::sys::ExecuteAndWait(clangPath, args);
+    REQUIRE(rc == 0);
+    CHECK(llvm::sys::fs::exists(objPath));
+    CHECK(llvm::sys::fs::exists(vycsPath));
+  }
+
+  // Default output path inference: when --output is omitted, the plugin writes
+  // to <CompilerInstanceFrontendOptsOutputFile with .vycs extension>
+  // (e.g. default_out.o -> default_out.vycs).
+  {
+    const std::string srcPath = fixture + "pipeline.cpp";
+    const std::string objPath = base + "default_out.o";
+    const std::string inferredVycs = base + "default_out.vycs";
+    const std::string fpluginArg = "-fplugin=" + pluginPath;
+    std::vector<llvm::StringRef> args = {
+        clangPath, "-std=c++17", "-I",    fixture,    "-c",
+        srcPath,   "-o",         objPath, fpluginArg,
+        "-fplugin-arg-vycor-megascope---no-wait",
+    };
+    int rc = llvm::sys::ExecuteAndWait(clangPath, args);
+    REQUIRE(rc == 0);
+    CHECK(llvm::sys::fs::exists(objPath));
+    CHECK(llvm::sys::fs::exists(inferredVycs));
+  }
+
+  // Unknown plugin argument or bad config path must be rejected with a non-zero exit code.
+  {
+    const std::string srcPath = fixture + "pipeline.cpp";
+    const std::string objPath = base + "bad_arg.o";
+    const std::string fpluginArg = "-fplugin=" + pluginPath;
+    std::vector<llvm::StringRef> args = {
+        clangPath, "-std=c++17", "-I",    fixture,    "-c",
+        srcPath,   "-o",         objPath, fpluginArg,
+        "-Xclang", "-plugin-arg-vycor-megascope",
+        "-Xclang", "--unknown-flag",
+    };
+    int rc = llvm::sys::ExecuteAndWait(clangPath, args);
+    CHECK(rc != 0);
+
+    std::vector<llvm::StringRef> badCfgArgs = {
+        clangPath, "-std=c++17", "-I",    fixture,    "-c",
+        srcPath,   "-o",         objPath, fpluginArg,
+        "-Xclang", "-plugin-arg-vycor-megascope",
+        "-Xclang", "--channel-types-json=/nonexistent/channel.json",
+    };
+    CHECK(llvm::sys::ExecuteAndWait(clangPath, badCfgArgs) != 0);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+#endif
+
+TEST_CASE("MegascopeBridge lowers C++ indexes into ModuleShard JSON and .mgsc snapshots",
+          "[megascope][bridge]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-mgsc-bridge", dir));
+  const std::string base = std::string(dir) + "/";
+
+  CallGraph g;
+  g.addNode({"main", "/src/app.cpp", 10, true, false, "", "c:@F@main#"},
+            "/src/app.cpp");
+  g.addNode({"worker", "/src/app.cpp", 25, false, false, "", "c:@F@worker#I#"},
+            "/src/app.cpp");
+  g.addNode({"dead_fn", "/src/app.cpp", 40, false, false, "", "c:@F@dead_fn#"},
+            "/src/app.cpp");
+  g.addEdge({"main", "worker", EdgeKind::DirectCall, Confidence::Proven,
+             "/src/app.cpp:14:3", 0, ExecutionContext::Synchronous},
+            "/src/app.cpp");
+
+  ControlFlowIndex cf;
+  {
+    CallSiteContext ctx;
+    ctx.callSite = "/src/app.cpp:14:3";
+    ctx.callerName = "main";
+    ctx.calleeName = "worker";
+    ctx.callerUsr = "c:@F@main#";
+    ctx.calleeUsr = "c:@F@worker#I#";
+    ctx.tuPath = "/src/app.cpp";
+    ctx.callerNoexcept = NoexceptSpec::Noexcept;
+
+    TryCatchScope tc;
+    tc.tryLocation = "/src/app.cpp:12:3";
+    tc.enclosingFunction = "main";
+    CatchHandlerInfo chInfo;
+    chInfo.caughtType = "std::exception";
+    chInfo.isCatchAll = false;
+    chInfo.location = "/src/app.cpp:16:3";
+    chInfo.rethrows = false;
+    tc.handlers.push_back(std::move(chInfo));
+    ctx.enclosingTryCatches.push_back(std::move(tc));
+
+    RaiiLocal lockLocal;
+    lockLocal.typeName = "std::lock_guard<std::mutex>";
+    lockLocal.varName = "mu";
+    lockLocal.declLocation = "/src/app.cpp:11:3";
+    lockLocal.kind = RaiiKind::Lock;
+    ctx.liveRaiiLocals.push_back(std::move(lockLocal));
+
+    RaiiLocal strLocal;
+    strLocal.typeName = "std::basic_string<char>";
+    strLocal.varName = "tmpStr";
+    strLocal.declLocation = "/src/app.cpp:11:10";
+    strLocal.kind = RaiiKind::Other;
+    ctx.liveRaiiLocals.push_back(std::move(strLocal));
+
+    RaiiLocal ptrLocal;
+    ptrLocal.typeName = "std::unique_ptr<int>";
+    ptrLocal.varName = "ptr";
+    ptrLocal.declLocation = "/src/app.cpp:11:20";
+    ptrLocal.kind = RaiiKind::SmartPtr;
+    ctx.liveRaiiLocals.push_back(std::move(ptrLocal));
+
+    ConditionalGuard guard;
+    guard.conditionText = "x > 0";
+    guard.inTrueBranch = true;
+    guard.isAssertion = false;
+    guard.location = "/src/app.cpp:13:3";
+    ctx.enclosingGuards.push_back(std::move(guard));
+
+    cf.addCallSiteContext(std::move(ctx));
+  }
+
+  ChannelIndex ch;
+  {
+    ChannelSite pub;
+    pub.channelId = "events.topic";
+    pub.channelTypeName = "vycor::Topic<EventMsg>";
+    pub.category = "topic";
+    pub.op = ChannelOperation::Produce;
+    pub.siteFunctionUsr = "c:@F@main#";
+    pub.siteFunctionDisplay = "main";
+    pub.callSite = "/src/app.cpp:15:3";
+    pub.tuPath = "/src/app.cpp";
+    ch.addSite(pub);
+
+    ChannelSite sub;
+    sub.channelId = "events.topic";
+    sub.channelTypeName = "vycor::Topic<EventMsg>";
+    sub.category = "topic";
+    sub.op = ChannelOperation::Consume;
+    sub.siteFunctionUsr = "c:@F@worker#I#";
+    sub.siteFunctionDisplay = "worker";
+    sub.callSite = "/src/app.cpp:28:3";
+    sub.tuPath = "/src/app.cpp";
+    ch.addSite(sub);
+  }
+
+  SnapshotMeta meta;
+  meta.files = {{"/src/app.cpp", 123456, 512}};
+  meta.fingerprints = {"fp-app"};
+  meta.outcomes = {{TuStatus::Indexed, ""}};
+  meta.entryPoints = {"main"};
+  meta.collapsePaths = {"ThirdParty/"};
+  meta.provenance.analyzer = "vycor-test";
+  meta.provenance.toolchain = "clang-21";
+  meta.provenance.environment = "env-bridge";
+  meta.provenance.bakeStartNs = 42000;
+
+  llvm::json::Object shardObj =
+      MegascopeBridge::toShardObject(g, cf, ch, meta);
+  REQUIRE(shardObj.getArray("entities") != nullptr);
+  CHECK(shardObj.getArray("entities")->size() == 3);
+  REQUIRE(shardObj.getArray("raw_calls") != nullptr);
+  CHECK(shardObj.getArray("raw_calls")->size() == 1);
+  REQUIRE(shardObj.getArray("raw_contexts") != nullptr);
+  CHECK(shardObj.getArray("raw_contexts")->size() == 1);
+  const auto *ctx0 = (*shardObj.getArray("raw_contexts"))[0].getAsObject();
+  REQUIRE(ctx0 != nullptr);
+  REQUIRE(ctx0->getArray("with_scopes") != nullptr);
+  CHECK(ctx0->getArray("with_scopes")->size() == 1);
+  REQUIRE(shardObj.getArray("channels") != nullptr);
+  CHECK(shardObj.getArray("channels")->size() == 2);
+
+  const std::string shardPath = base + "app.shard.json";
+  const std::string mgscPath = base + "app.mgsc";
+  std::string err;
+  REQUIRE(MegascopeBridge::saveShardJson(shardPath, g, cf, meta, ch, &err));
+  CHECK(llvm::sys::fs::exists(shardPath));
+  CHECK(MegascopeBridge::isMegascopeShardJsonPath(shardPath));
+  CHECK(MegascopeBridge::isMegascopeSnapshotPath(mgscPath));
+
+#if defined(VYCOR_HAS_LIBMEGASCOPE)
+  REQUIRE(MegascopeBridge::saveSnapshot(mgscPath, g, cf, meta, ch, &err));
+  CHECK(llvm::sys::fs::exists(mgscPath));
+
+  // Query the saved .mgsc snapshot through runMegascopeQueryVerb
+  {
+    auto info = run({"info", "--index", mgscPath});
+    CHECK(info.code == kExitResults);
+    auto obj = parseObject(info.out);
+    REQUIRE(obj.getObject("summary") != nullptr);
+    CHECK(obj.getObject("summary")->getInteger("entity_count") == 3);
+    CHECK(obj.getObject("summary")->getInteger("call_edge_count") == 1);
+  }
+  {
+    auto callees = run({"get-callees", "--index", mgscPath, "--name", "main"});
+    CHECK(callees.code == kExitResults);
+    CHECK(callees.out.find("worker") != std::string::npos);
+  }
+  {
+    auto callers =
+        run({"get-callers", "--index", mgscPath, "--name", "worker"});
+    CHECK(callers.code == kExitResults);
+    CHECK(callers.out.find("main") != std::string::npos);
+  }
+  {
+    auto dead = run({"analyze-dead-code", "--index", mgscPath});
+    CHECK(dead.code == kExitResults);
+    CHECK(dead.out.find("dead_fn") != std::string::npos);
+  }
+  {
+    auto chans = run({"list-channels", "--index", mgscPath});
+    CHECK(chans.code == kExitResults);
+    CHECK(chans.out.find("events.topic") != std::string::npos);
+  }
+  {
+    auto qchan = run(
+        {"query-channel", "--index", mgscPath, "--channel-id", "events.topic"});
+    CHECK(qchan.code == kExitResults);
+    CHECK(qchan.out.find("events.topic") != std::string::npos);
+  }
+  {
+    auto dmp = run({"dump", "--index", mgscPath, "--format", "json"});
+    CHECK(dmp.code == kExitResults);
+    CHECK(dmp.out.find("worker") != std::string::npos);
+  }
+
+  // Diff two .mgsc snapshots
+  const std::string mgscPath2 = base + "app2.mgsc";
+  g.addNode({"added_fn", "/src/app.cpp", 60, false, false, "",
+             "c:@F@added_fn#"},
+            "/src/app.cpp");
+  REQUIRE(MegascopeBridge::saveSnapshot(mgscPath2, g, cf, meta, ch, &err));
+  {
+    auto df = run({"diff", "--before", mgscPath, "--after", mgscPath2});
+    CHECK(df.code == kExitResults);
+    CHECK(df.out.find("added_fn") != std::string::npos);
+  }
+#endif
+
+  llvm::sys::fs::remove_directories(dir);
+}
+
+#if defined(VYCOR_HAS_LIBMEGASCOPE)
+TEST_CASE("megascope merge unifies C++ (.vycs, .shard.json, .mgsc) and Python shards into a cross-language .mgsc index",
+          "[megascope][bridge][merge]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-polyglot-merge", dir));
+  const std::string base = std::string(dir) + "/";
+
+  // 1. C++ shard A saved as legacy .vycs: cpp_bridge_fn -> cpp_leaf, plus Consume on "ipc.bus"
+  const std::string cppShardVycs = base + "cpp_a.vycs";
+  {
+    CallGraph g;
+    g.addNode({"cpp_bridge_fn", "/src/bridge.cpp", 10, false, false, "",
+               "c:@F@cpp_bridge_fn#"},
+              "/src/bridge.cpp");
+    g.addNode({"cpp_leaf", "/src/leaf.cpp", 20, false, false, "",
+               "c:@F@cpp_leaf#"},
+              "/src/bridge.cpp");
+    g.addEdge({"cpp_bridge_fn", "cpp_leaf", EdgeKind::DirectCall,
+               Confidence::Proven, "/src/bridge.cpp:12:3", 0},
+              "/src/bridge.cpp");
+    ControlFlowIndex cf;
+    ChannelIndex ch;
+    ChannelSite sub;
+    sub.channelId = "ipc.bus";
+    sub.channelTypeName = "IpcChannel";
+    sub.category = "ipc";
+    sub.op = ChannelOperation::Consume;
+    sub.siteFunctionUsr = "c:@F@cpp_bridge_fn#";
+    sub.siteFunctionDisplay = "cpp_bridge_fn";
+    sub.callSite = "/src/bridge.cpp:11:3";
+    sub.tuPath = "/src/bridge.cpp";
+    ch.addSite(sub);
+
+    SnapshotMeta m;
+    m.files = {{"/src/bridge.cpp", 1000, 128}};
+    m.fingerprints = {"fp-cpp-a"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+    m.provenance.analyzer = "vycor-cpp";
+    m.provenance.toolchain = "clang-21";
+    m.provenance.environment = "env-cpp";
+    REQUIRE(SnapshotIO::save(cppShardVycs, g, cf, m, ch));
+  }
+
+  // 2. C++ shard B saved as .shard.json: cpp_leaf definition + unused_cpp_fn
+  const std::string cppShardJson = base + "cpp_b.shard.json";
+  {
+    CallGraph g;
+    g.addNode({"cpp_leaf", "/src/leaf.cpp", 20, false, false, "",
+               "c:@F@cpp_leaf#"},
+              "/src/leaf.cpp");
+    g.addNode({"unused_cpp_fn", "/src/leaf.cpp", 35, false, false, "",
+               "c:@F@unused_cpp_fn#"},
+              "/src/leaf.cpp");
+    ControlFlowIndex cf;
+    ChannelIndex ch;
+    SnapshotMeta m;
+    m.files = {{"/src/leaf.cpp", 2000, 256}};
+    m.fingerprints = {"fp-cpp-b"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+    m.provenance.analyzer = "vycor-cpp";
+    m.provenance.toolchain = "clang-21";
+    m.provenance.environment = "env-cpp";
+    REQUIRE(MegascopeBridge::saveShardJson(cppShardJson, g, cf, m, ch));
+  }
+
+  // 3. Python shard (as emitted by pyrex) in ModuleShard JSON and baked to .mgsc:
+  //    py_main -> cpp_bridge_fn (cross-language FFI call) and Produce on "ipc.bus"
+  const std::string pyShardJsonPath = base + "service.py.shard.json";
+  const std::string pyShardMgscPath = base + "service.py.mgsc";
+  {
+    CallGraph pyG;
+    pyG.addNode({"py_main", "/app/service.py", 5, true, false, "",
+                 "py:service.py_main"},
+                "/app/service.py");
+    pyG.addNode({"cpp_bridge_fn", "/src/bridge.cpp", 10, false, false, "",
+                 "c:@F@cpp_bridge_fn#"},
+                "/app/service.py");
+    pyG.addEdge({"py_main", "cpp_bridge_fn", EdgeKind::DirectCall,
+                 Confidence::Proven, "/app/service.py:8:4", 0},
+                "/app/service.py");
+    ControlFlowIndex pyCf;
+    ChannelIndex pyCh;
+    ChannelSite pub;
+    pub.channelId = "ipc.bus";
+    pub.channelTypeName = "IpcChannel";
+    pub.category = "ipc";
+    pub.op = ChannelOperation::Produce;
+    pub.siteFunctionUsr = "py:service.py_main";
+    pub.siteFunctionDisplay = "py_main";
+    pub.callSite = "/app/service.py:7:4";
+    pub.tuPath = "/app/service.py";
+    pyCh.addSite(pub);
+
+    SnapshotMeta pyMeta;
+    pyMeta.files = {{"/app/service.py", 3000, 512}};
+    pyMeta.fingerprints = {"fp-py-service"};
+    pyMeta.outcomes = {{TuStatus::Indexed, ""}};
+    pyMeta.entryPoints = {"py_main"};
+    REQUIRE(MegascopeBridge::saveShardJson(pyShardJsonPath, pyG, pyCf, pyMeta,
+                                           pyCh));
+    REQUIRE(MegascopeBridge::saveSnapshot(pyShardMgscPath, pyG, pyCf, pyMeta,
+                                          pyCh));
+  }
+
+  // Merge all three shards (.vycs + .shard.json + Python .mgsc) into a unified .mgsc!
+  const std::string mergedMgsc = base + "unified.mgsc";
+  {
+    auto ok = run({"merge", "--output", mergedMgsc, cppShardVycs, cppShardJson,
+                   pyShardMgscPath, "--entry-point", "py_main", "-v"});
+    CHECK(ok.code == kExitResults);
+    auto summary = parseObject(ok.out);
+    CHECK(summary.getString("mode") == "merge");
+    CHECK(summary.getInteger("inputs") == 3);
+    CHECK(summary.getInteger("files") == 3);
+    CHECK(summary.getInteger("nodes") == 4);
+    CHECK(summary.getInteger("edges") == 2);
+  }
+
+  // Cross-language call chain query: py_main (Python) -> cpp_bridge_fn (C++) -> cpp_leaf (C++)
+  {
+    auto chain = run({"find-call-chain", "--index", mergedMgsc, "--from",
+                      "py_main", "--to", "cpp_leaf"});
+    CHECK(chain.code == kExitResults);
+    CHECK(chain.out.find("py_main") != std::string::npos);
+    CHECK(chain.out.find("cpp_bridge_fn") != std::string::npos);
+    CHECK(chain.out.find("cpp_leaf") != std::string::npos);
+  }
+
+  // Cross-language channel query on "ipc.bus": Python producer + C++ consumer
+  {
+    auto qchan = run(
+        {"query-channel", "--index", mergedMgsc, "--channel-id", "ipc.bus"});
+    CHECK(qchan.code == kExitResults);
+    CHECK(qchan.out.find("py_main") != std::string::npos);
+    CHECK(qchan.out.find("cpp_bridge_fn") != std::string::npos);
+  }
+
+  // Cross-language dead-code analysis: cpp_bridge_fn and cpp_leaf are reachable from py_main;
+  // unused_cpp_fn is reported dead.
+  {
+    auto dead = run({"analyze-dead-code", "--index", mergedMgsc});
+    CHECK(dead.code == kExitResults);
+    CHECK(dead.out.find("unused_cpp_fn") != std::string::npos);
+    CHECK(dead.out.find("cpp_leaf") == std::string::npos);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+
+#if defined(VYCOR_MEGASCOPE_PLUGIN_PATH) && defined(VYCOR_DEFAULT_CLANG) &&     \
+    defined(VYCOR_CPP_BINARY)
+TEST_CASE("vycor-cpp CLI and Clang plugin emit .mgsc and .shard.json shards directly",
+          "[megascope][bridge][plugin]") {
+  const std::string pluginPath = VYCOR_MEGASCOPE_PLUGIN_PATH;
+  const std::string clangPath = VYCOR_DEFAULT_CLANG;
+  const std::string vycorBin = VYCOR_CPP_BINARY;
+  REQUIRE(llvm::sys::fs::exists(pluginPath));
+  REQUIRE(llvm::sys::fs::exists(clangPath));
+  REQUIRE(llvm::sys::fs::exists(vycorBin));
+
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-mgsc-e2e", dir));
+  const std::string base = std::string(dir) + "/";
+  const std::string fixture =
+      std::string(PROJECT_SOURCE_DIR) + "/examples/deep_chains/";
+
+  // 1. Standalone CLI: vycor-cpp megascope index --index <pipeline.mgsc> --emit-shard <pipeline.shard.json>
+  const std::string pipelineMgsc = base + "pipeline.mgsc";
+  const std::string pipelineShard = base + "pipeline.shard.json";
+  const std::string pipelineSrc = fixture + "pipeline.cpp";
+  const std::string incFlag = "-I" + fixture;
+  {
+    std::vector<llvm::StringRef> args = {
+        vycorBin,
+        "megascope",
+        "index",
+        "--threads",
+        "1",
+        "--no-wait",
+        "--index",
+        pipelineMgsc,
+        "--emit-shard",
+        pipelineShard,
+        "--source",
+        pipelineSrc,
+        "--",
+        "-std=c++17",
+        incFlag,
+    };
+    int rc = llvm::sys::ExecuteAndWait(vycorBin, args);
+    REQUIRE(rc == 0);
+    CHECK(llvm::sys::fs::exists(pipelineMgsc));
+    CHECK(llvm::sys::fs::exists(pipelineShard));
+  }
+
+  // 2. Clang plugin: emit main.mgsc and main.shard.json during clang++ -c
+  const std::string mainObj = base + "main.o";
+  const std::string mainMgsc = base + "main.mgsc";
+  const std::string mainShard = base + "main.shard.json";
+  const std::string mainSrc = fixture + "main.cpp";
+  {
+    const std::string fpluginArg = "-fplugin=" + pluginPath;
+    const std::string outArg = "--output=" + mainMgsc;
+    const std::string shardArg = "--emit-shard=" + mainShard;
+    std::vector<llvm::StringRef> args = {
+        clangPath,
+        "-std=c++17",
+        "-I",
+        fixture,
+        "-c",
+        mainSrc,
+        "-o",
+        mainObj,
+        fpluginArg,
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        outArg,
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        shardArg,
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        "--entry-point=main",
+        "-Xclang",
+        "-plugin-arg-vycor-megascope",
+        "-Xclang",
+        "--no-wait",
+    };
+    int rc = llvm::sys::ExecuteAndWait(clangPath, args);
+    REQUIRE(rc == 0);
+    CHECK(llvm::sys::fs::exists(mainObj));
+    CHECK(llvm::sys::fs::exists(mainMgsc));
+    CHECK(llvm::sys::fs::exists(mainShard));
+  }
+
+  // 3. Merge the plugin-emitted main.mgsc and CLI-emitted pipeline.shard.json into a unified .mgsc
+  const std::string combinedMgsc = base + "combined.mgsc";
+  {
+    auto m = run({"merge", "--output", combinedMgsc, mainMgsc, pipelineShard});
+    CHECK(m.code == kExitResults);
+
+    auto chain = run({"find-call-chain", "--index", combinedMgsc, "--from",
+                      "main", "--to", "stage1_ingest"});
+    CHECK(chain.code == kExitResults);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+#endif
+
+TEST_CASE("megascope .mgsc supports batch mode, overloaded USR disambiguation, and multi-TU crashed/edgeless shard filtering",
+          "[megascope][bridge][regression]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-mgsc-reg", dir));
+  const std::string base = std::string(dir) + "/";
+
+  // 1. Multi-TU fixture with overloaded/duplicate name 'dup' (c:@F@dup#a in /src/a.cpp
+  //    and c:@F@dup#b in /src/b.cpp) plus a crashed TU (/src/crashed.cpp).
+  const std::string multiMgsc = base + "multi.mgsc";
+  const std::string multiShardJson = base + "multi.shard.json";
+  {
+    CallGraph g;
+    g.addNode({"entry", "/src/a.cpp", 1, true, false, "", "c:@F@entry#"},
+              "/src/a.cpp");
+    g.addNode({"dup", "/src/a.cpp", 10, false, false, "", "c:@F@dup#a"},
+              "/src/a.cpp");
+    g.addNode({"dup", "/src/b.cpp", 20, false, false, "", "c:@F@dup#b"},
+              "/src/b.cpp");
+    g.addEdge({"entry", "c:@F@dup#a", EdgeKind::DirectCall, Confidence::Proven,
+               "/src/a.cpp:3:3", 0},
+              "/src/a.cpp");
+
+    ControlFlowIndex cf;
+    ChannelIndex ch;
+    ChannelSite pub;
+    pub.channelId = "ch.events";
+    pub.channelTypeName = "Bus";
+    pub.category = "in_process";
+    pub.op = ChannelOperation::Produce;
+    pub.siteFunctionUsr = "c:@F@entry#";
+    pub.siteFunctionDisplay = "entry";
+    pub.callSite = "/src/a.cpp:4:3";
+    pub.tuPath = "/src/a.cpp";
+    ch.addSite(pub);
+
+    SnapshotMeta m;
+    m.files = {
+        {"/src/a.cpp", 100, 64},
+        {"/src/b.cpp", 200, 64},
+        {"/src/crashed.cpp", 300, 64},
+    };
+    m.fingerprints = {"fp-a", "fp-b", "fp-crashed"};
+    m.outcomes = {
+        {TuStatus::Indexed, ""},
+        {TuStatus::Indexed, ""},
+        {TuStatus::Crashed, "clang frontend segfault"},
+    };
+    m.entryPoints = {"entry"};
+
+    // Verify per-TU shard splitting: crashed TU must have 0 entities/calls/channels and outcome "failed"
+    std::string shardsJson = toMegascopeShardsJson(g, cf, ch, m);
+    auto parsedShards = llvm::json::parse(shardsJson);
+    REQUIRE(static_cast<bool>(parsedShards));
+    const auto *shardsArr = parsedShards->getAsArray();
+    REQUIRE(shardsArr != nullptr);
+    REQUIRE(shardsArr->size() == 3);
+
+    const auto *crashedShard = (*shardsArr)[2].getAsObject();
+    REQUIRE(crashedShard != nullptr);
+    CHECK(crashedShard->getString("file") == "/src/crashed.cpp");
+    CHECK(crashedShard->getString("outcome") == "failed");
+    CHECK(crashedShard->getArray("entities")->empty());
+    CHECK(crashedShard->getArray("raw_calls")->empty());
+    CHECK(crashedShard->getArray("channels")->empty());
+
+    REQUIRE(MegascopeBridge::saveSnapshot(multiMgsc, g, cf, m, ch));
+    REQUIRE(MegascopeBridge::saveShardJson(multiShardJson, g, cf, m, ch));
+  }
+
+  // 2. Verify edgeless multi-TU snapshot still produces 1 shard per TU
+  {
+    CallGraph edgelessG;
+    edgelessG.addNode({"f1", "/src/t1.cpp", 1, false, false, "", "c:@F@f1#"},
+                      "/src/t1.cpp");
+    edgelessG.addNode({"f2", "/src/t2.cpp", 1, false, false, "", "c:@F@f2#"},
+                      "/src/t2.cpp");
+    ControlFlowIndex cf;
+    ChannelIndex ch;
+    SnapshotMeta m;
+    m.files = {{"/src/t1.cpp", 10, 10}, {"/src/t2.cpp", 20, 20}};
+    m.fingerprints = {"fp-1", "fp-2"};
+    m.outcomes = {{TuStatus::Indexed, ""}, {TuStatus::Indexed, ""}};
+
+    std::string shardsJson = toMegascopeShardsJson(edgelessG, cf, ch, m);
+    auto parsed = llvm::json::parse(shardsJson);
+    REQUIRE(static_cast<bool>(parsed));
+    const auto *arr = parsed->getAsArray();
+    REQUIRE(arr != nullptr);
+    REQUIRE(arr->size() == 2);
+    CHECK((*arr)[0].getAsObject()->getArray("entities")->size() == 1);
+    CHECK((*arr)[1].getAsObject()->getArray("entities")->size() == 1);
+  }
+
+  // 3. Disambiguation on duplicate display name 'dup' in .mgsc:
+  //    --name dup -> kExitAmbiguous (4) with 2 candidates
+  //    --usr c:@F@dup#b -> kExitResults (0) resolving /src/b.cpp
+  //    --name dup --filter /src/b.cpp -> kExitResults (0) resolving /src/b.cpp
+  {
+    auto amb = run({"get-function-details", "--index", multiMgsc, "--name", "dup"});
+    CHECK(amb.code == kExitAmbiguous);
+    auto ambObj = parseObject(amb.out);
+    CHECK(ambObj.getString("status") == "ambiguous");
+    CHECK(ambObj.getBoolean("ambiguous") == true);
+    const auto *cands = ambObj.getArray("candidates");
+    REQUIRE(cands != nullptr);
+    CHECK(cands->size() == 2);
+
+    auto byUsr = run({"lookup-function", "--index", multiMgsc, "--usr",
+                      "c:@F@dup#b"});
+    CHECK(byUsr.code == kExitResults);
+    auto usrObj = parseObject(byUsr.out);
+    CHECK(usrObj.getString("status") == "ok");
+    CHECK(usrObj.getString("usr") == "c:@F@dup#b");
+    CHECK(usrObj.getString("file") == "/src/b.cpp");
+
+    auto byFilter = run({"lookup-function", "--index", multiMgsc, "--name",
+                         "dup", "--filter", "/src/b.cpp"});
+    CHECK(byFilter.code == kExitResults);
+    auto filtObj = parseObject(byFilter.out);
+    CHECK(filtObj.getString("status") == "ok");
+    CHECK(filtObj.getString("usr") == "c:@F@dup#b");
+
+    // Also verify indexScope reflects 3 requested, 2 indexed, 1 failed, complete=false
+    const auto *scope = usrObj.getObject("indexScope");
+    REQUIRE(scope != nullptr);
+    CHECK(scope->getInteger("requested") == 3);
+    CHECK(scope->getInteger("indexed") == 2);
+    CHECK(scope->getInteger("failed") == 1);
+    CHECK(scope->getBoolean("complete") == false);
+  }
+
+  // 4. Batch mode against .mgsc and .shard.json indexes
+  {
+    std::string batchInput =
+        "{\"id\":1,\"tool\":\"get-callees\",\"args\":{\"name\":\"entry\"}}\n"
+        "{\"id\":2,\"tool\":\"get_function_details\",\"args\":{\"name\":\"dup\"}}\n"
+        "{\"id\":3,\"tool\":\"no_such_tool\",\"args\":{}}\n"
+        "not-json\n";
+    auto bMgsc = run({"batch", "--index", multiMgsc}, batchInput);
+    CHECK(bMgsc.code == kExitResults);
+    auto outLines = lines(bMgsc.out);
+    REQUIRE(outLines.size() == 4);
+
+    auto r1 = parseObject(outLines[0]);
+    CHECK(r1.getInteger("id") == 1);
+    CHECK(r1.getString("tool") == "get_callees");
+    CHECK(r1.getString("status") == "ok");
+    CHECK(r1.getInteger("exit") == kExitResults);
+
+    auto r2 = parseObject(outLines[1]);
+    CHECK(r2.getInteger("id") == 2);
+    CHECK(r2.getString("status") == "ambiguous");
+    CHECK(r2.getInteger("exit") == kExitAmbiguous);
+
+    auto r3 = parseObject(outLines[2]);
+    CHECK(r3.getInteger("id") == 3);
+    CHECK(r3.getString("status") == "usage_error");
+    CHECK(r3.getInteger("exit") == kExitUsage);
+
+    auto r4 = parseObject(outLines[3]);
+    CHECK(r4.getString("status") == "usage_error");
+    CHECK(r4.getInteger("exit") == kExitUsage);
+
+    auto bShard = run({"batch", "--index", multiShardJson},
+                      "{\"id\":10,\"tool\":\"query_channel\",\"args\":{\"channel_id\":\"ch.events\"}}\n");
+    CHECK(bShard.code == kExitResults);
+    auto sLines = lines(bShard.out);
+    REQUIRE(sLines.size() == 1);
+    auto sr = parseObject(sLines[0]);
+    CHECK(sr.getInteger("id") == 10);
+    CHECK(sr.getString("status") == "ok");
+    CHECK(sr.getInteger("exit") == kExitResults);
+  }
+
+  // 5. Functions containing lambdas do not emit bogus cpp-class:<fn> entities
+  //    that would make lookup-function / get-callers ambiguous.
+  {
+    CallGraph lamG;
+    lamG.addNode({"vycor::analyzeOdrViolations", "/src/Analyzer.cpp", 830,
+                  false, false, "", "c:@N@vycor@F@analyzeOdrViolations#"},
+                 "/src/Analyzer.cpp");
+    lamG.addNode({"lambda#/src/Analyzer.cpp:850:26#vycor::analyzeOdrViolations",
+                  "/src/Analyzer.cpp", 850, false, false,
+                  "vycor::analyzeOdrViolations",
+                  "vycor-lambda:lambda#/src/Analyzer.cpp:850:26#vycor::analyzeOdrViolations"},
+                 "/src/Analyzer.cpp");
+    lamG.addEdge({"c:@N@vycor@F@analyzeOdrViolations#",
+                  "vycor-lambda:lambda#/src/Analyzer.cpp:850:26#vycor::analyzeOdrViolations",
+                  EdgeKind::DirectCall, Confidence::Proven, "/src/Analyzer.cpp:850:3",
+                  0},
+                 "/src/Analyzer.cpp");
+
+    ControlFlowIndex cf;
+    ChannelIndex ch;
+    SnapshotMeta m;
+    m.files = {{"/src/Analyzer.cpp", 10, 10}};
+    m.fingerprints = {"fp-lam"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+
+    const std::string lamMgsc = (llvm::Twine(dir) + "/lambda.mgsc").str();
+    REQUIRE(MegascopeBridge::saveSnapshot(lamMgsc, lamG, cf, m, ch));
+
+    auto lk = run({"lookup-function", "--index", lamMgsc, "--name",
+                   "vycor::analyzeOdrViolations"});
+    CHECK(lk.code == kExitResults);
+    auto lkObj = parseObject(lk.out);
+    CHECK(lkObj.getString("status") == "ok");
+    CHECK(lkObj.getString("kind") == "function");
+    CHECK(lkObj.getString("usr") == "c:@N@vycor@F@analyzeOdrViolations#");
+
+    auto callees = run({"get-callees", "--index", lamMgsc, "--name",
+                        "vycor::analyzeOdrViolations"});
+    CHECK(callees.code == kExitResults);
+    auto calleesObj = parseObject(callees.out);
+    REQUIRE(calleesObj.getArray("callees") != nullptr);
+    CHECK(calleesObj.getArray("callees")->size() == 1);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+#endif

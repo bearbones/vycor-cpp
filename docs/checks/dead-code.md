@@ -10,7 +10,7 @@ cross-TU call graph.
 Per-TU tools can only flag unused `static`/anonymous-namespace functions —
 for anything with external linkage, "unused in this TU" proves nothing.
 Reachability is a whole-program property: it needs every call edge from
-every TU, plus virtual-dispatch and function-pointer resolution. anneal
+every TU, plus virtual-dispatch and function-pointer resolution. check
 builds the same cross-TU call graph megascope serves and walks it from the
 declared entry points:
 
@@ -22,11 +22,11 @@ declared entry points:
 ## Usage
 
 ```bash
-vycor-cpp anneal --build-path build --source ... \
+vycor-cpp check --build-path build --source ... \
   --checks=dead-code --entry-point main --entry-point "PluginRegistry::init"
 ```
 
 Entry points default to `main`; list every external entry (plugin hooks,
 test frameworks, exported APIs) to avoid false positives. Grouped as
 **compute-heavy**: enabling it builds the full call graph in addition to
-the anneal index.
+the check index.

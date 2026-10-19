@@ -1,7 +1,6 @@
 # Validation corpus
 
-Status: implemented on `main`. Owner: package D of
-`docs/plans/2026-09-next/`. This page is the contract for
+This page is the contract for
 `corpus/cases/`, `scripts/corpus-run.py`, and the report it writes. The
 order contract the expectations rely on is `docs/deterministic-output.md`;
 the envelope is `docs/result-contract.md`; the path facts are
@@ -48,8 +47,8 @@ The runner copies `src/` into a scratch directory, backdates every file
 `compile_commands.json` of `clang++ -std=c++17 -I<dir> <flags> -c
 <file>` entries, bakes `index.vycs` with `megascope index --threads 2`
 and the case's `entry_points` (default `main`), and runs each query
-with `--index` appended. A query whose first word is `anneal` runs the
-`anneal` subcommand instead, with `--build-path` and every source
+with `--index` appended. A query whose first word is `check` runs the
+`check` subcommand instead, with `--build-path` and every source
 appended, and is checked as text.
 
 ### case.json
@@ -134,7 +133,7 @@ not necessarily adjacent. Text queries take `"lines": {"present":
 | `header_change` | an inline function in a header calls `gamma`; the patch makes it call `delta` | warm refresh re-parses the one including TU (`refreshed_for_headers: 1`); afterwards `gamma`, which only the old header ever named, is **unknown** (`not_found` to `get-callers` and `find-call-chain`), not "proven unreachable" or "no callers" |
 | `compile_flag_invalidation` | `entry()` calls `alpha` or `beta` under `#ifdef`; the patch adds `-DNEW_TARGET` to one compile command | `refreshed_for_inputs: 1`; the callee follows the flag; `alpha` stays a known node with no callers (the TU declares it), so its chain is `complete` with 0 paths |
 | `change_impact` | `process` calls `helper` bare, `main` calls `process`; the patch wraps the call in a try/catch, adds `fresh` (calls `helper`, called by `main`), and drops `caller_of_retired`'s call; a whitespace-only overlay in between | `diff` of the whitespace pair is empty (exit 1, `changeCount` 0); the patch pair yields exactly `function_added`, `call_removed`, two `call_added`, `context_changed` in that order; `--to helper` adds one route and removes none; `impact-of-change --changed helper` lists `fresh`, `process`, `main` by depth; `--patch-file` maps three functions by call site and reports `ops.cpp`, whose functions are declared in `ops.h`, as unmapped |
-| `odr_divergence` | `anneal --odr-diag` over the fixture from `tests/test_anneal_odr.cpp`: a `-D`-dependent inline body, one function defined by two headers, a class defined twice, an identical copy | the three violations are reported; the identical copy and the flagged class's own method are not; without the check nothing is |
+| `odr_divergence` | `check --odr-diag` over the fixture from `tests/test_check_odr.cpp`: a `-D`-dependent inline body, one function defined by two headers, a class defined twice, an identical copy | the three violations are reported; the identical copy and the flagged class's own method are not; without the check nothing is |
 
 Every case carries expected negatives; `header_change` is the
 regression for the stale-name bug the raw warm-refresh comparison found

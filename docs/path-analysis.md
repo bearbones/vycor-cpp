@@ -1,7 +1,6 @@
 # Call-site-accurate path analysis
 
-Status: implemented on `main` (snapshot format v11). Owner: package B of
-`docs/plans/2026-09-next/`. This page is the contract for the shared
+This page is the contract for the shared
 path search (`callgraph/PathSearch.h`), the exception oracle built on it
 (`callgraph/ControlFlowOracle.h`), and the path tools that consume both
 (`find_call_chain`, `query_exception_safety`, `query_throw_propagation`,
@@ -292,13 +291,13 @@ re-lays the control-flow section without changing what it records:
 - Hub pruning is by stored in-degree; the query-time expansions of a
   hub are not counted.
 
-## Migration path for anneal's exception summaries
+## Migration path for check's exception summaries
 
-`anneal` keeps its own name-level exception facts
-(`FunctionSummaryEntry` in `include/vycor/anneal/GlobalIndex.h`: merged by
+`check` keeps its own name-level exception facts
+(`FunctionSummaryEntry` in `include/vycor/check/GlobalIndex.h`: merged by
 qualified name, so overloads are conflated; `unguardedCalls`,
 `hasUncaughtThrow`, `isNoexcept`), consumed by `analyzeExceptionEscape`
-(`anneal/Analyzer.h`). The megascope side now has the USR-level facts
+(`check/Analyzer.h`). The megascope side now has the USR-level facts
 those summaries approximate. The path, as a follow-up (not part of this
 package):
 
@@ -310,7 +309,7 @@ package):
    `ControlFlowOracle::isCaughtByScope` over the same `TryCatchScope`
    records, so the handler matching (source order, catch-all, rethrow,
    inheritance) is one implementation.
-3. Where anneal wants a cross-TU verdict ("can this throw escape the
+3. Where check wants a cross-TU verdict ("can this throw escape the
    entry point"), bake the indexes it already parses (`bakeIndexes`) and
    call `queryThrowPropagation`, reading `verdictExhaustive` before
    reporting anything universal.
@@ -328,7 +327,7 @@ package):
   engine; `find_call_chain` and the lock tools no longer order anything
   themselves. D's remaining ordering work in `GraphTools.cpp` /
   `LockTools.cpp` is confined to the non-path tools.
-- **E (anneal):** the migration path above.
+- **E (check):** the migration path above.
 
 ## Measurements
 

@@ -17,10 +17,10 @@
 
 #include "clang/AST/Decl.h"
 #include "clang/Index/USRGeneration.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 
 #include <string>
+#include <unordered_map>
 
 namespace vycor {
 
@@ -34,7 +34,8 @@ struct Ident {
 
 // Per-visitor (per-TU) memo for (usr, display) generation. USR generation
 // allocates and the visitors resolve the same decls repeatedly, so the pair
-// is computed once per Decl* per visitor instance.
+// is computed once per Decl* per visitor instance. Uses std::unordered_map
+// so returned `const Ident &` references remain valid across rehashes.
 class UsrCache {
 public:
   const Ident &identFor(const clang::NamedDecl *decl) {
@@ -53,7 +54,7 @@ public:
   }
 
 private:
-  llvm::DenseMap<const clang::Decl *, Ident> memo_;
+  std::unordered_map<const clang::Decl *, Ident> memo_;
 };
 
 } // namespace vycor

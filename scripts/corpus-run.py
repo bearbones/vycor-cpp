@@ -121,7 +121,7 @@ def check_query(expect: dict, obs: dict) -> list[dict]:
         add("exit", obs["exit"] == expect["exit"],
             f"exit {obs['exit']}, expected {expect['exit']}")
 
-    if "lines" in expect:  # text output (anneal)
+    if "lines" in expect:  # text output (check)
         out = obs["stdout"]
         for pat in expect["lines"].get("present", []):
             add("line-present", re.search(pat, out, re.M),
@@ -324,7 +324,7 @@ class Runner:
     def query(self, q: dict, d: Path, index: Path, sources: list[str],
               case_dir: Path) -> dict:
         argv = [self.expand(a, d, index, case_dir) for a in q["argv"]]
-        if argv[0] == "anneal":
+        if argv[0] == "check":
             argv += ["--build-path", str(d)]
             for s in sources:
                 argv += ["--source", str(d / s)]

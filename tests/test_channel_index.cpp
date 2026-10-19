@@ -487,3 +487,37 @@ TEST_CASE("a loaded channel site's refcount is checked and merged in one "
           std::string::npos);
   }
 }
+
+TEST_CASE("ChannelIndex maintains deterministic site.tuPath across dedup, "
+          "removeTU, and snapshot save/load",
+          "[ChannelIndex][snapshot]") {
+  ChannelIndex ab;
+  ab.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                      "shared.h:10:5", "a.cpp"));
+  ab.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                      "shared.h:10:5", "b.cpp"));
+
+  ChannelIndex ba;
+  ba.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                      "shared.h:10:5", "b.cpp"));
+  ba.addSite(makeSite("c:q", ChannelOperation::Produce, "fn:Shared::send",
+                      "shared.h:10:5", "a.cpp"));
+
+  REQUIRE(ab.allSites().size() == 1);
+  REQUIRE(ba.allSites().size() == 1);
+  CHECK(ab.allSites()[0].tuPath == "a.cpp");
+  CHECK(ba.allSites()[0].tuPath == "a.cpp");
+
+  std::string pathAB, pathBA;
+  std::string bytesAB = savedChannelImage(ab, pathAB);
+  std::string bytesBA = savedChannelImage(ba, pathBA);
+  std::remove(pathAB.c_str());
+  std::remove(pathBA.c_str());
+  CHECK(bytesAB == bytesBA);
+
+  // Removing a.cpp updates site.tuPath to the remaining contributor b.cpp.
+  ab.removeTU("a.cpp");
+  REQUIRE(ab.allSites().size() == 1);
+  CHECK(ab.allSites()[0].tuPath == "b.cpp");
+}
+

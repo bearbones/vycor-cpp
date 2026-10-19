@@ -28,6 +28,7 @@
 #include <chrono>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace vycor {
 
@@ -460,7 +461,13 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     // byName_ index is rebuilt from the pairs. Contributor TU sets are raw
     // ids; nodeContributors_/tuNodes_ are rebuilt from them on load.
     putU32(data, static_cast<uint32_t>(graph.nodes_.size()));
-    for (const auto &[nameId, node] : graph.nodes_) {
+    std::vector<SId> nodeIds;
+    nodeIds.reserve(graph.nodes_.size());
+    for (const auto &[nameId, _] : graph.nodes_)
+      nodeIds.push_back(nameId);
+    std::sort(nodeIds.begin(), nodeIds.end());
+    for (SId nameId : nodeIds) {
+      const auto &node = graph.nodes_.at(nameId);
       putU32(data, nameId);
       // addNode interns every display name, so the lookup cannot miss.
       auto displayId = graph.interner_.find(node.qualifiedName);
@@ -488,6 +495,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       for (size_t idx : idxs)
         if (graph.edges_[idx].refs != 0)
           edgeTus[idx].push_back(tuId);
+    for (auto &[idx, tus] : edgeTus)
+      std::sort(tus.begin(), tus.end());
 
     // Live edges only (tombstones are dropped; the loaded graph comes back
     // pre-compacted). refs is preserved verbatim: it can exceed the
@@ -521,25 +530,37 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     auto emitVecPairs =
         [&](const std::unordered_map<SId, std::vector<SId>> &map) {
           uint32_t pairCount = 0;
-          for (const auto &kv : map)
+          std::vector<SId> keys;
+          keys.reserve(map.size());
+          for (const auto &kv : map) {
             pairCount += static_cast<uint32_t>(kv.second.size());
+            keys.push_back(kv.first);
+          }
+          std::sort(keys.begin(), keys.end());
           putU32(data, pairCount);
-          for (const auto &kv : map)
-            for (SId b : kv.second) {
-              putU32(data, kv.first);
+          for (SId k : keys) {
+            for (SId b : map.at(k)) {
+              putU32(data, k);
               putU32(data, b);
             }
+          }
         };
     auto emitSetPairs = [&](const std::unordered_map<SId, std::set<SId>> &map) {
       uint32_t pairCount = 0;
-      for (const auto &kv : map)
+      std::vector<SId> keys;
+      keys.reserve(map.size());
+      for (const auto &kv : map) {
         pairCount += static_cast<uint32_t>(kv.second.size());
+        keys.push_back(kv.first);
+      }
+      std::sort(keys.begin(), keys.end());
       putU32(data, pairCount);
-      for (const auto &kv : map)
-        for (SId b : kv.second) {
-          putU32(data, kv.first);
+      for (SId k : keys) {
+        for (SId b : map.at(k)) {
+          putU32(data, k);
           putU32(data, b);
         }
+      }
     };
 
     emitVecPairs(graph.derivedClasses_);       // (base, derived)
@@ -730,6 +751,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       for (size_t idx : idxs)
         if (channels.sites_[idx].refs != 0)
           siteTus[idx].push_back(tuPath);
+    for (auto &[idx, tus] : siteTus)
+      std::sort(tus.begin(), tus.end());
 
     putU32(data, static_cast<uint32_t>(channels.liveCount_));
     for (size_t i = 0; i < channels.sites_.size(); ++i) {
@@ -1598,6 +1621,151 @@ void SnapshotIO::recordOutcomes(SnapshotMeta &meta,
     else
       meta.outcomes[i] = TuOutcome{TuStatus::Skipped, "no outcome recorded"};
   }
+}
+
+std::optional<SnapshotData>
+SnapshotIO::merge(const std::vector<std::string> &inputPaths,
+                  const MergeOptions &options, std::string *error) {
+  auto fail = [&](std::string msg) -> std::optional<SnapshotData> {
+    if (error)
+      *error = std::move(msg);
+    return std::nullopt;
+  };
+  if (inputPaths.empty())
+    return fail("no input snapshots specified");
+
+  SnapshotData out;
+  bool haveConfig = false;
+  std::string configSource;
+  bool firstShard = true;
+  std::unordered_set<std::string> seenTus;
+  std::unordered_set<std::string> seenEntryPoints;
+  TuDependencies mergedDeps;
+  TuOutcomes mergedOutcomes;
+  uint64_t maxBakeStartNs = 0;
+
+  for (const auto &path : inputPaths) {
+    SnapshotLoadStats loadStats;
+    auto snap = SnapshotIO::load(path, &loadStats, LoadMode::Mutable,
+                                 kSectionAll);
+    if (!snap) {
+      std::string why = loadStats.error.empty() ? "missing or unreadable file"
+                                                : loadStats.error;
+      return fail("cannot load '" + path + "': " + why);
+    }
+
+    if (!haveConfig) {
+      out.meta.collapsePaths = snap->meta.collapsePaths;
+      out.meta.lockAllowlist = snap->meta.lockAllowlist;
+      out.meta.lockBuiltins = snap->meta.lockBuiltins;
+      out.meta.channelTypes = snap->meta.channelTypes;
+      out.meta.provenance = snap->meta.provenance;
+      maxBakeStartNs = snap->meta.provenance.bakeStartNs;
+      haveConfig = true;
+      configSource = path;
+    } else {
+      const bool cfgMatches =
+          snap->meta.collapsePaths == out.meta.collapsePaths &&
+          snap->meta.lockAllowlist == out.meta.lockAllowlist &&
+          snap->meta.lockBuiltins == out.meta.lockBuiltins &&
+          snap->meta.channelTypes == out.meta.channelTypes;
+      if (!cfgMatches && !options.allowMismatch) {
+        return fail("build configuration mismatch between '" + configSource +
+                    "' and '" + path + "' (pass --allow-mismatch to force)");
+      }
+      const bool envMatches =
+          out.meta.provenance.environment.empty() ||
+          snap->meta.provenance.environment.empty() ||
+          snap->meta.provenance.environment == out.meta.provenance.environment;
+      if (!envMatches && !options.allowMismatch) {
+        return fail("bake environment mismatch between '" + configSource +
+                    "' (" + out.meta.provenance.environment + ") and '" + path +
+                    "' (" + snap->meta.provenance.environment +
+                    ") (pass --allow-mismatch to force)");
+      }
+      if (out.meta.provenance.analyzer.empty() &&
+          !snap->meta.provenance.analyzer.empty())
+        out.meta.provenance.analyzer = snap->meta.provenance.analyzer;
+      if (out.meta.provenance.toolchain.empty() &&
+          !snap->meta.provenance.toolchain.empty())
+        out.meta.provenance.toolchain = snap->meta.provenance.toolchain;
+      if (out.meta.provenance.environment.empty() &&
+          !snap->meta.provenance.environment.empty())
+        out.meta.provenance.environment = snap->meta.provenance.environment;
+      maxBakeStartNs =
+          std::max(maxBakeStartNs, snap->meta.provenance.bakeStartNs);
+    }
+
+    if (options.entryPoints.empty()) {
+      for (const auto &ep : snap->meta.entryPoints)
+        if (seenEntryPoints.insert(ep).second)
+          out.meta.entryPoints.push_back(ep);
+    }
+
+    const TuDependencies snapDeps = SnapshotIO::dependenciesOf(snap->meta);
+    const TuOutcomes snapOutcomes = SnapshotIO::outcomesOf(snap->meta);
+    std::vector<std::string> overlapping;
+    size_t newTusInShard = 0;
+    for (size_t i = 0; i < snap->meta.files.size(); ++i) {
+      const FileStamp &fs = snap->meta.files[i];
+      if (!seenTus.insert(fs.path).second) {
+        overlapping.push_back(fs.path);
+        continue;
+      }
+      ++newTusInShard;
+      out.meta.files.push_back(fs);
+      out.meta.fingerprints.push_back(
+          i < snap->meta.fingerprints.size() ? snap->meta.fingerprints[i]
+                                             : std::string());
+      if (auto dit = snapDeps.find(fs.path); dit != snapDeps.end())
+        mergedDeps[fs.path] = dit->second;
+      if (auto oit = snapOutcomes.find(fs.path); oit != snapOutcomes.end())
+        mergedOutcomes[fs.path] = oit->second;
+    }
+
+    // If every TU recorded in this snapshot was already merged from an
+    // earlier snapshot (e.g. a diamond dependency in a build graph), skip
+    // absorbing its indexes so edges, contexts, and channel sites are
+    // never double-counted.
+    if (!snap->meta.files.empty() && newTusInShard == 0)
+      continue;
+
+    if (!overlapping.empty()) {
+      snap->graph.removeTUs(overlapping);
+      snap->cfIndex.removeTUs(overlapping);
+      snap->channels.removeTUs(overlapping);
+    }
+
+    if (firstShard && overlapping.empty()) {
+      out.graph = std::move(snap->graph);
+      out.cfIndex = std::move(snap->cfIndex);
+      out.channels = std::move(snap->channels);
+      firstShard = false;
+    } else {
+      out.graph.absorb(snap->graph);
+      out.cfIndex.absorb(snap->cfIndex);
+      out.channels.absorb(snap->channels);
+      firstShard = false;
+    }
+  }
+
+  SnapshotIO::recordDependencies(out.meta, mergedDeps);
+  if (!out.meta.files.empty())
+    SnapshotIO::recordOutcomes(out.meta, mergedOutcomes);
+  if (!options.entryPoints.empty()) {
+    for (const auto &ep : options.entryPoints)
+      if (seenEntryPoints.insert(ep).second)
+        out.meta.entryPoints.push_back(ep);
+  }
+  out.meta.provenance.bakeStartNs = maxBakeStartNs;
+  out.summary.nodes = out.graph.nodeCount();
+  out.summary.edges = out.graph.edgeCount();
+  out.summary.callSites = out.cfIndex.size();
+  out.summary.channelSites = out.channels.size();
+  out.loaded = kSectionAll;
+  if (error)
+    error->clear();
+  return out;
 }
 
 } // namespace vycor

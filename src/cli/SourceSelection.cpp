@@ -16,6 +16,7 @@
 #include "vycor/cli/SourceSelection.h"
 #include "vycor/callgraph/CollapseFilter.h"
 
+#include "clang/Tooling/JSONCompilationDatabase.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
@@ -168,6 +169,49 @@ selectSources(const clang::tooling::CompilationDatabase &db,
       stats->skipDropped = before - files.size();
   }
   return files;
+}
+
+std::unique_ptr<clang::tooling::CompilationDatabase>
+loadCompilationDatabase(llvm::StringRef buildPath,
+                        llvm::ArrayRef<std::string> fixedArgs,
+                        std::string &error, bool hasFixedArgs) {
+  if (hasFixedArgs || !fixedArgs.empty()) {
+    llvm::StringRef dir = buildPath.empty() ? llvm::StringRef(".") : buildPath;
+    // Strip object-emission and depfile-generation flags (-c, -o <out>,
+    // -MD/-MMD/-MP/-MF <dep>/-MT <target>/-MQ <target>) in case a build
+    // rule forwards its compile command flags verbatim after `--`.
+    std::vector<std::string> cleaned;
+    cleaned.reserve(fixedArgs.size());
+    for (size_t i = 0; i < fixedArgs.size(); ++i) {
+      llvm::StringRef arg = fixedArgs[i];
+      if (arg == "-c" || arg == "-M" || arg == "-MM" || arg == "-MD" ||
+          arg == "-MMD" || arg == "-MP" || arg == "-MG")
+        continue;
+      if (arg == "-o" || arg == "-MF" || arg == "-MT" || arg == "-MQ") {
+        if (i + 1 < fixedArgs.size())
+          ++i; // skip the output/depfile/target argument too
+        continue;
+      }
+      if ((arg.starts_with("-o") && arg.size() > 2) ||
+          (arg.starts_with("-MF") && arg.size() > 3) ||
+          (arg.starts_with("-MT") && arg.size() > 3) ||
+          (arg.starts_with("-MQ") && arg.size() > 3))
+        continue;
+      cleaned.push_back(fixedArgs[i]);
+    }
+    return std::make_unique<clang::tooling::FixedCompilationDatabase>(dir,
+                                                                      cleaned);
+  }
+  if (buildPath.empty()) {
+    error = "--build-path is required (or pass compiler flags after '--')";
+    return nullptr;
+  }
+  if (llvm::sys::fs::is_regular_file(buildPath)) {
+    return clang::tooling::JSONCompilationDatabase::loadFromFile(
+        buildPath, error, clang::tooling::JSONCommandLineSyntax::AutoDetect);
+  }
+  return clang::tooling::CompilationDatabase::loadFromDirectory(buildPath,
+                                                                error);
 }
 
 } // namespace vycor

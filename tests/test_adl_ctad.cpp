@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "vycor/anneal/Analyzer.h"
-#include "vycor/anneal/GlobalIndex.h"
-#include "vycor/anneal/Indexer.h"
+#include "vycor/check/Analyzer.h"
+#include "vycor/check/GlobalIndex.h"
+#include "vycor/check/Indexer.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
@@ -190,6 +190,53 @@ TEST_CASE("Indexer skips implicit and compiler-generated declarations",
 
   // Should not index implicit constructors, destructors, etc.
   CHECK(index.overloadCount() == 0);
+}
+
+TEST_CASE("Indexer and Analyzer skip anonymous-namespace and static functions "
+          "for cross-TU ADL",
+          "[Indexer][Analyzer][ADL]") {
+  GlobalIndex index;
+
+  std::string tuA = R"(
+    namespace chamber {
+      using Real = float;
+      struct Vec {};
+    }
+    namespace {
+      bool same_bits(chamber::Vec, chamber::Real) { return true; }
+    }
+    static bool local_helper(chamber::Vec, int) { return false; }
+  )";
+
+  std::string tuB = R"(
+    namespace chamber {
+      using Real = double;
+      struct Vec {};
+    }
+    namespace {
+      bool same_bits(chamber::Vec, int) { return true; }
+    }
+    void test() {
+      chamber::Vec v;
+      same_bits(v, 1.0);
+    }
+  )";
+
+  IndexerActionFactory factory(index);
+  REQUIRE(clang::tooling::runToolOnCodeWithArgs(
+      factory.create(), tuA, {"-std=c++17"}, "tu_a.cpp"));
+  REQUIRE(clang::tooling::runToolOnCodeWithArgs(
+      factory.create(), tuB, {"-std=c++17"}, "tu_b.cpp"));
+
+  CHECK(index.findOverloads("(anonymous namespace)::same_bits").empty());
+  CHECK(index.findOverloads("local_helper").empty());
+  CHECK(index.overloadCount() == 1); // only void test()
+
+  std::vector<Diagnostic> diagnostics;
+  auto action = std::make_unique<AnalyzerAction>(index, diagnostics);
+  REQUIRE(clang::tooling::runToolOnCodeWithArgs(
+      std::move(action), tuB, {"-std=c++17"}, "tu_b.cpp"));
+  CHECK(diagnostics.empty());
 }
 
 // ============================================================================
@@ -814,4 +861,30 @@ TEST_CASE("adl_same_score example fixture files are loadable",
   CHECK_FALSE(readFileContents(base + "Extension.hpp").empty());
   CHECK_FALSE(readFileContents(base + "order_a.cpp").empty());
   CHECK_FALSE(readFileContents(base + "order_b.cpp").empty());
+}
+
+TEST_CASE("Indexer skips internal-linkage functions, deduction guides, and "
+          "specializations in anonymous namespaces",
+          "[Indexer][ADL][CTAD][Specialization]") {
+  GlobalIndex index;
+  std::string tu1 = R"(
+    namespace {
+      struct Tag {};
+      void helper(Tag, double) {}
+      template <typename T> struct Box { T v; Box(T x) : v(x) {} };
+      Box(int) -> Box<double>;
+      template <typename T> struct Trait { static constexpr int id = 0; };
+      template <> struct Trait<int> { static constexpr int id = 1; };
+    }
+    static void staticHelper(int, double) {}
+  )";
+
+  IndexerActionFactory factory(index);
+  REQUIRE(clang::tooling::runToolOnCodeWithArgs(
+      factory.create(), tu1, {"-std=c++17"}, "tu1.cpp"));
+
+  CHECK(index.overloadCount() == 0);
+  CHECK(index.guideCount() == 0);
+  CHECK(index.findSpecializations("Trait").empty());
+  CHECK(index.findSpecializations("(anonymous namespace)::Trait").empty());
 }

@@ -42,12 +42,12 @@ struct FeatureFlagPattern {
 //     "featureFlags": [{"pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1}],
 //     "staticInitHazards": ["myorg::JniEnv::attach"],
 //     "collapsePaths": ["ThirdParty/Math"],
-//     "disabledAnnealChecks": ["some-ext-check"]
+//     "disabledChecks": ["some-ext-check"]
 //   }
 //
 // Every key is optional. lockTypes/channelTypes/collapsePaths merge with
 // (never replace) the corresponding CLI flags; featureFlags become guard
-// classifiers (see Extensions.h); disabledAnnealChecks suppresses compiled
+// classifiers (see Extensions.h); disabledChecks suppresses compiled
 // ext/ checks by name.
 struct OrgConfig {
   std::vector<std::string> lockTypes;
@@ -56,7 +56,7 @@ struct OrgConfig {
   std::vector<ChannelTypeSpec> channelTypes;
   std::vector<FeatureFlagPattern> featureFlags;
   std::vector<std::string> collapsePaths;
-  std::vector<std::string> disabledAnnealChecks;
+  std::vector<std::string> disabledChecks;
 };
 
 // Parse an org config from an in-memory JSON buffer. Returns false and
@@ -71,7 +71,7 @@ bool loadOrgConfigFile(const std::string &path, OrgConfig &out,
 
 // Install the config's hook-shaped parts (lockTypes, channelTypes,
 // featureFlags) into ExtensionRegistry::instance(). collapsePaths and
-// disabledAnnealChecks are not registry concerns — the CLI layer consumes
+// disabledChecks are not registry concerns — the CLI layer consumes
 // those directly. Returns false and fills `error` when a featureFlags
 // pattern is not a valid regex.
 bool applyOrgConfig(const OrgConfig &cfg, std::string &error);

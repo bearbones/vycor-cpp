@@ -3,7 +3,7 @@
 A Clang LibTooling backend for safe, AST-aware C++ refactoring and static
 analysis. It exposes four features as subcommands:
 
-- **anneal** — detect problems such as fragile ADL/CTAD resolutions across translation units. Like if `clang-tidy` went Super Saiyan.
+- **check** — detect problems such as fragile ADL/CTAD resolutions across translation units. Like if `clang-tidy` went Super Saiyan.
 - **morph** — apply rule-driven, multi-pass AST matcher transformations
 - **megascope** — index a multi-TU call graph once, then query it from the shell (`megascope get-callers --name f`) or in batches; designed for LLM-assisted code analysis
 
@@ -69,7 +69,7 @@ Requires CMake 3.20+, a C++17 compiler, and Ninja (recommended).
 
 | Dependency | Required | How it's resolved |
 |---|---|---|
-| LLVM/Clang | 18, 20, or 21 | system package preferred; submodule fallback |
+| LLVM/Clang | 18, 20, 21, or 22 | system package preferred; submodule fallback |
 | Catch2 | v3.10+ (tests only) | imported target -> `find_package` -> submodule fallback |
 
 Neither dependency is fetched at configure time. Hermetic-build
@@ -105,8 +105,8 @@ cd build && ctest --output-on-failure
 
 ### LLVM/Clang resolution
 
-The build tries each supported LLVM major version in turn (21, then 20,
-then 18) by probing well-known install paths, then falls back to the
+The build tries each supported LLVM major version in turn (22, then 21,
+then 20, then 18) by probing well-known install paths, then falls back to the
 `extern/llvm-project` submodule. To pin a specific version, point
 `CMAKE_PREFIX_PATH` at it:
 
@@ -156,20 +156,22 @@ project's build files:
 
 ## Usage
 
-All subcommands consume a `compile_commands.json` compilation database
-(`--build-path` points at its directory).
+All subcommands accept compile commands from:
+1. A directory containing `compile_commands.json` (`--build-path <dir>`),
+2. A direct path to a compilation database JSON file (`--build-path <path/to/compdb.json>`), or
+3. Compiler flags passed directly after `--` (`vycor-cpp <subcommand> ... -- -std=c++17 -Iinclude`), enabling hermetic per-TU and per-target actions in build systems such as **Buck2** without generating `compile_commands.json`.
 
-### anneal — Analyze for Fragile ADL/CTAD
+### check — Analyze for Fragile ADL/CTAD
 
 ADL (Argument-Dependent Lookup) and CTAD (Class Template Argument
 Deduction) can silently resolve to different declarations depending on
 which headers a translation unit includes — a correctness hazard standard
-compilers do not diagnose. `anneal` indexes all overloads and deduction
+compilers do not diagnose. `check` indexes all overloads and deduction
 guides across the project (phase 1), then re-walks each TU comparing
 resolved call sites against the global index (phase 2).
 
 ```bash
-./build/vycor-cpp anneal \
+./build/vycor-cpp check \
   --build-path /path/to/compile_commands_dir \
   --source file1.cpp --source file2.cpp
 ```
@@ -185,12 +187,12 @@ src/logic.cpp:42:5: [adl-visibility] Fragile ADL resolution: MathLib::scale(Vect
 
 A summary goes to stderr: `N TU(s): A analyzed, F failed`, naming every
 TU that did not parse cleanly. A run with a failed TU never prints
-`anneal: no issues found.`.
+`check: no issues found.`.
 
 **ODR violation detection** (`--odr-diag`): linkers reject duplicate
 *strong* symbols, but mismatched *vague-linkage* definitions — inline
 functions, in-class method bodies, class definitions — are silently
-merged, with the linker keeping one arbitrary copy. `anneal` hashes every
+merged, with the linker keeping one arbitrary copy. `check` hashes every
 such definition during indexing (`clang::ODRHash`) and compares across
 the whole project, catching both the two-headers-define-the-same-thing
 case and the subtler one-header-whose-body-depends-on-`-D`-flags case:
@@ -204,10 +206,10 @@ limits.hpp:2: [odr-violations] ODR violation: 'limits' at ./limits.hpp:2 compile
 Token-identical copies at different paths are not flagged (vendored
 duplicates are benign), so the signal stays clean.
 
-Every anneal analysis is a **named check** with its own documentation
+Every check analysis is a **named check** with its own documentation
 page — see [docs/checks/README.md](docs/checks/README.md) for the full
 list, defaults, and groups. Select checks clang-tidy-style with
-`--checks=all,-noisy` or a `.vycor-anneal.json` discovered from the
+`--checks=all,-noisy` or a `.vycor-check.json` discovered from the
 working directory upward:
 
 ```json
@@ -237,13 +239,13 @@ worker's heap. Ctrl-C or SIGTERM kills the workers and removes their
 scratch directory. All of these compose.
 
 ```bash
-./build/vycor-cpp anneal \
+./build/vycor-cpp check \
   --build-path /path/to/compile_commands_dir \
   --source file1.cpp --source file2.cpp \
-  --threads 0 --checkpoint /tmp/anneal.vycj
+  --threads 0 --checkpoint /tmp/check.vycj
 ```
 
-#### anneal as a CI gate
+#### check as a CI gate
 
 | Flag | Effect |
 |---|---|
@@ -261,21 +263,21 @@ scratch directory. All of these compose.
 Exit codes: **0** clean, **1** findings at or above `--fail-on`, **2**
 usage or configuration error, **3** a requested TU did not parse cleanly
 (it takes precedence over 1). Details next to megascope's in
-[docs/result-contract.md](docs/result-contract.md#anneal-exit-codes).
+[docs/result-contract.md](docs/result-contract.md#check-exit-codes).
 
 Each finding has a **fingerprint** (check name + the entities involved +
 the file relative to the project root, never a line number), so it
 survives unrelated edits — see
 [docs/checks/README.md](docs/checks/README.md#finding-identity). Adopt
-anneal on an existing codebase by recording today's findings once:
+check on an existing codebase by recording today's findings once:
 
 ```bash
-vycor-cpp anneal --build-path build --source-list tus.txt \
-  --write-baseline .vycor-anneal-baseline.json
+vycor-cpp check --build-path build --source-list tus.txt \
+  --write-baseline .vycor-check-baseline.json
 # later runs fail only on new findings, and say which baseline entries
 # are fixed so the file can shrink:
-vycor-cpp anneal --build-path build --source-list tus.txt \
-  --baseline .vycor-anneal-baseline.json
+vycor-cpp check --build-path build --source-list tus.txt \
+  --baseline .vycor-check-baseline.json
 ```
 
 Silence one finding in the source with a comment on its line, or alone
@@ -288,7 +290,7 @@ page, and a `partialFingerprints` entry per result so alerts follow the
 code across edits):
 
 ```yaml
-name: anneal
+name: check
 on:
   pull_request:
   push:
@@ -299,7 +301,7 @@ permissions:
   security-events: write # upload-sarif
 
 jobs:
-  anneal:
+  check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -315,26 +317,26 @@ jobs:
       - name: Configure (writes compile_commands.json)
         run: cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      - name: anneal
+      - name: check
         run: |
           jq -r '.[].file' build/compile_commands.json | sort -u > tus.txt
-          vycor-cpp anneal --build-path build --source-list tus.txt \
-            --baseline .vycor-anneal-baseline.json \
-            --format sarif --output anneal.sarif
+          vycor-cpp check --build-path build --source-list tus.txt \
+            --baseline .vycor-check-baseline.json \
+            --format sarif --output check.sarif
 
       - name: Upload SARIF
-        if: always() && hashFiles('anneal.sarif') != ''
+        if: always() && hashFiles('check.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: anneal.sarif
-          category: vycor-anneal
+          sarif_file: check.sarif
+          category: vycor-check
 ```
 
-The `anneal` step fails the job on a new finding (exit 1) or a TU that
+The `check` step fails the job on a new finding (exit 1) or a TU that
 did not parse (exit 3); the upload runs either way. To gate only on the
 lines a pull request touches instead of a baseline, check out with
 `fetch-depth: 0` and pass `--git-base origin/${{ github.base_ref }}`.
-anneal's checks are cross-TU, so analyze the whole compilation database
+check's checks are cross-TU, so analyze the whole compilation database
 (as above) rather than only the changed files: `--source-list` with a
 changed-file list misses findings whose evidence is in unchanged TUs.
 
@@ -458,12 +460,48 @@ per-section index load split), `-v`. Query verbs also take `-v`, which
 reports the load time section by section.
 
 **Ephemeral mode**: a query verb given `--source`/`--source-list`/
-`--source-re` (with `--build-path`) bakes those TUs in memory and
-answers, reading and writing no index — the former `prism` subcommand.
-`--skip-paths`, `--collapse-paths`, `--threads`, and `--org-config`
-qualify the bake as they do for `index`. The bake sees only the selected
-TUs, so callers in other files are invisible; for security audits or
-multi-file analysis, index the project once and query that.
+`--source-re` (with `--build-path` or `-- <compile-flags...>`) bakes those
+TUs in memory and answers, reading and writing no index — the former
+`prism` subcommand. `--skip-paths`, `--collapse-paths`, `--threads`, and
+`--org-config` qualify the bake as they do for `index`. The bake sees only
+the selected TUs, so callers in other files are invisible; for security
+audits or multi-file analysis, index the project once and query that.
+
+#### Hierarchical Map-Reduce Indexing & Buck2 Integration (`megascope merge`)
+
+For hermetic build systems like **Buck2**, `megascope` supports a map-reduce
+workflow that produces `.vycs` call-graph artifacts at three granularities
+without needing a monolithic `compile_commands.json`:
+
+1. **Per-TU (`.vycs` per translation unit)**:
+   ```bash
+   vycor-cpp megascope index --threads 1 --no-wait \
+     --index out/tu/a.cpp.vycs --source src/a.cpp \
+     -- -std=c++17 -Iinclude
+   ```
+2. **Per-library / per-binary target (`.vycs` per target)**:
+   ```bash
+   vycor-cpp megascope merge --no-wait \
+     --output out/libcore.vycs \
+     out/tu/a.cpp.vycs out/tu/b.cpp.vycs
+   ```
+3. **Global index (`.vycs` across targets)**:
+   ```bash
+   vycor-cpp megascope merge --no-wait \
+     --output out/megascope.global.vycs \
+     --input-list out/target_shards.list \
+     --entry-point main
+   ```
+
+`megascope merge` validates build configuration and environment compatibility
+across shards (overridable with `--allow-mismatch`) and deduplicates
+overlapping TUs idempotently so diamond dependencies in the target graph never
+double-count edges or call-site contexts.
+
+Out-of-the-box **Buck2** rules ([`buck2/vycor.bzl`](buck2/vycor.bzl)),
+zero-config **BXL** scripts ([`buck2/vycor.bxl`](buck2/vycor.bxl)), and a
+complete multi-target example ([`examples/buck2_megascope/`](examples/buck2_megascope/))
+are shipped in this repository — see **[buck2/README.md](buck2/README.md)**.
 
 ---
 
@@ -478,8 +516,8 @@ without editing upstream files (so upstream merges stay conflict-free):
   guards are annotated with the flag name in query output, so "this
   path only runs with `FFlag::NewNav` on" becomes queryable), collapse
   paths, and per-check kill switches.
-- **`ext/` slot-in directory** — compiled hooks: custom **anneal checks**
-  (full AST access, registered with `VYCOR_REGISTER_ANNEAL_CHECK`),
+- **`ext/` slot-in directory** — compiled hooks: custom **check checks**
+  (full AST access, registered with `VYCOR_REGISTER_CHECK`),
   arbitrary guard classifiers, and code-registered type lists. `ext/*.cpp`
   is auto-globbed into the build; `ext/tests/*.cpp` into the test binary.
 - **CLI flags** (`--lock-types`, `--channel-types-json`,
@@ -499,7 +537,7 @@ extern/llvm-project/            LLVM/Clang submodule (sparse checkout)
 extern/Catch2/                  Catch2 submodule (tests)
 
 include/vycor/
-  anneal/                       ADL/CTAD analysis (GlobalIndex, Indexer,
+  check/                       ADL/CTAD analysis (GlobalIndex, Indexer,
                                 Analyzer, DeadCodeAnalyzer)
   morph/                        Transform pipeline (MatcherEngine,
                                 RulesParser, TemplateEngine, TransformPipeline)
@@ -517,8 +555,8 @@ include/vycor/
   compat/                       LLVM-version compat, PCH cache, tool adjusters
 
 src/
-  main.cpp                      CLI entry point (anneal/morph/megascope)
-  anneal/ morph/ callgraph/ query/ cli/ impact/ ext/ compat/   Implementations
+  main.cpp                      CLI entry point (check/morph/megascope)
+  check/ morph/ callgraph/ query/ cli/ impact/ ext/ compat/   Implementations
 
 ext/                            Organization slot-in (fork-owned; globbed
                                 into the build — see ext/README.md)
@@ -534,7 +572,7 @@ scripts/                        Benchmarking and smoke-test scripts
 
 ## Architecture
 
-### Two-Phase Analysis (anneal)
+### Two-Phase Analysis (check)
 
 ```
 Phase 1 — Index:
@@ -548,7 +586,7 @@ Phase 2 — Analyze:
     → for each TU: AnalyzerVisitor(GlobalIndex)
       → VisitCallExpr → check ADL candidates vs global index
       → VisitVarDecl  → check CTAD usages vs global index
-      → then: registered organization AnnealChecks (ext/)
+      → then: registered organization CheckSpec (ext/)
       → emit Diagnostic entries
 ```
 
@@ -580,13 +618,13 @@ index consistent with full rebuilds.
 `order_a.cpp` and `order_b.cpp` contain identical code but include headers in
 different orders. Due to ADL, the same unqualified call resolves to different
 overloads depending on which `scale()` overload is visible at the call site.
-`anneal` detects this without requiring compilation of both orderings.
+`check` detects this without requiring compilation of both orderings.
 
 ### CTAD Fragility (`examples/ctad_fallback/`)
 
 `Container c("hello")` deduces differently depending on whether `Guide.hpp`
 (which contains an explicit `Container(const char*) -> Container<std::string>`
-deduction guide) is included. `anneal` flags the case where the explicit guide
+deduction guide) is included. `check` flags the case where the explicit guide
 is absent.
 
 ### Boolean Macro Split (`examples/macro_split/`)
@@ -607,7 +645,7 @@ in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
 
 Glass and optics. **vycor** is the Corning glass family the C++ tool draws
 its name from (sibling to Pyrex, more demanding spec); the `-cpp` suffix
-just hints at what it's about. **anneal** surfaces latent stress — ADL/CTAD
+just hints at what it's about. **check** surfaces latent stress — ADL/CTAD
 fragility — in order to relieve it. **morph** reshapes amorphous structure —
 AST transforms. **megascope** is the persistent far-seeing instrument — the
 cross-TU index and its query verbs (its ephemeral mode absorbed **prism**,

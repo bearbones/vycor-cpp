@@ -16,7 +16,7 @@ deduces `Container<std::string>`. Both versions compile; the object's type
 silently differs per TU with include order. A single-TU tool can't know
 the guide exists.
 
-anneal indexes every deduction guide project-wide and compares each TU's
+check indexes every deduction guide project-wide and compares each TU's
 actual deduction against what the invisible guides would have produced.
 
 ## Example

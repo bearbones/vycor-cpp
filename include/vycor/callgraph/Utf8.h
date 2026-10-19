@@ -50,7 +50,7 @@ namespace vycor {
 // fromIndexText(toIndexText(s)) == s for every byte string s, so the
 // conversion is injective: distinct raw strings stay distinct strings.
 //
-// Where it applies (callgraph indexes; anneal's GlobalIndex never reaches
+// Where it applies (callgraph indexes; check's GlobalIndex never reaches
 // llvm::json and keeps raw bytes):
 //   - Producers: CallGraph::add*, ControlFlowIndex::addCallSiteContext and
 //     ChannelIndex::addSite convert every string they are given (raw bytes

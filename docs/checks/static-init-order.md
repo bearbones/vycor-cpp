@@ -14,7 +14,7 @@ initializer" — `cppcoreguidelines-avoid-non-const-global-variables` and
 friends), which is so broad that everyone suppresses it. Whether an actual
 fiasco exists depends on a cross-TU fact: does some *other* TU's
 initializer read this one before it has run? Proving that needs both TUs'
-initializer expressions — anneal's phase-1 index has them all.
+initializer expressions — check's phase-1 index has them all.
 
 Reads of a not-yet-initialized global observe its zero/constant-initialized
 state — not garbage, but silently wrong, and whether it bites depends on

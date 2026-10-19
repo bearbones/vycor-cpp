@@ -50,7 +50,7 @@ bool interruptRequested();
 
 /// Once interrupted, never return: wait for the watcher to finish its
 /// cleanup and kill the process by the signal. Called before anything that
-/// would publish a partial result (an index save, anneal's findings), so
+/// would publish a partial result (an index save, check's findings), so
 /// an interrupted run can neither overwrite the previous index nor exit 0
 /// on a partial answer. A no-op when no interrupt was requested.
 void exitIfInterrupted();

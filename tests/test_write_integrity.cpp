@@ -20,7 +20,7 @@
 // journal record swallowing every later append, and a record length that
 // wrapped the bounds check.
 
-#include "vycor/anneal/Checkpoint.h"
+#include "vycor/check/Checkpoint.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/AtomicFile.h"
@@ -473,17 +473,17 @@ std::string u32le(uint32_t v) {
 } // namespace
 
 TEST_CASE("A corrupt journal record does not swallow later progress",
-          "[write-integrity][AnnealCheckpoint]") {
+          "[write-integrity][CheckCheckpoint]") {
   ScratchDir dir;
-  const std::string path = dir.file("anneal.vycj");
+  const std::string path = dir.file("check.vycj");
   const uint64_t fp = 0x1234;
   const FileStamp a = stampOf("/src/a.cpp", 1);
   const FileStamp b = stampOf("/src/b.cpp", 2);
 
   {
-    auto ckpt = AnnealCheckpoint::open(path, fp);
+    auto ckpt = CheckCheckpoint::open(path, fp);
     REQUIRE(ckpt);
-    ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, a.path, a);
+    ckpt->recordAttempt(CheckCheckpoint::kPhaseIndex, a.path, a);
   }
   // A torn tail: what a kill mid-append (or a bad sector) leaves.
   appendRaw(path, "\x02garbage-not-a-record");
@@ -491,51 +491,51 @@ TEST_CASE("A corrupt journal record does not swallow later progress",
   // Resume 1 keeps what precedes the damage and appends new progress: a
   // second attempt at a (it died again) and b's completed phase 1.
   {
-    auto ckpt = AnnealCheckpoint::open(path, fp);
+    auto ckpt = CheckCheckpoint::open(path, fp);
     REQUIRE(ckpt);
-    CHECK(ckpt->attempts(AnnealCheckpoint::kPhaseIndex, a.path, a) == 1);
-    ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, a.path, a);
-    ckpt->recordPhase1(b.path, b, AnnealIndexPayload{});
+    CHECK(ckpt->attempts(CheckCheckpoint::kPhaseIndex, a.path, a) == 1);
+    ckpt->recordAttempt(CheckCheckpoint::kPhaseIndex, a.path, a);
+    ckpt->recordPhase1(b.path, b, CheckIndexPayload{});
   }
 
   // Resume 2 must see resume 1's appends. Before the fix they landed
   // after the garbage, where every later load stopped: b re-ran forever
   // and a was never recognized as poisoned.
-  auto ckpt = AnnealCheckpoint::open(path, fp);
+  auto ckpt = CheckCheckpoint::open(path, fp);
   REQUIRE(ckpt);
-  CHECK(ckpt->attempts(AnnealCheckpoint::kPhaseIndex, a.path, a) == 2);
+  CHECK(ckpt->attempts(CheckCheckpoint::kPhaseIndex, a.path, a) == 2);
   GlobalIndex into;
   CHECK(ckpt->replayPhase1(b.path, b, into));
 }
 
 TEST_CASE("A journal another run has open is refused",
-          "[write-integrity][AnnealCheckpoint]") {
+          "[write-integrity][CheckCheckpoint]") {
   ScratchDir dir;
-  const std::string path = dir.file("anneal.vycj");
-  auto first = AnnealCheckpoint::open(path, 0x1234);
+  const std::string path = dir.file("check.vycj");
+  auto first = CheckCheckpoint::open(path, 0x1234);
   REQUIRE(first);
   // A second run would truncate records the first is still appending.
-  CHECK_FALSE(AnnealCheckpoint::open(path, 0x1234));
+  CHECK_FALSE(CheckCheckpoint::open(path, 0x1234));
   first.reset();
-  CHECK(AnnealCheckpoint::open(path, 0x1234));
+  CHECK(CheckCheckpoint::open(path, 0x1234));
 }
 
 TEST_CASE("A journal record length near 4 GiB cannot read past the file",
-          "[write-integrity][AnnealCheckpoint]") {
+          "[write-integrity][CheckCheckpoint]") {
   ScratchDir dir;
-  const std::string path = dir.file("anneal.vycj");
+  const std::string path = dir.file("check.vycj");
   const uint64_t fp = 0x1234;
   const FileStamp a = stampOf("/src/a.cpp", 1);
   {
-    auto ckpt = AnnealCheckpoint::open(path, fp);
+    auto ckpt = CheckCheckpoint::open(path, fp);
     REQUIRE(ckpt);
-    ckpt->recordPhase1(a.path, a, AnnealIndexPayload{});
+    ckpt->recordPhase1(a.path, a, CheckIndexPayload{});
   }
   // kind, then a length whose `len + 4` wraps to 2 in uint32_t: the old
   // bounds check passed and `pos += len` walked 4 GiB past the buffer.
   appendRaw(path, std::string("\x02", 1) + u32le(0xFFFFFFFEu) + "xx");
 
-  auto ckpt = AnnealCheckpoint::open(path, fp);
+  auto ckpt = CheckCheckpoint::open(path, fp);
   REQUIRE(ckpt);
   GlobalIndex into;
   CHECK(ckpt->replayPhase1(a.path, a, into));
@@ -543,16 +543,16 @@ TEST_CASE("A journal record length near 4 GiB cannot read past the file",
 
 #ifndef _WIN32
 TEST_CASE("A journal append on a full disk stops journaling, not the run",
-          "[write-integrity][AnnealCheckpoint]") {
+          "[write-integrity][CheckCheckpoint]") {
   ScratchDir dir;
-  const std::string path = dir.file("anneal.vycj");
+  const std::string path = dir.file("check.vycj");
   const uint64_t fp = 0x1234;
   const FileStamp a = stampOf("/src/a.cpp", 1);
   uint64_t sizeBefore = 0;
   {
-    auto ckpt = AnnealCheckpoint::open(path, fp);
+    auto ckpt = CheckCheckpoint::open(path, fp);
     REQUIRE(ckpt);
-    ckpt->recordPhase1(a.path, a, AnnealIndexPayload{});
+    ckpt->recordPhase1(a.path, a, CheckIndexPayload{});
     REQUIRE(!llvm::sys::fs::file_size(path, sizeBefore));
 
     struct rlimit old;
@@ -563,14 +563,14 @@ TEST_CASE("A journal append on a full disk stops journaling, not the run",
     REQUIRE(setrlimit(RLIMIT_FSIZE, &capped) == 0);
     // Too big for the space left: the append fails part way (before the
     // fix the stream error aborted the process at destruction).
-    ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex,
+    ckpt->recordAttempt(CheckCheckpoint::kPhaseIndex,
                         std::string(4096, 'x'), a);
-    ckpt->recordAttempt(AnnealCheckpoint::kPhaseIndex, a.path, a);
+    ckpt->recordAttempt(CheckCheckpoint::kPhaseIndex, a.path, a);
     REQUIRE(setrlimit(RLIMIT_FSIZE, &old) == 0);
     std::signal(SIGXFSZ, oldHandler);
   }
   // The torn append is truncated away on resume; what preceded it stays.
-  auto ckpt = AnnealCheckpoint::open(path, fp);
+  auto ckpt = CheckCheckpoint::open(path, fp);
   REQUIRE(ckpt);
   GlobalIndex into;
   CHECK(ckpt->replayPhase1(a.path, a, into));
@@ -581,11 +581,11 @@ TEST_CASE("A journal append on a full disk stops journaling, not the run",
 #endif
 
 TEST_CASE("A shard entry length near 4 GiB is refused",
-          "[write-integrity][AnnealCheckpoint]") {
+          "[write-integrity][CheckCheckpoint]") {
   ScratchDir dir;
   const std::string path = dir.file("diag.shard");
-  REQUIRE(writeAnnealDiagShard(path, {{"/src/a.cpp", {}}},
-                               {AnnealCheckpoint::kCleanParse}));
+  REQUIRE(writeCheckDiagShard(path, {{"/src/a.cpp", {}}},
+                               {CheckCheckpoint::kCleanParse}));
   std::string bytes = readBytes(path);
   // magic(4) version(4) count(4) tu(len 4 + 10 bytes) payloadLen(4)...
   const size_t lenAt = 12 + 4 + std::strlen("/src/a.cpp");
@@ -593,7 +593,7 @@ TEST_CASE("A shard entry length near 4 GiB is refused",
   bytes.replace(lenAt, 4, u32le(0xFFFFFFFEu));
   writeBytes(path, bytes);
   bool called = false;
-  CHECK_FALSE(readAnnealDiagShard(
+  CHECK_FALSE(readCheckDiagShard(
       path, [&](const std::string &, std::vector<Diagnostic>) {
         called = true;
       }));

@@ -1,19 +1,19 @@
-# anneal checks
+# check checks
 
-Every anneal analysis is a **named check** with its own documentation page,
+Every check analysis is a **named check** with its own documentation page,
 selectable through a clang-tidy-style specification. All of them share one
 property: they compare information **across translation units**, which is
 exactly what single-TU tools (clang-tidy, compiler warnings) structurally
 cannot do.
 
-Run `vycor-cpp anneal --list-checks` for the live table (organization
+Run `vycor-cpp check --list-checks` for the live table (organization
 checks included).
 
 ## Selecting checks
 
 Three sources, applied in order (later entries win):
 
-1. **`.vycor-anneal.json`** — discovered by walking up from the working
+1. **`.vycor-check.json`** — discovered by walking up from the working
    directory (like `.clang-tidy`), or named explicitly with
    `--checks-config <file>`:
 
@@ -24,7 +24,7 @@ Three sources, applied in order (later entries win):
 2. **`--checks=<spec>`** on the command line, same syntax, comma-separated:
 
    ```bash
-   vycor-cpp anneal --build-path build --source ... --checks=all,-dead-code
+   vycor-cpp check --build-path build --source ... --checks=all,-dead-code
    ```
 
 3. **Legacy toggle flags** (`--odr-diag`, `--coverage-diag`, `--dead-code`)
@@ -73,7 +73,7 @@ whatever their check: `ADL_SameScore` (`--warn-same-score`) and
 
 ## Organization checks
 
-Checks registered from `ext/` (per-TU `AnnealCheck` or cross-TU
+Checks registered from `ext/` (per-TU `Check` or cross-TU
 `IndexCheck`) participate in the same selection by their `name()`, default
 to enabled, and should ship their own page under the fork's `docs/checks/`.
 See [docs/EXTENDING.md](../EXTENDING.md).
@@ -96,7 +96,8 @@ xxh3-64 over, NUL-separated:
    `name()`);
 3. the kind (`ADL_Fallback`, `ODR_DuplicateDefinition`, ...);
 4. the finding's file relative to the project root (`--project-root`,
-   default the working directory), `/`-separated;
+   default inferred from the enclosing `.git` root or common source
+   prefix), `/`-separated;
 5. the identity of the entities involved: the qualified names,
    signatures, or USRs the check records (`Diagnostic::entities`); for
    the ADL, CTAD, coverage, and dead-code checks, the resolved and the
@@ -110,6 +111,12 @@ xxh3-64 over, NUL-separated:
    or declaration that is not a lambda or a local class's method (whose
    USRs carry byte offsets), or of the variable for a namespace-scope
    initializer (`Diagnostic::scope`).
+
+By default, all file paths in finding locations, embedded diagnostic
+messages, and TU summaries are formatted relative to the project root.
+Pass `--absolute-paths` to emit full absolute filesystem paths in
+findings and diagnostic messages instead (fingerprints remain
+project-root-relative in both modes).
 
 No line or column number enters, so inserting or deleting unrelated
 lines above a finding leaves its fingerprint unchanged; renaming an
@@ -135,7 +142,7 @@ are merged into one finding.
 entry per distinct fingerprint with how many findings carried it:
 
 ```json
-{"version": 2, "tool": "vycor-cpp anneal", "findings": [
+{"version": 2, "tool": "vycor-cpp check", "findings": [
   {"fingerprint": "afd3147461fcb3df", "count": 2,
    "check": "adl-visibility", "file": "src/use.cpp",
    "message": "Fragile ADL resolution: ..."}]}
@@ -161,18 +168,23 @@ ones a version-1 file recorded.
 ## Suppressing a finding
 
 A comment on the finding's line, or a comment alone on the line above
-it:
+it, using either `vycor: ignore[...]` or `vycor-disable-next-line` /
+`vycor-disable-line`:
 
 ```cpp
 // vycor: ignore[adl-visibility]
 scale(v, 3.14);
+// vycor-disable-next-line exception-escape
+void safeApi() noexcept { mid(); }
 scale(v, 2.5); // vycor: ignore[adl-visibility, odr-violations]
+scale(v, 1.0); // vycor-disable-line adl-visibility
 // vycor: ignore[*]
 scale(v, 1.5);
 ```
 
-A trailing comment (code before it on the line, like the `2.5` call)
-covers its own line only, never the line after it.
+A trailing `vycor: ignore[...]` comment (code before it on the line,
+like the `2.5` call) or `vycor-disable-line` covers its own line only,
+never the line after it.
 
 `*` suppresses every check. Suppressed findings are counted in the
 summary (`suppressed`) and do not affect the exit code. `-v` lists

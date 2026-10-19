@@ -1,7 +1,6 @@
 # Semantic diff and change impact
 
-Status: implemented on `main`. Owner: package E of
-`docs/plans/2026-09-next/`. This page is the contract for `megascope
+This page is the contract for `megascope
 diff` (two indexes compared) and `impact_of_change` (one index, a
 changed set, the callers it reaches). The envelope is
 `docs/result-contract.md`; the path facts are `docs/path-analysis.md`;
@@ -319,7 +318,7 @@ second each.
 
 ## Follow-ups
 
-- **Anneal finding deltas** are not part of this package. `anneal`
+- **Check finding deltas** are not part of this package. `check`
   now has a stable finding identity and an export contract
   (`docs/checks/README.md`, "Finding identity"; `--format json`), and
   covers "new findings since base" itself with `--baseline` and the

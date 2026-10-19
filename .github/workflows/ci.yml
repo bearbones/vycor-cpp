@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llvm-version: [18, 20, 21]
+        llvm-version: [18, 20, 21, 22]
 
     name: LLVM ${{ matrix.llvm-version }}
 
@@ -26,6 +26,11 @@ jobs:
 
       - name: Initialize Catch2 submodule
         run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Download megascope v0.1.0 C FFI library
+        run: |
+          wget -qO /tmp/megascope.tar.gz https://github.com/bearbones/megascope/releases/download/v0.1.0/megascope-x86_64-unknown-linux-gnu.tar.gz
+          tar -C .. -xzf /tmp/megascope.tar.gz
 
       - name: Install LLVM/Clang ${{ matrix.llvm-version }}
         env:
@@ -73,6 +78,11 @@ jobs:
 
       - name: Initialize Catch2 submodule
         run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Download megascope v0.1.0 C FFI library
+        run: |
+          wget -qO /tmp/megascope.tar.gz https://github.com/bearbones/megascope/releases/download/v0.1.0/megascope-x86_64-unknown-linux-gnu.tar.gz
+          tar -C .. -xzf /tmp/megascope.tar.gz
 
       - name: Install LLVM/Clang
         run: |
@@ -125,6 +135,11 @@ jobs:
 
       - name: Initialize Catch2 submodule
         run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Download megascope v0.1.0 C FFI library
+        run: |
+          wget -qO /tmp/megascope.tar.gz https://github.com/bearbones/megascope/releases/download/v0.1.0/megascope-x86_64-unknown-linux-gnu.tar.gz
+          tar -C .. -xzf /tmp/megascope.tar.gz
 
       - name: Install LLVM/Clang
         run: |
@@ -181,7 +196,7 @@ jobs:
 
   # ThreadSanitizer over what runs on more than one thread: the per-TU
   # thread pool (determinism bakes at 1 and 4 threads, the worker-pool and
-  # shard-merge tests, parallel anneal), an in-process 4-thread bake of
+  # shard-merge tests, parallel check), an in-process 4-thread bake of
   # examples/deep_chains with queries over it, and one validation corpus
   # case (its isolated bake drives the parent's worker dispatcher).
   tsan:
@@ -199,6 +214,11 @@ jobs:
 
       - name: Initialize Catch2 submodule
         run: git submodule update --init --depth 1 -- extern/Catch2
+
+      - name: Download megascope v0.1.0 C FFI library
+        run: |
+          wget -qO /tmp/megascope.tar.gz https://github.com/bearbones/megascope/releases/download/v0.1.0/megascope-x86_64-unknown-linux-gnu.tar.gz
+          tar -C .. -xzf /tmp/megascope.tar.gz
 
       - name: Install LLVM/Clang
         run: |
@@ -232,7 +252,7 @@ jobs:
       - name: Thread-pool tests
         run: |
           cd build && ctest --output-on-failure --no-tests=error \
-            -L '^(worker_pool|determinism|AnnealCheckpoint|AnnealIsolated)$'
+            -L '^(worker_pool|determinism|CheckCheckpoint|CheckIsolated)$'
 
       - name: Multi-threaded bake of examples/deep_chains
         run: |

@@ -15,10 +15,10 @@
 
 // Order B: Only Core.hpp is visible here, so the call silently resolves to
 // scale(Vector, int). The same-score tie against scale(Vector, float) in
-// Extension.hpp is only visible to anneal's cross-TU index.
+// Extension.hpp is only visible to check's cross-TU index.
 //
 // The call is intentionally written here in the main file (rather than in
-// an inline helper inside Logic.hpp) so that anneal's VisitCallExpr
+// an inline helper inside Logic.hpp) so that check's VisitCallExpr
 // analyses it — the analyzer skips call sites that aren't in the main
 // file.
 #include "Core.hpp"

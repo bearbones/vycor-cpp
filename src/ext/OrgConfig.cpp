@@ -62,7 +62,7 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
   // silently configuring nothing.
   static const char *knownKeys[] = {"lockTypes", "channelTypes",
                                     "featureFlags", "collapsePaths",
-                                    "disabledAnnealChecks",
+                                    "disabledChecks",
                                     "staticInitHazards"};
   for (const auto &kv : *root) {
     bool known = false;
@@ -71,7 +71,7 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
     if (!known) {
       error = "unknown key '" + kv.first.str() +
               "' (expected one of: lockTypes, channelTypes, featureFlags, "
-              "collapsePaths, disabledAnnealChecks, staticInitHazards)";
+              "collapsePaths, disabledChecks, staticInitHazards)";
       return false;
     }
   }
@@ -80,8 +80,8 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
                         error) ||
       !parseStringArray(*root, "lockTypes", out.lockTypes, error) ||
       !parseStringArray(*root, "collapsePaths", out.collapsePaths, error) ||
-      !parseStringArray(*root, "disabledAnnealChecks",
-                        out.disabledAnnealChecks, error))
+      !parseStringArray(*root, "disabledChecks",
+                        out.disabledChecks, error))
     return false;
 
   if (const llvm::json::Value *channels = root->get("channelTypes")) {

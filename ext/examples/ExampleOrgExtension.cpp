@@ -4,7 +4,7 @@
 //
 // Demonstrates the two registration macros:
 //   - VYCOR_EXTENSION_SETUP: lock types + feature-flag guard patterns
-//   - VYCOR_REGISTER_ANNEAL_CHECK: a custom per-TU anneal check
+//   - VYCOR_REGISTER_CHECK: a custom per-TU check check
 
 #include "vycor/ext/Extensions.h"
 
@@ -38,12 +38,12 @@ VYCOR_EXTENSION_SETUP(ExampleOrgHooks) {
 }
 
 // ---------------------------------------------------------------------------
-// A custom anneal check: forbid direct use of a legacy API outside the
+// A custom check check: forbid direct use of a legacy API outside the
 // directory that owns it. One instance per TU; state needs no reset.
 // ---------------------------------------------------------------------------
 
 class NoLegacyAllocatorCheck
-    : public vycor::AnnealCheck,
+    : public vycor::Check,
       public clang::RecursiveASTVisitor<NoLegacyAllocatorCheck> {
 public:
   std::string name() const override { return "no-legacy-allocator"; }
@@ -84,4 +84,4 @@ private:
 
 } // namespace
 
-VYCOR_REGISTER_ANNEAL_CHECK(NoLegacyAllocatorCheck)
+VYCOR_REGISTER_CHECK(NoLegacyAllocatorCheck)

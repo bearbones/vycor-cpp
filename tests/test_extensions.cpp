@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "vycor/anneal/Analyzer.h"
+#include "vycor/check/Analyzer.h"
 #include "vycor/ext/Extensions.h"
 #include "vycor/ext/OrgConfig.h"
 
@@ -41,7 +41,7 @@ struct RegistryReset {
 
 // Minimal org check: flags every function literally named "forbidden" among
 // the TU's top-level declarations.
-class ForbiddenFunctionCheck : public vycor::AnnealCheck {
+class ForbiddenFunctionCheck : public vycor::Check {
 public:
   std::string name() const override { return "forbidden-function"; }
 
@@ -73,10 +73,10 @@ std::vector<vycor::Diagnostic> analyzeCode(const std::string &code,
 
 } // namespace
 
-TEST_CASE("Registered AnnealCheck runs per TU and emits Custom diagnostics",
+TEST_CASE("Registered Check runs per TU and emits Custom diagnostics",
           "[Extensions]") {
   RegistryReset reset;
-  vycor::ExtensionRegistry::instance().addAnnealCheck(
+  vycor::ExtensionRegistry::instance().addCheck(
       [] { return std::make_unique<ForbiddenFunctionCheck>(); });
 
   auto diagnostics = analyzeCode("void forbidden();\nvoid fine();\n");
@@ -90,7 +90,7 @@ TEST_CASE("Registered AnnealCheck runs per TU and emits Custom diagnostics",
 TEST_CASE("disabledChecks suppresses a registered check by name",
           "[Extensions]") {
   RegistryReset reset;
-  vycor::ExtensionRegistry::instance().addAnnealCheck(
+  vycor::ExtensionRegistry::instance().addCheck(
       [] { return std::make_unique<ForbiddenFunctionCheck>(); });
 
   vycor::AnalysisOptions opts;
@@ -189,7 +189,7 @@ TEST_CASE("OrgConfig parses all sections", "[Extensions][OrgConfig]") {
                       "consume": ["drain"], "category": "bus"}],
     "featureFlags": [{"pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1}],
     "collapsePaths": ["ThirdParty/Math"],
-    "disabledAnnealChecks": ["forbidden-function"]
+    "disabledChecks": ["forbidden-function"]
   })json";
 
   vycor::OrgConfig cfg;
@@ -209,7 +209,7 @@ TEST_CASE("OrgConfig parses all sections", "[Extensions][OrgConfig]") {
   CHECK(cfg.featureFlags[0].pattern == "FFlag::([A-Za-z0-9_]+)");
   CHECK(cfg.featureFlags[0].nameGroup == 1);
   CHECK(cfg.collapsePaths == std::vector<std::string>{"ThirdParty/Math"});
-  CHECK(cfg.disabledAnnealChecks ==
+  CHECK(cfg.disabledChecks ==
         std::vector<std::string>{"forbidden-function"});
 }
 
@@ -324,7 +324,7 @@ TEST_CASE("Registered IndexCheck runs over the merged index and honors "
   REQUIRE(diags.size() == 1);
   CHECK(diags[0].checkName == "no-legacy-alloc-index");
 
-  // disabledChecks filters by name, same as AnnealChecks.
+  // disabledChecks filters by name, same as CheckSpec.
   CHECK(vycor::ExtensionRegistry::instance()
             .createIndexChecks({"no-legacy-alloc-index"})
             .empty());

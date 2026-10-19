@@ -123,6 +123,12 @@ getStripIncompatibleFlagsAdjuster(bool stripPch = true) {
         skip = true;
         ++i; // skip next arg too
       }
+      // Strip CMake 3.28+ / Ninja C++20 module-map response files (@*.modmap)
+      // emitted in compile_commands.json before a build has materialized them.
+      if (!skip && llvm::StringRef(args[i]).starts_with("@") &&
+          llvm::StringRef(args[i]).ends_with(".modmap")) {
+        skip = true;
+      }
       // Strip -include args that reference PCH files (CMake-style PCH).
       // These use "-include/path/to/pch" (joined) or "-include /path/to/pch".
       if (stripPch) {

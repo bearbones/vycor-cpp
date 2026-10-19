@@ -232,6 +232,8 @@ void dispatchIsolated(
     return;
   if (workers == 0)
     workers = 1;
+  if (files.size() < workers)
+    workers = std::max<unsigned>(1u, static_cast<unsigned>(files.size()));
 
   // Small enough for pipelined merging and cheap retry, large enough to
   // amortize process spawn and shard write (design doc §Batching).
@@ -413,6 +415,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
                                     unsigned batchSizeOverride) {
   BakedIndexes out;
   unsigned poisonedCount = 0;
+  bool firstShard = true;
   dispatchIsolated(
       runner, files, workers, shardDir,
       [&](const std::string &shardPath,
@@ -424,9 +427,16 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
                          snap->meta.lockAllowlist != expected->lockTypes))
           llvm::errs() << "megascope: worker: WARNING: shard " << shardPath
                        << " records a different build configuration\n";
-        out.graph.absorb(snap->graph);
-        out.cfIndex.absorb(snap->cfIndex);
-        out.channels.absorb(snap->channels);
+        if (firstShard) {
+          out.graph = std::move(snap->graph);
+          out.cfIndex = std::move(snap->cfIndex);
+          out.channels = std::move(snap->channels);
+          firstShard = false;
+        } else {
+          out.graph.absorb(snap->graph);
+          out.cfIndex.absorb(snap->cfIndex);
+          out.channels.absorb(snap->channels);
+        }
         // The worker records its batch's dependencies and per-TU
         // outcomes in the shard meta.
         for (auto &kv : SnapshotIO::dependenciesOf(snap->meta))
@@ -473,14 +483,16 @@ WorkerRunner makeSubprocessRunner(const std::string &selfExe,
                         const std::string &shardPath,
                         const std::string &stderrPath) -> int {
     std::vector<std::string> argv;
-    argv.reserve(16 + 2 * batch.size());
+    argv.reserve(16 + 2 * batch.size() + cfg.fixedCompileArgs.size());
     argv.push_back(selfExe);
     argv.push_back("megascope");
     argv.push_back("--bake-worker");
     argv.push_back("--worker-out");
     argv.push_back(shardPath);
-    argv.push_back("--build-path");
-    argv.push_back(cfg.buildPath);
+    if (!cfg.buildPath.empty()) {
+      argv.push_back("--build-path");
+      argv.push_back(cfg.buildPath);
+    }
     // Single-threaded worker: keeps the last WORKER-TU marker an exact
     // poison identifier (a parallel worker's markers interleave).
     argv.push_back("--threads");
@@ -510,6 +522,12 @@ WorkerRunner makeSubprocessRunner(const std::string &selfExe,
     for (const auto &f : batch) {
       argv.push_back("--source");
       argv.push_back(f);
+    }
+    if (cfg.hasFixedCompileArgs || cfg.buildPath.empty() ||
+        !cfg.fixedCompileArgs.empty()) {
+      argv.push_back("--");
+      for (const auto &a : cfg.fixedCompileArgs)
+        argv.push_back(a);
     }
 
     return runWorkerProcess(argv, stderrPath, limits, "megascope");

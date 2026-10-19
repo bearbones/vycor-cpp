@@ -14,7 +14,7 @@ A single-TU tool can see the *pattern* ("static variable in a header")
 but not the *duplication*: whether any other TU actually includes that
 header. Pattern-level warnings drown in the benign case — `static const`
 tables and tags in headers are idiomatic and harmless — so they get
-disabled. anneal records the defining site together with the TU that
+disabled. check records the defining site together with the TU that
 materialized it, and reports only when:
 
 - the variable is **mutable** (const/constexpr copies are identical and
@@ -37,10 +37,8 @@ inline int bump() { return ++gCounter; }         // each TU bumps ITS OWN counte
 
 ```
 state.hpp:2: Header-static duplication: 'gCounter' is defined static in
-    state.hpp:2, and 2 TUs (a.cpp, b.cpp) each materialized their OWN copy —
-    writes in one TU are invisible in the others, and its address differs per
-    TU. Use 'inline' (C++17) for one shared object, extern with a single
-    definition, or constexpr if it is meant to be a constant.
+    state.hpp:2, and 2 TUs (a.cpp, b.cpp) each creates a separate copy at
+    different addresses.
 ```
 
 Note the `bump()` combination: an inline function mutating a header
@@ -66,6 +64,12 @@ sees that flavor, this check names the root cause.
 
 ## Remediation
 
-`inline int gCounter = 0;` (C++17) for one shared mutable object;
-`extern` in the header plus a single `.cpp` definition pre-C++17; or
-`constexpr` if it was meant to be a constant all along.
+Choose the fix that matches the intended semantics of the variable:
+
+1. **One shared mutable object across all TUs (most common):**
+   - In C++17 and later, replace `static` with `inline` (`inline int gCounter = 0;`) so every TU shares a single object at one address.
+   - In pre-C++17 code, declare the variable `extern int gCounter;` in the header and place a single `int gCounter = 0;` definition in one `.cpp` file.
+2. **An immutable constant:**
+   - Mark the variable `constexpr` (or `static const` when `constexpr` is not possible). Immutable header copies are benign and are not flagged.
+3. **Intentional per-TU private state:**
+   - If each translation unit genuinely needs its own independent copy (for example, a per-TU registration guard or TU-local cache), move the `static` variable into the `.cpp` files that use it, or suppress the finding at the header definition with `// vycor-disable-next-line header-static-duplication` (or `// vycor: ignore[header-static-duplication]`).

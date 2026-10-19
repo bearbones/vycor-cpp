@@ -1,10 +1,8 @@
 # Index freshness and provenance
 
-Status: implemented on `main` (snapshot format v10; write integrity
-and checksums in v13). Owner: package A of
-`docs/plans/2026-09-next/`. This page is the contract the warm start
-keeps and the interface the shared result contract (package C) and the
-selective control-flow storage (package F) build on.
+This page documents the index freshness and provenance contract (snapshot
+format v10; write integrity and checksums in v13) that warm refreshes,
+the shared result contract, and selective control-flow storage build on.
 
 Modules: `include/vycor/callgraph/InputFingerprint.h` (fingerprints),
 `include/vycor/callgraph/TuOutcome.h` (per-TU outcomes),
@@ -309,12 +307,12 @@ reading in place; the meta section is again unchanged.
 
 ## Write integrity (format v13)
 
-Package H of `docs/plans/2026-09-hardening/`. The index is a cache, but
+The index is a cache, but
 a torn, mixed, or emptied one answers queries wrongly without saying
 so, so every write that publishes one is atomic, serialized, checked,
 and refused when there is nothing to publish.
 
-- **Atomic save.** `SnapshotIO::save` (and every anneal journal header,
+- **Atomic save.** `SnapshotIO::save` (and every check journal header,
   worker shard, and handoff file) goes through `writeFileAtomically`
   (`callgraph/AtomicFile.h`): a uniquely named temp file in the target
   directory (`<index>.tmp-XXXXXX`), flushed and `fsync`ed, renamed over
@@ -357,8 +355,8 @@ and refused when there is nothing to publish.
   `bakeIsolated` now reports every TU `Skipped` with the reason. A TU
   that was parsed and failed (`Partial`, `Crashed`, `Poisoned`) is a
   real result and is published as before.
-- **anneal journal.** Loading records where the last valid record ends;
-  `AnnealCheckpoint::open` truncates the file there before appending, so
+- **check journal.** Loading records where the last valid record ends;
+  `CheckCheckpoint::open` truncates the file there before appending, so
   a torn or damaged record no longer hides every record written after it
   (the attempt records poison detection counts included). Record and
   shard lengths are bounds-checked in `size_t` (`len + 4` wrapped in
@@ -368,7 +366,7 @@ and refused when there is nothing to publish.
   `<journal>.lock` while a run has it open; a second run given the same
   `--checkpoint` continues without one (truncating could otherwise cut
   off a record the first run is still appending).
-- **Throwaway files** (worker shards, the anneal handoff file) are
+- **Throwaway files** (worker shards, the check handoff file) are
   published atomically but without the two fsyncs
   (`writeFileAtomically(..., durable=false)`).
 
@@ -433,8 +431,8 @@ opened file, and the fingerprint covers the inputs that are not files.
 
 ## Follow-ups
 
-- **anneal checkpoints** (`anneal/Checkpoint.h`) have the same gap this
-  package closed for megascope: `annealOptionsFingerprint` covers the
+- **check checkpoints** (`check/Checkpoint.h`) have the same gap this
+  package closed for megascope: `checkOptionsFingerprint` covers the
   analysis options and per-TU `FileStamp`s, but neither the compile
   commands nor the bake environment. A compile-flag change replays a
   stale phase-1 record. Reuse `fingerprintTUs` there; rewriting the
@@ -443,5 +441,5 @@ opened file, and the fingerprint covers the inputs that are not files.
   per-TU working-directory switch is a process-wide `chdir`; parallel
   parses of TUs with different compile directories raced (the
   working-directory scenario caught it). `makeClangTool` now gives every
-  tool its own physical file system. anneal and morph share the helper
+  tool its own physical file system. check and morph share the helper
   and inherit the fix.

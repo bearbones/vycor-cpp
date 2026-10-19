@@ -30,7 +30,7 @@ ExtensionRegistry &ExtensionRegistry::instance() {
   return registry;
 }
 
-void ExtensionRegistry::addAnnealCheck(AnnealCheckFactory factory) {
+void ExtensionRegistry::addCheck(CheckFactory factory) {
   checkFactories_.push_back(std::move(factory));
 }
 
@@ -93,9 +93,9 @@ bool ExtensionRegistry::addFeatureFlagPattern(const std::string &pattern,
   return true;
 }
 
-std::vector<std::unique_ptr<AnnealCheck>> ExtensionRegistry::createAnnealChecks(
+std::vector<std::unique_ptr<Check>> ExtensionRegistry::createChecks(
     const std::vector<std::string> &disabled) const {
-  std::vector<std::unique_ptr<AnnealCheck>> checks;
+  std::vector<std::unique_ptr<Check>> checks;
   for (const auto &factory : checkFactories_) {
     auto check = factory();
     if (!check)

@@ -26,7 +26,7 @@ See `include/vycor/ext/Extensions.h` for the full API and
 
 | Hook | Registered via | Effect |
 |---|---|---|
-| Custom anneal check | `VYCOR_REGISTER_ANNEAL_CHECK(MyCheck)` | Runs per TU after the built-in analyzer; emits `Diagnostic::Custom` |
+| Custom check check | `VYCOR_REGISTER_CHECK(MyCheck)` | Runs per TU after the built-in analyzer; emits `Diagnostic::Custom` |
 | Lock types | `registry.addLockTypes({...})` | Recognized as `RaiiKind::Lock` in RAII/lock tracking (megascope/prism) |
 | Channel types | `registry.addChannelTypes({...})` | Producer/consumer call-site tracing (ChannelIndex) |
 | Guard classifiers / feature flags | `registry.addFeatureFlagPattern(...)` / `addGuardClassifier(...)` | Annotates conditional guards in `megascope dump` and tool responses (e.g. "this path only runs with FFlag::X on") |
@@ -45,4 +45,4 @@ cmake --build build --target vycor-cpp vycor_tests
 ```
 
 Keep each check's `name()` stable: it is the key used by
-`disabledAnnealChecks` in the org config and is surfaced in diagnostics.
+`disabledChecks` in the org config and is surfaced in diagnostics.

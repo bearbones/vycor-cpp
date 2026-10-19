@@ -35,6 +35,7 @@
 //   vycor-cpp megascope tools   [--format json|ndjson|tsv]
 //   vycor-cpp megascope info    [--index F] [--files]
 //   vycor-cpp megascope batch   [--index F]     # NDJSON requests on stdin
+//   vycor-cpp megascope merge   --output F [shard.vycs ...] [--input-list L]
 //
 // These verbs never touch llvm::cl: main.cpp peels the verb off argv and
 // hands the rest to runMegascopeQueryVerb. Per-tool flags are derived from
@@ -51,8 +52,9 @@
 // channel site (ndjson by default).
 //
 // Ephemeral mode (2.1, 4.1): a query verb given --source/--source-list/
-// --source-re (with --build-path) bakes the selected TUs in memory and
-// answers from that — no index is read or written. What `prism` was.
+// --source-re (with --build-path or `-- <compile-flags...>`) bakes the
+// selected TUs in memory and answers from that — no index is read or
+// written. What `prism` was.
 // ============================================================================
 
 namespace vycor {
@@ -69,7 +71,8 @@ enum MegascopeExit : int {
   kExitAmbiguous = 4, // ambiguous identity (candidates on stdout)
 };
 
-/// Default index location relative to a build directory.
+/// Default index location relative to a build directory (or parent directory
+/// when `buildPath` names a compilation database file).
 std::string defaultIndexPath(llvm::StringRef buildPath);
 
 /// Resolution chain for the index file read by the query verbs: `--index`,
@@ -152,6 +155,20 @@ int runDiffVerb(llvm::ArrayRef<std::string> args, OutputFormat format,
                 bool pretty, const std::vector<std::string> &entryPoints,
                 llvm::raw_ostream &out, llvm::raw_ostream &err);
 
+/// `megascope merge --output OUT [--input IN ...] [--input-list FILE|-]
+/// [--allow-mismatch] [--no-wait] [IN.vycs ...]`:
+/// merges per-TU or per-target `.vycs` shards into a single saved index
+/// (for build-system rules such as Buck2 that compile per-TU shards and
+/// reduce them into per-target and global `.vycs` artifacts). `args` are
+/// the flags after the verb with the common query flags already split out;
+/// `indexFlag` is the common `--index` value (accepted as an alias for
+/// `--output`). Returns a MegascopeExit code.
+int runMergeVerb(llvm::ArrayRef<std::string> args, llvm::StringRef indexFlag,
+                 bool pretty, bool verbose,
+                 const std::vector<std::string> &entryPoints,
+                 std::istream &in, llvm::raw_ostream &out,
+                 llvm::raw_ostream &err);
+
 /// The impact-of-change CLI adapter's own flags: removes `--patch-file F`
 /// (`-` reads `in`), `--git-base A`, `--git-head B`, and `--repo DIR`
 /// from `args` and seeds `seed["patch"]` with the file's text or the
@@ -163,7 +180,7 @@ int seedImpactPatch(std::vector<std::string> &args, llvm::json::Object &seed,
 /// `git [-C repo] diff -U0 --no-color --no-ext-diff <base> [<head>] --`:
 /// its output in `patch`. An empty `head` diffs against the working tree;
 /// an empty `repo` runs in the current directory. Shared by
-/// impact-of-change and anneal's changed-lines mode.
+/// impact-of-change and check's changed-lines mode.
 bool gitDiffText(const std::string &repo, const std::string &base,
                  const std::string &head, std::string &patch,
                  std::string &error);

@@ -1,11 +1,11 @@
 add_library(vycor_lib
-  anneal/GlobalIndex.cpp
-  anneal/Indexer.cpp
-  anneal/Analyzer.cpp
-  anneal/Checkpoint.cpp
-  anneal/CheckSet.cpp
-  anneal/DeadCodeAnalyzer.cpp
-  anneal/Report.cpp
+  check/GlobalIndex.cpp
+  check/Indexer.cpp
+  check/Analyzer.cpp
+  check/Checkpoint.cpp
+  check/CheckSet.cpp
+  check/DeadCodeAnalyzer.cpp
+  check/Report.cpp
   morph/MatcherEngine.cpp
   morph/TemplateEngine.cpp
   morph/RulesParser.cpp
@@ -20,6 +20,7 @@ add_library(vycor_lib
   callgraph/ChannelIndex.cpp
   callgraph/ControlFlowOracle.cpp
   callgraph/InputFingerprint.cpp
+  callgraph/MegascopeBridge.cpp
   callgraph/PathSearch.cpp
   callgraph/Snapshot.cpp
   callgraph/WorkerPool.cpp
@@ -47,28 +48,63 @@ add_library(vycor_lib
   ext/OrgConfig.cpp
 )
 
+set_target_properties(vycor_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_include_directories(vycor_lib PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/generated
 )
 
+option(VYCOR_USE_LIBMEGASCOPE "Link against libmegascope C FFI if found" ON)
+set(MEGASCOPE_ROOT "${CMAKE_SOURCE_DIR}/../megascope" CACHE PATH "Path to the megascope Rust core repository or release prefix")
+if(VYCOR_USE_LIBMEGASCOPE AND NOT _vycor_sanitize)
+  find_path(MEGASCOPE_INCLUDE_DIR
+    NAMES megascope.h
+    HINTS "${MEGASCOPE_ROOT}/include"
+    NO_DEFAULT_PATH
+  )
+  find_library(MEGASCOPE_STATIC_LIB
+    NAMES libmegascope.a megascope
+    HINTS
+      "${MEGASCOPE_ROOT}/lib"
+      "${MEGASCOPE_ROOT}/target/release"
+      "${MEGASCOPE_ROOT}/target/debug"
+    NO_DEFAULT_PATH
+  )
+endif()
+if(MEGASCOPE_INCLUDE_DIR AND MEGASCOPE_STATIC_LIB)
+  message(STATUS "Found libmegascope: ${MEGASCOPE_STATIC_LIB} (include: ${MEGASCOPE_INCLUDE_DIR})")
+  target_include_directories(vycor_lib PUBLIC "${MEGASCOPE_INCLUDE_DIR}")
+  target_compile_definitions(vycor_lib PUBLIC VYCOR_HAS_LIBMEGASCOPE=1)
+  target_link_libraries(vycor_lib PUBLIC "${MEGASCOPE_STATIC_LIB}" dl pthread m)
+else()
+  message(STATUS "libmegascope not linked (MEGASCOPE_ROOT=${MEGASCOPE_ROOT}); building with JSON shard export only")
+endif()
+
 target_compile_options(vycor_lib PRIVATE ${VYCOR_WARNING_FLAGS})
 
-target_link_libraries(vycor_lib PUBLIC
-  clangTooling
-  clangDynamicASTMatchers
-  clangASTMatchers
-  clangAST
-  clangIndex
-  clangBasic
-  clangDriver
-  clangFrontend
-  clangSema
-  clangSerialization
-  clangRewrite
-  clangToolingCore
-  LLVMSupport
-)
+if(LLVM_LINK_LLVM_DYLIB AND CLANG_LINK_CLANG_DYLIB AND TARGET clang-cpp AND TARGET LLVM)
+  target_link_libraries(vycor_lib PUBLIC
+    clang-cpp
+    LLVM
+  )
+else()
+  target_link_libraries(vycor_lib PUBLIC
+    clangTooling
+    clangDynamicASTMatchers
+    clangASTMatchers
+    clangAST
+    clangIndex
+    clangBasic
+    clangDriver
+    clangFrontend
+    clangSema
+    clangSerialization
+    clangRewrite
+    clangToolingCore
+    LLVMSupport
+  )
+endif()
 
 # Embed the Clang resource directory so the tool can find built-in headers
 # (stdarg.h, etc.) when consuming compilation databases from other toolchains.
@@ -111,7 +147,7 @@ endif()
 # Organization extension slot-in (docs/EXTENDING.md): every .cpp directly
 # under <repo>/ext/ is compiled into the executable. Deliberately NOT part
 # of vycor_lib — these files typically contain only static registrars
-# (VYCOR_REGISTER_ANNEAL_CHECK / VYCOR_EXTENSION_SETUP), and the linker
+# (VYCOR_REGISTER_CHECK / VYCOR_EXTENSION_SETUP), and the linker
 # drops unreferenced members of a static archive, silently discarding the
 # registration. Objects listed directly on the target are always linked.
 file(GLOB VYCOR_EXT_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/ext/*.cpp")
@@ -127,9 +163,18 @@ target_compile_options(vycor-cpp PRIVATE ${VYCOR_WARNING_FLAGS})
 target_compile_definitions(vycor-cpp PRIVATE
   "VYCOR_DEFAULT_CLANG=\"${VYCOR_DEFAULT_CLANG}\"")
 
+# Clang frontend plugin (`clang++ -c foo.cpp -fplugin=libvycor_megascope_plugin.so`)
+# for zero-reparse per-TU .vycs emission during normal compilation.
+add_library(vycor_megascope_plugin MODULE
+  plugin/MegascopePlugin.cpp
+  ${VYCOR_EXT_SOURCES}
+)
+target_link_libraries(vycor_megascope_plugin PRIVATE vycor_lib)
+target_compile_options(vycor_megascope_plugin PRIVATE ${VYCOR_WARNING_FLAGS})
+
 # Release packaging: `cmake --install build --prefix <dir>` stages a single
 # self-contained bin/ dir that release.yml tars up. No CPack -- one binary
-# doesn't need it (see docs/toolchain-portability.md for why this project
-# keeps packaging minimal).
+# doesn't need it.
 include(GNUInstallDirs)
 install(TARGETS vycor-cpp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS vycor_megascope_plugin LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})

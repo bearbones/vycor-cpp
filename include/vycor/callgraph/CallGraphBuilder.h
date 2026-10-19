@@ -46,6 +46,7 @@ public:
   bool TraverseCXXMethodDecl(clang::CXXMethodDecl *decl);
   bool TraverseCXXConstructorDecl(clang::CXXConstructorDecl *decl);
   bool TraverseCXXDestructorDecl(clang::CXXDestructorDecl *decl);
+  bool TraverseCXXConversionDecl(clang::CXXConversionDecl *decl);
   bool TraverseLambdaExpr(clang::LambdaExpr *expr);
   bool VisitLambdaExpr(clang::LambdaExpr *expr);
   bool VisitReturnStmt(clang::ReturnStmt *stmt);
@@ -79,6 +80,7 @@ public:
   bool TraverseCXXMethodDecl(clang::CXXMethodDecl *decl);
   bool TraverseCXXConstructorDecl(clang::CXXConstructorDecl *decl);
   bool TraverseCXXDestructorDecl(clang::CXXDestructorDecl *decl);
+  bool TraverseCXXConversionDecl(clang::CXXConversionDecl *decl);
   bool TraverseLambdaExpr(clang::LambdaExpr *expr);
 
   bool VisitCallExpr(clang::CallExpr *expr);

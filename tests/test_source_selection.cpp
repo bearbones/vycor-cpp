@@ -259,3 +259,82 @@ TEST_CASE("explicit files and list files are unioned, canonicalized, and "
           std::string::npos);
   }
 }
+
+TEST_CASE("loadCompilationDatabase supports fixed flags, JSON file, and directory",
+          "[source-selection]") {
+  Tree tree;
+
+  SECTION("fixed compiler flags after '--' strip -c, -o, and depfile flags") {
+    std::string err;
+    std::vector<std::string> flags = {
+        "-std=c++20", "-I/inc",  "-c",     "-o",      "out.o",  "-oalt.o",
+        "-MMD",       "-MP",     "-MF",    "out.d",   "-MFa.d", "-MT",
+        "out.o",      "-MTalt",  "-MQ",    "out.o",   "-MQalt", "-DFOO=1"};
+    auto db = loadCompilationDatabase("", flags, err);
+    REQUIRE(db != nullptr);
+    CHECK(err.empty());
+    auto cmds = db->getCompileCommands(tree.at("Core/b.cpp"));
+    REQUIRE(cmds.size() == 1);
+    const auto &cl = cmds[0].CommandLine;
+    CHECK(std::find(cl.begin(), cl.end(), "-std=c++20") != cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-I/inc") != cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-DFOO=1") != cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-c") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-o") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "out.o") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-oalt.o") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-MMD") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-MP") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-MF") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "out.d") == cl.end());
+    CHECK(std::find(cl.begin(), cl.end(), "-MFa.d") == cl.end());
+
+    // Bare '--' with zero flags still creates a FixedCompilationDatabase.
+    auto emptyFixed = loadCompilationDatabase("", {}, err, /*hasFixedArgs=*/true);
+    REQUIRE(emptyFixed != nullptr);
+    CHECK(!emptyFixed->getCompileCommands(tree.at("Core/b.cpp")).empty());
+  }
+
+  SECTION("custom compilation database file path and directory path") {
+    const std::string customJson = tree.at("buck2_compdb.json");
+    const std::string standardJson = tree.at("compile_commands.json");
+    const std::string body =
+        "[{\"directory\":\"" + std::string(tree.root.str()) +
+        "\",\"file\":\"" + tree.at("Core/b.cpp") +
+        "\",\"arguments\":[\"clang++\",\"-std=c++17\",\"-c\",\"" +
+        tree.at("Core/b.cpp") + "\"]}]\n";
+    for (const auto &p : {customJson, standardJson}) {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(p, ec);
+      REQUIRE_FALSE(ec);
+      os << body;
+    }
+
+    std::string err;
+    auto fromFile = loadCompilationDatabase(customJson, {}, err);
+    REQUIRE(fromFile != nullptr);
+    CHECK(fromFile->getAllFiles() ==
+          std::vector<std::string>{tree.at("Core/b.cpp")});
+
+    err.clear();
+    auto fromDir = loadCompilationDatabase(tree.root, {}, err);
+    REQUIRE(fromDir != nullptr);
+    CHECK(fromDir->getAllFiles() ==
+          std::vector<std::string>{tree.at("Core/b.cpp")});
+
+    std::remove(customJson.c_str());
+    std::remove(standardJson.c_str());
+  }
+
+  SECTION("error cases") {
+    std::string err;
+    CHECK(loadCompilationDatabase("", {}, err) == nullptr);
+    CHECK(err.find("--build-path is required") != std::string::npos);
+
+    err.clear();
+    CHECK(loadCompilationDatabase(tree.at("nonexistent_dir"), {}, err) ==
+          nullptr);
+    CHECK(!err.empty());
+  }
+}
+

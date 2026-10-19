@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "title": "Vague-linkage definitions that differ across TUs (anneal --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
+ "title": "Vague-linkage definitions that differ across TUs (check --odr-diag): a -D-dependent inline body, two headers defining one function, a class defined twice; identical copies and the flagged class's own methods stay silent",
  "sources": [
   "tu1.cpp",
   "tu2.cpp"
@@ -15,7 +15,7 @@
   {
    "id": "odr-diag",
    "argv": [
-    "anneal",
+    "check",
     "--odr-diag",
     "--threads",
     "1"
@@ -38,7 +38,7 @@
   {
    "id": "no-odr-without-the-check",
    "argv": [
-    "anneal",
+    "check",
     "--threads",
     "1"
    ],
@@ -46,7 +46,7 @@
     "exit": 0,
     "lines": {
      "present": [
-      "^anneal: no issues found"
+      "^check: no issues found"
      ],
      "absent": [
       "ODR violation"

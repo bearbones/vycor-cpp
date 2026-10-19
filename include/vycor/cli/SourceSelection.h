@@ -16,9 +16,12 @@
 #pragma once
 
 #include "clang/Tooling/CompilationDatabase.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
 #include <istream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -76,5 +79,22 @@ llvm::Expected<std::vector<std::string>>
 selectSources(const clang::tooling::CompilationDatabase &db,
               const SourceSelection &sel, std::istream &stdinFor,
               SourceSelectionStats *stats = nullptr);
+
+/// Load a compilation database for the CLI (`megascope index`, `check`,
+/// `morph`, and ephemeral `megascope <tool> --source ...`):
+///   1. When `hasFixedArgs` is true or `fixedArgs` (from
+///      `-- [compile-flags...]` on the command line) is non-empty, returns
+///      a `FixedCompilationDatabase` rooted at `buildPath` (or "." when
+///      `buildPath` is empty) using those flags.
+///   2. When `buildPath` is a regular file on disk, loads it directly via
+///      `JSONCompilationDatabase::loadFromFile` (so build systems can pass
+///      a target-specific `.json` file without wrapping it in a directory
+///      named `compile_commands.json`).
+///   3. Otherwise, loads from the directory `buildPath` via
+///      `CompilationDatabase::loadFromDirectory`.
+std::unique_ptr<clang::tooling::CompilationDatabase>
+loadCompilationDatabase(llvm::StringRef buildPath,
+                        llvm::ArrayRef<std::string> fixedArgs,
+                        std::string &error, bool hasFixedArgs = false);
 
 } // namespace vycor

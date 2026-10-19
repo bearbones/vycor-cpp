@@ -1,9 +1,7 @@
 # Control-flow access for one-shot queries
 
-Status: implemented on `main` (snapshot format v12). Owner: package F of
-`docs/plans/2026-09-next/` (`F-control-flow-performance.md`). This page
-is the benchmark report, the go/no-go decision, the layout of the v12
-control-flow section, and the reproduction commands.
+This page documents the layout of the v12 memory-mapped control-flow
+section, parity guarantees, and benchmark reproduction commands.
 
 ## The problem
 

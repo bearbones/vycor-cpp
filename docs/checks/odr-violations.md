@@ -16,13 +16,15 @@ the same inline function sail through every ordinary build; behavior then
 depends on link order. Catching this otherwise requires LTO + `-Wodr` or
 ASan's ODR checker at runtime — neither of which most builds run.
 
-When enabled, anneal's phase-1 index records a `clang::ODRHash` per
+When enabled, check's phase-1 index records a `clang::ODRHash` per
 vague-linkage definition and compares project-wide:
 
 - **`ODR_DivergentDefinition`** — ONE definition site whose body hashes
-  differently across TUs: the definition depends on preprocessor state
-  that differs between compile commands (`-D` flags, `NDEBUG`, config
-  headers).
+  differently across TUs in the same `compile_commands.json` database: the
+  definition depends on preprocessor state that differs between compile
+  commands (`-D` flags, `NDEBUG`, config headers, or header inclusion order),
+  such as library TUs vs. test TUs compiled with different macro definitions.
+  The diagnostic lists representative TUs for each distinct definition variant.
 - **`ODR_DuplicateDefinition`** — the same entity defined at multiple
   distinct sites with differing content (two headers each define it).
 
@@ -35,9 +37,11 @@ echoes of the same root cause.
 ## Example
 
 ```
-./limits.hpp:2: ODR violation: 'limits' at ./limits.hpp:2 compiles to 2 different
-    definitions across TUs — its body depends on preprocessor state that differs
-    between compile commands. Every TU must see an identical definition.
+limits.hpp:2: ODR violation: 'limits' at limits.hpp:2 compiles to 2 different
+    definitions across TUs in the same compile_commands.json database
+    [variant 1 in a.cpp; variant 2 in b.cpp] — its body depends on preprocessor
+    state that differs between compile commands. Every TU must see an identical
+    definition.
 ```
 
 ## Notes and limitations

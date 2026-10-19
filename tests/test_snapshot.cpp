@@ -1007,3 +1007,311 @@ TEST_CASE("dependencies are recorded by the path the file system opened",
     CHECK(llvm::sys::fs::exists(p));
   llvm::sys::fs::remove_directories(dir);
 }
+
+TEST_CASE("SnapshotIO::merge combines disjoint and diamond-overlapping shards",
+          "[snapshot][merge]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-merge-test", dir));
+  const std::string base = std::string(dir) + "/";
+
+  auto makeShardMeta = [](std::vector<std::string> tus,
+                          std::vector<std::string> eps,
+                          uint64_t bakeStartNs,
+                          std::string env = "env-1",
+                          std::vector<std::string> collapse = {}) {
+    SnapshotMeta m;
+    for (size_t i = 0; i < tus.size(); ++i) {
+      m.files.push_back({tus[i], 1000 + i, 200 + i});
+      m.fingerprints.push_back("fp-" + tus[i]);
+      m.outcomes.push_back({TuStatus::Indexed, ""});
+    }
+    m.entryPoints = std::move(eps);
+    m.collapsePaths = std::move(collapse);
+    m.provenance.analyzer = "vycor-test";
+    m.provenance.toolchain = "clang-test";
+    m.provenance.environment = std::move(env);
+    m.provenance.bakeStartNs = bakeStartNs;
+    return m;
+  };
+
+  // Shard 1: /src/common.cpp + /src/lib1.cpp
+  const std::string shard1Path = base + "lib1.vycs";
+  {
+    CallGraph g;
+    g.addNode({"commonFn", "/src/common.cpp", 10, false, false, ""},
+              "/src/common.cpp");
+    g.addNode({"leafFn", "/src/common.cpp", 20, false, false, ""},
+              "/src/common.cpp");
+    g.addEdge({"commonFn", "leafFn", EdgeKind::DirectCall,
+               Confidence::Proven, "/src/common.cpp:12:3", 0},
+              "/src/common.cpp");
+    g.addNode({"inlineHelper", "/inc/common.h", 5, false, false, ""},
+              "/src/lib1.cpp");
+    g.addNode({"lib1Api", "/src/lib1.cpp", 30, false, false, ""},
+              "/src/lib1.cpp");
+    g.addEdge({"inlineHelper", "commonFn", EdgeKind::DirectCall,
+               Confidence::Proven, "/inc/common.h:6:3", 0},
+              "/src/lib1.cpp");
+    g.addEdge({"lib1Api", "inlineHelper", EdgeKind::DirectCall,
+               Confidence::Proven, "/src/lib1.cpp:32:3", 0},
+              "/src/lib1.cpp");
+
+    ControlFlowIndex cf;
+    CallSiteContext ctxCommon;
+    ctxCommon.callerUsr = "commonFn";
+    ctxCommon.callerName = "commonFn";
+    ctxCommon.calleeUsr = "leafFn";
+    ctxCommon.calleeName = "leafFn";
+    ctxCommon.callSite = "/src/common.cpp:12:3";
+    ctxCommon.tuPath = "/src/common.cpp";
+    cf.addCallSiteContext(ctxCommon);
+
+    CallSiteContext ctx1;
+    ctx1.callerUsr = "lib1Api";
+    ctx1.callerName = "lib1Api";
+    ctx1.calleeUsr = "inlineHelper";
+    ctx1.calleeName = "inlineHelper";
+    ctx1.callSite = "/src/lib1.cpp:32:3";
+    ctx1.tuPath = "/src/lib1.cpp";
+    cf.addCallSiteContext(ctx1);
+
+    ChannelIndex ch;
+    ChannelSite cs;
+    cs.op = ChannelOperation::Produce;
+    cs.channelId = "q_";
+    cs.channelTypeName = "WorkQueue";
+    cs.category = "queue";
+    cs.siteFunctionUsr = "commonFn";
+    cs.siteFunctionDisplay = "commonFn";
+    cs.callSite = "/src/common.cpp:13:3";
+    cs.tuPath = "/src/common.cpp";
+    ch.addSite(cs);
+
+    SnapshotMeta m = makeShardMeta({"/src/common.cpp", "/src/lib1.cpp"},
+                                   {"main", "lib1_entry"}, 100);
+    TuDependencies deps;
+    deps["/src/common.cpp"] = {{"/inc/common.h", 500, 50}};
+    deps["/src/lib1.cpp"] = {{"/inc/common.h", 500, 50}};
+    SnapshotIO::recordDependencies(m, deps);
+    REQUIRE(SnapshotIO::save(shard1Path, g, cf, m, ch));
+  }
+
+  // Shard 2: /src/common.cpp (overlapping diamond dependency) + /src/lib2.cpp
+  const std::string shard2Path = base + "lib2.vycs";
+  {
+    CallGraph g;
+    g.addNode({"commonFn", "/src/common.cpp", 10, false, false, ""},
+              "/src/common.cpp");
+    g.addNode({"leafFn", "/src/common.cpp", 20, false, false, ""},
+              "/src/common.cpp");
+    g.addEdge({"commonFn", "leafFn", EdgeKind::DirectCall,
+               Confidence::Proven, "/src/common.cpp:12:3", 0},
+              "/src/common.cpp");
+    g.addNode({"inlineHelper", "/inc/common.h", 5, false, false, ""},
+              "/src/lib2.cpp");
+    g.addNode({"lib2Api", "/src/lib2.cpp", 40, false, false, ""},
+              "/src/lib2.cpp");
+    g.addEdge({"inlineHelper", "commonFn", EdgeKind::DirectCall,
+               Confidence::Proven, "/inc/common.h:6:3", 0},
+              "/src/lib2.cpp");
+    g.addEdge({"lib2Api", "inlineHelper", EdgeKind::DirectCall,
+               Confidence::Proven, "/src/lib2.cpp:42:3", 0},
+              "/src/lib2.cpp");
+
+    ControlFlowIndex cf;
+    CallSiteContext ctxCommon;
+    ctxCommon.callerUsr = "commonFn";
+    ctxCommon.callerName = "commonFn";
+    ctxCommon.calleeUsr = "leafFn";
+    ctxCommon.calleeName = "leafFn";
+    ctxCommon.callSite = "/src/common.cpp:12:3";
+    ctxCommon.tuPath = "/src/common.cpp";
+    cf.addCallSiteContext(ctxCommon);
+
+    CallSiteContext ctx2;
+    ctx2.callerUsr = "lib2Api";
+    ctx2.callerName = "lib2Api";
+    ctx2.calleeUsr = "inlineHelper";
+    ctx2.calleeName = "inlineHelper";
+    ctx2.callSite = "/src/lib2.cpp:42:3";
+    ctx2.tuPath = "/src/lib2.cpp";
+    cf.addCallSiteContext(ctx2);
+
+    ChannelIndex ch;
+    ChannelSite cs;
+    cs.op = ChannelOperation::Produce;
+    cs.channelId = "q_";
+    cs.channelTypeName = "WorkQueue";
+    cs.category = "queue";
+    cs.siteFunctionUsr = "commonFn";
+    cs.siteFunctionDisplay = "commonFn";
+    cs.callSite = "/src/common.cpp:13:3";
+    cs.tuPath = "/src/common.cpp";
+    ch.addSite(cs);
+
+    SnapshotMeta m = makeShardMeta({"/src/common.cpp", "/src/lib2.cpp"},
+                                   {"main", "lib2_entry"}, 250);
+    TuDependencies deps;
+    deps["/src/common.cpp"] = {{"/inc/common.h", 500, 50}};
+    deps["/src/lib2.cpp"] = {{"/inc/common.h", 500, 50}};
+    SnapshotIO::recordDependencies(m, deps);
+    REQUIRE(SnapshotIO::save(shard2Path, g, cf, m, ch));
+  }
+
+  SECTION("merges diamond shards idempotently without double-counting TUs") {
+    std::string error;
+    // Also pass shard1Path twice to verify full-shard deduplication.
+    auto merged = SnapshotIO::merge({shard1Path, shard2Path, shard1Path},
+                                    SnapshotIO::MergeOptions{}, &error);
+    REQUIRE(merged.has_value());
+    CHECK(error.empty());
+
+    // 3 distinct TUs: /src/common.cpp, /src/lib1.cpp, /src/lib2.cpp
+    REQUIRE(merged->meta.files.size() == 3);
+    CHECK(merged->meta.files[0].path == "/src/common.cpp");
+    CHECK(merged->meta.files[1].path == "/src/lib1.cpp");
+    CHECK(merged->meta.files[2].path == "/src/lib2.cpp");
+    CHECK(merged->meta.fingerprints.size() == 3);
+    CHECK(merged->meta.outcomes.size() == 3);
+    CHECK(merged->meta.entryPoints ==
+          std::vector<std::string>{"main", "lib1_entry", "lib2_entry"});
+    CHECK(merged->meta.provenance.bakeStartNs == 250);
+
+    // 5 nodes: commonFn, leafFn, inlineHelper, lib1Api, lib2Api
+    // 4 edges: commonFn->leafFn, inlineHelper->commonFn, lib1Api->inlineHelper,
+    //          lib2Api->inlineHelper
+    CHECK(merged->graph.nodeCount() == 5);
+    CHECK(merged->graph.edgeCount() == 4);
+    // 3 call-site contexts (ctxCommon not duplicated!) and 1 channel site.
+    CHECK(merged->cfIndex.size() == 3);
+    CHECK(merged->channels.size() == 1);
+    CHECK(merged->channels.producersOf("q_").size() == 1);
+
+    // Verify contributor tracking after diamond merge:
+    // commonFn -> leafFn, ctxCommon, and cs were only in /src/common.cpp
+    // (must drop when /src/common.cpp is removed, proving none were
+    // double-counted across shard1 and shard2).
+    CHECK(merged->graph.removeTU("/src/common.cpp") == 1);
+    CHECK(merged->cfIndex.removeTU("/src/common.cpp") == 1);
+    CHECK(merged->channels.removeTU("/src/common.cpp") == 1);
+    CHECK(merged->cfIndex.size() == 2);
+    CHECK(merged->channels.size() == 0);
+    // inlineHelper -> commonFn was contributed by both lib1.cpp and lib2.cpp:
+    // removing lib1.cpp drops only lib1Api->inlineHelper (1 edge), keeping
+    // inlineHelper->commonFn alive until lib2.cpp is removed.
+    CHECK(merged->graph.removeTU("/src/lib1.cpp") == 1);
+    CHECK(merged->graph.edgeCount() == 2);
+    CHECK(merged->graph.removeTU("/src/lib2.cpp") == 2);
+    CHECK(merged->graph.edgeCount() == 0);
+  }
+
+  SECTION("rejects mismatched build config or environment unless allowed") {
+    const std::string mismatchPath = base + "mismatch.vycs";
+    SnapshotMeta m = makeShardMeta({"/src/other.cpp"}, {"main"}, 300,
+                                   "env-different", {"ThirdParty"});
+    REQUIRE(SnapshotIO::save(mismatchPath, CallGraph(), ControlFlowIndex(), m));
+
+    std::string error;
+    CHECK(!SnapshotIO::merge({shard1Path, mismatchPath},
+                             SnapshotIO::MergeOptions{}, &error));
+    CHECK(error.find("--allow-mismatch") != std::string::npos);
+
+    SnapshotIO::MergeOptions allowOpts;
+    allowOpts.allowMismatch = true;
+    allowOpts.entryPoints = {"custom_entry"};
+    error.clear();
+    auto merged = SnapshotIO::merge({shard1Path, mismatchPath}, allowOpts,
+                                    &error);
+    REQUIRE(merged.has_value());
+    CHECK(merged->meta.files.size() == 3);
+    CHECK(merged->meta.entryPoints ==
+          std::vector<std::string>{"custom_entry"});
+  }
+
+  SECTION("error cases: empty input list and missing file") {
+    std::string error;
+    CHECK(!SnapshotIO::merge({}, SnapshotIO::MergeOptions{}, &error));
+    CHECK(!error.empty());
+
+    error.clear();
+    CHECK(!SnapshotIO::merge({base + "nonexistent.vycs"},
+                             SnapshotIO::MergeOptions{}, &error));
+    CHECK(error.find("cannot load") != std::string::npos);
+  }
+
+  llvm::sys::fs::remove_directories(dir);
+}
+
+TEST_CASE("SnapshotIO::save is byte-for-byte deterministic across map insertion orders and duplicate removeTUs",
+          "[snapshot][determinism]") {
+  // Pre-populate nodes in the same order so both graphs assign identical
+  // StringIds, then insert relationship-map entries and multi-TU edge
+  // contributors in opposite orders (which changes std::unordered_map
+  // iteration order unless SnapshotIO::save canonicalizes map keys).
+  auto seedNodes = [](CallGraph &g) {
+    for (const char *name :
+         {"alpha", "beta", "BaseA", "DerivedA1", "BaseB", "DerivedB1",
+          "BaseA::run", "DerivedA1::run", "BaseB::run", "DerivedB1::run",
+          "IfaceA", "ImplA", "IfaceB", "ImplB", "factoryA", "workerA",
+          "factoryB", "workerB", "/inc/shared.h:5:3"}) {
+      g.addNode({name, "/src/a.cpp", 1, false, false, ""}, "/src/a.cpp");
+      g.addNode({name, "/src/a.cpp", 1, false, false, ""}, "/src/b.cpp");
+    }
+  };
+
+  CallGraph g1;
+  seedNodes(g1);
+  g1.addDerivedClass("BaseA", "DerivedA1", "/src/a.cpp");
+  g1.addDerivedClass("BaseB", "DerivedB1", "/src/b.cpp");
+  g1.addMethodOverride("BaseA::run", "DerivedA1::run", "/src/a.cpp");
+  g1.addMethodOverride("BaseB::run", "DerivedB1::run", "/src/b.cpp");
+  g1.addEffectiveImpl("IfaceA", "ImplA", "/src/a.cpp");
+  g1.addEffectiveImpl("IfaceB", "ImplB", "/src/b.cpp");
+  g1.addFunctionReturn("factoryA", "workerA", "/src/a.cpp");
+  g1.addFunctionReturn("factoryB", "workerB", "/src/b.cpp");
+  g1.addEdge({"alpha", "beta", EdgeKind::DirectCall, Confidence::Proven,
+              "/inc/shared.h:5:3", 0},
+             "/src/a.cpp");
+  g1.addEdge({"alpha", "beta", EdgeKind::DirectCall, Confidence::Proven,
+              "/inc/shared.h:5:3", 0},
+             "/src/b.cpp");
+
+  CallGraph g2;
+  seedNodes(g2);
+  g2.addFunctionReturn("factoryB", "workerB", "/src/b.cpp");
+  g2.addFunctionReturn("factoryA", "workerA", "/src/a.cpp");
+  g2.addEffectiveImpl("IfaceB", "ImplB", "/src/b.cpp");
+  g2.addEffectiveImpl("IfaceA", "ImplA", "/src/a.cpp");
+  g2.addMethodOverride("BaseB::run", "DerivedB1::run", "/src/b.cpp");
+  g2.addMethodOverride("BaseA::run", "DerivedA1::run", "/src/a.cpp");
+  g2.addDerivedClass("BaseB", "DerivedB1", "/src/b.cpp");
+  g2.addDerivedClass("BaseA", "DerivedA1", "/src/a.cpp");
+  g2.addEdge({"alpha", "beta", EdgeKind::DirectCall, Confidence::Proven,
+              "/inc/shared.h:5:3", 0},
+             "/src/b.cpp");
+  g2.addEdge({"alpha", "beta", EdgeKind::DirectCall, Confidence::Proven,
+              "/inc/shared.h:5:3", 0},
+             "/src/a.cpp");
+
+  ControlFlowIndex cf;
+  SnapshotMeta meta = makeMeta();
+  std::string p1 = tempSnapshotPath("det-save-1");
+  std::string p2 = tempSnapshotPath("det-save-2");
+  REQUIRE(SnapshotIO::save(p1, g1, cf, meta));
+  REQUIRE(SnapshotIO::save(p2, g2, cf, meta));
+  auto slurp = [](const std::string &p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+  };
+  CHECK(slurp(p1) == slurp(p2));
+  std::remove(p1.c_str());
+  std::remove(p2.c_str());
+
+  // Duplicate entries in removeTUs must not double-remove or corrupt counts.
+  CHECK(g1.removeTUs({"/src/a.cpp", "/src/a.cpp"}) == 0);
+  CHECK(g1.edgeCount() == 1);
+  CHECK(g1.removeTUs({"/src/b.cpp", "/src/b.cpp"}) == 1);
+  CHECK(g1.edgeCount() == 0);
+}
+
