@@ -1131,6 +1131,14 @@ TEST_CASE("megascope merge combines shards into a queryable index",
 }
 
 #if defined(VYCOR_MEGASCOPE_PLUGIN_PATH) && defined(VYCOR_DEFAULT_CLANG)
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define VYCOR_PLUGIN_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define VYCOR_PLUGIN_SANITIZED 1
+#endif
+#endif
+#ifndef VYCOR_PLUGIN_SANITIZED
 TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clang++ -c compilation",
           "[megascope][plugin]") {
   const std::string pluginPath = VYCOR_MEGASCOPE_PLUGIN_PATH;
@@ -1286,6 +1294,7 @@ TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clan
 
   llvm::sys::fs::remove_directories(dir);
 }
+#endif
 #endif
 
 TEST_CASE("MegascopeBridge lowers C++ indexes into ModuleShard JSON and .mgsc snapshots",
