@@ -22,12 +22,12 @@
 // file without re-parsing headers or templates in a separate process.
 //
 // Driver invocation:
-//   clang++ -c foo.cpp -o foo.o \
-//     -fplugin=/path/to/libvycor_megascope_plugin.so \
+//   clang++ -c foo.cpp -o foo.o
+//     -fplugin=/path/to/libvycor_megascope_plugin.so
 //     -Xclang -plugin-arg-vycor-megascope -Xclang --output=foo.vycs
 // or:
-//   clang++ -c foo.cpp -o foo.o \
-//     -fplugin=/path/to/libvycor_megascope_plugin.so \
+//   clang++ -c foo.cpp -o foo.o
+//     -fplugin=/path/to/libvycor_megascope_plugin.so
 //     -fplugin-arg-vycor-megascope---output=foo.vycs
 //
 // When `--output` is omitted, the plugin defaults to replacing the compiler's

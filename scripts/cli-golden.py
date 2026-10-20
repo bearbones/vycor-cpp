@@ -177,6 +177,7 @@ PATH_RE = re.compile(r'"/[^"]*"')
 # system-header location are dropped outright (which declarations a
 # header carries is host-dependent too).
 STD_USR_RE = re.compile(r'"c:@N@(std|__gnu_cxx)@[^"]*"')
+INLINE_STD_NS_RE = re.compile(r'@N@std@N@(__1|__cxx11)@')
 # `--pretty` output is one JSON document over many lines, so the
 # per-line scrub above cannot drop its volatile bake reference.
 BAKE_RE = re.compile(r'"bake": ?"[0-9a-f]+@[0-9]+"')
@@ -198,7 +199,18 @@ def write_compile_commands(build: Path) -> None:
 
 def scrub(v):
     if isinstance(v, dict):
-        return {k: scrub(x) for k, x in v.items() if k not in VOLATILE_KEYS}
+        out = {}
+        for k, x in v.items():
+            if k in VOLATILE_KEYS:
+                continue
+            if k == "didYouMean" and isinstance(x, list):
+                x = [
+                    c for c in x
+                    if not (isinstance(c, dict)
+                            and str(c.get("file", "")).startswith("/"))
+                ]
+            out[k] = scrub(x)
+        return out
     if isinstance(v, list):
         return [scrub(x) for x in v]
     return v
@@ -226,6 +238,7 @@ def normalize(text: str, subs: list[tuple[str, str]]) -> list[str]:
         # a system header, and the record is host-dependent.
         if PATH_RE.search(line):
             continue
+        line = INLINE_STD_NS_RE.sub("@N@std@", line)
         out.append(STD_USR_RE.sub('"<std-usr>"', line))
     return sorted(out)
 

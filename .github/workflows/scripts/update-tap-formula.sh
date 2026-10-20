@@ -80,6 +80,7 @@ class ${class_name} < Formula
 
   def install
     bin.install "bin/vycor-cpp"
+    lib.install Dir["lib/*"] if Dir.exist?("lib")
   end
 
   test do

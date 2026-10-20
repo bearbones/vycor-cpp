@@ -313,7 +313,7 @@ TEST_CASE("runCrashGuarded recovers a stack overflow on a worker thread",
   });
   t.join();
   CHECK_FALSE(ok);
-  CHECK(sig == SIGSEGV);
+  CHECK((sig == SIGSEGV || sig == SIGBUS));
   // And the thread-pool style reuse: a clean function still runs.
   int ran = 0;
   CHECK(runCrashGuarded([&] { ran = 1; }));

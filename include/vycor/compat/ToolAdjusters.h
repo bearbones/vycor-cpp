@@ -164,20 +164,56 @@ inline clang::tooling::ArgumentsAdjuster
 getSysrootAdjuster(const std::string &sysrootOverride = "") {
   return [sysrootOverride](const clang::tooling::CommandLineArguments &args,
                            llvm::StringRef /*filename*/) {
-    for (const auto &a : args)
-      if (a == "-isysroot")
-        return args;
-
-    const std::string sysroot = !sysrootOverride.empty() ? sysrootOverride
-#ifdef VYCOR_DEFAULT_SYSROOT
-        : std::string(VYCOR_DEFAULT_SYSROOT);
-#else
-        : std::string();
-#endif
-    if (sysroot.empty())
-      return args;
-
     auto result = args;
+
+#ifdef VYCOR_DEFAULT_CXX_INCLUDE
+    bool hasStdlibInclude = false;
+    for (const auto &a : result) {
+      if (a == "-stdlib++-isystem" || a == "-nostdinc++" || a == "-nostdinc") {
+        hasStdlibInclude = true;
+        break;
+      }
+    }
+    if (!hasStdlibInclude &&
+        llvm::sys::fs::is_directory(VYCOR_DEFAULT_CXX_INCLUDE)) {
+      result.push_back("-stdlib++-isystem");
+      result.push_back(VYCOR_DEFAULT_CXX_INCLUDE);
+    }
+#endif
+
+    for (const auto &a : result)
+      if (a == "-isysroot" || llvm::StringRef(a).starts_with("--sysroot"))
+        return result;
+
+    std::string sysroot = sysrootOverride;
+    if (sysroot.empty()) {
+#ifdef VYCOR_DEFAULT_SYSROOT
+      if (llvm::sys::fs::is_directory(VYCOR_DEFAULT_SYSROOT))
+        sysroot = VYCOR_DEFAULT_SYSROOT;
+#endif
+      if (sysroot.empty()) {
+        if (const char *env = std::getenv("SDKROOT")) {
+          if (llvm::sys::fs::is_directory(env))
+            sysroot = env;
+        }
+      }
+      if (sysroot.empty()) {
+        static const char *const Fallbacks[] = {
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "/Applications/Xcode.app/Contents/Developer/Platforms/"
+            "MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+        };
+        for (const char *fb : Fallbacks) {
+          if (llvm::sys::fs::is_directory(fb)) {
+            sysroot = fb;
+            break;
+          }
+        }
+      }
+    }
+    if (sysroot.empty())
+      return result;
+
     result.push_back("-isysroot");
     result.push_back(sysroot);
     return result;

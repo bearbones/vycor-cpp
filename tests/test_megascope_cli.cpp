@@ -1155,6 +1155,14 @@ TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clan
         "-std=c++17",
         "-I",
         fixture,
+#ifdef VYCOR_DEFAULT_CXX_INCLUDE
+        "-stdlib++-isystem",
+        VYCOR_DEFAULT_CXX_INCLUDE,
+#endif
+#ifdef VYCOR_DEFAULT_SYSROOT
+        "-isysroot",
+        VYCOR_DEFAULT_SYSROOT,
+#endif
         "-c",
         srcPath,
         "-o",

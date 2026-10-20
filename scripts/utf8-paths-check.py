@@ -250,6 +250,13 @@ def main() -> int:
 
     root = os.fsencode(tempfile.mkdtemp(prefix="vycor-utf8-"))
     try:
+        probe = os.path.join(root, b"probe\xe9")
+        try:
+            os.mkdir(probe)
+            os.rmdir(probe)
+        except OSError:
+            print("utf8-paths-check: skipped (filesystem rejects non-UTF-8 path names)")
+            return 0
         # In-process (--threads 1) and in isolated workers (--threads 2).
         for threads in (b"1", b"2"):
             scenario(binary, root, threads)

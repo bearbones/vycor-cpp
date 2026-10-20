@@ -62,25 +62,33 @@ const std::string kReplacement = "\xef\xbf\xbd"; // U+FFFD
 struct Latin1Fixture {
   std::string dir;
   std::string tu;
+  bool supported = false;
 
   Latin1Fixture() {
     llvm::SmallString<128> base;
     llvm::sys::path::system_temp_directory(/*ErasedOnReboot=*/true, base);
     llvm::sys::path::append(base, "vycor-utf8-" + kLatin1E);
     llvm::SmallString<128> made;
-    REQUIRE(!llvm::sys::fs::createUniqueDirectory(base, made));
+    if (llvm::sys::fs::createUniqueDirectory(base, made))
+      return; // Host filesystem (e.g. macOS APFS) rejects non-UTF-8 paths.
     dir = std::string(made);
     tu = dir + "/t" + kLatin1E + ".cpp";
-    std::ofstream(tu, std::ios::binary)
-        << "int g(int);\n"
+    std::ofstream out(tu, std::ios::binary);
+    if (!out)
+      return;
+    out << "int g(int);\n"
            "int f(const char *s) {\n"
            "  if (s[0] == 'A' /* caf" + kLatin1E + " */ && s[1] != 0)\n"
            "    return g(1);\n"
            "  return 0;\n"
            "}\n"
            "int main() { return f(\"x\"); }\n";
+    supported = true;
   }
-  ~Latin1Fixture() { llvm::sys::fs::remove_directories(dir); }
+  ~Latin1Fixture() {
+    if (!dir.empty())
+      llvm::sys::fs::remove_directories(dir);
+  }
 };
 
 /// Every tool, and every context and channel site through the dump
@@ -128,6 +136,10 @@ std::string readAll(const std::string &path) {
 TEST_CASE("a bake from a Latin-1 path and source text holds UTF-8 only",
           "[utf8]") {
   Latin1Fixture fx;
+  if (!fx.supported) {
+    SUCCEED("Host filesystem rejects non-UTF-8 path names");
+    return;
+  }
   clang::tooling::FixedCompilationDatabase db(fx.dir, {"-std=c++17"});
   BakedIndexes baked = bakeIndexes(db, {fx.tu}, {}, /*threadCount=*/1);
   REQUIRE(baked.graph.findNode("f") != nullptr);
@@ -336,6 +348,7 @@ namespace {
 /// A temporary directory holding `files` (name -> text), removed at exit.
 struct SourceDir {
   std::string dir;
+  bool supported = true;
 
   explicit SourceDir(
       const std::vector<std::pair<std::string, std::string>> &files) {
@@ -345,8 +358,14 @@ struct SourceDir {
     llvm::SmallString<128> made;
     REQUIRE(!llvm::sys::fs::createUniqueDirectory(base, made));
     dir = std::string(made);
-    for (const auto &[name, text] : files)
-      std::ofstream(path(name), std::ios::binary) << text;
+    for (const auto &[name, text] : files) {
+      std::ofstream out(path(name), std::ios::binary);
+      if (!out) {
+        supported = false;
+        return;
+      }
+      out << text;
+    }
   }
   ~SourceDir() { llvm::sys::fs::remove_directories(dir); }
 
@@ -383,6 +402,10 @@ TEST_CASE("two TU paths that differ in one non-UTF-8 byte stay two TUs "
   const std::string a = "a\xe9.cpp", b = "a\xe8.cpp";
   SourceDir src({{a, "int fx();\nint ca() { return fx(); }\n"},
                  {b, "int fx();\nint cb() { return fx(); }\n"}});
+  if (!src.supported) {
+    SUCCEED("Host filesystem rejects non-UTF-8 path names");
+    return;
+  }
   clang::tooling::FixedCompilationDatabase db(src.dir, {"-std=c++17"});
   BakedIndexes baked =
       bakeIndexes(db, {src.path(a), src.path(b)}, {}, /*threadCount=*/1);
@@ -443,6 +466,10 @@ TEST_CASE("internal-linkage functions in files whose names differ in one "
                      "int ub() { return helper(); }\n"},
                  {b, "static int helper() { return 2; }\n"
                      "int vb() { return helper(); }\n"}});
+  if (!src.supported) {
+    SUCCEED("Host filesystem rejects non-UTF-8 path names");
+    return;
+  }
   clang::tooling::FixedCompilationDatabase db(src.dir, {"-std=c++17"});
   BakedIndexes baked =
       bakeIndexes(db, {src.path(a), src.path(b)}, {}, /*threadCount=*/1);

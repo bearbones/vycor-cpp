@@ -692,6 +692,9 @@ TEST_CASE("Repo-relative paths by default and --absolute-paths opt-in",
     std::string realRepo = (llvm::Twine(tmpDir) + "/real_repo").str();
     std::string symRepo = (llvm::Twine(tmpDir) + "/sym_repo").str();
     llvm::sys::fs::create_directories(realRepo + "/src");
+    llvm::SmallString<256> canonRealRepo;
+    if (!llvm::sys::fs::real_path(realRepo, canonRealRepo))
+      realRepo = std::string(canonRealRepo);
     if (!llvm::sys::fs::create_link(realRepo, symRepo)) {
       Diagnostic symDiag = adlAt(realRepo + "/src/use.cpp:4:3");
       symDiag.message = "In " + realRepo + "/src/use.cpp:4:3";

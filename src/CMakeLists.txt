@@ -142,6 +142,15 @@ if(APPLE)
     target_compile_definitions(vycor_lib PUBLIC
       "VYCOR_DEFAULT_SYSROOT=\"${_VYCOR_DEFAULT_SYSROOT}\"")
   endif()
+  if(LLVM_FOUND)
+    get_filename_component(_VYCOR_DEFAULT_CXX_INCLUDE
+      "${LLVM_TOOLS_BINARY_DIR}/../include/c++/v1" ABSOLUTE)
+    if(IS_DIRECTORY "${_VYCOR_DEFAULT_CXX_INCLUDE}")
+      message(STATUS "Default macOS libc++ include: ${_VYCOR_DEFAULT_CXX_INCLUDE}")
+      target_compile_definitions(vycor_lib PUBLIC
+        "VYCOR_DEFAULT_CXX_INCLUDE=\"${_VYCOR_DEFAULT_CXX_INCLUDE}\"")
+    endif()
+  endif()
 endif()
 
 # Organization extension slot-in (docs/EXTENDING.md): every .cpp directly
