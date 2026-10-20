@@ -1,11 +1,12 @@
 # vycor-cpp
 
 A Clang LibTooling backend for safe, AST-aware C++ refactoring and static
-analysis. It exposes four features as subcommands:
+analysis. It exposes three subcommands (plus a zero-reparse Clang frontend
+plugin, `libvycor_megascope_plugin`):
 
-- **check** — detect problems such as fragile ADL/CTAD resolutions across translation units. Like if `clang-tidy` went Super Saiyan.
+- **check** — detect cross-TU structural and ODR defects such as fragile ADL/CTAD/template-specialization resolutions, divergent default arguments or exception specs, static initialization order hazards, and uncaught exception escapes. Like if `clang-tidy` went Super Saiyan.
 - **morph** — apply rule-driven, multi-pass AST matcher transformations
-- **megascope** — index a multi-TU call graph once, then query it from the shell (`megascope get-callers --name f`) or in batches; designed for LLM-assisted code analysis
+- **megascope** — index a multi-TU call graph and control-flow context graph once (`.vycs`, `.mgsc`, or `.shard.json`), then query it from the shell (`megascope get-callers --name f`) or in batches; backed by both the native C++ engine and the language-agnostic **[`megascope`](https://github.com/bearbones/megascope)** Rust core (shared with **[`pyRx`](https://github.com/bearbones/pyRx)** for Python)
 
 Designed as a backend for external systems (e.g. a Python script translating
 a custom DSL, or an LLM agent performing security audits via the megascope
@@ -40,9 +41,9 @@ and need the matching LLVM runtime present.
 
 ```bash
 # Linux: runtime .so only (lighter than the full -dev package), from apt.llvm.org
-sudo apt-get install libllvm21
+sudo apt-get install libllvm22
 
-tar xzf vycor-cpp-v0.2.0-linux-x86_64-llvm21.tar.gz
+tar xzf vycor-cpp-v0.3.0-linux-x86_64-llvm22.tar.gz
 ./bin/vycor-cpp --version
 ```
 
@@ -70,6 +71,7 @@ Requires CMake 3.20+, a C++17 compiler, and Ninja (recommended).
 | Dependency | Required | How it's resolved |
 |---|---|---|
 | LLVM/Clang | 18, 20, 21, or 22 | system package preferred; submodule fallback |
+| [`libmegascope`](https://github.com/bearbones/megascope) | optional (`VYCOR_USE_LIBMEGASCOPE=ON`) | probed at `MEGASCOPE_ROOT` (`../megascope` or release prefix); enables direct `.mgsc` binary snapshot baking/merging/querying via C FFI (`megascope.h`), while `.shard.json` export works even without it |
 | Catch2 | v3.10+ (tests only) | imported target -> `find_package` -> submodule fallback |
 
 Neither dependency is fetched at configure time. Hermetic-build
@@ -503,6 +505,50 @@ zero-config **BXL** scripts ([`buck2/vycor.bxl`](buck2/vycor.bxl)), and a
 complete multi-target example ([`examples/buck2_megascope/`](examples/buck2_megascope/))
 are shipped in this repository — see **[buck2/README.md](buck2/README.md)**.
 
+#### Zero-Reparse Clang Frontend Plugin (`libvycor_megascope_plugin.so`)
+
+Instead of invoking `vycor-cpp megascope index` as a separate compilation pass,
+you can load `libvycor_megascope_plugin.so` directly into your normal
+`clang++ -c` compile commands. The plugin runs via
+`PluginASTAction::AddAfterMainAction`, walking the already-parsed `ASTContext`
+once to emit a per-TU shard alongside the `.o` object file with zero extra
+header or template parsing:
+
+```bash
+# Emits foo.vycs next to foo.o by default (or pass --output=foo.vycs / foo.mgsc / foo.shard.json)
+clang++ -c foo.cpp -o foo.o \
+  -fplugin=/path/to/lib/libvycor_megascope_plugin.so \
+  -fplugin-arg-vycor-megascope---output=foo.vycs \
+  -fplugin-arg-vycor-megascope---entry-point=main \
+  -fplugin-arg-vycor-megascope---no-wait
+```
+
+Plugin flags (`--output=<path>`, `--entry-point=<fn>`, `--collapse-paths=<p>`,
+`--org-config=<file>`, `--lock-types=<t>`, `--channel-types-json=<file>`,
+`--no-wait`) can be passed via `-fplugin-arg-vycor-megascope-<flag>` or
+`-Xclang -plugin-arg-vycor-megascope -Xclang <flag>`.
+
+#### Standalone `megascope` Core & Polyglot (`C++` + `Python`) Indexing
+
+In addition to `vycor-cpp`'s native `.vycs` snapshot format, [`MegascopeBridge`](include/vycor/callgraph/MegascopeBridge.h)
+connects `vycor-cpp` to the language-agnostic **[`megascope`](https://github.com/bearbones/megascope)**
+Rust engine (`brew tap bearbones/megascope && brew install megascope`):
+
+- **`.shard.json` / `.shards.json` export**: Passing an `--index` (or plugin
+  `--output`) path ending in `.shard.json` or `.shards.json` lowers C++
+  functions, call edges, `try`/`catch` scopes, RAII/lock scopes, conditional
+  guards, class hierarchies, and channels into `megascope::ModuleShard` JSON
+  for ingestion by `megascope ingest`.
+- **`.mgsc` binary snapshots (via `libmegascope` C FFI)**: When built with
+  `libmegascope` (`VYCOR_HAS_LIBMEGASCOPE`), passing an `--index` / `--output`
+  path ending in `.mgsc` bakes, merges, diffs, and queries native `.mgsc`
+  binary snapshots directly through `libmegascope`.
+- **Polyglot C++ + Python merging**: `vycor-cpp megascope merge` (or the
+  standalone `megascope merge` CLI) can merge C++ shards (`.mgsc`, `.vycs`,
+  `.shard.json`) with Python `.pyrx` snapshots produced by
+  **[`pyRx`](https://github.com/bearbones/pyRx)** (`brew tap bearbones/pyrx && brew install pyrx`)
+  into a single unified `.mgsc` index.
+
 ---
 
 ## Customizing for your organization
@@ -544,7 +590,7 @@ include/vycor/
   callgraph/                    Call graph + control flow (CallGraph,
                                 CallGraphBuilder, ControlFlowIndex,
                                 ControlFlowOracle, ChannelIndex, Snapshot,
-                                CollapseFilter, WorkerPool)
+                                MegascopeBridge, CollapseFilter, WorkerPool)
   query/                        Transport-neutral megascope tools (Tools.h:
                                 ToolEntry/ToolContext/result contract,
                                 Identity, Serialize)
@@ -556,6 +602,7 @@ include/vycor/
 
 src/
   main.cpp                      CLI entry point (check/morph/megascope)
+  plugin/MegascopePlugin.cpp    Clang frontend plugin (libvycor_megascope_plugin)
   check/ morph/ callgraph/ query/ cli/ impact/ ext/ compat/   Implementations
 
 ext/                            Organization slot-in (fork-owned; globbed
