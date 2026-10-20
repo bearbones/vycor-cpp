@@ -210,6 +210,8 @@ def scrub(v):
                             and str(c.get("file", "")).startswith("/"))
                 ]
             out[k] = scrub(x)
+        if "didYouMean" in out and not out["didYouMean"] and isinstance(out.get("error"), str):
+            out["error"] = re.sub(r" \(did you mean [^)]*\?\)", "", out["error"])
         return out
     if isinstance(v, list):
         return [scrub(x) for x in v]

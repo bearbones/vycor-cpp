@@ -1186,6 +1186,11 @@ bool MegascopeBridge::saveSnapshot(const std::string &path,
     megascope_string_free(errPtr);
   return true;
 #else
+  (void)path;
+  (void)graph;
+  (void)cfIndex;
+  (void)meta;
+  (void)channels;
   if (error)
     *error = "vycor-cpp was built without libmegascope support";
   return false;
@@ -1343,6 +1348,10 @@ bool MegascopeBridge::mergeSnapshots(
     megascope_string_free(errPtr);
   return true;
 #else
+  (void)outputPath;
+  (void)inputPaths;
+  (void)entryPoints;
+  (void)collapsePaths;
   if (error)
     *error = "vycor-cpp was built without libmegascope support";
   return false;
@@ -1382,6 +1391,11 @@ int MegascopeBridge::runVerbJson(llvm::StringRef verb,
   }
   return static_cast<int>(rc);
 #else
+  (void)verb;
+  (void)args;
+  (void)indexPath;
+  (void)shardsJson;
+  (void)outputOut;
   errorOut = "vycor-cpp was built without libmegascope support";
   return 3;
 #endif

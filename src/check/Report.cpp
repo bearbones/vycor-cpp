@@ -432,18 +432,18 @@ std::string inferProjectRoot(llvm::StringRef explicitRoot,
     if (startDir.empty())
       return "";
     const bool startedInCwd = isDirOrParent(absCwd, startDir);
-    llvm::SmallString<256> cur(startDir);
+    std::string cur = startDir.str();
     while (!cur.empty()) {
       llvm::SmallString<256> dotGit(cur);
       llvm::sys::path::append(dotGit, ".git");
       if (llvm::sys::fs::exists(dotGit))
-        return std::string(cur);
-      if (startedInCwd && llvm::StringRef(cur) == absCwd)
+        return cur;
+      if (startedInCwd && cur == absCwd)
         break;
       llvm::StringRef parent = llvm::sys::path::parent_path(cur);
       if (parent.empty() || parent == cur)
         break;
-      cur.assign(parent);
+      cur.resize(parent.size());
     }
     return "";
   };
