@@ -336,7 +336,7 @@ struct Diagnostic {
     ExceptionSpec_Divergent,      // declaration sites disagree on whether a
                                   // function can throw — callers compile
                                   // contradictory unwind assumptions
-    Custom,                       // organization ext/ check (see checkName)
+    Custom,                       // named built-in or org check (see checkName)
   };
   Kind kind;
   std::string file;          // source file path (repo-relative when projectRoot is set)
@@ -345,7 +345,7 @@ struct Diagnostic {
   std::string betterDecl;    // what the global index found
   std::string missingHeader; // which header to include
   std::string message;       // human-readable diagnostic
-  std::string checkName;     // for Kind::Custom: Check::name()
+  std::string checkName;     // for Kind::Custom: named check identity
   // The identity of the entities involved (qualified names, signatures,
   // USRs) for checks whose resolvedDecl/betterDecl do not carry it. Feeds
   // the finding fingerprint (check/Report.h) and never holds a line

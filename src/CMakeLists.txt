@@ -2,6 +2,7 @@ add_library(vycor_lib
   check/GlobalIndex.cpp
   check/Indexer.cpp
   check/Analyzer.cpp
+  check/CallbackUnderLock.cpp
   check/Checkpoint.cpp
   check/CheckSet.cpp
   check/DeadCodeAnalyzer.cpp

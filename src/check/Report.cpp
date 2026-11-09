@@ -269,6 +269,7 @@ Severity checkSeverity(const std::string &check) {
       {"odr-violations", Severity::Error},
       {"coverage-properties", Severity::Note},
       {"dead-code", Severity::Note},
+      {"callback-under-lock", Severity::Warning},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;

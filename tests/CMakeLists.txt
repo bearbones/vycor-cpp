@@ -103,6 +103,7 @@ add_executable(vycor_tests
   test_check_set.cpp
   test_crash_containment.cpp
   test_check_report.cpp
+  test_callback_under_lock.cpp
   test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
@@ -200,6 +201,12 @@ if(Python3_Interpreter_FOUND)
   # tests/data/sarif-schema-2.1.0.json), byte-identical JSON across
   # --checkpoint and --isolate-workers, fingerprints, baselines,
   # suppressions, and the changed-lines filter.
+  add_test(NAME callback_lock_gate
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/scripts/callback-lock-check.py"
+            --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(callback_lock_gate PROPERTIES LABELS "cli;check" TIMEOUT 300)
+
   add_test(NAME check_gate
            COMMAND ${Python3_EXECUTABLE}
                    ${CMAKE_SOURCE_DIR}/scripts/check-gate-check.py
