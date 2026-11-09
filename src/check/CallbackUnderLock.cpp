@@ -153,9 +153,12 @@ private:
     if (mutex.empty())
       return; // Recursive, null, dependent and custom mutexes are not guessed.
     const auto *init = construction(var->getInit());
-    if (!init || init->getConstructor()->isCopyOrMoveConstructor())
+    if (!init || init->getNumArgs() == 0 ||
+        init->getConstructor()->isCopyOrMoveConstructor())
       return;
-    bool held = true;
+    // unique/shared timed constructors, like ownership tags, do not prove
+    // acquisition. scoped_lock can acquire multiple mutexes unconditionally.
+    bool held = name == "scoped_lock" || init->getNumArgs() == 1;
     for (const auto *arg : init->arguments()) {
       const auto *rd = arg->getType()->getAsCXXRecordDecl();
       if (rd && inStd(rd->getDeclContext()) &&

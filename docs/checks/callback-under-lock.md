@@ -36,7 +36,8 @@ The check follows lexical guard lifetimes and explicit `unique_lock::lock()` /
 `std::scoped_lock` and `std::shared_lock` around `std::mutex`, `std::timed_mutex`,
 `std::shared_mutex` and `std::shared_timed_mutex`. Aliases and instantiated template
 arguments use their canonical types. Recursive and unknown/custom/null mutexes
-are excluded. Deferred, try-lock and adopted guards do not establish acquisition;
+are excluded. Empty owners and moved-from/aliased owners are opaque. Deferred,
+try-lock, timed and adopted guards do not establish acquisition;
 an explicit subsequent `lock()` can establish it. Guard ownership passed to a
 helper, referenced through an alias, or moved is treated as opaque.
 

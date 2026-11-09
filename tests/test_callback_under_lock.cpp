@@ -22,6 +22,7 @@ constexpr defer_lock_t defer_lock{}; constexpr adopt_lock_t adopt_lock{};
 constexpr try_to_lock_t try_to_lock{};
 template<class M> struct lock_guard { explicit lock_guard(M&); lock_guard(M&,adopt_lock_t); ~lock_guard(); };
 template<class M> struct unique_lock {
+  unique_lock();
   explicit unique_lock(M&); unique_lock(M&,defer_lock_t); unique_lock(M&,try_to_lock_t); ~unique_lock();
   void lock(); void unlock(); explicit operator bool() const;
 };
@@ -99,6 +100,7 @@ void safe(std::function<void()> cb) { { std::lock_guard<std::mutex> guard(m); } 
 void safe_helper(std::function<void()> cb) { snapshot(); cb(); }
 void constructed_only(std::function<void()> cb) { std::lock_guard<std::mutex> guard(m); auto later=[&] { cb(); }; (void)later; }
 void after_unlock(std::function<void()> cb) { std::unique_lock<std::mutex> guard(m); guard.unlock(); cb(); }
+void empty_owner(std::function<void()> cb) { std::unique_lock<std::mutex> guard; cb(); }
 void deferred(std::function<void()> cb) { std::unique_lock<std::mutex> guard(m,std::defer_lock); cb(); }
 void tried(std::function<void()> cb) { std::unique_lock<std::mutex> guard(m,std::try_to_lock); cb(); }
 void adopted(std::function<void()> cb) { std::lock_guard<std::mutex> guard(m,std::adopt_lock); cb(); }
