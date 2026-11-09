@@ -75,8 +75,11 @@ Spdlog's callback sink supplies the inherited virtual-dispatch example:
 `base_sink::log` holds a guard while `callback_sink::sink_it_` invokes user code.
 Reentrant logging through that same sink is a reproduced API hazard, not an
 assertion that a downstream project violates a documented contract.
-Pinned clients and runtime receipts are in
-[open-source-todos](https://github.com/bearbones/open-source-todos/blob/main/case-studies/callbacks-under-lock.md).
+Source witnesses: [old sigslot emission](https://github.com/palacaze/sigslot/blob/c748428c91fff12ff745aa7cc73bea75ff3f4f5e/include/sigslot/signal.hpp#L502),
+[fixed/current sigslot emission](https://github.com/palacaze/sigslot/blob/b588b791b9cf7eb17ff0a74d8aebd4a61166c2e1/include/sigslot/signal.hpp#L1311),
+[spdlog base sink](https://github.com/gabime/spdlog/blob/6d9805df3f588402b17073dcd13eb569ceda864d/include/spdlog/sinks/base_sink-inl.h#L28),
+[callback override](https://github.com/gabime/spdlog/blob/6d9805df3f588402b17073dcd13eb569ceda864d/include/spdlog/sinks/callback_sink.h#L29),
+and [eventpp traversal](https://github.com/wqking/eventpp/blob/1224dd6c9bd4577d686ac42334fc545997f5ece1/include/eventpp/callbacklist.h#L326).
 
 ## Limits and freshness
 
