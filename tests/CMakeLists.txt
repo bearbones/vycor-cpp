@@ -104,6 +104,7 @@ add_executable(vycor_tests
   test_crash_containment.cpp
   test_check_report.cpp
   test_callback_under_lock.cpp
+  test_tooling_runtime.cpp
   test_utf8_strings.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}

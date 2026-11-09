@@ -196,6 +196,12 @@ Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
 are preserved. This reduces noise from utility/math headers while keeping entry points visible.
 
+`makeClangTool` calls `compat/ToolingRuntime` once before frontend work. Its
+instrumented initialization barrier materializes LLVM statistics state without
+enabling statistics, so prebuilt LLVM lazy initialization is ordered across
+parsing threads (including the isolated-worker test seam). Subsequent parses
+remain concurrent; no sanitizer reports are suppressed.
+
 **Crash and hang containment**: `megascope index` bakes in subprocess workers
 by default whenever `--threads` is not 1 and `--pch-dir` is unset
 (`--isolate-workers=false` opts out). A worker that starts no new TU for

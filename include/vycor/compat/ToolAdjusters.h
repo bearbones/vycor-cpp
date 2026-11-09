@@ -17,6 +17,7 @@
 #define VYCOR_COMPAT_TOOL_ADJUSTERS_H
 
 #include "vycor/compat/PchCache.h"
+#include "vycor/compat/ToolingRuntime.h"
 
 #include "clang/Tooling/Tooling.h"
 #include "clang/Tooling/ArgumentsAdjusters.h"
@@ -421,6 +422,7 @@ makeClangTool(const clang::tooling::CompilationDatabase &compDb,
               const std::vector<std::string> &files,
               const PchCache *pchCache = nullptr,
               const std::string &sysroot = "") {
+  initializeToolingRuntime();
   clang::tooling::ClangTool tool(
       compDb, files, std::make_shared<clang::PCHContainerOperations>(),
       llvm::vfs::createPhysicalFileSystem());

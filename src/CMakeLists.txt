@@ -12,6 +12,7 @@ add_library(vycor_lib
   morph/RulesParser.cpp
   morph/TransformPipeline.cpp
   compat/PchCache.cpp
+  compat/ToolingRuntime.cpp
   callgraph/AtomicFile.cpp
   callgraph/CallGraph.cpp
   callgraph/CallGraphBuilder.cpp
