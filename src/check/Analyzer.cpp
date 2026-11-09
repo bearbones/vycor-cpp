@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/check/Analyzer.h"
+#include "vycor/check/CallbackUnderLock.h"
 #include "vycor/check/Checkpoint.h"
 #include "vycor/check/Indexer.h"
 #include "vycor/check/Report.h"
@@ -646,6 +647,8 @@ AnalyzerConsumer::AnalyzerConsumer(const GlobalIndex &index,
 void AnalyzerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
   visitor_.TraverseDecl(context.getTranslationUnitDecl());
+  if (opts_.enableCallbackUnderLockDiag)
+    analyzeCallbacksUnderLock(context, diagnostics_);
   // Organization checks (ext/ registrars) run after the built-in analysis
   // of the same TU; fresh instances per TU so member state needs no reset.
   // A Custom diagnostic is always attributed to the check that emitted it
@@ -1523,7 +1526,9 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   std::unique_ptr<CheckCheckpoint> ckpt;
   std::vector<FileStamp> stamps;
   std::unordered_map<std::string, const FileStamp *> stampFor;
-  if (!opts.checkpointPath.empty()) {
+  // The legacy journal does not validate headers/compile commands. This
+  // scope-sensitive check must see fresh ASTs, including included helpers.
+  if (!opts.checkpointPath.empty() && !opts.enableCallbackUnderLockDiag) {
     ckpt = CheckCheckpoint::open(opts.checkpointPath,
                                   checkOptionsFingerprint(opts));
     if (!ckpt) {

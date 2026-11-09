@@ -951,6 +951,8 @@ int main(int argc, const char **argv) {
         enabledChecks.count("exception-spec-divergence") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
+    opts.enableCallbackUnderLockDiag =
+        enabledChecks.count("callback-under-lock") > 0;
     opts.warnSameScore = CheckWarnSameScore;
     opts.modelConvertibility = CheckModelConvertibility;
     opts.includeCallSiteLocations = CheckExceptionEscapeCallSiteLocations;

@@ -2,6 +2,7 @@ add_library(vycor_lib
   check/GlobalIndex.cpp
   check/Indexer.cpp
   check/Analyzer.cpp
+  check/CallbackUnderLock.cpp
   check/Checkpoint.cpp
   check/CheckSet.cpp
   check/DeadCodeAnalyzer.cpp
@@ -11,6 +12,7 @@ add_library(vycor_lib
   morph/RulesParser.cpp
   morph/TransformPipeline.cpp
   compat/PchCache.cpp
+  compat/ToolingRuntime.cpp
   callgraph/AtomicFile.cpp
   callgraph/CallGraph.cpp
   callgraph/CallGraphBuilder.cpp

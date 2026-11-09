@@ -103,6 +103,9 @@ struct AnalysisOptions {
   // class linkers silently merge instead of diagnosing.
   bool enableOdrDiag = false;
 
+  // Possible application callback invocation with a live nonrecursive mutex.
+  bool enableCallbackUnderLockDiag = false;
+
   // Emit ADL_SameScore diagnostics when an invisible candidate ties the
   // resolved overload on every argument position. Off by default because
   // it's a noisier signal than the Pareto-dominance cases.

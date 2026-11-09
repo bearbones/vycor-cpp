@@ -207,6 +207,8 @@ uint64_t checkOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.enableHeaderStaticDiag ? '1' : '0';
   canon += "|xsd=";
   canon += opts.enableExceptionSpecDiag ? '1' : '0';
+  canon += "|callback-under-lock=";
+  canon += opts.enableCallbackUnderLockDiag ? '1' : '0';
   canon += "|abs=";
   canon += opts.absolutePaths ? '1' : '0';
   canon += "|root=";

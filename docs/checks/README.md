@@ -1,10 +1,10 @@
 # check checks
 
 Every check analysis is a **named check** with its own documentation page,
-selectable through a clang-tidy-style specification. All of them share one
-property: they compare information **across translation units**, which is
-exactly what single-TU tools (clang-tidy, compiler warnings) structurally
-cannot do.
+selectable through a clang-tidy-style specification. Most compare information
+**across translation units**. Some opt-in checks
+also inspect source-ordered behavior within each TU; their documentation states
+which helper definitions and runtime contracts they can model.
 
 Run `vycor-cpp check --list-checks` for the live table (organization
 checks included).
@@ -63,6 +63,7 @@ initial seeding and may evolve. Organizations can define their own groups
 | [exception-escape](exception-escape.md) | off | note | noisy | noexcept functions that can transitively reach an uncaught throw across TUs |
 | [odr-violations](odr-violations.md) | off | error | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
 | [coverage-properties](coverage-properties.md) | off | note | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
+| [callback-under-lock](callback-under-lock.md) | off | warning | compute-heavy | Application callbacks reached with a live nonrecursive mutex guard |
 | [dead-code](dead-code.md) | off | note | compute-heavy | Functions unreachable from the entry points via the call graph |
 
 Severity is the SARIF `level` and what `--fail-on` compares against:

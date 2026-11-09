@@ -134,6 +134,13 @@ with `--checkpoint`: shard results are journaled per TU as they land.
 workers, no spawning). `--worker-timeout`/`--worker-memory-limit` apply
 to these workers too (`runWorkerProcess`, below).
 
+`callback-under-lock` is an opt-in TU-local AST check in
+`check/CallbackUnderLock.cpp`: lexical standard mutex guard ownership plus
+cycle-safe helper/virtual-override paths to application callbacks. It emits named
+`Custom` diagnostics through the existing reporting/worker payload, and bypasses
+checkpoint reuse because headers and compile flags can change the lock witness.
+See `docs/checks/callback-under-lock.md` and `tests/test_callback_under_lock.cpp`.
+
 ### `morph` — AST-Based Transformations
 
 **Headers:** `include/vycor/morph/`
@@ -188,6 +195,12 @@ Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
 are preserved. This reduces noise from utility/math headers while keeping entry points visible.
+
+`makeClangTool` calls `compat/ToolingRuntime` once before frontend work. Its
+instrumented initialization barrier materializes LLVM statistics state without
+enabling statistics, so prebuilt LLVM lazy initialization is ordered across
+parsing threads (including the isolated-worker test seam). Subsequent parses
+remain concurrent; no sanitizer reports are suppressed.
 
 **Crash and hang containment**: `megascope index` bakes in subprocess workers
 by default whenever `--threads` is not 1 and `--pch-dir` is unset
