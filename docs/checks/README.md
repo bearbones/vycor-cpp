@@ -61,6 +61,7 @@ initial seeding and may evolve. Organizations can define their own groups
 | [exception-spec-divergence](exception-spec-divergence.md) | on | error | — | Declaration sites that disagree on whether a function can throw |
 | [static-init-hazards](static-init-hazards.md) | off | warning | compute-heavy | Static initializers reaching dlopen/dlsym or thread create/join (loader-lock deadlock risk) |
 | [exception-escape](exception-escape.md) | off | note | noisy | noexcept functions that can transitively reach an uncaught throw across TUs |
+| [abi-layout-divergence](abi-layout-divergence.md) | off | error | compute-heavy | Computed record layouts disagree across linked TUs with the same target ABI |
 | [odr-violations](odr-violations.md) | off | error | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
 | [coverage-properties](coverage-properties.md) | off | note | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
 | [callback-under-lock](callback-under-lock.md) | off | warning | compute-heavy | Application callbacks reached with a live nonrecursive mutex guard |

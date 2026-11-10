@@ -42,7 +42,8 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // used it up (a worker crash or timeout). v11: odrEntries carry tuPath,
 // specializations carry resolutionSummary, functionSummaries carry
 // unguardedCallSites & uncaughtThrowSite, diagnostics carry file.
-constexpr uint32_t kVersion = 11;
+// v12: computed ABI record layouts.
+constexpr uint32_t kVersion = 12;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -186,6 +187,8 @@ uint64_t checkOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.modelConvertibility ? '1' : '0';
   // ODR collection changes phase-1 record content (odrEntries present or
   // absent), so it is part of the journal identity.
+  canon += "|abi=";
+  canon += opts.enableAbiLayoutDiag ? '1' : '0';
   canon += "|odr=";
   canon += opts.enableOdrDiag ? '1' : '0';
   // These change phase-2 diagnostic content.
@@ -241,6 +244,8 @@ CheckIndexPayload CheckIndexPayload::capture(const GlobalIndex &shard) {
   shard.forEachCoverageProperty(
       [&](const CoveragePropertyEntry &e) { p.coverage.push_back(e); });
   shard.forEachOdrEntry([&](const OdrEntry &e) { p.odrEntries.push_back(e); });
+  shard.forEachAbiLayout(
+      [&](const AbiLayoutEntry &e) { p.abiLayouts.push_back(e); });
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
   shard.forEachDefaultArg(
@@ -276,6 +281,8 @@ void CheckIndexPayload::applyTo(GlobalIndex &into) const {
     into.addCoverageProperty(e);
   for (const auto &e : odrEntries)
     into.addOdrEntry(e);
+  for (const auto &e : abiLayouts)
+    into.addAbiLayout(e);
   for (const auto &e : specializations)
     into.addSpecialization(e);
   for (const auto &e : defaultArgs)
@@ -451,6 +458,16 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
     putStr(out, e.filePath);
     putU32(out, e.line);
   }
+  putU32(out, static_cast<uint32_t>(p.abiLayouts.size()));
+  for (const auto &e : p.abiLayouts) {
+    putStr(out, e.usr);
+    putStr(out, e.qualifiedName);
+    putStr(out, e.targetAbi);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+    putStr(out, e.tuPath);
+    putStr(out, e.layout);
+  }
 }
 
 bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
@@ -598,6 +615,18 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     e.filePath = r.str();
     e.line = r.u32();
     p.exceptionSpecs.push_back(std::move(e));
+  }
+  uint32_t nAbi = r.u32();
+  for (uint32_t i = 0; i < nAbi && r.ok; ++i) {
+    AbiLayoutEntry e;
+    e.usr = r.str();
+    e.qualifiedName = r.str();
+    e.targetAbi = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    e.tuPath = r.str();
+    e.layout = r.str();
+    p.abiLayouts.push_back(std::move(e));
   }
   return r.ok;
 }
@@ -994,8 +1023,8 @@ namespace {
 // v10: diagnostics carry their enclosing scope.
 // v11: odrEntries carry tuPath, specializations carry resolutionSummary,
 // functionSummaries carry unguardedCallSites & uncaughtThrowSite,
-// diagnostics carry file.
-constexpr uint32_t kShardVersion = 11;
+// diagnostics carry file. v12: computed ABI record layouts.
+constexpr uint32_t kShardVersion = 12;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

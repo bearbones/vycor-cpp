@@ -1528,7 +1528,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   std::unordered_map<std::string, const FileStamp *> stampFor;
   // The legacy journal does not validate headers/compile commands. This
   // scope-sensitive check must see fresh ASTs, including included helpers.
-  if (!opts.checkpointPath.empty() && !opts.enableCallbackUnderLockDiag) {
+  if (!opts.checkpointPath.empty() && !opts.enableCallbackUnderLockDiag && !opts.enableAbiLayoutDiag) {
     ckpt = CheckCheckpoint::open(opts.checkpointPath,
                                   checkOptionsFingerprint(opts));
     if (!ckpt) {
@@ -1684,7 +1684,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         auto tool = vycor::makeClangTool(compDb, {file});
         IndexerActionFactory factory(shard, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
-                                         opts.enableExceptionEscapeDiag);
+                                         opts.enableExceptionEscapeDiag, opts.enableAbiLayoutDiag);
         TuOutcome outcome = outcomeForToolStatus(tool.run(&factory));
         noteOutcome(file, outcome);
         ckpt->recordPhase1(file, *st, shard, outcome);
@@ -1693,7 +1693,7 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         auto tool = vycor::makeClangTool(compDb, {file});
         IndexerActionFactory factory(index, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
-                                         opts.enableExceptionEscapeDiag);
+                                         opts.enableExceptionEscapeDiag, opts.enableAbiLayoutDiag);
         noteOutcome(file, outcomeForToolStatus(tool.run(&factory)));
       }
     });
@@ -1726,6 +1726,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // run (checkpoint replay restores the OdrEntries it reads from).
   if (opts.enableOdrDiag)
     analyzeOdrViolations(index, diagnostics);
+  if (opts.enableAbiLayoutDiag)
+    analyzeAbiLayoutDivergence(index, diagnostics);
   if (opts.enableDefaultArgDiag)
     analyzeDefaultArgDivergence(index, diagnostics);
   if (opts.enableStaticInitOrderDiag)

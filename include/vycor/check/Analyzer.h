@@ -102,6 +102,8 @@ struct AnalysisOptions {
   // definitions differ across sites or across TUs — the ODR-violation
   // class linkers silently merge instead of diagnosing.
   bool enableOdrDiag = false;
+  // Opt-in physical record-layout comparison; requires fresh header/flag facts.
+  bool enableAbiLayoutDiag = false;
 
   // Possible application callback invocation with a live nonrecursive mutex.
   bool enableCallbackUnderLockDiag = false;
@@ -338,6 +340,10 @@ const TuOutcome &worseOutcome(const TuOutcome &a, const TuOutcome &b);
 // ClangTool::run's status as an outcome: 0 clean, 1 the parse reported
 // errors, 2 no compile command.
 TuOutcome outcomeForToolStatus(int status);
+
+// One deterministic physical-layout witness per record / target ABI.
+void analyzeAbiLayoutDivergence(const GlobalIndex &index,
+                                std::vector<Diagnostic> &diagnostics);
 
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are

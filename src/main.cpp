@@ -951,6 +951,7 @@ int main(int argc, const char **argv) {
         enabledChecks.count("exception-spec-divergence") > 0;
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
+    opts.enableAbiLayoutDiag = enabledChecks.count("abi-layout-divergence") > 0;
     opts.enableCallbackUnderLockDiag =
         enabledChecks.count("callback-under-lock") > 0;
     opts.warnSameScore = CheckWarnSameScore;
@@ -995,7 +996,8 @@ int main(int argc, const char **argv) {
           auto tool = vycor::makeClangTool(*compDb, {file});
           vycor::IndexerActionFactory factory(
             shard, opts.enableOdrDiag,
-            opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag);
+            opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag,
+              opts.enableAbiLayoutDiag);
           outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           shards.emplace_back(file, vycor::CheckIndexPayload::capture(shard));
         }
