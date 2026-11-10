@@ -294,6 +294,21 @@ struct ExceptionSpecEntry {
   unsigned line = 0;
 };
 
+// A concrete non-system C++ record layout as computed in one translation unit.
+// USR preserves declaration identity; targetAbi keeps different architectures /
+// C++ ABIs separate. layout is a canonical list of numeric physical-layout
+// facts, not an ODR token hash (pragma pack may change it without changing the
+// body).
+struct AbiLayoutEntry {
+  std::string usr;
+  std::string qualifiedName;
+  std::string targetAbi;
+  std::string filePath;
+  unsigned line = 0;
+  std::string tuPath;
+  std::string layout;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -336,6 +351,7 @@ struct Diagnostic {
     ExceptionSpec_Divergent,      // declaration sites disagree on whether a
                                   // function can throw — callers compile
                                   // contradictory unwind assumptions
+    AbiLayout_Divergent,
     Custom,                       // named built-in or org check (see checkName)
   };
   Kind kind;
@@ -387,6 +403,7 @@ public:
   // ODR definition-site tracking (see OdrEntry). Identical entries — the
   // common case of N TUs including one unchanged header — dedup at insert.
   void addOdrEntry(const OdrEntry &entry);
+  void addAbiLayout(const AbiLayoutEntry &entry);
   const std::vector<OdrEntry> &odrDefinitions() const { return odrEntries_; }
 
   // Explicit class template specializations (see SpecializationEntry).
@@ -425,6 +442,7 @@ public:
   size_t guideCount() const;
   size_t coverageEntryCount() const;
   size_t odrEntryCount() const;
+  size_t abiLayoutCount() const;
   size_t specializationCount() const;
   size_t defaultArgCount() const;
   size_t staticInitCount() const;
@@ -455,6 +473,10 @@ public:
     for (const auto &kv : coverageProps_)
       for (const auto &entry : kv.second)
         fn(entry);
+  }
+  template <typename Fn> void forEachAbiLayout(Fn fn) const {
+    for (const auto &entry : abiLayouts_)
+      fn(entry);
   }
   template <typename Fn> void forEachOdrEntry(Fn fn) const {
     for (const auto &entry : odrEntries_)
@@ -502,6 +524,8 @@ private:
   // Plain values, no interning: entry volume is bounded by non-system
   // vague-linkage definitions and hasn't earned ControlFlowIndex-style
   // compaction (same call ChannelIndex made).
+  std::vector<AbiLayoutEntry> abiLayouts_;
+  std::unordered_set<std::string> abiLayoutKeys_;
   std::vector<OdrEntry> odrEntries_;
   std::unordered_map<std::string, size_t> odrByKey_; // full-identity dedup keys
   std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;

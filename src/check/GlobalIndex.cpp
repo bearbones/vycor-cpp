@@ -218,6 +218,7 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
   shard.forEachCoverageProperty(
       [this](const CoveragePropertyEntry &e) { addCoverageProperty(e); });
   shard.forEachOdrEntry([this](const OdrEntry &e) { addOdrEntry(e); });
+  shard.forEachAbiLayout([this](const AbiLayoutEntry &e) { addAbiLayout(e); });
   shard.forEachSpecialization(
       [this](const SpecializationEntry &e) { addSpecialization(e); });
   shard.forEachDefaultArg(
@@ -412,6 +413,19 @@ void GlobalIndex::addOdrEntry(const OdrEntry &entry) {
 }
 
 size_t GlobalIndex::odrEntryCount() const { return odrEntries_.size(); }
+
+void GlobalIndex::addAbiLayout(const AbiLayoutEntry &entry) {
+  std::string key;
+  for (const auto *part : {&entry.usr, &entry.targetAbi, &entry.filePath,
+                           &entry.tuPath, &entry.layout})
+    key += std::to_string(part->size()) + ":" + *part;
+  key += ":" + std::to_string(entry.line);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  if (abiLayoutKeys_.insert(std::move(key)).second)
+    abiLayouts_.push_back(entry);
+}
+
+size_t GlobalIndex::abiLayoutCount() const { return abiLayouts_.size(); }
 
 std::vector<const FunctionOverloadEntry *>
 GlobalIndex::findOverloads(const std::string &qualifiedName) const {

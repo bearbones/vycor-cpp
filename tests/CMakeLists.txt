@@ -94,6 +94,7 @@ add_executable(vycor_tests
   test_check_checkpoint.cpp
   test_write_integrity.cpp
   test_check_odr.cpp
+  test_check_abi.cpp
   test_check_specialization.cpp
   test_check_default_args.cpp
   test_check_static_init.cpp
@@ -202,6 +203,11 @@ if(Python3_Interpreter_FOUND)
   # tests/data/sarif-schema-2.1.0.json), byte-identical JSON across
   # --checkpoint and --isolate-workers, fingerprints, baselines,
   # suppressions, and the changed-lines filter.
+  add_test(NAME abi_layout_gate
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/abi-layout-check.py"
+            --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(abi_layout_gate PROPERTIES LABELS "cli;check" TIMEOUT 300)
+
   add_test(NAME callback_lock_gate
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/scripts/callback-lock-check.py"

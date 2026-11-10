@@ -22,10 +22,14 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/ODRHash.h"
+#include "clang/AST/RecordLayout.h"
+#include "clang/Basic/TargetInfo.h"
+#include "clang/Index/USRGeneration.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Path.h"
@@ -64,9 +68,11 @@ std::string formatTemplateArgs(const clang::TemplateArgumentList &args,
 // compares. Always collected: scanning parameters costs nothing.
 
 IndexerVisitor::IndexerVisitor(GlobalIndex &index, clang::SourceManager &sm,
-                               bool collectOdr, bool collectSummaries)
+                               bool collectOdr, bool collectSummaries,
+                               bool collectAbiLayouts)
     : index_(index), sm_(sm), collectOdr_(collectOdr),
-      collectSummaries_(collectSummaries) {}
+      collectSummaries_(collectSummaries),
+      collectAbiLayouts_(collectAbiLayouts) {}
 
 // ODR definition-site hashing (--odr-diag). Only vague-linkage entities are
 // interesting: their definitions are legal in many TUs and the linker
@@ -193,6 +199,88 @@ void IndexerVisitor::maybeRecordOdrClass(clang::CXXRecordDecl *decl) {
   if (auto mainFile = sm_.getFileEntryRefForID(sm_.getMainFileID()))
     entry.tuPath = absoluteFileName(sm_, mainFile->getName());
   index_.addOdrEntry(entry);
+}
+
+void IndexerVisitor::maybeRecordAbiLayout(clang::CXXRecordDecl *decl) {
+  if (!collectAbiLayouts_ || !astContext_ || !decl->isCompleteDefinition() ||
+      decl->isInvalidDecl() || decl->isLambda() || !decl->getIdentifier() ||
+      !decl->isExternallyVisible() || decl->isDependentType() ||
+      decl->getDescribedClassTemplate())
+    return;
+  // Inline-function local types can be externally visible in Clang's linkage
+  // model, but they are not a shared ABI record. Do not group them by name.
+  for (auto *dc = decl->getDeclContext(); dc; dc = dc->getParent())
+    if (dc->isFunctionOrMethod())
+      return;
+  if (const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl))
+    if (spec->getSpecializationKind() == clang::TSK_ImplicitInstantiation)
+      return;
+  auto loc = sm_.getSpellingLoc(decl->getLocation());
+  if (sm_.isInSystemHeader(loc))
+    return;
+  llvm::SmallString<128> usr;
+  if (clang::index::generateUSRForDecl(decl, usr))
+    return;
+  const auto &target = astContext_->getTargetInfo();
+  const auto &layout = astContext_->getASTRecordLayout(decl);
+  AbiLayoutEntry entry;
+  entry.usr = std::string(usr);
+  entry.qualifiedName = decl->getQualifiedNameAsString();
+  entry.targetAbi = target.getTriple().str() + "|" +
+                    target.getDataLayoutString() +
+                    "|cxx=" + std::to_string(target.getCXXABI().getKind());
+  entry.filePath = getFilePath(decl->getLocation());
+  entry.line = sm_.getSpellingLineNumber(loc);
+  if (auto mainFile = sm_.getFileEntryRefForID(sm_.getMainFileID()))
+    entry.tuPath = absoluteFileName(sm_, mainFile->getName());
+  auto fact = [&](const std::string &key, int64_t value) {
+    entry.layout += key + "=" + std::to_string(value) + ";";
+  };
+  auto bits = [&](clang::CharUnits n) {
+    return n.getQuantity() * astContext_->getCharWidth();
+  };
+  fact("size(bits)", bits(layout.getSize()));
+  fact("alignment(bits)", bits(layout.getAlignment()));
+  fact("data-size(bits)", bits(layout.getDataSize()));
+  fact("nonvirtual-size(bits)", bits(layout.getNonVirtualSize()));
+  fact("nonvirtual-alignment(bits)", bits(layout.getNonVirtualAlignment()));
+  fact("field-count", std::distance(decl->field_begin(), decl->field_end()));
+  unsigned i = 0;
+  for (const auto *field : decl->fields()) {
+    const auto prefix = "field[" + std::to_string(i) + "]";
+    fact(prefix + ".offset(bits)", layout.getFieldOffset(i++));
+    if (!field->getType()->isIncompleteType())
+      fact(prefix + ".size(bits)", astContext_->getTypeSize(field->getType()));
+    else if (field->getType()->isIncompleteArrayType())
+      fact(prefix + ".size(bits)", 0); // flexible tail contributes no storage
+    else
+      return; // no complete layout witness for an unknown field size
+    if (field->isBitField())
+      fact(prefix + ".bit-width", field->getBitWidth()
+                                      ->EvaluateKnownConstInt(*astContext_)
+                                      .getZExtValue());
+  }
+  fact("base-count", decl->getNumBases());
+  i = 0;
+  for (const auto &base : decl->bases()) {
+    if (!base.isVirtual())
+      fact("base[" + std::to_string(i) + "].offset(bits)",
+           bits(layout.getBaseClassOffset(
+               base.getType()->getAsCXXRecordDecl())));
+    ++i;
+  }
+  fact("virtual-base-count", decl->getNumVBases());
+  i = 0;
+  for (const auto &base : decl->vbases())
+    fact(
+        "vbase[" + std::to_string(i++) + "].offset(bits)",
+        bits(layout.getVBaseClassOffset(base.getType()->getAsCXXRecordDecl())));
+  fact("own-vfptr", layout.hasOwnVFPtr());
+  fact("own-vbptr", layout.hasOwnVBPtr());
+  if (layout.hasOwnVBPtr())
+    fact("vbptr-offset(bits)", bits(layout.getVBPtrOffset()));
+  index_.addAbiLayout(entry);
 }
 
 void IndexerVisitor::maybeRecordDefaultArgs(clang::FunctionDecl *decl) {
@@ -686,6 +774,7 @@ bool IndexerVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
   if (decl->isImplicit())
     return true;
   maybeRecordOdrClass(decl);
+  maybeRecordAbiLayout(decl);
 
   // Explicit (full) class template specializations — recorded even when
   // declaration-only, and BEFORE the definition guards below: the
@@ -881,8 +970,9 @@ std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
 // --- IndexerConsumer ---
 
 IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
-                                 bool collectOdr, bool collectSummaries)
-    : visitor_(index, sm, collectOdr, collectSummaries) {}
+                                 bool collectOdr, bool collectSummaries,
+                                 bool collectAbiLayouts)
+    : visitor_(index, sm, collectOdr, collectSummaries, collectAbiLayouts) {}
 
 void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
@@ -892,28 +982,31 @@ void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
 // --- IndexerAction ---
 
 IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr,
-                             bool collectSummaries)
+                             bool collectSummaries, bool collectAbiLayouts)
     : index_(index), collectOdr_(collectOdr),
-      collectSummaries_(collectSummaries) {}
+      collectSummaries_(collectSummaries),
+      collectAbiLayouts_(collectAbiLayouts) {}
 
 std::unique_ptr<clang::ASTConsumer>
 IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
                                  llvm::StringRef /*file*/) {
   return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager(),
-                                           collectOdr_, collectSummaries_);
+                                           collectOdr_, collectSummaries_,
+                                           collectAbiLayouts_);
 }
 
 // --- IndexerActionFactory ---
 
-IndexerActionFactory::IndexerActionFactory(GlobalIndex &index,
-                                           bool collectOdr,
-                                           bool collectSummaries)
+IndexerActionFactory::IndexerActionFactory(GlobalIndex &index, bool collectOdr,
+                                           bool collectSummaries,
+                                           bool collectAbiLayouts)
     : index_(index), collectOdr_(collectOdr),
-      collectSummaries_(collectSummaries) {}
+      collectSummaries_(collectSummaries),
+      collectAbiLayouts_(collectAbiLayouts) {}
 
 std::unique_ptr<clang::FrontendAction> IndexerActionFactory::create() {
-  return std::make_unique<IndexerAction>(index_, collectOdr_,
-                                         collectSummaries_);
+  return std::make_unique<IndexerAction>(index_, collectOdr_, collectSummaries_,
+                                         collectAbiLayouts_);
 }
 
 } // namespace vycor

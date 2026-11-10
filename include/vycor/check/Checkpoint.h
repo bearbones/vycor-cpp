@@ -91,6 +91,7 @@ struct CheckIndexPayload {
   std::vector<DeductionGuideEntry> guides;
   std::vector<CoveragePropertyEntry> coverage;
   std::vector<OdrEntry> odrEntries; // populated when enableOdrDiag
+  std::vector<AbiLayoutEntry> abiLayouts; // populated when enableAbiLayoutDiag
   std::vector<SpecializationEntry> specializations;
   std::vector<DefaultArgEntry> defaultArgs;
   std::vector<StaticInitEntry> staticInits;

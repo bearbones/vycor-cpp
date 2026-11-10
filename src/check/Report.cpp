@@ -207,6 +207,8 @@ const char *diagnosticKindName(Diagnostic::Kind kind) {
     return "HeaderStatic_Duplicated";
   case Diagnostic::ExceptionSpec_Divergent:
     return "ExceptionSpec_Divergent";
+  case Diagnostic::AbiLayout_Divergent:
+    return "AbiLayout_Divergent";
   case Diagnostic::Custom:
     return "Custom";
   }
@@ -247,6 +249,8 @@ std::string checkNameOf(const Diagnostic &diag) {
     return "header-static-duplication";
   case Diagnostic::ExceptionSpec_Divergent:
     return "exception-spec-divergence";
+  case Diagnostic::AbiLayout_Divergent:
+    return "abi-layout-divergence";
   case Diagnostic::Custom:
     return diag.checkName.empty() ? "custom" : diag.checkName;
   }
@@ -267,6 +271,7 @@ Severity checkSeverity(const std::string &check) {
       {"exception-spec-divergence", Severity::Error},
       {"exception-escape", Severity::Note},
       {"odr-violations", Severity::Error},
+      {"abi-layout-divergence", Severity::Error},
       {"coverage-properties", Severity::Note},
       {"dead-code", Severity::Note},
       {"callback-under-lock", Severity::Warning},

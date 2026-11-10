@@ -218,6 +218,12 @@ working directory upward:
 { "checks": ["all", "-coverage-properties", "-compute-heavy"] }
 ```
 
+**ABI layout divergence** (`--checks=abi-layout-divergence`) compares computed
+record sizes, alignments, field and base offsets across TUs with the same target
+ABI. It can find packing-flag mismatches even when declaration text is identical.
+The check is opt-in, produces one witness per record/target, and uses fresh parses;
+see [the check reference](docs/checks/abi-layout-divergence.md).
+
 Other optional flags: `--warn-same-score`, `--model-convertibility`, the
 legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
 `--entry-point`), and `--org-config` (organization checks/config — see

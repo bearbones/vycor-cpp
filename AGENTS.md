@@ -806,3 +806,8 @@ only, not a namespace boundary.
   "Tagging and releases". Each formula `depends_on "llvm@NN"`: Homebrew's
   LLVM formulas link Clang/LLVM as shared libraries, so that dependency is
   required at runtime, not just at build time.
+
+`abi-layout-divergence` compares physical record layouts by canonical USR and
+target ABI. Its worker/journal payload is version 12. Enabling it bypasses legacy
+checkpoint reuse because headers and compile flags affect layout. See
+`docs/checks/abi-layout-divergence.md`.
