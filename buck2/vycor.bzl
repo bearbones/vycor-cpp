@@ -137,6 +137,10 @@ def _collect_dep_Sets(ctx: AnalysisContext, deps: list) -> _DepSets:
         flag_children = flag_children,
     )
 
+def _format_ext(index_format: str) -> str:
+    fmt = index_format[1:] if index_format.startswith(".") else index_format
+    return "." + (fmt if fmt else "vycs")
+
 def _index_ext(ctx: AnalysisContext) -> str:
     fmt = getattr(ctx.attrs, "index_format", "vycs")
     if fmt.startswith("."):
@@ -273,7 +277,7 @@ def _declare_tu_bake_action(
         cmd.add(compile_flags)
         for ea in getattr(ctx.attrs, "extra_args", []):
             cmd.add(ea)
-        cmd.add("-c", src)
+        cmd.add(src)
     else:
         cmd = cmd_args(_vycor_exe(ctx))
         cmd.add(
@@ -853,7 +857,7 @@ def vycor_cxx_library(
         for d in deps
     ]
 
-    ext = _index_ext(index_format)
+    ext = _format_ext(index_format)
     merged_ext = ".mgsc" if ext == ".shard.json" else ext
 
     vycor_target_index(
@@ -958,7 +962,7 @@ def vycor_cxx_binary(
         for d in deps
     ]
 
-    ext = _index_ext(index_format)
+    ext = _format_ext(index_format)
     merged_ext = ".mgsc" if ext == ".shard.json" else ext
 
     vycor_target_index(

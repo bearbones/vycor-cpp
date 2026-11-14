@@ -301,14 +301,24 @@ verb-less invocation is a usage error, and `serve` prints its removal
 notice). `megascope index` and `megascope merge` print a one-line JSON
 summary on stdout.
 
-**Buck2 integration** (`buck2/vycor.bzl`, `buck2/vycor.bxl`, `buck2/README.md`,
-`examples/buck2_megascope/`): Starlark rules (`vycor_tu_index`,
-`vycor_target_index`, `vycor_global_index`, `vycor_query`,
-`vycor_check`), wrapper macros (`vycor_cxx_library`,
-`vycor_cxx_binary`), and BXL scripts (`index`, `check`) that produce
-`.vycs` artifacts per translation unit, per library/binary target, and
-for the global index using `VycorIndexTSet` (`transitive_set`) and
-`megascope merge`.
+**Buck2 & Bazel integration**:
+- **Buck2** (`buck2/vycor.bzl`, `buck2/vycor.bxl`, `buck2/README.md`,
+  `examples/buck2_megascope/`): Starlark rules (`vycor_tu_index`,
+  `vycor_target_index`, `vycor_global_index`, `vycor_query`,
+  `vycor_check`), wrapper macros (`vycor_cxx_library`,
+  `vycor_cxx_binary`), and BXL scripts (`index`, `check`) that produce
+  `.vycs`/`.mgsc`/`.shard.json` artifacts per translation unit, per
+  library/binary target, and for the global index using `VycorIndexTSet`
+  (`transitive_set`) and `megascope merge`.
+- **Bazel** (`MODULE.bazel`, `WORKSPACE`, `bazel/vycor.bzl`,
+  `bazel/aspects.bzl`, `bazel/settings.bzl`, `bazel/BUILD.bazel`,
+  `bazel/README.md`, `examples/bazel_megascope/`): symmetric Starlark
+  rules (`vycor_tu_index`, `vycor_target_index`, `vycor_global_index`,
+  `vycor_query`, `vycor_check`), drop-in wrapper macros
+  (`vycor_cc_library`, `vycor_cc_binary` + `vycor_cxx_*` aliases), and
+  zero-config Bazel Aspects (`vycor_index_aspect`, `vycor_check_aspect`)
+  propagating `VycorIndexInfo` `depset`s and `CcInfo` contexts with zero
+  analysis-time `depset.to_list()` flattening.
 
 TU selection (`SourceSelection.h/.cpp`): `--source` and `--source-list`
 entries are unioned; `--source-re` and `--skip-paths` narrow the base

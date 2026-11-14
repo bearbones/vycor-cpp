@@ -1,0 +1,264 @@
+# Copyright (c) 2026 The vycor-cpp Authors
+#
+# Working Bazel example demonstrating:
+#   1. Unmodified native `cc_library` / `cc_binary` targets (`headers_only`,
+#      `core`, `engine`, `app`) indexed and checked with zero BUILD changes via
+#      `@vycor//bazel:aspects.bzl%vycor_index_aspect` & `vycor_check_aspect`
+#   2. Drop-in wrapper macros (`vycor_cc_library`, `vycor_cc_binary`)
+#   3. Explicit per-TU (`vycor_tu_index`), per-target (`vycor_target_index`),
+#      and diamond-safe global (`vycor_global_index`) call-graph artifacts
+#   4. Hermetic `vycor_query` and `vycor_check` static-analysis build actions
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load(
+    "@vycor//bazel:vycor.bzl",
+    "vycor_cc_binary",
+    "vycor_cc_library",
+    "vycor_check",
+    "vycor_global_index",
+    "vycor_query",
+    "vycor_target_index",
+    "vycor_tu_index",
+)
+
+# ---------------------------------------------------------------------------
+# 1. Unmodified native C++ target graph (`app` -> `engine` -> `core` -> `headers_only`
+#    AND `app` -> `core`, forming a diamond dependency on `core`).
+#
+#    Build & run the C++ binary normally:
+#      bazel run //:app
+#
+#    Zero-config call-graph indexing via Bazel Aspect:
+#      bazel build //:app \
+#        --aspects=@vycor//bazel:aspects.bzl%vycor_index_aspect \
+#        --output_groups=tu,target,global
+#
+#    Zero-config static analysis (`vycor-cpp check`) via Bazel Aspect:
+#      bazel build //:core //:engine //:app \
+#        --aspects=@vycor//bazel:aspects.bzl%vycor_check_aspect \
+#        --output_groups=report
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "headers_only",
+    hdrs = ["include/core/logger.h"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "core",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+    ],
+    hdrs = ["include/core/logger.h"],
+    includes = ["include"],
+    deps = [":headers_only"],
+)
+
+cc_library(
+    name = "engine",
+    srcs = [
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    hdrs = ["include/engine/pipeline.h"],
+    includes = ["include"],
+    deps = [":core"],
+)
+
+cc_binary(
+    name = "app",
+    srcs = ["src/main.cpp"],
+    deps = [
+        ":core",
+        ":engine",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# 2. Drop-in wrapper macros (`vycor_cc_library` & `vycor_cc_binary`)
+#    Generates `:wrapped_core`, `:wrapped_core_vycor`, `:wrapped_core_check`,
+#    `:wrapped_engine`, `:wrapped_engine_vycor`, `:wrapped_engine_check`,
+#    `:wrapped_app`, `:wrapped_app_vycor`, `:wrapped_app_vycor_global`,
+#    and `:wrapped_app_check`.
+# ---------------------------------------------------------------------------
+vycor_cc_library(
+    name = "wrapped_core",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+    ],
+    hdrs = ["include/core/logger.h"],
+    includes = ["include"],
+)
+
+vycor_cc_library(
+    name = "wrapped_engine",
+    srcs = [
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    hdrs = ["include/engine/pipeline.h"],
+    includes = ["include"],
+    deps = [":wrapped_core"],
+)
+
+vycor_cc_binary(
+    name = "wrapped_app",
+    srcs = ["src/main.cpp"],
+    deps = [
+        ":wrapped_core",
+        ":wrapped_engine",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# 3. Explicit single-TU call-graph artifact (`bazel build //:logger_tu`)
+# ---------------------------------------------------------------------------
+vycor_tu_index(
+    name = "logger_tu",
+    src = "src/logger.cpp",
+    exported_headers = ["include/core/logger.h"],
+    include_dirs = ["include"],
+    cxx_standard = "c++17",
+    out = "logger.tu.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 4. Explicit per-library call-graph index targets (`core_vycor`, `engine_vycor`)
+#
+#    Build per-target index:
+#      bazel build //:core_vycor //:engine_vycor
+#
+#    Build all per-TU shards of a library:
+#      bazel build //:core_vycor --output_groups=tu
+#
+#    Build a single TU's shard within a library:
+#      bazel build //:core_vycor --output_groups=tu_src/logger.cpp
+#      # (or sanitized group name: --output_groups=tu_src_logger_cpp)
+# ---------------------------------------------------------------------------
+vycor_target_index(
+    name = "headers_only_vycor",
+    srcs = [],
+    exported_headers = ["include/core/logger.h"],
+    exported_include_dirs = ["include"],
+    cxx_standard = "c++17",
+)
+
+vycor_target_index(
+    name = "core_vycor",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+    ],
+    exported_headers = ["include/core/logger.h"],
+    exported_include_dirs = ["include"],
+    include_dirs = ["include"],
+    deps = [":headers_only_vycor"],
+    cxx_standard = "c++17",
+    out = "core.vycs",
+)
+
+vycor_target_index(
+    name = "engine_vycor",
+    srcs = [
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    exported_headers = ["include/engine/pipeline.h"],
+    exported_include_dirs = ["include"],
+    include_dirs = ["include"],
+    deps = [":core_vycor"],
+    cxx_standard = "c++17",
+    out = "engine.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 5. Binary target index (`app_vycor`) with diamond dependency on `core_vycor`
+#
+#    - Per-target index (just main.cpp):      bazel build //:app_vycor
+#    - Transitive global index output group:  bazel build //:app_vycor --output_groups=global
+# ---------------------------------------------------------------------------
+vycor_target_index(
+    name = "app_vycor",
+    srcs = ["src/main.cpp"],
+    include_dirs = ["include"],
+    deps = [
+        ":core_vycor",
+        ":engine_vycor",
+    ],
+    entry_points = ["main"],
+    cxx_standard = "c++17",
+    out = "app.target.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 6. Global call-graph index across all targets (`bazel build //:global_index`)
+# ---------------------------------------------------------------------------
+vycor_global_index(
+    name = "global_index",
+    deps = [":app_vycor"],
+    entry_points = ["main"],
+    merge_granularity = "target",
+    out = "megascope.global.vycs",
+)
+
+# Alternative global index merging leaf per-TU .vycs shards directly:
+vycor_global_index(
+    name = "global_tu_index",
+    deps = [":app_vycor"],
+    entry_points = ["main"],
+    merge_granularity = "tu",
+    out = "megascope.global_from_tu.vycs",
+)
+
+# ---------------------------------------------------------------------------
+# 7. Hermetic query & static-analysis actions over the global index
+# ---------------------------------------------------------------------------
+vycor_query(
+    name = "call_graph_summary",
+    index = ":global_index",
+    tool = "graph-summary",
+    out = "call_graph_summary.json",
+)
+
+vycor_query(
+    name = "dead_code_report",
+    index = ":global_index",
+    tool = "analyze-dead-code",
+    entry_points = ["main"],
+    out = "dead_code_report.json",
+)
+
+vycor_query(
+    name = "exception_safety_report",
+    index = ":global_index",
+    tool = "query-exception-safety",
+    tool_flags = [
+        "--function",
+        "engine::runWorkerStep",
+        "--exception-type",
+        "std::runtime_error",
+    ],
+    entry_points = ["main"],
+    out = "exception_safety_report.json",
+)
+
+vycor_check(
+    name = "app_check",
+    srcs = [
+        "src/config.cpp",
+        "src/logger.cpp",
+        "src/main.cpp",
+        "src/pipeline.cpp",
+        "src/worker.cpp",
+    ],
+    headers = [
+        "include/core/logger.h",
+        "include/engine/pipeline.h",
+    ],
+    include_dirs = ["include"],
+    cxx_standard = "c++17",
+    format = "sarif",
+    out = "app_check.sarif",
+)

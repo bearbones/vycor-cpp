@@ -69,3 +69,7 @@ bench-out/
 # Buck2 build outputs and daemon state
 buck-out/
 .buckd/
+
+# Bazel convenience symlinks and lockfiles in examples
+bazel-*
+MODULE.bazel.lock

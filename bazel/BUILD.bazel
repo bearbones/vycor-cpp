@@ -1,0 +1,101 @@
+# Copyright (c) 2026 The vycor-cpp Authors
+#
+# Starlark build flags and exported .bzl files for @vycor//bazel.
+
+load(":settings.bzl", "vycor_string_flag", "vycor_string_list_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "README.md",
+    "aspects.bzl",
+    "settings.bzl",
+    "vycor.bzl",
+])
+
+# Empty sentinel target used as the default for optional label_flags.
+filegroup(
+    name = "none",
+    srcs = [],
+)
+
+# Optional hermetic vycor-cpp binary target (overrides vycor_executable when set).
+# Example: --@vycor//bazel:vycor_bin=//tools:vycor_cpp
+label_flag(
+    name = "vycor_bin",
+    build_setting_default = ":none",
+)
+
+# Optional hermetic libvycor_megascope_plugin.so target (overrides vycor_plugin_path when set).
+# Example: --@vycor//bazel:vycor_plugin=//tools:libvycor_megascope_plugin.so
+label_flag(
+    name = "vycor_plugin",
+    build_setting_default = ":none",
+)
+
+# Path or binary name for vycor-cpp when `vycor_bin` is not specified on a rule or flag.
+# Override on the CLI: --@vycor//bazel:vycor_executable=/path/to/vycor-cpp
+vycor_string_flag(
+    name = "vycor_executable",
+    build_setting_default = "vycor-cpp",
+)
+
+# Optional path to libvycor_megascope_plugin.so for Clang frontend plugin mode.
+vycor_string_flag(
+    name = "vycor_plugin_path",
+    build_setting_default = "",
+)
+
+# Clang++ binary used when indexing via libvycor_megascope_plugin.so.
+vycor_string_flag(
+    name = "clang_executable",
+    build_setting_default = "clang++",
+)
+
+# Default output shard/snapshot format ('vycs', 'mgsc', or 'shard.json').
+vycor_string_flag(
+    name = "index_format",
+    build_setting_default = "vycs",
+)
+
+# Default C++ language standard passed when target copts omit -std=...
+vycor_string_flag(
+    name = "cxx_standard",
+    build_setting_default = "c++17",
+)
+
+# Path patterns collapsed during call-graph construction (comma-separated).
+vycor_string_list_flag(
+    name = "collapse_paths",
+    build_setting_default = [],
+)
+
+# Additional qualified RAII lock types recognized during control-flow indexing.
+vycor_string_list_flag(
+    name = "lock_types",
+    build_setting_default = [],
+)
+
+# Entry-point function names recorded in aspect-built indexes.
+vycor_string_list_flag(
+    name = "entry_points",
+    build_setting_default = ["main"],
+)
+
+# Comma-separated check specification for vycor_check_aspect (--checks=...).
+vycor_string_flag(
+    name = "checks",
+    build_setting_default = "",
+)
+
+# Report format for vycor_check_aspect ('sarif', 'json', or 'text').
+vycor_string_flag(
+    name = "check_format",
+    build_setting_default = "sarif",
+)
+
+# Severity threshold that fails vycor_check_aspect ('none', 'note', 'warning', 'error').
+vycor_string_flag(
+    name = "fail_on",
+    build_setting_default = "none",
+)

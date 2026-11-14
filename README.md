@@ -161,7 +161,7 @@ project's build files:
 All subcommands accept compile commands from:
 1. A directory containing `compile_commands.json` (`--build-path <dir>`),
 2. A direct path to a compilation database JSON file (`--build-path <path/to/compdb.json>`), or
-3. Compiler flags passed directly after `--` (`vycor-cpp <subcommand> ... -- -std=c++17 -Iinclude`), enabling hermetic per-TU and per-target actions in build systems such as **Buck2** without generating `compile_commands.json`.
+3. Compiler flags passed directly after `--` (`vycor-cpp <subcommand> ... -- -std=c++17 -Iinclude`), enabling hermetic per-TU and per-target actions in build systems such as **Buck2** and **Bazel** without generating `compile_commands.json`.
 
 ### check — Analyze for Fragile ADL/CTAD
 
@@ -475,10 +475,10 @@ TUs in memory and answers, reading and writing no index — the former
 the selected TUs, so callers in other files are invisible; for security
 audits or multi-file analysis, index the project once and query that.
 
-#### Hierarchical Map-Reduce Indexing & Buck2 Integration (`megascope merge`)
+#### Hierarchical Map-Reduce Indexing — Buck2 & Bazel Integration (`megascope merge`)
 
-For hermetic build systems like **Buck2**, `megascope` supports a map-reduce
-workflow that produces `.vycs` call-graph artifacts at three granularities
+For hermetic build systems like **Buck2** and **Bazel**, `megascope` supports a map-reduce
+workflow that produces `.vycs` (or `.mgsc` / `.shard.json`) call-graph artifacts at three granularities
 without needing a monolithic `compile_commands.json`:
 
 1. **Per-TU (`.vycs` per translation unit)**:
@@ -506,10 +506,17 @@ across shards (overridable with `--allow-mismatch`) and deduplicates
 overlapping TUs idempotently so diamond dependencies in the target graph never
 double-count edges or call-site contexts.
 
-Out-of-the-box **Buck2** rules ([`buck2/vycor.bzl`](buck2/vycor.bzl)),
-zero-config **BXL** scripts ([`buck2/vycor.bxl`](buck2/vycor.bxl)), and a
-complete multi-target example ([`examples/buck2_megascope/`](examples/buck2_megascope/))
-are shipped in this repository — see **[buck2/README.md](buck2/README.md)**.
+Out-of-the-box integrations and complete multi-target examples are shipped in
+this repository for both build systems:
+- **Buck2**: Starlark rules ([`buck2/vycor.bzl`](buck2/vycor.bzl)), zero-config
+  **BXL** scripts ([`buck2/vycor.bxl`](buck2/vycor.bxl)), and example project
+  ([`examples/buck2_megascope/`](examples/buck2_megascope/)) — see
+  **[buck2/README.md](buck2/README.md)**.
+- **Bazel** (Bzlmod & `WORKSPACE`): Starlark rules ([`bazel/vycor.bzl`](bazel/vycor.bzl)),
+  zero-config **Bazel Aspects** ([`bazel/aspects.bzl`](bazel/aspects.bzl)), build
+  flags ([`bazel/BUILD.bazel`](bazel/BUILD.bazel)), and example project
+  ([`examples/bazel_megascope/`](examples/bazel_megascope/)) — see
+  **[bazel/README.md](bazel/README.md)**.
 
 #### Zero-Reparse Clang Frontend Plugin (`libvycor_megascope_plugin.so`)
 

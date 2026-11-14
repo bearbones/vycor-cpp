@@ -1,0 +1,14 @@
+# Helpful aliases for zero-config aspect indexing and static analysis:
+#   bazel build //:app --config=vycor-index
+#   bazel build //:app --config=vycor-mgsc
+#   bazel build //:core //:engine //:app --config=vycor-check
+
+build:vycor-index --aspects=@vycor//bazel:aspects.bzl%vycor_index_aspect
+build:vycor-index --output_groups=global
+
+build:vycor-mgsc --aspects=@vycor//bazel:aspects.bzl%vycor_index_aspect
+build:vycor-mgsc --@vycor//bazel:index_format=mgsc
+build:vycor-mgsc --output_groups=global
+
+build:vycor-check --aspects=@vycor//bazel:aspects.bzl%vycor_check_aspect
+build:vycor-check --output_groups=report

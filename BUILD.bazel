@@ -1,0 +1,9 @@
+# Copyright (c) 2026 The vycor-cpp Authors
+# Root Bazel package for @vycor.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "LICENSE",
+    "VERSION",
+])
