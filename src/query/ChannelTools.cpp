@@ -214,8 +214,16 @@ std::vector<ConcurrencyBoundary>
 findConcurrencyBoundaries(const CallGraph &graph,
                           const std::string &functionUsrOrName) {
   std::vector<ConcurrencyBoundary> found;
-  std::set<std::string> visited{functionUsrOrName};
-  std::vector<std::string> queue{functionUsrOrName};
+  std::set<std::string> visited;
+  std::vector<std::string> queue;
+  for (const auto &usr : graph.usrsForName(functionUsrOrName)) {
+    if (visited.insert(usr).second)
+      queue.push_back(usr);
+  }
+  if (queue.empty()) {
+    visited.insert(functionUsrOrName);
+    queue.push_back(functionUsrOrName);
+  }
   size_t qi = 0;
   while (qi < queue.size() && queue.size() < kMaxBoundaryWalkNodes) {
     const std::string cur = queue[qi++];
@@ -226,8 +234,10 @@ findConcurrencyBoundaries(const CallGraph &graph,
                          e.callSite});
         continue;
       }
-      if (visited.insert(e.callerName).second)
-        queue.push_back(e.callerName);
+      const std::string &callerId =
+          !e.callerUsr.empty() ? e.callerUsr : e.callerName;
+      if (visited.insert(callerId).second)
+        queue.push_back(callerId);
     }
   }
   return found;
@@ -235,10 +245,7 @@ findConcurrencyBoundaries(const CallGraph &graph,
 
 std::optional<ChannelSite> findChannelSiteAt(const ChannelIndex &channels,
                                              const std::string &callSite) {
-  for (const auto &s : channels.allSites())
-    if (s.callSite == callSite)
-      return s;
-  return std::nullopt;
+  return channels.siteAtCallSite(callSite);
 }
 
 } // namespace

@@ -17,9 +17,11 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/ext/Extensions.h"
 
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+
 #include <algorithm>
 #include <deque>
-#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,37 +81,33 @@ stdExceptionHierarchy() {
   return hierarchy;
 }
 
-// Strip reference, const, and surrounding whitespace for matching.
-static std::string stripTypeSpelling(const std::string &t) {
-  std::string s = t;
+// Strip reference, const, and surrounding whitespace without front-shift erases.
+static llvm::StringRef stripTypeSpellingView(llvm::StringRef s) noexcept {
   while (!s.empty() && (s.back() == '&' || s.back() == ' '))
-    s.pop_back();
-  if (s.compare(0, 6, "const ") == 0)
-    s = s.substr(6);
-  while (!s.empty() && s.back() == ' ')
-    s.pop_back();
-  while (!s.empty() && s.front() == ' ')
-    s.erase(s.begin());
-  return s;
+    s = s.drop_back(1);
+  if (s.starts_with("const "))
+    s = s.drop_front(6);
+  return s.trim(' ');
 }
 
 bool ControlFlowOracle::isSubtypeOf(const std::string &thrownType,
                                     const std::string &caughtType) const {
   if (thrownType == caughtType)
     return true;
-  const std::string thrown = stripTypeSpelling(thrownType);
-  const std::string caught = stripTypeSpelling(caughtType);
-  if (thrown == caught)
+  const llvm::StringRef thrownView = stripTypeSpellingView(thrownType);
+  const llvm::StringRef caughtView = stripTypeSpellingView(caughtType);
+  if (thrownView == caughtView)
     return true;
 
-  // Walk the hardcoded std hierarchy.
-  std::string current = thrown;
-  std::set<std::string> visited;
-  while (visited.insert(current).second) {
+  // Walk the hardcoded std hierarchy on the stack (no std::set allocations).
+  llvm::StringRef current = thrownView;
+  llvm::SmallVector<llvm::StringRef, 8> visited;
+  while (std::find(visited.begin(), visited.end(), current) == visited.end()) {
+    visited.push_back(current);
     bool advanced = false;
     for (const auto &pair : stdExceptionHierarchy()) {
       if (pair.first == current) {
-        if (pair.second == caught)
+        if (pair.second == caughtView)
           return true;
         current = pair.second;
         advanced = true;
@@ -122,8 +120,9 @@ bool ControlFlowOracle::isSubtypeOf(const std::string &thrownType,
 
   // The graph's recorded class hierarchy (qualified names): a user type
   // derived, directly or transitively, from the caught type.
+  const std::string caught(caughtView);
   for (const auto &derived : graph_.getAllDerivedClasses(caught)) {
-    if (derived == thrown)
+    if (derived == thrownView)
       return true;
   }
   return false;
@@ -422,51 +421,48 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName,
   NearestCatchResult result;
   result.maxDepth = maxDepth;
 
-  // Target identities: every node carrying the display name, else the
-  // string itself.
-  std::vector<std::string> targets = graph_.usrsForName(functionName);
-  if (targets.empty())
-    targets.push_back(functionName);
-  std::sort(targets.begin(), targets.end());
-  result.targetKnown = graph_.interner().find(functionName).has_value() ||
-                       !graph_.usrsForName(functionName).empty();
+  using SId = StringInterner::Id;
+  const StringInterner &interner = graph_.interner();
+  // Resolve via resolveKnownIds so stale strings left in StringInterner after
+  // removeTU warm refresh do not falsely report targetKnown = true.
+  std::vector<SId> targets = resolveKnownIds(graph_, functionName);
+  result.targetKnown = !targets.empty();
   if (!result.targetKnown)
     return result;
 
-  auto displayOf = [&](const std::string &usr) -> std::string {
-    if (const auto *node = graph_.findNode(usr))
-      return node->qualifiedName;
-    return usr;
-  };
+  std::sort(targets.begin(), targets.end(), [&](SId a, SId b) {
+    return interner.resolve(a) < interner.resolve(b);
+  });
 
-  // BFS tree: usr -> (parent usr, edge into parent's callee). Callers are
-  // visited in canonical (callerUsr, callSite) order so the tree — and the
-  // reported chains — do not depend on edge insertion order.
+  // BFS tree in SId space: callerId -> (child calleeId, hop into child).
+  // Callers are visited in canonical (callerUsr, callSite, ...) order so the
+  // tree — and reported chains — never depend on edge insertion order.
   struct Parent {
-    std::string child; // the callee side (toward the target)
+    SId child;
     PathHop hop;
   };
-  std::unordered_map<std::string, Parent> parent;
-  std::unordered_set<std::string> visited;
-  std::deque<std::pair<std::string, unsigned>> queue;
-  for (const auto &t : targets) {
+  std::unordered_map<SId, Parent> parent;
+  std::unordered_set<SId> visited;
+  std::deque<std::pair<SId, unsigned>> queue;
+  for (SId t : targets) {
     if (visited.insert(t).second)
       queue.emplace_back(t, 0);
   }
 
   // Rebuild the chain from a caller down to the target through the tree.
-  auto chainFrom = [&](const std::string &usr, const PathHop &firstHop) {
+  auto chainFrom = [&](SId callerId, SId firstCalleeId,
+                       const PathHop &firstHop) {
     NearestCatchInfo nci;
     nci.hops.push_back(firstHop);
-    std::string cur = firstHop.calleeUsr;
+    SId cur = firstCalleeId;
     while (true) {
       auto it = parent.find(cur);
       if (it == parent.end())
         break;
       nci.hops.push_back(it->second.hop);
-      cur = it->second.hop.calleeUsr;
+      cur = it->second.child;
     }
-    nci.pathSegment.push_back(displayOf(usr));
+    nci.pathSegment.push_back(graph_.displayNameOf(callerId));
     for (const auto &h : nci.hops)
       nci.pathSegment.push_back(h.callee);
     return nci;
@@ -476,25 +472,20 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName,
     auto [node, depth] = queue.front();
     queue.pop_front();
     if (depth >= maxDepth) {
-      if (!graph_.callersOf(node).empty())
+      if (!graph_.callerRefsOf(node).empty())
         result.stops |= static_cast<unsigned>(StopReason::DepthLimit);
       continue;
     }
 
-    auto callers = graph_.callersOf(node);
-    std::sort(callers.begin(), callers.end(),
-              [](const CallGraphEdge &a, const CallGraphEdge &b) {
-                if (a.callerUsr != b.callerUsr)
-                  return a.callerUsr < b.callerUsr;
-                return a.callSite < b.callSite;
-              });
+    auto callers = graph_.callerRefsOf(node);
+    sortCallerRefsCanonically(graph_, callers);
     for (const auto &edge : callers) {
       PathHop hop;
-      hop.callerUsr = edge.callerUsr;
-      hop.calleeUsr = edge.calleeUsr;
-      hop.caller = edge.callerName;
-      hop.callee = edge.calleeName;
-      hop.callSite = edge.callSite;
+      hop.callerUsr = interner.resolve(edge.caller);
+      hop.calleeUsr = interner.resolve(edge.callee);
+      hop.caller = graph_.displayNameOf(edge.caller);
+      hop.callee = graph_.displayNameOf(edge.callee);
+      hop.callSite = interner.resolve(edge.callSite);
       hop.kind = edge.kind;
       hop.confidence = edge.confidence;
       hop.execContext = edge.execContext;
@@ -504,16 +495,16 @@ ControlFlowOracle::queryNearestCatches(const std::string &functionName,
       // another edge still contributes its try/catch at this one.
       auto ctx = contextForHop(hop);
       if (ctx && !ctx->enclosingTryCatches.empty()) {
-        NearestCatchInfo nci = chainFrom(edge.callerUsr, hop);
+        NearestCatchInfo nci = chainFrom(edge.caller, edge.callee, hop);
         nci.scope = ctx->enclosingTryCatches.front(); // Innermost.
         nci.callSite = hop.callSite;
         nci.framesFromTarget = depth + 1;
         result.catches.push_back(std::move(nci));
         continue;
       }
-      if (visited.insert(edge.callerUsr).second) {
-        parent.emplace(edge.callerUsr, Parent{node, hop});
-        queue.emplace_back(edge.callerUsr, depth + 1);
+      if (visited.insert(edge.caller).second) {
+        parent.emplace(edge.caller, Parent{node, std::move(hop)});
+        queue.emplace_back(edge.caller, depth + 1);
       }
     }
   }

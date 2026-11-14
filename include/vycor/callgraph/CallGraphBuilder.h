@@ -23,9 +23,10 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -98,24 +99,24 @@ private:
 
   // Track DeclRefExprs that are direct callees or function-pointer arguments,
   // so VisitDeclRefExpr can add Plausible edges only for uncovered refs.
-  std::set<const clang::DeclRefExpr *> handledRefs_;
+  llvm::DenseSet<const clang::DeclRefExpr *> handledRefs_;
 
   // Track callable-typed vars initialized from a direct call, keyed to the
   // *returning* function's USR. Consumed by processCallableArgs as deferred
   // FunctionPointerReturn edges; the function-returns join happens at query
   // time (CallGraph::calleesOf/callersOf), so edge building never reads
   // cross-TU state.
-  std::map<const clang::VarDecl *, std::string> varCallSources_;
+  llvm::DenseMap<const clang::VarDecl *, std::string> varCallSources_;
 
   // Track local vars initialized from a LambdaExpr so concurrency spawners
   // and downstream callers can resolve the synthetic lambda USR.
-  std::map<const clang::VarDecl *, std::string> varLambdaSources_;
+  llvm::DenseMap<const clang::VarDecl *, std::string> varLambdaSources_;
 
   // Per-TU (usr, display) memo; getCurrentFunction is const but memoizes.
   mutable UsrCache usrs_;
 
   // Callee decls whose node this visitor registered (see identForCallee).
-  std::set<const clang::FunctionDecl *> auxNodes_;
+  llvm::DenseSet<const clang::FunctionDecl *> auxNodes_;
 
   std::string getFilePath(clang::SourceLocation loc) const;
   std::string formatLocation(clang::SourceLocation loc) const;

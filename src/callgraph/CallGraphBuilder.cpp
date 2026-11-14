@@ -20,6 +20,7 @@
 #include "vycor/compat/ClangVersion.h"
 #include "vycor/compat/ToolAdjusters.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ThreadPool.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -89,11 +90,11 @@ static std::string getFilePathHelper(clang::SourceManager &sm,
 static std::string formatLocationHelper(clang::SourceManager &sm,
                                         clang::SourceLocation loc) {
   auto sLoc = sm.getSpellingLoc(loc);
-  auto file = sm.getFilename(sLoc);
-  unsigned line = sm.getSpellingLineNumber(sLoc);
-  unsigned col = sm.getSpellingColumnNumber(sLoc);
-  return std::string(file) + ":" + std::to_string(line) + ":" +
-         std::to_string(col);
+  llvm::SmallString<128> buf;
+  llvm::raw_svector_ostream os(buf);
+  os << sm.getFilename(sLoc) << ':' << sm.getSpellingLineNumber(sLoc) << ':'
+     << sm.getSpellingColumnNumber(sLoc);
+  return std::string(buf.str());
 }
 
 // Stable synthetic name for a lambda closure: "lambda#file:line:col#enclosing".
@@ -103,9 +104,15 @@ static std::string formatLocationHelper(clang::SourceManager &sm,
 static std::string lambdaQualifiedName(clang::SourceManager &sm,
                                        clang::SourceLocation loc,
                                        const std::string &enclosing) {
-  std::string site = formatLocationHelper(sm, loc);
-  std::string parent = enclosing.empty() ? std::string("<tu>") : enclosing;
-  return "lambda#" + site + "#" + parent;
+  auto sLoc = sm.getSpellingLoc(loc);
+  llvm::SmallString<160> buf;
+  llvm::raw_svector_ostream os(buf);
+  os << "lambda#" << sm.getFilename(sLoc) << ':'
+     << sm.getSpellingLineNumber(sLoc) << ':'
+     << sm.getSpellingColumnNumber(sLoc) << '#'
+     << (enclosing.empty() ? llvm::StringRef("<tu>")
+                           : llvm::StringRef(enclosing));
+  return std::string(buf.str());
 }
 
 // Lambda identity: the synthetic name is already identity-stable across
@@ -336,11 +343,11 @@ bool CallGraphIndexerVisitor::VisitCXXRecordDecl(
 void CallGraphIndexerVisitor::computeEffectiveImpls(
     const clang::CXXRecordDecl *cls) {
   std::string className = cls->getQualifiedNameAsString();
-  std::set<std::string> handledMethodNames;
+  llvm::SmallDenseSet<const clang::IdentifierInfo *, 16> handledMethodNames;
 
   // Walk from most-derived (cls) upward through bases.
   // The first implementation found for a method name is the effective one.
-  std::vector<const clang::CXXRecordDecl *> hierarchy;
+  llvm::SmallVector<const clang::CXXRecordDecl *, 8> hierarchy;
   hierarchy.push_back(cls);
 
   for (size_t i = 0; i < hierarchy.size(); ++i) {
@@ -350,12 +357,13 @@ void CallGraphIndexerVisitor::computeEffectiveImpls(
       if (!method->isVirtual() || method->isImplicit())
         continue;
 
-      std::string methodName = method->getNameAsString();
-      if (handledMethodNames.count(methodName))
+      const clang::IdentifierInfo *methodId = method->getIdentifier();
+      if (methodId && handledMethodNames.contains(methodId))
         continue;
 
       if (!method->isPureVirtual()) {
-        handledMethodNames.insert(methodName);
+        if (methodId)
+          handledMethodNames.insert(methodId);
         // Class stays display-keyed; the impl method is usr-keyed.
         graph_.addEffectiveImpl(className, usrs_.identFor(method).usr,
                                 tuPath_);
@@ -677,12 +685,10 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
     spawnerCtx = spawnerContextFor(direct->getQualifiedNameAsString());
   }
 
-  // Process arguments: detect function pointers and lambdas as callables.
-  std::vector<clang::Expr *> args;
-  args.reserve(expr->getNumArgs());
-  for (unsigned i = 0; i < expr->getNumArgs(); ++i)
-    args.push_back(expr->getArg(i));
-  processCallableArgs(args, caller.usr, callBeginLoc(expr), spawnerCtx);
+  // Process arguments directly via ArrayRef (zero heap allocation per call).
+  processCallableArgs(
+      llvm::ArrayRef<clang::Expr *>(expr->getArgs(), expr->getNumArgs()),
+      caller.usr, callBeginLoc(expr), spawnerCtx);
 
   auto *callee = expr->getDirectCallee();
   if (!callee)
@@ -801,11 +807,9 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   Ident ctorId = identForCallee(ctor);
   ExecutionContext spawnerCtx = spawnerContextFor(ctorId.display);
   if (spawnerCtx != ExecutionContext::Synchronous) {
-    std::vector<clang::Expr *> args;
-    args.reserve(expr->getNumArgs());
-    for (unsigned i = 0; i < expr->getNumArgs(); ++i)
-      args.push_back(expr->getArg(i));
-    processCallableArgs(args, caller.usr, expr->getBeginLoc(), spawnerCtx);
+    processCallableArgs(
+        llvm::ArrayRef<clang::Expr *>(expr->getArgs(), expr->getNumArgs()),
+        caller.usr, expr->getBeginLoc(), spawnerCtx);
   }
 
   // Add constructor edge.

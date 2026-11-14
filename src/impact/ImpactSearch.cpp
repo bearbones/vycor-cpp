@@ -38,10 +38,8 @@ PathHop hopOf(const CallGraph &graph, const CallGraph::EdgeRef &e) {
   PathHop h;
   h.callerUsr = in.resolve(e.caller);
   h.calleeUsr = in.resolve(e.callee);
-  const CallGraphNode *cn = graph.findNode(h.callerUsr);
-  const CallGraphNode *dn = graph.findNode(h.calleeUsr);
-  h.caller = cn ? cn->qualifiedName : h.callerUsr;
-  h.callee = dn ? dn->qualifiedName : h.calleeUsr;
+  h.caller = graph.displayNameOf(e.caller);
+  h.callee = graph.displayNameOf(e.callee);
   h.callSite = in.resolve(e.callSite);
   h.kind = e.kind;
   h.confidence = e.confidence;
@@ -106,11 +104,13 @@ ImpactResult findImpact(const CallGraph &graph,
     }
     // A changed function is always expanded, whatever its fan-in: its
     // callers are the question.
-    if (depth > 0 && limits.maxFanIn &&
-        graph.storedInDegree(node) > limits.maxFanIn) {
-      hubs.emplace(node, graph.storedInDegree(node));
-      r.stops |= static_cast<unsigned>(StopReason::HubPruned);
-      continue;
+    if (depth > 0 && limits.maxFanIn) {
+      const size_t inDeg = graph.storedInDegree(node);
+      if (inDeg > limits.maxFanIn) {
+        hubs.emplace(node, inDeg);
+        r.stops |= static_cast<unsigned>(StopReason::HubPruned);
+        continue;
+      }
     }
     if (limits.maxWork && r.expansions >= limits.maxWork) {
       r.stops |= static_cast<unsigned>(StopReason::WorkBudget);
@@ -135,8 +135,7 @@ ImpactResult findImpact(const CallGraph &graph,
       continue;
     AffectedFunction a;
     a.usr = in.resolve(id);
-    const CallGraphNode *n = graph.findNode(a.usr);
-    a.name = n ? n->qualifiedName : a.usr;
+    a.name = graph.displayNameOf(id);
     a.depth = rc.depth;
     a.changedUsr = in.resolve(rc.origin);
     SId cur = id;
@@ -156,8 +155,7 @@ ImpactResult findImpact(const CallGraph &graph,
   for (const auto &[id, deg] : hubs) {
     SkippedHub h;
     h.usr = in.resolve(id);
-    const CallGraphNode *n = graph.findNode(h.usr);
-    h.name = n ? n->qualifiedName : h.usr;
+    h.name = graph.displayNameOf(id);
     h.inDegree = deg;
     r.skippedHubs.push_back(std::move(h));
   }

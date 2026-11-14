@@ -132,25 +132,8 @@ ControlFlowIndex::ControlFlowIndex() {
 
 ControlFlowIndex::~ControlFlowIndex() = default;
 
-ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept
-    : mapped_(std::move(other.mapped_)), interner_(std::move(other.interner_)),
-      contexts_(std::move(other.contexts_)),
-      scopeSets_(std::move(other.scopeSets_)),
-      guardSets_(std::move(other.guardSets_)),
-      raiiSets_(std::move(other.raiiSets_)),
-      scopeSetIds_(std::move(other.scopeSetIds_)),
-      guardSetIds_(std::move(other.guardSetIds_)),
-      raiiSetIds_(std::move(other.raiiSetIds_)),
-      byCallee_(std::move(other.byCallee_)),
-      byCaller_(std::move(other.byCaller_)),
-      byCalleeDisplay_(std::move(other.byCalleeDisplay_)),
-      byCallerDisplay_(std::move(other.byCallerDisplay_)),
-      bySite_(std::move(other.bySite_)), byTu_(std::move(other.byTu_)),
-      noProvenance_(std::move(other.noProvenance_)),
-      liveCount_(other.liveCount_) {}
-
-ControlFlowIndex &
-ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
+ControlFlowIndex::ControlFlowIndex(ControlFlowIndex &&other) noexcept {
+  std::lock_guard<std::mutex> lock(other.mutex_);
   mapped_ = std::move(other.mapped_);
   interner_ = std::move(other.interner_);
   contexts_ = std::move(other.contexts_);
@@ -168,6 +151,44 @@ ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
   byTu_ = std::move(other.byTu_);
   noProvenance_ = std::move(other.noProvenance_);
   liveCount_ = other.liveCount_;
+  other.liveCount_ = 0;
+  try {
+    other.scopeSets_.emplace_back();
+    other.guardSets_.emplace_back();
+    other.raiiSets_.emplace_back();
+  } catch (...) {
+  }
+}
+
+ControlFlowIndex &
+ControlFlowIndex::operator=(ControlFlowIndex &&other) noexcept {
+  if (this == &other)
+    return *this;
+  std::scoped_lock lock(mutex_, other.mutex_);
+  mapped_ = std::move(other.mapped_);
+  interner_ = std::move(other.interner_);
+  contexts_ = std::move(other.contexts_);
+  scopeSets_ = std::move(other.scopeSets_);
+  guardSets_ = std::move(other.guardSets_);
+  raiiSets_ = std::move(other.raiiSets_);
+  scopeSetIds_ = std::move(other.scopeSetIds_);
+  guardSetIds_ = std::move(other.guardSetIds_);
+  raiiSetIds_ = std::move(other.raiiSetIds_);
+  byCallee_ = std::move(other.byCallee_);
+  byCaller_ = std::move(other.byCaller_);
+  byCalleeDisplay_ = std::move(other.byCalleeDisplay_);
+  byCallerDisplay_ = std::move(other.byCallerDisplay_);
+  bySite_ = std::move(other.bySite_);
+  byTu_ = std::move(other.byTu_);
+  noProvenance_ = std::move(other.noProvenance_);
+  liveCount_ = other.liveCount_;
+  other.liveCount_ = 0;
+  try {
+    other.scopeSets_.emplace_back();
+    other.guardSets_.emplace_back();
+    other.raiiSets_.emplace_back();
+  } catch (...) {
+  }
   return *this;
 }
 

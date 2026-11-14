@@ -160,11 +160,11 @@ namespace vycor {
 static std::string formatLocationHelper(clang::SourceManager &sm,
                                         clang::SourceLocation loc) {
   auto sLoc = sm.getSpellingLoc(loc);
-  auto file = sm.getFilename(sLoc);
-  unsigned line = sm.getSpellingLineNumber(sLoc);
-  unsigned col = sm.getSpellingColumnNumber(sLoc);
-  return std::string(file) + ":" + std::to_string(line) + ":" +
-         std::to_string(col);
+  llvm::SmallString<128> buf;
+  llvm::raw_svector_ostream os(buf);
+  os << sm.getFilename(sLoc) << ':' << sm.getSpellingLineNumber(sLoc) << ':'
+     << sm.getSpellingColumnNumber(sLoc);
+  return std::string(buf.str());
 }
 
 // Set of qualified lock type names recognized out of the box. Matched by

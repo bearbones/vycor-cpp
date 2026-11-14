@@ -190,11 +190,23 @@ public:
   // Count of live stored in-edges (cheap: no materialization or virtual
   // expansion). Used as a hub heuristic by path-walking tools. The id
   // overload avoids the name lookup in inner loops.
-  size_t storedInDegree(const std::string &name) const;
-  size_t storedInDegree(StringInterner::Id id) const;
+  [[nodiscard]] size_t storedInDegree(const std::string &name) const;
+  [[nodiscard]] size_t storedInDegree(StringInterner::Id id) const noexcept;
 
-  size_t nodeCount() const;
-  size_t edgeCount() const;
+  // True when `id` is a registered node USR or a live edge endpoint
+  // (including synthesized virtual-dispatch or function-return targets),
+  // tested directly without allocating EdgeRef vectors or round-tripping
+  // through strings.
+  [[nodiscard]] bool isReferencedId(StringInterner::Id id) const;
+
+  // Display name for a USR id: the registered node's qualifiedName when a
+  // node exists, else the interned string itself. O(1) without UTF-8 or
+  // string-interner re-hashing.
+  [[nodiscard]] const std::string &
+  displayNameOf(StringInterner::Id usrId) const;
+
+  [[nodiscard]] size_t nodeCount() const noexcept;
+  [[nodiscard]] size_t edgeCount() const noexcept;
 
   std::vector<const CallGraphNode *> allNodes() const;
   // Accepts a usr or a display name. Ambiguous display names resolve to the
@@ -271,7 +283,9 @@ public:
   // Compact the edge storage, eliminating tombstones.
   void compact();
 
-  const StringInterner &interner() const { return interner_; }
+  [[nodiscard]] const StringInterner &interner() const noexcept {
+    return interner_;
+  }
 
   // Pre-size node/edge tables for a known bulk insert (snapshot load).
   void reserveNodes(size_t n);

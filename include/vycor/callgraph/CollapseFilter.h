@@ -35,9 +35,9 @@ public:
   /// configured collapse patterns. Matching is path-component-aware:
   /// pattern "Client/Math" matches ".../Client/Math/..." but not
   /// ".../Client/MathExtras/...".
-  bool isCollapsed(llvm::StringRef filePath) const;
+  [[nodiscard]] bool isCollapsed(llvm::StringRef filePath) const noexcept;
 
-  bool empty() const { return patterns_.empty(); }
+  [[nodiscard]] bool empty() const noexcept { return patterns_.empty(); }
 
 private:
   // Stored with leading and trailing '/' for component-boundary matching.

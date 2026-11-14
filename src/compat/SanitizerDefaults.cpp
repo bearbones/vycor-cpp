@@ -40,8 +40,13 @@
 #define VYCOR_ASAN_BUILD 1
 #endif
 
+// malloc_context_size=64: ASan defaults to recording 30 frames per allocation,
+// which in unoptimized (-O0) Debug builds can truncate deep RecursiveASTVisitor
+// + ClangTool::run call stacks just before vycor::runCrashGuarded, preventing
+// tests/sanitizers/lsan-crash-recovery.supp from matching abandoned frames of
+// intentionally-crashed [crash-guard] parses.
 #ifdef VYCOR_ASAN_BUILD
 extern "C" const char *__asan_default_options() {
-  return "allow_user_poisoning=0";
+  return "allow_user_poisoning=0:malloc_context_size=64";
 }
 #endif

@@ -15,14 +15,17 @@
 
 #include "vycor/callgraph/PathSearch.h"
 
+#include "llvm/ADT/SmallVector.h"
+
 #include <algorithm>
 #include <functional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace vycor {
 
-const char *stopReasonName(StopReason r) {
+const char *stopReasonName(StopReason r) noexcept {
   switch (r) {
   case StopReason::PathLimit: return "path_limit";
   case StopReason::DepthLimit: return "depth_limit";
@@ -77,10 +80,7 @@ std::vector<SId> resolveIds(const CallGraph &graph, const std::string &name) {
   // refresh removed the TU that knew a function, a search for it would
   // otherwise claim a complete, exhaustive answer (no callers) where a
   // clean bake of the same sources says the target is unknown.
-  auto referenced = [&](SId id) {
-    return graph.findNode(interner.resolve(id)) != nullptr ||
-           !graph.callerRefsOf(id).empty() || !graph.calleeRefsOf(id).empty();
-  };
+  auto referenced = [&](SId id) { return graph.isReferencedId(id); };
   for (const auto &usr : graph.usrsForName(name)) {
     if (auto id = interner.find(usr))
       if (referenced(*id))
@@ -183,13 +183,24 @@ struct Search {
       flags |= kFound;
     }
 
-    if (limits.maxFanIn != 0 && depth > 0 &&
-        graph.storedInDegree(node) > limits.maxFanIn) {
-      // Hub: expanding its ancestry would dominate the search. Record and
-      // prune. Deterministic per node, so it does not poison the memo.
-      hubs.emplace(node, graph.storedInDegree(node));
-      stops |= static_cast<unsigned>(StopReason::HubPruned);
-    } else if (limits.maxDepth != 0 && depth >= limits.maxDepth) {
+    if (limits.maxFanIn != 0 && depth > 0) {
+      const size_t inDeg = graph.storedInDegree(node);
+      if (inDeg > limits.maxFanIn) {
+        // Hub: expanding its ancestry would dominate the search. Record and
+        // prune. Deterministic per node, so it does not poison the memo.
+        hubs.emplace(node, inDeg);
+        stops |= static_cast<unsigned>(StopReason::HubPruned);
+        currentPath.pop_back();
+        onPath.erase(node);
+        if (!(flags & (kFound | kBlocked))) {
+          auto [it, inserted] = deadAt.emplace(node, depth);
+          if (!inserted && depth < it->second)
+            it->second = depth;
+        }
+        return flags;
+      }
+    }
+    if (limits.maxDepth != 0 && depth >= limits.maxDepth) {
       // Budget exhausted: any caller would make the path too long. The
       // corridor prune below normally catches this one edge earlier; this
       // is the guard for a target that is itself at the bound.
@@ -260,23 +271,39 @@ std::vector<StringInterner::Id> resolveKnownIds(const CallGraph &graph,
 
 void sortCallerRefsCanonically(const CallGraph &graph,
                                std::vector<CallGraph::EdgeRef> &edges) {
+  if (edges.size() <= 1)
+    return;
   const StringInterner &interner = graph.interner();
-  std::sort(edges.begin(), edges.end(),
-            [&](const CallGraph::EdgeRef &a, const CallGraph::EdgeRef &b) {
+  // Pre-resolve string_views once per edge (O(E) shared_lock acquisitions
+  // instead of O(E log E) inside std::sort comparator calls). StringInterner
+  // backs strings with a deque, so resolved addresses stay valid.
+  struct KeyedEdge {
+    std::string_view caller;
+    std::string_view callSite;
+    CallGraph::EdgeRef edge;
+  };
+  llvm::SmallVector<KeyedEdge, 16> keyed;
+  keyed.reserve(edges.size());
+  for (const auto &e : edges) {
+    keyed.push_back({interner.resolve(e.caller),
+                     interner.resolve(e.callSite), e});
+  }
+  std::sort(keyed.begin(), keyed.end(),
+            [](const KeyedEdge &a, const KeyedEdge &b) {
               if (a.caller != b.caller)
-                return interner.resolve(a.caller) <
-                       interner.resolve(b.caller);
+                return a.caller < b.caller;
               if (a.callSite != b.callSite)
-                return interner.resolve(a.callSite) <
-                       interner.resolve(b.callSite);
-              if (a.kind != b.kind)
-                return a.kind < b.kind;
-              if (a.confidence != b.confidence)
-                return a.confidence < b.confidence;
-              if (a.execContext != b.execContext)
-                return a.execContext < b.execContext;
-              return a.indirectionDepth < b.indirectionDepth;
+                return a.callSite < b.callSite;
+              if (a.edge.kind != b.edge.kind)
+                return a.edge.kind < b.edge.kind;
+              if (a.edge.confidence != b.edge.confidence)
+                return a.edge.confidence < b.edge.confidence;
+              if (a.edge.execContext != b.edge.execContext)
+                return a.edge.execContext < b.edge.execContext;
+              return a.edge.indirectionDepth < b.edge.indirectionDepth;
             });
+  for (size_t i = 0; i < keyed.size(); ++i)
+    edges[i] = keyed[i].edge;
 }
 
 PathSearchResult findCallerPaths(const CallGraph &graph,
@@ -355,10 +382,7 @@ PathSearchResult findCallerPaths(const CallGraph &graph,
     st.stops |= static_cast<unsigned>(StopReason::PathLimit);
 
   auto displayOf = [&](SId id) -> const std::string & {
-    const std::string &usr = interner.resolve(id);
-    if (const auto *node = graph.findNode(usr))
-      return node->qualifiedName;
-    return usr;
+    return graph.displayNameOf(id);
   };
 
   result.paths.reserve(st.found.size());

@@ -36,15 +36,26 @@ public:
   StringInterner(StringInterner &&other) noexcept {
     std::unique_lock lock(other.mutex_);
     strings_ = std::move(other.strings_);
-    rebuildIndex();
+    other.index_.clear();
+    try {
+      rebuildIndex();
+    } catch (...) {
+      strings_.clear();
+      index_.clear();
+    }
   }
 
   StringInterner &operator=(StringInterner &&other) noexcept {
     if (this != &other) {
-      std::unique_lock lockOther(other.mutex_);
-      std::unique_lock lockThis(mutex_);
+      std::scoped_lock lock(mutex_, other.mutex_);
       strings_ = std::move(other.strings_);
-      rebuildIndex();
+      other.index_.clear();
+      try {
+        rebuildIndex();
+      } catch (...) {
+        strings_.clear();
+        index_.clear();
+      }
     }
     return *this;
   }
@@ -52,7 +63,7 @@ public:
   StringInterner(const StringInterner &) = delete;
   StringInterner &operator=(const StringInterner &) = delete;
 
-  Id intern(const std::string &s) {
+  Id intern(std::string_view s) {
     {
       std::shared_lock lock(mutex_);
       auto it = index_.find(s);
@@ -64,17 +75,17 @@ public:
     if (it != index_.end())
       return it->second;
     Id id = static_cast<Id>(strings_.size());
-    strings_.push_back(s);
+    strings_.emplace_back(s);
     index_.emplace(std::string_view(strings_.back()), id);
     return id;
   }
 
-  const std::string &resolve(Id id) const {
+  [[nodiscard]] const std::string &resolve(Id id) const {
     std::shared_lock lock(mutex_);
     return strings_[id];
   }
 
-  std::optional<Id> find(const std::string &s) const {
+  [[nodiscard]] std::optional<Id> find(std::string_view s) const {
     std::shared_lock lock(mutex_);
     auto it = index_.find(s);
     if (it != index_.end())
@@ -82,7 +93,7 @@ public:
     return std::nullopt;
   }
 
-  size_t size() const {
+  [[nodiscard]] size_t size() const noexcept {
     std::shared_lock lock(mutex_);
     return strings_.size();
   }
@@ -128,6 +139,7 @@ private:
 
   void rebuildIndex() {
     index_.clear();
+    index_.reserve(strings_.size());
     for (size_t i = 0; i < strings_.size(); ++i)
       index_.emplace(std::string_view(strings_[i]), static_cast<Id>(i));
   }

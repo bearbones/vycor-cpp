@@ -275,21 +275,33 @@ static llvm::json::Value handleQuerySameLock(const llvm::json::Object &args,
     for (const auto &l : pathsB[i].locksHeld)
       byKeyB[{l.typeName, l.varName}].push_back(i);
 
-  // Intersect.
-  llvm::json::Array sharedArr;
-  int sharedCount = 0;
+  // Intersect in deterministic (typeName, varName) order rather than
+  // hash-bucket iteration order (docs/deterministic-output.md).
+  std::vector<LockKey> matchedKeys;
   for (const auto &[key, idxsA] : byKeyA) {
-    auto it = byKeyB.find(key);
-    if (it == byKeyB.end())
-      continue;
-    ++sharedCount;
+    (void)idxsA;
+    if (byKeyB.find(key) != byKeyB.end())
+      matchedKeys.push_back(key);
+  }
+  std::sort(matchedKeys.begin(), matchedKeys.end(),
+            [](const LockKey &lhs, const LockKey &rhs) {
+              if (lhs.typeName != rhs.typeName)
+                return lhs.typeName < rhs.typeName;
+              return lhs.varName < rhs.varName;
+            });
+
+  llvm::json::Array sharedArr;
+  int sharedCount = static_cast<int>(matchedKeys.size());
+  for (const auto &key : matchedKeys) {
+    const auto &idxsA = byKeyA.at(key);
+    const auto &idxsB = byKeyB.at(key);
     llvm::json::Object obj;
     obj["typeName"] = key.typeName;
     obj["varName"] = key.varName;
     llvm::json::Array pa, pb;
     for (auto idx : idxsA)
       pa.push_back(pathResultToJson(pathsA[idx]));
-    for (auto idx : it->second)
+    for (auto idx : idxsB)
       pb.push_back(pathResultToJson(pathsB[idx]));
     obj["pathsA"] = std::move(pa);
     obj["pathsB"] = std::move(pb);

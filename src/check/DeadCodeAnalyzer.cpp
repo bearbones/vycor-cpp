@@ -15,7 +15,12 @@
 
 #include "vycor/check/DeadCodeAnalyzer.h"
 
-#include <queue>
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringSet.h"
+
+#include <algorithm>
+#include <deque>
+#include <tuple>
 
 namespace vycor {
 
@@ -37,16 +42,20 @@ void DeadCodeAnalyzer::analyzeOptimistic() {
 
 void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
                            std::set<std::string> &alive) {
-  // The walk runs in usr space (edges carry callerUsr/calleeUsr) so two
-  // overloads sharing a display name keep disjoint reachability; entry
-  // points and public API arrive as display names and are resolved through
-  // the graph's by-name union.
-  std::queue<std::string> queue;
+  // Walk in interned-id space over calleeRefsOf so two overloads sharing a
+  // display name keep disjoint reachability AND we avoid copying 5 strings
+  // per edge across the entire call graph.
+  using SId = StringInterner::Id;
+  const StringInterner &interner = graph_.interner();
+  llvm::DenseSet<SId> aliveIds;
+  std::deque<SId> queue;
 
   auto seed = [&](const std::string &name) {
     for (const auto &usr : graph_.usrsForName(name)) {
-      if (alive.insert(usr).second)
-        queue.push(usr);
+      if (auto id = interner.find(usr)) {
+        if (aliveIds.insert(*id).second)
+          queue.push_back(*id);
+      }
     }
   };
   for (const auto &ep : entryPoints_)
@@ -55,45 +64,35 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
     seed(api);
 
   // Track which classes have their constructors reachable.
-  std::set<std::string> constructedClasses;
+  llvm::StringSet<> constructedClasses;
 
-  // Track VirtualDispatch Plausible edges that we deferred because the
-  // target's class wasn't yet constructed. We'll re-check them when new
-  // classes are constructed.
-  struct DeferredEdge {
-    std::string callee;
+  // Track VirtualDispatch Plausible edges deferred because the target's class
+  // wasn't yet constructed. Re-checked when new classes are constructed.
+  std::vector<SId> deferredVirtualTargets;
+
+  auto isTargetClassConstructed = [&](SId calleeId) -> bool {
+    const std::string &calleeUsr = interner.resolve(calleeId);
+    for (const auto &cls : graph_.getClassesForImpl(calleeUsr)) {
+      if (constructedClasses.contains(cls))
+        return true;
+    }
+    if (const auto *node = graph_.findNode(calleeUsr)) {
+      if (!node->enclosingClass.empty() &&
+          constructedClasses.contains(node->enclosingClass))
+        return true;
+    }
+    return false;
   };
-  std::vector<DeferredEdge> deferredVirtualEdges;
 
-  auto shouldFollowEdge = [&](const CallGraphEdge &edge) -> bool {
-    // Always follow Proven edges.
+  auto shouldFollowEdge = [&](const CallGraph::EdgeRef &edge) -> bool {
     if (edge.confidence == Confidence::Proven)
       return true;
-
     if (!includeVirtualPlausible)
       return false;
-
-    // In optimistic mode, follow Plausible edges based on kind.
     if (edge.kind == EdgeKind::FunctionPointer)
-      return true; // Address-taken functions are optimistically alive.
-
-    if (edge.kind == EdgeKind::VirtualDispatch) {
-      // Only follow if the target's class is constructible.
-      auto classes = graph_.getClassesForImpl(edge.calleeUsr);
-      for (const auto &cls : classes) {
-        if (constructedClasses.count(cls))
-          return true;
-      }
-      // Also check: is the target node's enclosingClass directly constructed?
-      auto *node = graph_.findNode(edge.calleeUsr);
-      if (node && !node->enclosingClass.empty()) {
-        if (constructedClasses.count(node->enclosingClass))
-          return true;
-      }
-      return false; // Defer this edge.
-    }
-
-    // Other Plausible kinds: follow in optimistic mode.
+      return true;
+    if (edge.kind == EdgeKind::VirtualDispatch)
+      return isTargetClassConstructed(edge.callee);
     return true;
   };
 
@@ -103,63 +102,50 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
     changed = false;
 
     while (!queue.empty()) {
-      std::string current = std::move(queue.front());
-      queue.pop();
+      const SId current = queue.front();
+      queue.pop_front();
 
-      auto edges = graph_.calleesOf(current);
-      for (const auto &edge : edges) {
-        // Track constructed classes from ConstructorCall edges.
+      for (const auto &edge : graph_.calleeRefsOf(current)) {
         if (edge.kind == EdgeKind::ConstructorCall) {
-          auto *calleeNode = graph_.findNode(edge.calleeUsr);
+          const auto *calleeNode =
+              graph_.findNode(interner.resolve(edge.callee));
           if (calleeNode && !calleeNode->enclosingClass.empty()) {
-            if (constructedClasses.insert(calleeNode->enclosingClass).second) {
-              changed = true; // New class constructed, may unlock deferred edges.
-            }
+            if (constructedClasses.insert(calleeNode->enclosingClass).second)
+              changed = true;
           }
         }
 
         if (shouldFollowEdge(edge)) {
-          if (alive.insert(edge.calleeUsr).second)
-            queue.push(edge.calleeUsr);
+          if (aliveIds.insert(edge.callee).second)
+            queue.push_back(edge.callee);
         } else if (includeVirtualPlausible &&
                    edge.kind == EdgeKind::VirtualDispatch &&
                    edge.confidence == Confidence::Plausible) {
-          deferredVirtualEdges.push_back({edge.calleeUsr});
+          deferredVirtualTargets.push_back(edge.callee);
         }
       }
     }
 
-    // Re-check deferred virtual dispatch edges with updated constructed classes.
     if (changed && includeVirtualPlausible) {
-      std::vector<DeferredEdge> stillDeferred;
-      for (const auto &deferred : deferredVirtualEdges) {
-        bool shouldFollow = false;
-        auto classes = graph_.getClassesForImpl(deferred.callee);
-        for (const auto &cls : classes) {
-          if (constructedClasses.count(cls)) {
-            shouldFollow = true;
-            break;
-          }
-        }
-        if (!shouldFollow) {
-          auto *node = graph_.findNode(deferred.callee);
-          if (node && !node->enclosingClass.empty() &&
-              constructedClasses.count(node->enclosingClass))
-            shouldFollow = true;
-        }
-
-        if (shouldFollow) {
-          if (alive.insert(deferred.callee).second) {
-            queue.push(deferred.callee);
-            changed = true;
-          }
+      std::vector<SId> stillDeferred;
+      stillDeferred.reserve(deferredVirtualTargets.size());
+      for (SId calleeId : deferredVirtualTargets) {
+        if (aliveIds.contains(calleeId))
+          continue;
+        if (isTargetClassConstructed(calleeId)) {
+          aliveIds.insert(calleeId);
+          queue.push_back(calleeId);
+          changed = true;
         } else {
-          stillDeferred.push_back(deferred);
+          stillDeferred.push_back(calleeId);
         }
       }
-      deferredVirtualEdges = std::move(stillDeferred);
+      deferredVirtualTargets = std::move(stillDeferred);
     }
   }
+
+  for (SId id : aliveIds)
+    alive.insert(interner.resolve(id));
 }
 
 std::unordered_map<std::string, Liveness>
@@ -226,6 +212,11 @@ std::vector<Diagnostic> DeadCodeAnalyzer::getDiagnostics() const {
     }
   }
 
+  std::sort(diags.begin(), diags.end(),
+            [](const Diagnostic &a, const Diagnostic &b) {
+              return std::tie(a.callLocation, a.resolvedDecl, a.kind) <
+                     std::tie(b.callLocation, b.resolvedDecl, b.kind);
+            });
   return diags;
 }
 

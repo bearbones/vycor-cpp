@@ -98,35 +98,8 @@ void stampCheckName(std::vector<Diagnostic> &diags, size_t first,
 // because the per-position score distinguishes exact-match and
 // arithmetic-convertible on the "builtin" fast path before the convertibility
 // model is consulted.
-static bool isArithmeticTypeName(const std::string &normalized) {
-  return llvm::StringSwitch<bool>(normalized)
-      .Case("bool", true)
-      .Case("char", true)
-      .Case("signedchar", true)
-      .Case("unsignedchar", true)
-      .Case("wchar_t", true)
-      .Case("char8_t", true)
-      .Case("char16_t", true)
-      .Case("char32_t", true)
-      .Case("short", true)
-      .Case("shortint", true)
-      .Case("unsignedshort", true)
-      .Case("unsignedshortint", true)
-      .Case("int", true)
-      .Case("unsigned", true)
-      .Case("unsignedint", true)
-      .Case("long", true)
-      .Case("longint", true)
-      .Case("unsignedlong", true)
-      .Case("unsignedlongint", true)
-      .Case("longlong", true)
-      .Case("longlongint", true)
-      .Case("unsignedlonglong", true)
-      .Case("unsignedlonglongint", true)
-      .Case("float", true)
-      .Case("double", true)
-      .Case("longdouble", true)
-      .Default(false);
+static bool isArithmeticTypeName(llvm::StringRef normalized) noexcept {
+  return isArithmeticNormalizedType(normalized);
 }
 
 // Per-position score under either the legacy or the convertibility-model

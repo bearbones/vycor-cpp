@@ -17,6 +17,8 @@
 
 #include "vycor/callgraph/StringInterner.h"
 
+#include "llvm/ADT/StringRef.h"
+
 #include <mutex>
 #include <string>
 #include <unordered_map>

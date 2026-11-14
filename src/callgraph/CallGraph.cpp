@@ -16,6 +16,8 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/Utf8.h"
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -25,26 +27,15 @@
 
 namespace vycor {
 
-CallGraph::CallGraph(CallGraph &&other) noexcept
-    : interner_(std::move(other.interner_)),
-      nodes_(std::move(other.nodes_)),
-      byName_(std::move(other.byName_)),
-      edges_(std::move(other.edges_)),
-      edgeIndex_(std::move(other.edgeIndex_)),
-      outEdges_(std::move(other.outEdges_)),
-      inEdges_(std::move(other.inEdges_)),
-      derivedClasses_(std::move(other.derivedClasses_)),
-      methodOverrides_(std::move(other.methodOverrides_)),
-      overrideBases_(std::move(other.overrideBases_)),
-      effectiveImplClasses_(std::move(other.effectiveImplClasses_)),
-      functionReturns_(std::move(other.functionReturns_)),
-      returnedBy_(std::move(other.returnedBy_)),
-      tuEdges_(std::move(other.tuEdges_)),
-      nodeContributors_(std::move(other.nodeContributors_)),
-      tuNodes_(std::move(other.tuNodes_)),
-      liveEdgeCount_(other.liveEdgeCount_), readOnly_(other.readOnly_) {}
+namespace {
+inline uint64_t packIdPair(StringInterner::Id a,
+                           StringInterner::Id b) noexcept {
+  return (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
+}
+} // namespace
 
-CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
+CallGraph::CallGraph(CallGraph &&other) noexcept {
+  std::lock_guard<std::mutex> lock(other.mutex_);
   interner_ = std::move(other.interner_);
   nodes_ = std::move(other.nodes_);
   byName_ = std::move(other.byName_);
@@ -63,6 +54,34 @@ CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
   tuNodes_ = std::move(other.tuNodes_);
   liveEdgeCount_ = other.liveEdgeCount_;
   readOnly_ = other.readOnly_;
+  other.liveEdgeCount_ = 0;
+  other.readOnly_ = false;
+}
+
+CallGraph &CallGraph::operator=(CallGraph &&other) noexcept {
+  if (this == &other)
+    return *this;
+  std::scoped_lock lock(mutex_, other.mutex_);
+  interner_ = std::move(other.interner_);
+  nodes_ = std::move(other.nodes_);
+  byName_ = std::move(other.byName_);
+  edges_ = std::move(other.edges_);
+  edgeIndex_ = std::move(other.edgeIndex_);
+  outEdges_ = std::move(other.outEdges_);
+  inEdges_ = std::move(other.inEdges_);
+  derivedClasses_ = std::move(other.derivedClasses_);
+  methodOverrides_ = std::move(other.methodOverrides_);
+  overrideBases_ = std::move(other.overrideBases_);
+  effectiveImplClasses_ = std::move(other.effectiveImplClasses_);
+  functionReturns_ = std::move(other.functionReturns_);
+  returnedBy_ = std::move(other.returnedBy_);
+  tuEdges_ = std::move(other.tuEdges_);
+  nodeContributors_ = std::move(other.nodeContributors_);
+  tuNodes_ = std::move(other.tuNodes_);
+  liveEdgeCount_ = other.liveEdgeCount_;
+  readOnly_ = other.readOnly_;
+  other.liveEdgeCount_ = 0;
+  other.readOnly_ = false;
   return *this;
 }
 
@@ -146,6 +165,10 @@ const std::string &CallGraph::displayFor(SId usrId) const {
   if (it != nodes_.end())
     return it->second.qualifiedName;
   return interner_.resolve(usrId);
+}
+
+const std::string &CallGraph::displayNameOf(SId usrId) const {
+  return displayFor(usrId);
 }
 
 CallGraph::SId CallGraph::internRaw(const std::string &s) {
@@ -239,11 +262,11 @@ std::vector<CallGraph::SId> CallGraph::transitiveClosure(
   std::vector<SId> result;
   if (relation.find(start) == relation.end())
     return result; // common case: no entry — skip all allocations
-  std::vector<SId> stack{start};
-  std::set<SId> visited{start};
+  llvm::SmallVector<SId, 16> stack{start};
+  llvm::SmallDenseSet<SId, 16> visited;
+  visited.insert(start);
   while (!stack.empty()) {
-    SId cur = stack.back();
-    stack.pop_back();
+    SId cur = stack.pop_back_val();
     auto it = relation.find(cur);
     if (it == relation.end())
       continue;
@@ -264,55 +287,69 @@ CallGraph::calleeRefsOf(StringInterner::Id caller) const {
   if (it == outEdges_.end())
     return result;
 
+  result.reserve(it->second.size());
+
   // Keys of stored VirtualDispatch edges, so synthesized expansions never
   // duplicate an edge already on disk (e.g. a snapshot baked with the old
-  // build-time fan-out).
-  std::set<std::pair<SId, SId>> seen; // (callee, callSite)
+  // build-time fan-out). Stack-inline DenseSet avoids red-black tree heap
+  // allocations on every node expansion during path/impact/dead-code walks.
+  llvm::SmallDenseSet<uint64_t, 16> seen; // packed (callee, callSite)
+  bool hasPlausibleVirtual = false;
+  bool hasDeferredReturn = false;
   for (size_t idx : it->second) {
     const StoredEdge &se = edges_[idx];
     if (se.refs == 0)
       continue;
     // Deferred join rows are expanded below, never shown raw.
-    if (se.kind == EdgeKind::FunctionPointerReturn)
+    if (se.kind == EdgeKind::FunctionPointerReturn) {
+      hasDeferredReturn = true;
       continue;
-    if (se.kind == EdgeKind::VirtualDispatch)
-      seen.insert({se.callee, se.callSite});
+    }
+    if (se.kind == EdgeKind::VirtualDispatch) {
+      seen.insert(packIdPair(se.callee, se.callSite));
+      if (se.confidence == Confidence::Plausible)
+        hasPlausibleVirtual = true;
+    }
     result.push_back({se.caller, se.callee, se.callSite, se.kind,
                       se.confidence, se.execContext, se.indirectionDepth});
   }
 
   // Expand Plausible virtual dispatch through transitive overrides.
-  for (size_t idx : it->second) {
-    const StoredEdge &se = edges_[idx];
-    if (se.refs == 0 || se.kind != EdgeKind::VirtualDispatch ||
-        se.confidence != Confidence::Plausible)
-      continue;
-    for (SId ovId : transitiveClosure(se.callee, methodOverrides_)) {
-      if (!seen.insert({ovId, se.callSite}).second)
+  if (hasPlausibleVirtual) {
+    for (size_t idx : it->second) {
+      const StoredEdge &se = edges_[idx];
+      if (se.refs == 0 || se.kind != EdgeKind::VirtualDispatch ||
+          se.confidence != Confidence::Plausible)
         continue;
-      result.push_back({se.caller, ovId, se.callSite, se.kind,
-                        se.confidence, se.execContext, se.indirectionDepth});
+      for (SId ovId : transitiveClosure(se.callee, methodOverrides_)) {
+        if (!seen.insert(packIdPair(ovId, se.callSite)).second)
+          continue;
+        result.push_back({se.caller, ovId, se.callSite, se.kind,
+                          se.confidence, se.execContext, se.indirectionDepth});
+      }
     }
   }
 
   // Expand deferred function-pointer-through-return edges: the stored
   // callee is the returning function; synthesize an edge to each function
   // it is known (now, at query time) to return. Empty joins yield nothing.
-  for (size_t idx : it->second) {
-    const StoredEdge &se = edges_[idx];
-    if (se.refs == 0 || se.kind != EdgeKind::FunctionPointerReturn)
-      continue;
-    auto rit = functionReturns_.find(se.callee);
-    if (rit == functionReturns_.end())
-      continue;
-    for (SId retId : rit->second) {
-      if (!seen.insert({retId, se.callSite}).second)
+  if (hasDeferredReturn) {
+    for (size_t idx : it->second) {
+      const StoredEdge &se = edges_[idx];
+      if (se.refs == 0 || se.kind != EdgeKind::FunctionPointerReturn)
         continue;
-      EdgeKind kind = se.execContext != ExecutionContext::Synchronous
-                          ? EdgeKind::ThreadEntry
-                          : EdgeKind::FunctionPointer;
-      result.push_back({se.caller, retId, se.callSite, kind, se.confidence,
-                        se.execContext, se.indirectionDepth});
+      auto rit = functionReturns_.find(se.callee);
+      if (rit == functionReturns_.end())
+        continue;
+      for (SId retId : rit->second) {
+        if (!seen.insert(packIdPair(retId, se.callSite)).second)
+          continue;
+        EdgeKind kind = se.execContext != ExecutionContext::Synchronous
+                            ? EdgeKind::ThreadEntry
+                            : EdgeKind::FunctionPointer;
+        result.push_back({se.caller, retId, se.callSite, kind, se.confidence,
+                          se.execContext, se.indirectionDepth});
+      }
     }
   }
   return result;
@@ -337,9 +374,10 @@ std::vector<CallGraph::EdgeRef>
 CallGraph::callerRefsOf(StringInterner::Id callee) const {
   std::vector<EdgeRef> result;
 
-  std::set<std::pair<SId, SId>> seen; // (caller, callSite)
+  llvm::SmallDenseSet<uint64_t, 16> seen; // packed (caller, callSite)
   auto it = inEdges_.find(callee);
   if (it != inEdges_.end()) {
+    result.reserve(it->second.size());
     for (size_t idx : it->second) {
       const StoredEdge &se = edges_[idx];
       if (se.refs == 0)
@@ -348,7 +386,7 @@ CallGraph::callerRefsOf(StringInterner::Id callee) const {
       // expanded onto the returned targets below, never shown raw.
       if (se.kind == EdgeKind::FunctionPointerReturn)
         continue;
-      seen.insert({se.caller, se.callSite});
+      seen.insert(packIdPair(se.caller, se.callSite));
       result.push_back({se.caller, se.callee, se.callSite, se.kind,
                         se.confidence, se.execContext, se.indirectionDepth});
     }
@@ -365,7 +403,7 @@ CallGraph::callerRefsOf(StringInterner::Id callee) const {
       if (se.refs == 0 || se.kind != EdgeKind::VirtualDispatch ||
           se.confidence != Confidence::Plausible)
         continue;
-      if (!seen.insert({se.caller, se.callSite}).second)
+      if (!seen.insert(packIdPair(se.caller, se.callSite)).second)
         continue;
       result.push_back({se.caller, callee, se.callSite, se.kind,
                         se.confidence, se.execContext, se.indirectionDepth});
@@ -384,7 +422,7 @@ CallGraph::callerRefsOf(StringInterner::Id callee) const {
         const StoredEdge &se = edges_[idx];
         if (se.refs == 0 || se.kind != EdgeKind::FunctionPointerReturn)
           continue;
-        if (!seen.insert({se.caller, se.callSite}).second)
+        if (!seen.insert(packIdPair(se.caller, se.callSite)).second)
           continue;
         EdgeKind kind = se.execContext != ExecutionContext::Synchronous
                             ? EdgeKind::ThreadEntry
@@ -419,7 +457,7 @@ size_t CallGraph::storedInDegree(const std::string &name) const {
   return count;
 }
 
-size_t CallGraph::storedInDegree(StringInterner::Id id) const {
+size_t CallGraph::storedInDegree(StringInterner::Id id) const noexcept {
   auto it = inEdges_.find(id);
   if (it == inEdges_.end())
     return 0;
@@ -431,9 +469,57 @@ size_t CallGraph::storedInDegree(StringInterner::Id id) const {
   return count;
 }
 
-size_t CallGraph::nodeCount() const { return nodes_.size(); }
+bool CallGraph::isReferencedId(StringInterner::Id id) const {
+  if (nodes_.find(id) != nodes_.end())
+    return true;
+  if (auto inIt = inEdges_.find(id); inIt != inEdges_.end()) {
+    for (size_t idx : inIt->second) {
+      const StoredEdge &se = edges_[idx];
+      if (se.refs > 0 && se.kind != EdgeKind::FunctionPointerReturn)
+        return true;
+    }
+  }
+  if (auto outIt = outEdges_.find(id); outIt != outEdges_.end()) {
+    for (size_t idx : outIt->second) {
+      const StoredEdge &se = edges_[idx];
+      if (se.refs == 0)
+        continue;
+      if (se.kind != EdgeKind::FunctionPointerReturn)
+        return true;
+      auto rit = functionReturns_.find(se.callee);
+      if (rit != functionReturns_.end() && !rit->second.empty())
+        return true;
+    }
+  }
+  for (SId baseId : transitiveClosure(id, overrideBases_)) {
+    auto bit = inEdges_.find(baseId);
+    if (bit == inEdges_.end())
+      continue;
+    for (size_t idx : bit->second) {
+      const StoredEdge &se = edges_[idx];
+      if (se.refs > 0 && se.kind == EdgeKind::VirtualDispatch &&
+          se.confidence == Confidence::Plausible)
+        return true;
+    }
+  }
+  if (auto rbIt = returnedBy_.find(id); rbIt != returnedBy_.end()) {
+    for (SId returner : rbIt->second) {
+      auto rin = inEdges_.find(returner);
+      if (rin == inEdges_.end())
+        continue;
+      for (size_t idx : rin->second) {
+        const StoredEdge &se = edges_[idx];
+        if (se.refs > 0 && se.kind == EdgeKind::FunctionPointerReturn)
+          return true;
+      }
+    }
+  }
+  return false;
+}
 
-size_t CallGraph::edgeCount() const { return liveEdgeCount_; }
+size_t CallGraph::nodeCount() const noexcept { return nodes_.size(); }
+
+size_t CallGraph::edgeCount() const noexcept { return liveEdgeCount_; }
 
 std::vector<const CallGraphNode *> CallGraph::allNodes() const {
   std::vector<const CallGraphNode *> result;
@@ -497,11 +583,10 @@ CallGraph::getAllDerivedClasses(const std::string &baseClass) const {
   if (!baseId)
     return {};
   std::vector<std::string> result;
-  std::vector<SId> stack = {*baseId};
-  std::set<SId> visited;
+  llvm::SmallVector<SId, 16> stack{*baseId};
+  llvm::SmallDenseSet<SId, 16> visited;
   while (!stack.empty()) {
-    SId cls = stack.back();
-    stack.pop_back();
+    SId cls = stack.pop_back_val();
     if (!visited.insert(cls).second)
       continue;
     auto it = derivedClasses_.find(cls);
@@ -540,7 +625,7 @@ CallGraph::getOverrides(const std::string &baseMethod) const {
   // Methods overload, so the override maps are usr-keyed: resolve the name
   // to its candidates, union, and emit display names.
   std::vector<std::string> result;
-  std::set<SId> seen;
+  llvm::SmallDenseSet<SId, 16> seen;
   for (SId usrId : resolveUsrIds(baseMethod)) {
     auto it = methodOverrides_.find(usrId);
     if (it == methodOverrides_.end())
@@ -555,7 +640,7 @@ CallGraph::getOverrides(const std::string &baseMethod) const {
 std::vector<std::string>
 CallGraph::getTransitiveOverrides(const std::string &baseMethod) const {
   std::vector<std::string> result;
-  std::set<SId> seen;
+  llvm::SmallDenseSet<SId, 16> seen;
   for (SId usrId : resolveUsrIds(baseMethod))
     for (SId sid : transitiveClosure(usrId, methodOverrides_))
       if (seen.insert(sid).second)
@@ -566,7 +651,7 @@ CallGraph::getTransitiveOverrides(const std::string &baseMethod) const {
 std::vector<std::string>
 CallGraph::getOverriddenBases(const std::string &method) const {
   std::vector<std::string> result;
-  std::set<SId> seen;
+  llvm::SmallDenseSet<SId, 16> seen;
   for (SId usrId : resolveUsrIds(method))
     for (SId sid : transitiveClosure(usrId, overrideBases_))
       if (seen.insert(sid).second)
@@ -594,7 +679,7 @@ CallGraph::getClassesForImpl(const std::string &implMethod) const {
   // implMethod is usr-keyed; the class values are display-keyed and resolve
   // directly (classes do not overload).
   std::vector<std::string> result;
-  std::set<SId> seen;
+  llvm::SmallDenseSet<SId, 16> seen;
   for (SId usrId : resolveUsrIds(implMethod)) {
     auto it = effectiveImplClasses_.find(usrId);
     if (it == effectiveImplClasses_.end())

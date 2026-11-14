@@ -215,10 +215,7 @@ bool isKnownIdentity(const ToolContext &ctx, const std::string &ident) {
   // An endpoint without a node (external or unresolved callee): usr and
   // display name coincide, and some edge names it.
   auto id = ctx.graph.interner().find(ident);
-  if (!id)
-    return false;
-  return !ctx.graph.callerRefsOf(*id).empty() ||
-         !ctx.graph.calleeRefsOf(*id).empty();
+  return id.has_value() && ctx.graph.isReferencedId(*id);
 }
 
 llvm::json::Value unknownFunctionResult(const ToolContext &ctx,

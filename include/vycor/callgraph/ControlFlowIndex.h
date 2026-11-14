@@ -228,7 +228,7 @@ public:
   std::vector<CallSiteContext>
   unprotectedCallsTo(const std::string &calleeName) const;
 
-  size_t size() const { return liveCount_; }
+  [[nodiscard]] size_t size() const noexcept { return liveCount_; }
 
   // Visit every live context, materialized one at a time: `megascope
   // dump` streams a multi-million-site index through this without ever

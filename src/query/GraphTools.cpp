@@ -422,21 +422,31 @@ handleGraphSummary(const llvm::json::Object & /*args*/,
   std::unordered_map<Confidence, size_t> confHist;
   std::unordered_map<EdgeKind, size_t> kindHist;
   std::vector<std::pair<std::string, size_t>> callerFanout;
-  std::unordered_map<std::string, size_t> calleeInDegree;
+  std::unordered_map<StringInterner::Id, size_t> calleeInDegreeById;
 
+  const auto &interner = ctx.graph.interner();
   for (auto *node : ctx.graph.allNodes()) {
-    // Per-node scan queries by usr: exact identity, so two nodes sharing a
-    // display name are not double-counted through the by-name union.
-    auto edges = ctx.graph.calleesOf(node->usr);
+    // Per-node scan queries by exact usr id in EdgeRef space: two nodes
+    // sharing a display name are not double-counted, and no CallGraphEdge
+    // string copies are materialized per edge.
+    auto usrId = interner.find(node->usr);
+    if (!usrId)
+      continue;
+    auto edges = ctx.graph.calleeRefsOf(*usrId);
     if (!edges.empty())
       callerFanout.emplace_back(node->qualifiedName, edges.size());
     for (const auto &e : edges) {
       ++totalEdges;
       ++confHist[e.confidence];
       ++kindHist[e.kind];
-      ++calleeInDegree[e.calleeName];
+      ++calleeInDegreeById[e.callee];
     }
   }
+
+  std::unordered_map<std::string, size_t> calleeInDegree;
+  calleeInDegree.reserve(calleeInDegreeById.size());
+  for (const auto &[calleeId, count] : calleeInDegreeById)
+    calleeInDegree[ctx.graph.displayNameOf(calleeId)] += count;
 
   auto topN = [](std::vector<std::pair<std::string, size_t>> v,
                  size_t n) -> llvm::json::Array {

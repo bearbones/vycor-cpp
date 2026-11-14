@@ -53,7 +53,7 @@ enum class StopReason : uint8_t {
 };
 
 // Snake-case spelling used in tool payloads ("path_limit", ...).
-const char *stopReasonName(StopReason r);
+[[nodiscard]] const char *stopReasonName(StopReason r) noexcept;
 // The names of every reason set in `stops`, in enum order.
 std::vector<std::string> stopReasonNames(unsigned stops);
 
@@ -132,13 +132,13 @@ struct PathSearchResult {
   bool targetKnown = false;
   bool startKnown = false;
 
-  bool stopped(StopReason r) const {
+  [[nodiscard]] bool stopped(StopReason r) const noexcept {
     return (stops & static_cast<unsigned>(r)) != 0;
   }
   // A search ran and every simple path within maxDepth was enumerated.
   // DepthLimit does not clear this: it says longer walks exist, not that
   // a path in bounds was missed.
-  bool complete() const {
+  [[nodiscard]] bool complete() const noexcept {
     return targetKnown && startKnown && !stopped(StopReason::PathLimit) &&
            !stopped(StopReason::WorkBudget) &&
            !stopped(StopReason::HubPruned);
@@ -146,7 +146,9 @@ struct PathSearchResult {
   // complete() and no DepthLimit: the paths are ALL the simple paths from
   // the starts to the target. The precondition for an unconditional
   // always/never verdict over paths.
-  bool exhaustive() const { return complete() && stops == 0; }
+  [[nodiscard]] bool exhaustive() const noexcept {
+    return complete() && stops == 0;
+  }
 };
 
 // The graph identities a usr-or-display name resolves to for a search:

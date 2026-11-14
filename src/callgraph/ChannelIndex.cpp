@@ -21,21 +21,32 @@
 
 namespace vycor {
 
-ChannelIndex::ChannelIndex(ChannelIndex &&other) noexcept
-    : sites_(std::move(other.sites_)), index_(std::move(other.index_)),
-      byChannel_(std::move(other.byChannel_)),
-      byFunctionUsr_(std::move(other.byFunctionUsr_)),
-      byFunctionDisplay_(std::move(other.byFunctionDisplay_)),
-      byTu_(std::move(other.byTu_)), liveCount_(other.liveCount_) {}
-
-ChannelIndex &ChannelIndex::operator=(ChannelIndex &&other) noexcept {
+ChannelIndex::ChannelIndex(ChannelIndex &&other) noexcept {
+  std::lock_guard<std::mutex> lock(other.mutex_);
   sites_ = std::move(other.sites_);
   index_ = std::move(other.index_);
   byChannel_ = std::move(other.byChannel_);
+  bySite_ = std::move(other.bySite_);
   byFunctionUsr_ = std::move(other.byFunctionUsr_);
   byFunctionDisplay_ = std::move(other.byFunctionDisplay_);
   byTu_ = std::move(other.byTu_);
   liveCount_ = other.liveCount_;
+  other.liveCount_ = 0;
+}
+
+ChannelIndex &ChannelIndex::operator=(ChannelIndex &&other) noexcept {
+  if (this == &other)
+    return *this;
+  std::scoped_lock lock(mutex_, other.mutex_);
+  sites_ = std::move(other.sites_);
+  index_ = std::move(other.index_);
+  byChannel_ = std::move(other.byChannel_);
+  bySite_ = std::move(other.bySite_);
+  byFunctionUsr_ = std::move(other.byFunctionUsr_);
+  byFunctionDisplay_ = std::move(other.byFunctionDisplay_);
+  byTu_ = std::move(other.byTu_);
+  liveCount_ = other.liveCount_;
+  other.liveCount_ = 0;
   return *this;
 }
 
@@ -76,12 +87,14 @@ void ChannelIndex::addSiteRefs(ChannelSite site, uint32_t count) {
   } else {
     idx = sites_.size();
     std::string channelId = site.channelId;
+    std::string callSiteStr = site.callSite;
     std::string funcUsr = site.siteFunctionUsr;
     std::string funcDisplay = site.siteFunctionDisplay;
     bool differentDisplay = funcDisplay != funcUsr;
     sites_.push_back(StoredSite{std::move(site), count, true});
     index_.emplace(key, idx);
     byChannel_[channelId].push_back(idx);
+    bySite_[callSiteStr].push_back(idx);
     byFunctionUsr_[funcUsr].push_back(idx);
     if (differentDisplay)
       byFunctionDisplay_[funcDisplay].push_back(idx);
@@ -145,6 +158,19 @@ ChannelIndex::sitesForFunction(const std::string &functionUsrOrDisplay) const {
   collect(byFunctionUsr_);
   collect(byFunctionDisplay_);
   return result;
+}
+
+std::optional<ChannelSite>
+ChannelIndex::siteAtCallSite(const std::string &callSite) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = bySite_.find(lookupText(callSite));
+  if (it == bySite_.end())
+    return std::nullopt;
+  for (size_t i : it->second) {
+    if (sites_[i].live)
+      return sites_[i].site;
+  }
+  return std::nullopt;
 }
 
 std::vector<std::string> ChannelIndex::allChannelIds() const {
@@ -237,8 +263,8 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
   // index vector once for the whole set (mirrors CallGraph::removeTUs).
   std::unordered_set<size_t> dead;
   std::unordered_set<size_t> survivingNeedTuRefresh;
-  std::unordered_set<std::string> affectedChannels, affectedFuncUsr,
-      affectedFuncDisplay;
+  std::unordered_set<std::string> affectedChannels, affectedSites,
+      affectedFuncUsr, affectedFuncDisplay;
   for (const auto &rawPath : tuPaths) {
     const std::string tuText = toIndexText(rawPath); // raw bytes (Utf8.h)
     auto tit = byTu_.find(tuText);
@@ -257,6 +283,7 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
       survivingNeedTuRefresh.erase(idx);
       dead.insert(idx);
       affectedChannels.insert(se.site.channelId);
+      affectedSites.insert(se.site.callSite);
       affectedFuncUsr.insert(se.site.siteFunctionUsr);
       if (se.site.siteFunctionDisplay != se.site.siteFunctionUsr)
         affectedFuncDisplay.insert(se.site.siteFunctionDisplay);
@@ -297,6 +324,14 @@ size_t ChannelIndex::removeTUs(const std::vector<std::string> &tuPaths) {
     if (it->second.empty())
       byChannel_.erase(it);
   }
+  for (const auto &cs : affectedSites) {
+    auto it = bySite_.find(cs);
+    if (it == bySite_.end())
+      continue;
+    scrub(it->second);
+    if (it->second.empty())
+      bySite_.erase(it);
+  }
   for (const auto &f : affectedFuncUsr) {
     auto it = byFunctionUsr_.find(f);
     if (it == byFunctionUsr_.end())
@@ -320,7 +355,7 @@ void ChannelIndex::compact() {
   std::lock_guard<std::mutex> lock(mutex_);
   std::deque<StoredSite> newSites;
   std::unordered_map<SiteKey, size_t, SiteKeyHash> newIndex;
-  std::unordered_map<std::string, std::vector<size_t>> newByChannel,
+  std::unordered_map<std::string, std::vector<size_t>> newByChannel, newBySite,
       newByFuncUsr, newByFuncDisplay, newByTu;
 
   std::vector<size_t> oldToNew(sites_.size(),
@@ -349,6 +384,7 @@ void ChannelIndex::compact() {
         }
       };
   remapInto(byChannel_, newByChannel);
+  remapInto(bySite_, newBySite);
   remapInto(byFunctionUsr_, newByFuncUsr);
   remapInto(byFunctionDisplay_, newByFuncDisplay);
   remapInto(byTu_, newByTu);
@@ -356,6 +392,7 @@ void ChannelIndex::compact() {
   sites_ = std::move(newSites);
   index_ = std::move(newIndex);
   byChannel_ = std::move(newByChannel);
+  bySite_ = std::move(newBySite);
   byFunctionUsr_ = std::move(newByFuncUsr);
   byFunctionDisplay_ = std::move(newByFuncDisplay);
   byTu_ = std::move(newByTu);

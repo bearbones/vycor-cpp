@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -126,13 +127,18 @@ public:
   std::vector<ChannelSite>
   sitesForFunction(const std::string &functionUsrOrDisplay) const;
 
+  // First live channel site recorded at `callSite` (file:line:col), in O(1)
+  // without materializing allSites().
+  [[nodiscard]] std::optional<ChannelSite>
+  siteAtCallSite(const std::string &callSite) const;
+
   // All distinct channel ids with at least one live site.
   std::vector<std::string> allChannelIds() const;
 
   // All live sites (dump mode).
   std::vector<ChannelSite> allSites() const;
 
-  size_t size() const {
+  [[nodiscard]] size_t size() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return liveCount_;
   }
@@ -205,6 +211,7 @@ private:
   std::unordered_map<SiteKey, size_t, SiteKeyHash> index_;
 
   std::unordered_map<std::string, std::vector<size_t>> byChannel_;
+  std::unordered_map<std::string, std::vector<size_t>> bySite_;
   std::unordered_map<std::string, std::vector<size_t>> byFunctionUsr_;
   // Sites whose siteFunctionDisplay differs from siteFunctionUsr (hand-built
   // name-only sites coincide and are skipped here, mirroring

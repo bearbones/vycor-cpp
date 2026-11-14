@@ -35,6 +35,27 @@ set(VYCOR_SUPPORTED_LLVM_VERSIONS 22 21 20 18)
 
 set(LLVM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/extern/llvm-project/llvm")
 
+# Guard find_package(Clang CONFIG ...) against partial Debian/Ubuntu installs
+# where llvm-NN-dev + libclang-common-NN-dev install ClangTargets.cmake without
+# libclang-NN-dev (missing Version.h / libclangBasic), which would otherwise
+# trigger message(FATAL_ERROR ...) inside ClangTargets.cmake even with QUIET.
+function(_vycor_prefix_has_clang_dev PREFIX OUT_VAR)
+  if(NOT EXISTS "${PREFIX}/include/clang/Basic/Version.h")
+    set(${OUT_VAR} FALSE PARENT_SCOPE)
+    return()
+  endif()
+  file(GLOB _clang_libs
+    "${PREFIX}/lib*/libclangBasic.*"
+    "${PREFIX}/lib*/libclang-cpp.*"
+    "${PREFIX}/lib*/*/libclangBasic.*"
+    "${PREFIX}/lib*/clangBasic.lib")
+  if(_clang_libs)
+    set(${OUT_VAR} TRUE PARENT_SCOPE)
+  else()
+    set(${OUT_VAR} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
 # If the caller explicitly pinned LLVM via LLVM_DIR or CMAKE_PREFIX_PATH,
 # honor that first before probing default /usr/lib/llvm-NN locations.
 if(LLVM_DIR OR CMAKE_PREFIX_PATH)
@@ -54,14 +75,17 @@ if(LLVM_DIR OR CMAKE_PREFIX_PATH)
     list(FIND VYCOR_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
     if(_idx GREATER_EQUAL 0)
       unset(Clang_DIR CACHE)
-      find_package(Clang CONFIG QUIET
-        PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
-              "${LLVM_DIR}/../clang"
-        NO_DEFAULT_PATH)
-      if(NOT Clang_FOUND)
+      _vycor_prefix_has_clang_dev("${LLVM_INSTALL_PREFIX}" _has_clang_dev)
+      if(_has_clang_dev)
         find_package(Clang CONFIG QUIET
-          HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
-                "${LLVM_DIR}/../clang")
+          PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+                "${LLVM_DIR}/../clang"
+          NO_DEFAULT_PATH)
+        if(NOT Clang_FOUND)
+          find_package(Clang CONFIG QUIET
+            HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+                  "${LLVM_DIR}/../clang")
+        endif()
       endif()
     else()
       message(WARNING "Found LLVM ${LLVM_PACKAGE_VERSION}, but only versions "
@@ -90,12 +114,15 @@ if(NOT LLVM_FOUND)
       NO_DEFAULT_PATH)
     if(LLVM_FOUND AND LLVM_VERSION_MAJOR STREQUAL "${_ver}")
       unset(Clang_DIR CACHE)
-      find_package(Clang CONFIG QUIET
-        PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
-              "${LLVM_DIR}/../clang"
-        NO_DEFAULT_PATH)
-      if(Clang_FOUND)
-        break()
+      _vycor_prefix_has_clang_dev("${LLVM_INSTALL_PREFIX}" _has_clang_dev)
+      if(_has_clang_dev)
+        find_package(Clang CONFIG QUIET
+          PATHS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+                "${LLVM_DIR}/../clang"
+          NO_DEFAULT_PATH)
+        if(Clang_FOUND)
+          break()
+        endif()
       endif()
     endif()
     # Reset state so the next iteration starts clean.
@@ -114,9 +141,12 @@ if(NOT LLVM_FOUND)
     list(FIND VYCOR_SUPPORTED_LLVM_VERSIONS "${LLVM_VERSION_MAJOR}" _idx)
     if(_idx GREATER_EQUAL 0)
       unset(Clang_DIR CACHE)
-      find_package(Clang CONFIG QUIET
-        HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
-              "${LLVM_DIR}/../clang")
+      _vycor_prefix_has_clang_dev("${LLVM_INSTALL_PREFIX}" _has_clang_dev)
+      if(_has_clang_dev)
+        find_package(Clang CONFIG QUIET
+          HINTS "${LLVM_INSTALL_PREFIX}/lib/cmake/clang"
+                "${LLVM_DIR}/../clang")
+      endif()
     else()
       message(WARNING "Found LLVM ${LLVM_PACKAGE_VERSION}, but only versions "
               "${VYCOR_SUPPORTED_LLVM_VERSIONS} are supported.")

@@ -907,19 +907,13 @@ int main(int argc, const char **argv) {
           return kUsage;
         }
       }
-      std::string cli = CheckSpec;
-      size_t pos = 0;
-      while (pos != std::string::npos && pos < cli.size()) {
-        size_t comma = cli.find(',', pos);
-        std::string entry = cli.substr(
-            pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        while (!entry.empty() && entry.front() == ' ')
-          entry.erase(entry.begin());
-        while (!entry.empty() && entry.back() == ' ')
-          entry.pop_back();
-        if (!entry.empty())
-          spec.push_back(entry);
-        pos = comma == std::string::npos ? std::string::npos : comma + 1;
+      llvm::SmallVector<llvm::StringRef, 8> rawParts;
+      llvm::StringRef(CheckSpec).split(rawParts, ',', /*MaxSplit=*/-1,
+                                       /*KeepEmpty=*/false);
+      for (llvm::StringRef part : rawParts) {
+        llvm::StringRef trimmed = part.trim(' ');
+        if (!trimmed.empty())
+          spec.push_back(trimmed.str());
       }
       if (CheckCoverageDiag)
         spec.push_back("coverage-properties");

@@ -16,6 +16,7 @@
 #pragma once
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 
 #include <cctype>
 #include <string>
@@ -32,44 +33,82 @@ namespace vycor {
 //   - all whitespace (so "long long int" is consistent regardless of how
 //     the upstream printer spaced the tokens)
 //
-// This is shared between the Indexer and the Analyzer so both agree on how
-// to key type names when consulting the TypeRelationIndex.
-inline std::string normalizeTypeForMatching(llvm::StringRef in) {
-  std::string s = in.str();
-
-  auto isIdent = [](char c) {
+// Single-pass O(n) implementation with zero inner-loop allocations or shifts.
+// Shared between the Indexer and the Analyzer so both agree on how to key type
+// names when consulting the TypeRelationIndex.
+[[nodiscard]] inline std::string normalizeTypeForMatching(llvm::StringRef in) {
+  auto isIdent = [](char c) noexcept {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
   };
-
-  auto stripKeyword = [&](llvm::StringRef kw) {
-    size_t pos = 0;
-    while ((pos = s.find(kw.str(), pos)) != std::string::npos) {
-      bool boundaryLeft = (pos == 0) || !isIdent(s[pos - 1]);
-      bool boundaryRight =
-          (pos + kw.size() == s.size()) || !isIdent(s[pos + kw.size()]);
-      if (boundaryLeft && boundaryRight) {
-        s.erase(pos, kw.size());
-      } else {
-        pos += kw.size();
-      }
-    }
+  auto isWs = [](char c) noexcept {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
   };
 
-  stripKeyword("const");
-  stripKeyword("volatile");
+  std::string out;
+  out.reserve(in.size());
+
+  size_t i = 0;
+  const size_t n = in.size();
+  while (i < n) {
+    const char c = in[i];
+    if (isWs(c)) {
+      ++i;
+      continue;
+    }
+    if (isIdent(c)) {
+      const size_t start = i;
+      do {
+        ++i;
+      } while (i < n && isIdent(in[i]));
+      const llvm::StringRef tok = in.slice(start, i);
+      if (tok != "const" && tok != "volatile")
+        out.append(tok.data(), tok.size());
+      continue;
+    }
+    out.push_back(c);
+    ++i;
+  }
 
   // Strip trailing reference markers.
-  while (!s.empty() && s.back() == '&')
-    s.pop_back();
+  while (!out.empty() && out.back() == '&')
+    out.pop_back();
 
-  // Strip all whitespace so spacing variations don't matter.
-  std::string out;
-  out.reserve(s.size());
-  for (char c : s) {
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
-      out.push_back(c);
-  }
   return out;
+}
+
+// Fixed set of builtin C++ arithmetic type names after
+// normalizeTypeForMatching(). Any two normalized type names in this set are
+// mutually convertible under C++ standard arithmetic conversions.
+[[nodiscard]] inline bool
+isArithmeticNormalizedType(llvm::StringRef normalized) noexcept {
+  return llvm::StringSwitch<bool>(normalized)
+      .Case("bool", true)
+      .Case("char", true)
+      .Case("signedchar", true)
+      .Case("unsignedchar", true)
+      .Case("wchar_t", true)
+      .Case("char8_t", true)
+      .Case("char16_t", true)
+      .Case("char32_t", true)
+      .Case("short", true)
+      .Case("shortint", true)
+      .Case("unsignedshort", true)
+      .Case("unsignedshortint", true)
+      .Case("int", true)
+      .Case("unsigned", true)
+      .Case("unsignedint", true)
+      .Case("long", true)
+      .Case("longint", true)
+      .Case("unsignedlong", true)
+      .Case("unsignedlongint", true)
+      .Case("longlong", true)
+      .Case("longlongint", true)
+      .Case("unsignedlonglong", true)
+      .Case("unsignedlonglongint", true)
+      .Case("float", true)
+      .Case("double", true)
+      .Case("longdouble", true)
+      .Default(false);
 }
 
 } // namespace vycor

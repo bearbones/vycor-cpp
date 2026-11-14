@@ -211,7 +211,7 @@ bool isResourceOrLockRaii(const RaiiLocal &raii) {
       "optional",       "variant",        "any",          "tuple",
       "pair",           "array",          "deque",        "list",
       "function",       "unique_ptr",     "shared_ptr",   "weak_ptr",
-      "intrusive_ref",  "raw_string_ostream", " raw_svector_ostream",
+      "intrusive_ref",  "raw_string_ostream", "raw_svector_ostream",
       "stringstream",   "ostringstream",  "istringstream","regex",
       "path",           "twine",          "error",        "expected",
       "json::",
@@ -570,9 +570,10 @@ llvm::json::Object MegascopeBridge::toShardObject(
     std::string sname = shortNameOf(qname);
     std::string file = node.file.empty() ? moduleFile : node.file;
 
+    static const std::string kEmptyClass;
     const bool isLambda = isLambdaNode(node);
     const std::string &effectiveEnclosingClass =
-        isLambda ? std::string() : node.enclosingClass;
+        isLambda ? kEmptyClass : node.enclosingClass;
     const char *kindStr = "function";
     if (isLambda) {
       kindStr = "lambda";

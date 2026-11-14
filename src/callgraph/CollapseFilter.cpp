@@ -20,18 +20,20 @@ namespace vycor {
 CollapseFilter::CollapseFilter(std::vector<std::string> patterns) {
   patterns_.reserve(patterns.size());
   for (auto &p : patterns) {
+    llvm::StringRef trimmed = llvm::StringRef(p).trim('/');
+    if (trimmed.empty())
+      continue;
     // Normalize to "/pattern/" for component-boundary matching.
     std::string normalized;
-    if (!p.empty() && p.front() != '/')
-      normalized += '/';
-    normalized += p;
-    if (!normalized.empty() && normalized.back() != '/')
-      normalized += '/';
+    normalized.reserve(trimmed.size() + 2);
+    normalized.push_back('/');
+    normalized.append(trimmed.data(), trimmed.size());
+    normalized.push_back('/');
     patterns_.push_back(std::move(normalized));
   }
 }
 
-bool CollapseFilter::isCollapsed(llvm::StringRef filePath) const {
+bool CollapseFilter::isCollapsed(llvm::StringRef filePath) const noexcept {
   for (const auto &pattern : patterns_) {
     if (filePath.find(pattern) != llvm::StringRef::npos)
       return true;

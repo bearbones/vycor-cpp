@@ -1323,6 +1323,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         ChannelIndex::SiteKey key{site.channelId, site.callSite,
                                   site.siteFunctionUsr, site.op};
         std::string channelId = site.channelId;
+        std::string callSiteStr = site.callSite;
         std::string funcUsr = site.siteFunctionUsr;
         std::string funcDisplay = site.siteFunctionDisplay;
         bool differentDisplay = funcDisplay != funcUsr;
@@ -1330,6 +1331,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
             ChannelIndex::StoredSite{std::move(site), refs, true});
         ch.index_.emplace(key, idx);
         ch.byChannel_[channelId].push_back(idx);
+        ch.bySite_[callSiteStr].push_back(idx);
         ch.byFunctionUsr_[funcUsr].push_back(idx);
         if (differentDisplay)
           ch.byFunctionDisplay_[funcDisplay].push_back(idx);

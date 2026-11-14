@@ -16,59 +16,55 @@
 #include "vycor/check/GlobalIndex.h"
 #include "vycor/check/TypeNormalize.h"
 
-#include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
-#include <unordered_set>
+#include <string_view>
 
 namespace vycor {
 
 namespace {
 
-// The fixed set of builtin arithmetic type names (names as produced by
-// clang::QualType::getAsString() after normalization). Any two normalized
-// type names in this set are treated as mutually convertible, matching the
-// behaviour of C++ standard conversions.
-bool isArithmeticTypeName(const std::string &normalized) {
-  return llvm::StringSwitch<bool>(normalized)
-      .Case("bool", true)
-      .Case("char", true)
-      .Case("signedchar", true)
-      .Case("unsignedchar", true)
-      .Case("wchar_t", true)
-      .Case("char8_t", true)
-      .Case("char16_t", true)
-      .Case("char32_t", true)
-      .Case("short", true)
-      .Case("shortint", true)
-      .Case("unsignedshort", true)
-      .Case("unsignedshortint", true)
-      .Case("int", true)
-      .Case("unsigned", true)
-      .Case("unsignedint", true)
-      .Case("long", true)
-      .Case("longint", true)
-      .Case("unsignedlong", true)
-      .Case("unsignedlongint", true)
-      .Case("longlong", true)
-      .Case("longlongint", true)
-      .Case("unsignedlonglong", true)
-      .Case("unsignedlonglongint", true)
-      .Case("float", true)
-      .Case("double", true)
-      .Case("longdouble", true)
-      .Default(false);
+// Strip a single trailing '*' without heap allocation to compare
+// pointer-to-class against base. Reference qualifiers are already stripped by
+// normalizeTypeForMatching.
+llvm::StringRef stripPointerView(llvm::StringRef s) noexcept {
+  if (!s.empty() && s.back() == '*')
+    return s.drop_back(1);
+  return s;
 }
 
-// Strip a single trailing '*' to compare pointer-to-class against base.
-// Reference qualifiers are already stripped by normalizeTypeForMatching.
-std::string stripPointer(const std::string &s) {
-  if (!s.empty() && s.back() == '*') {
-    std::string out = s;
-    out.pop_back();
-    return out;
+bool isBaseOrSelfView(
+    const StringInterner &interner,
+    const std::unordered_map<StringInterner::Id,
+                             std::vector<StringInterner::Id>> &bases,
+    llvm::StringRef derived, llvm::StringRef maybeBase) {
+  if (derived == maybeBase)
+    return true;
+  auto derivedOpt =
+      interner.find(std::string_view(derived.data(), derived.size()));
+  auto baseOpt =
+      interner.find(std::string_view(maybeBase.data(), maybeBase.size()));
+  if (!derivedOpt || !baseOpt)
+    return false;
+  const StringInterner::Id baseId = *baseOpt;
+  llvm::SmallDenseSet<StringInterner::Id, 16> seen;
+  llvm::SmallVector<StringInterner::Id, 16> stack{*derivedOpt};
+  while (!stack.empty()) {
+    StringInterner::Id cur = stack.pop_back_val();
+    if (!seen.insert(cur).second)
+      continue;
+    auto it = bases.find(cur);
+    if (it == bases.end())
+      continue;
+    for (StringInterner::Id b : it->second) {
+      if (b == baseId)
+        return true;
+      stack.push_back(b);
+    }
   }
-  return s;
+  return false;
 }
 
 } // namespace
@@ -119,30 +115,7 @@ void TypeRelationIndex::absorb(const TypeRelationIndex &other) {
 
 bool TypeRelationIndex::isBaseOrSelf(const std::string &derived,
                                      const std::string &maybeBase) const {
-  if (derived == maybeBase)
-    return true;
-  auto derivedOpt = interner_.find(derived);
-  auto baseOpt = interner_.find(maybeBase);
-  if (!derivedOpt || !baseOpt)
-    return false;
-  SId baseId = *baseOpt;
-  std::unordered_set<SId> seen;
-  std::vector<SId> stack{*derivedOpt};
-  while (!stack.empty()) {
-    SId cur = stack.back();
-    stack.pop_back();
-    if (!seen.insert(cur).second)
-      continue;
-    auto it = bases_.find(cur);
-    if (it == bases_.end())
-      continue;
-    for (SId b : it->second) {
-      if (b == baseId)
-        return true;
-      stack.push_back(b);
-    }
-  }
-  return false;
+  return isBaseOrSelfView(interner_, bases_, derived, maybeBase);
 }
 
 bool TypeRelationIndex::isConvertible(const std::string &from,
@@ -150,17 +123,22 @@ bool TypeRelationIndex::isConvertible(const std::string &from,
   if (from == to)
     return true;
 
-  if (isArithmeticTypeName(from) && isArithmeticTypeName(to))
+  if (isArithmeticNormalizedType(from) && isArithmeticNormalizedType(to))
     return true;
 
   {
-    std::string fromClass = stripPointer(from);
-    std::string toClass = stripPointer(to);
-    if (fromClass != from || toClass != to) {
-      if (fromClass != from && toClass != to &&
-          isBaseOrSelf(fromClass, toClass))
+    const llvm::StringRef fromView(from);
+    const llvm::StringRef toView(to);
+    const llvm::StringRef fromClass = stripPointerView(fromView);
+    const llvm::StringRef toClass = stripPointerView(toView);
+    if (fromClass.size() != fromView.size() ||
+        toClass.size() != toView.size()) {
+      if (fromClass.size() != fromView.size() &&
+          toClass.size() != toView.size() &&
+          isBaseOrSelfView(interner_, bases_, fromClass, toClass))
         return true;
-    } else if (isBaseOrSelf(fromClass, toClass) && fromClass != toClass) {
+    } else if (fromClass != toClass &&
+               isBaseOrSelfView(interner_, bases_, fromClass, toClass)) {
       return true;
     }
   }
