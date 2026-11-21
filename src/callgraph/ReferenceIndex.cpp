@@ -795,9 +795,10 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
   struct Named {
     const std::string *name;
     SymbolKind kind;
+    bool symbol; // false: no symbol record, the USR stands in
   };
   const auto named = [&](Id usr) {
-    Named out{&text(usr), SymbolKind::Function};
+    Named out{&text(usr), SymbolKind::Function, false};
     const std::string *best = nullptr;
     uint8_t kind = UINT8_MAX;
     for (uint32_t idx : symbolsByUsr_.at(usr)) {
@@ -810,6 +811,7 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
     if (best) {
       out.name = best;
       out.kind = static_cast<SymbolKind>(kind);
+      out.symbol = true;
     }
     return out;
   };
@@ -830,7 +832,7 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
     info.targetKind = target.kind;
     // A lock target with no symbol (a data member mutex, an unnamed lock,
     // a once guard) is a variable, not a function.
-    if (isLockRole(first.role) && target.name == &text(first.target))
+    if (isLockRole(first.role) && !target.symbol)
       info.targetKind = SymbolKind::Variable;
     const std::string *file = nullptr;
     const std::string *firstTu = nullptr;

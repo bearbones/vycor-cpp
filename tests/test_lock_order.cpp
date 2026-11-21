@@ -749,6 +749,32 @@ PAIR(ab, a, b) PAIR(ba, b, a) PAIR(cd, c, d) PAIR(dc, d, c)
   CHECK(stats.cyclesCapped);
   CHECK(stats.lockGroups == 2);   // the group never reached is counted
   CHECK(stats.boundedGroups == 2);
+
+  // A group enumerated in full before another reaches the total bound
+  // gets the note too: the bound stopped the search as a whole.
+  Project q;
+  q.tu("tu.cpp", R"cpp(
+#include <mutex>
+std::mutex a, b, c, d, e;
+#define PAIR(n, x, y) void n() { std::lock_guard<std::mutex> g1(x); std::lock_guard<std::mutex> g2(y); }
+PAIR(ab, a, b) PAIR(ba, b, a)
+PAIR(cd, c, d) PAIR(dc, d, c) PAIR(ce, c, e) PAIR(ec, e, c) PAIR(de, d, e) PAIR(ed, e, d)
+)cpp");
+  auto bakedQ = q.bake();
+  LockOrderOptions two;
+  two.maxCycles = 2;
+  LockOrderStats statsQ;
+  auto found = runCheck(bakedQ, two, &statsQ);
+  INFO(allMessages(found));
+  REQUIRE(found.size() == 2);
+  CHECK(statsQ.cyclesCapped);
+  CHECK(statsQ.boundedGroups == 2);
+  size_t abNoted = 0;
+  for (const Diagnostic &d : found) {
+    CHECK(contains(d, "stopped at a bound"));
+    abNoted += contains(d, "'a' -> 'b' -> 'a'") ? 1 : 0;
+  }
+  CHECK(abNoted == 1);
 }
 
 TEST_CASE("lock-order: a cycle longer than the length bound marks its group",
