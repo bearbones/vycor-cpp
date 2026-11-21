@@ -1076,3 +1076,195 @@ TEST_CASE("isa-leak orders groups one file witnesses by content",
   REQUIRE(first.size() == 1);
   CHECK(run(false) == first);
 }
+
+namespace {
+std::set<std::string> emittedNames(const GlobalIndex &index) {
+  std::set<std::string> names;
+  for (const auto &r : index.isaLeakFacts().records())
+    names.insert(r.function.qualifiedName);
+  return names;
+}
+} // namespace
+
+TEST_CASE("isa-leak keeps dead branches CodeGen still emits",
+          "[CheckIsaLeak]") {
+  // A label or a case label inside a folded-away branch makes it
+  // reachable, and a class-type ?: emits both arms whatever its condition.
+  IsaFixture fixture(R"cpp(
+inline float work(const float *a, unsigned long n) {
+  float s = 0;
+  for (unsigned long i = 0; i < n; ++i) s += a[i];
+  return s;
+}
+inline float more(const float *a, unsigned long n) {
+  float s = 1;
+  for (unsigned long i = 0; i < n; ++i) s *= a[i];
+  return s;
+}
+struct Str { Str(); Str(const Str &); ~Str(); };
+inline Str slowFormat(const float *a) { Str s; (void)more(a, 3); return s; }
+constexpr bool kDebug = false;
+inline float jump(const float *a, int n) {
+  float r = 0;
+  switch (n) { case 0: if (0) { case 1: r = work(a, 1); } break; }
+  if (n == 7) goto later;
+  if (0) { later: r += 1; }
+  Str s = kDebug ? slowFormat(a) : Str();
+  return r;
+}
+)cpp",
+                     "  float v[2] = {};\n  (void)jump(v, 1);\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  (void)runAnalysis(*db, fixture.files(), isaOptions(), &index);
+  const auto names = emittedNames(index);
+  CHECK(names.count("jump(const float *, int)"));
+  CHECK(names.count("work(const float *, unsigned long)"));
+  CHECK(names.count("slowFormat(const float *)"));
+  CHECK(names.count("more(const float *, unsigned long)"));
+}
+
+TEST_CASE("isa-leak reports float vector builtins and classification under "
+          "fast-math",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+typedef float v4sf __attribute__((vector_size(16)));
+typedef int v4si __attribute__((vector_size(16)));
+inline v4sf root(v4sf a) { return __builtin_elementwise_sqrt(a); }
+inline v4si narrow(v4sf a) { return __builtin_convertvector(a, v4si); }
+inline int above(float x) { return __builtin_isgreater(x, 1.0f); }
+)cpp",
+                     "  v4sf v = {1, 2, 3, 4};\n  (void)root(v);\n"
+                     "  (void)narrow(v);\n  (void)above(2.0f);\n");
+  fixture.database({"-ffast-math"}, {});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  std::set<std::string> reported;
+  for (const auto &d : result) {
+    reported.insert(d.resolvedDecl);
+    CHECK(mentions(d, "(fp)"));
+  }
+  CHECK(reported.count("root(v4sf)"));
+  CHECK(reported.count("narrow(v4sf)"));
+  CHECK(reported.count("above(float)"));
+}
+
+TEST_CASE("isa-leak emits a key-less vtable where its destructor resets it",
+          "[CheckIsaLeak]") {
+  // Neither class's constructor is defined here. Loud's destructor has a
+  // body, so emitting it stores the vptr and emits the vtable; Quiet's
+  // destructor and its field's have trivial bodies, so CodeGen skips the
+  // store and Quiet's vtable stays unemitted.
+  IsaFixture fixture(R"cpp(
+struct Inner { ~Inner() {} };
+void note();
+struct Loud {
+  Loud();
+  ~Loud() { note(); }
+  virtual float sum(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+struct Quiet {
+  Quiet();
+  ~Quiet() {}
+  Inner inner;
+  virtual float total(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+inline void kill(Loud *l, Quiet *q) { delete l; delete q; }
+)cpp",
+                     "  kill(nullptr, nullptr);\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  (void)runAnalysis(*db, fixture.files(), isaOptions(), &index);
+  const auto names = emittedNames(index);
+  CHECK(names.count("Loud::~Loud()"));
+  CHECK(names.count("Quiet::~Quiet()"));
+  CHECK(names.count("Loud::sum(const float *, unsigned long) const"));
+  CHECK_FALSE(names.count("Quiet::total(const float *, unsigned long) const"));
+}
+
+TEST_CASE("isa-leak emits a static local's destructor and final-class "
+          "virtual calls",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+inline float flush(const float *a, unsigned long n) {
+  float s = 0;
+  for (unsigned long i = 0; i < n; ++i) s += a[i];
+  return s;
+}
+struct Logger { float buf[4]; ~Logger() { (void)flush(buf, 4); } };
+inline Logger &logger() { static Logger l; return l; }
+struct Base {
+  virtual void anchor();
+  virtual float sum(const float *a, unsigned long n) const;
+};
+struct Fin final : Base {
+  void anchor() override;
+  float sum(const float *a, unsigned long n) const override {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+inline float call(const Fin *f, const float *a) { return f->sum(a, 2); }
+)cpp",
+                     "  (void)logger();\n  float v[2] = {};\n"
+                     "  (void)call(nullptr, v);\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  (void)runAnalysis(*db, fixture.files(), isaOptions(), &index);
+  const auto names = emittedNames(index);
+  CHECK(names.count("Logger::~Logger()"));
+  CHECK(names.count("flush(const float *, unsigned long)"));
+  CHECK(names.count("Fin::sum(const float *, unsigned long) const"));
+}
+
+TEST_CASE("isa-leak compares move-only bodies on the vector class off x86-64",
+          "[CheckIsaLeak]") {
+  // On i386 an FP value moves through x87 or SSE registers, so SSE
+  // matters even to a body that only loads and returns a float. (Clang's
+  // i686 Linux default CPU, pentium4, has SSE2; -mno-sse turns it off.)
+  IsaFixture fixture(R"cpp(
+inline float pass(const float *p) { return *p; }
+)cpp",
+                     "  float v = 1;\n  (void)pass(&v);\n");
+  fixture.database({"--target=i686-unknown-linux-gnu"},
+                   {"--target=i686-unknown-linux-gnu", "-mno-sse"});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl == "pass(const float *)");
+  CHECK(mentions(result[0], "+sse2"));
+  CHECK(mentions(result[0], "floating-point values"));
+}
+
+TEST_CASE("isa-leak rejects a shard whose profile features are unsorted",
+          "[CheckIsaLeak]") {
+  GlobalIndex index;
+  IsaLeakFacts &facts = index.mutableIsaLeakFacts();
+  facts.addTu("/p/a.cpp", facts.addProfile(x86Profile({"avx", "sse2"})),
+              {loopFunction()});
+  auto payload = CheckIndexPayload::capture(index);
+  REQUIRE(payload.isaLeak.profiles.size() == 1);
+  payload.isaLeak.profiles[0].features = {"sse2", "avx"};
+  llvm::SmallString<128> dir;
+  REQUIRE_FALSE(llvm::sys::fs::createUniqueDirectory("isa_leak_shard", dir));
+  const std::string shard = std::string(dir) + "/worker.bin";
+  REQUIRE(writeCheckIndexShard(shard, {{"a.cpp", payload}},
+                               {{TuStatus::Indexed, ""}}));
+  bool called = false;
+  CHECK_FALSE(readCheckIndexShard(
+      shard, [&](const auto &, const auto &) { called = true; }));
+  CHECK_FALSE(called);
+  llvm::sys::fs::remove_directories(dir);
+}

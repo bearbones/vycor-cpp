@@ -70,7 +70,7 @@ profile are compared. The default is `isa,fp,eh`; `all` adds `overflow`.
 | Facet | Compared | Changes code for a body that has |
 |-------|----------|----------------------------------|
 | `isa` | The effective target features (`-march`, `-mcpu`, `-m<feature>`, `-mno-<feature>`) | See the feature classes below |
-| `fp` | `-ffp-contract`, `-fassociative-math`, `-f[no-]honor-nans`/`-infinities`, `-f[no-]signed-zeros`, `-freciprocal-math`, `-frounding-math`, `-ffp-exception-behavior`, `-ffp-eval-method`, `-mfpmath` (all set by `-ffast-math` and friends) | Floating-point arithmetic, comparisons and conversions, on vectors of floats too (not values that are only loaded, passed or returned, `fabs`/`copysign`, or integer vector code) |
+| `fp` | `-ffp-contract`, `-fassociative-math`, `-f[no-]honor-nans`/`-infinities`, `-f[no-]signed-zeros`, `-freciprocal-math`, `-frounding-math`, `-ffp-exception-behavior`, `-ffp-eval-method`, `-mfpmath` (all set by `-ffast-math` and friends) | Floating-point arithmetic, comparisons and conversions, on vectors of floats too (`__builtin_convertvector`, `__builtin_elementwise_*`), and classification builtins (`isnan`, `isgreater`, `fpclassify`, ...) that `-ffinite-math-only` folds; not values that are only loaded, passed or returned, `fabs`/`copysign`/`nan`/`inf`, or integer vector code |
 | `fp` | `-f[no-]math-errno`, `-fapprox-func` | Calls to math builtins (`sqrt`, `exp`, ...) that the compiler does not fold to a constant |
 | `eh` | `-fexceptions` vs `-fno-exceptions` | A `try` block, or a destructor-bearing local or temporary around a call not declared non-throwing |
 | `overflow` | `-fwrapv`, `-ftrapv` | Signed integer `+ - * <<`, increments and negation |
@@ -82,9 +82,12 @@ classes the body can be affected by:
   `neon`/`sve*`, PowerPC `altivec`/`vsx`, WebAssembly `simd128`, RISC-V `v`/`zv*`,
   ...) are compared for bodies with a loop (a vectorization candidate),
   floating-point arithmetic, vector types or `memcpy`/`memset`. A body whose
-  only floating-point code is values loaded, passed or returned is compared
-  on x86 `avx` alone: under `-mavx` every scalar floating-point move is
-  VEX-encoded, and no other feature changes how a value moves.
+  only floating-point code is values loaded, passed or returned is compared,
+  on x86-64, on `avx` and `avx512fp16` alone: under `-mavx` every scalar
+  floating-point move is VEX-encoded, `avx512fp16` moves `_Float16` with an
+  EVEX `vmovsh`, and no other feature changes how a value moves. On other
+  targets (i386 x87 or SSE, ARM VFP, RISC-V F/D, ...) such a body is
+  compared on the whole vector class.
 - **Bit manipulation** (`popcnt`, `lzcnt`, `bmi`, `bmi2`, `movbe`, RISC-V
   `zb*`, ...) is compared for bodies with a loop or a bit builtin
   (`__builtin_popcount`, `clz`, `ctz`, `ffs`, `parity`, `clrsb`, `bswap`,
@@ -120,9 +123,10 @@ then follow every function a walked body references. A TU must emit:
   emitted for it;
 - the vtables it homes, meaning those of classes whose key function it
   defines, and the vtables of dynamic classes without a key function whose
-  constructor it emits, or whose destructor when that destructor resets the
-  vtable pointer (CodeGen skips that for an effectively final class or a
-  trivial destructor body over trivially destructible fields). A vtable
+  constructor it emits, or whose destructor it emits when that destructor
+  resets the vtable pointer (CodeGen skips that for an effectively final
+  class, or a trivial destructor body whose fields' destructors have
+  trivial bodies too: `CanSkipVTablePointerInitialization`). A vtable
   emits every function in its slots, the final overriders inherited from
   bases included.
 
@@ -130,14 +134,24 @@ An inline function referenced only by another inline function that nothing
 calls is not emitted. `Decl::isUsed` is not consulted. A virtual call,
 virtual operator call or `delete` through a virtual destructor does not emit
 its callee: the callee is reached through a vtable or not at all. The
-exception is a call Clang makes direct (`CXXMethodDecl::getDevirtualizedMethod`,
-what CodeGen asks: a complete object, a final class or function, ...).
+exception is a call CodeGen makes direct: when
+`CXXMethodDecl::getDevirtualizedMethod` allows it (a complete object, a
+final class or function, ...), the call goes to the method of the best
+dynamic class, unless the return type is covariant or that class is
+neither the object's static class nor the inner expression's. A `delete`
+is devirtualized only to the deleted expression's class; through the
+vtable the deleting destructor calls `operator delete`, so the `delete`
+expression emits it only on that direct path or for `::delete`.
 Code the compiler evaluates or discards emits nothing: unevaluated operands
 (`sizeof`, `noexcept`, `decltype`, a non-polymorphic `typeid`),
 initializers of `constexpr` locals, `case` labels and other constant
-expressions, the discarded branch of `if constexpr`, and the branch Clang
-drops when an `if`, `?:`, `&&` or `||` condition folds to a constant without
-side effects (unless that branch holds a label). By-value parameters are
+expressions, the discarded branch of `if constexpr` or `if consteval`,
+`requires` and `_Generic` operands, and the branch CodeGen drops when an
+`if`, `&&` or `||` condition, or a scalar or lvalue `?:` condition, folds
+to a constant without side effects. A dead branch holding a label, or a
+`case`/`default` label of an enclosing `switch`, is still emitted, and so
+are both arms of a `?:` whose result is a class, array or `_Complex`
+prvalue. By-value parameters are
 destroyed by the caller in the Itanium ABI and by the callee where Clang
 says so (the Microsoft ABI, or a `trivial_abi` class).
 
