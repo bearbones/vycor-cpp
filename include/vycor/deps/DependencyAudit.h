@@ -195,9 +195,25 @@ struct LinkFacts {
     /// file several TUs contributed: no one target holds them.
     uint64_t fileScopeDropped = 0;
     /// References the producer adds for what a vtable holds: its class's
-    /// virtual functions, and its base classes' vtables.
+    /// own virtual functions, and those it inherits without overriding.
     uint64_t vtableEntryRefs = 0;
+    uint64_t inheritedVirtualRefs = 0;
+    /// Base classes taken from the call graph's hierarchy.
     uint64_t baseClassRefs = 0;
+    /// Weak or `used` definitions in headers, emitted by every TU that
+    /// includes them: their references are held by all of those targets.
+    uint32_t emittedDefinitions = 0;
+    /// Base classes the hierarchy names but no TU saw with the derived
+    /// class (a template's or an anonymous namespace's name): not taken.
+    uint64_t baseClassUnseen = 0;
+    /// Calls and address-ofs that share one witness site with a reference
+    /// of the same role to another symbol: the candidates of an overload
+    /// set a template left open. Taken as indirect uses, not references.
+    uint64_t overloadCandidateRefs = 0;
+    /// References of a symbol with definitions in several target sets (a
+    /// USR two targets' code share, such as `main`) charged to the target
+    /// set of the site, or of the one TU that recorded them.
+    uint64_t siteAnchoredRefs = 0;
   } counts;
   /// Whether per-TU outcomes and opened-file tables were available.
   bool hasIndexMeta = false;
@@ -280,6 +296,14 @@ struct AuditRow {
   uint32_t seedBegin = 0, seedEnd = 0; // DependencyAudit::seed*
   uint32_t needBegin = 0, needEnd = 0; // DependencyAudit::needs
   uint32_t dropBegin = 0, dropEnd = 0; // DependencyAudit::droppable
+  /// Final link targets (executables, shared and module libraries) that
+  /// link the consumer and would stop linking at least one of `droppable`
+  /// if the closure were split out — the consumer itself when it is one —
+  /// and the most Defined symbols one of them would drop (less the
+  /// closure when the provider is among them). Direct rows only.
+  uint32_t linkTargetsHelped = 0;
+  uint64_t linkTargetGain = 0;
+  uint32_t helpedBegin = 0, helpedEnd = 0; // DependencyAudit::helped*
   /// The consumer links the provider only because of this edge, and the
   /// closure does not pull it back in: splitting the closure out removes
   /// the provider from the consumer's link.
@@ -303,6 +327,10 @@ struct DependencyAudit {
   std::vector<uint32_t> needs;
   /// Targets a row's consumer would stop linking, ascending.
   std::vector<uint32_t> droppable;
+  /// The final link targets a row's split would help and the Defined
+  /// symbols each would drop: by symbols descending, then target.
+  std::vector<uint32_t> helpedTarget;
+  std::vector<uint64_t> helpedSymbols;
 
   std::vector<uint32_t> providerSymbols; // Defined symbols per target
   std::vector<uint32_t> providerFiles;   // files holding them

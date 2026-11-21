@@ -23,6 +23,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/Path.h"
@@ -30,8 +31,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <map>
 #include <numeric>
+#include <tuple>
 
 namespace vycor {
 
@@ -256,6 +259,8 @@ struct FileAttrs {
   /// 0 not in the index, 1 parsed cleanly, 2 parse not clean.
   std::vector<uint8_t> fileStatus;
   std::vector<uint8_t> unmappedTu; // an indexed TU no target lists
+  /// The file of each TU and of each opened file the index meta lists.
+  std::vector<uint32_t> metaTuFile, metaDepFile;
 
   void grow(size_t n) {
     fileSet.resize(n, 0);
@@ -311,6 +316,8 @@ void attributeFiles(const TargetMap &map, const SnapshotMeta *meta,
       depFile[j] = files.add(
           normalizeAuditPath(toIndexText(meta->deps[j].path), ""));
     fa.grow(files.paths.size());
+    fa.metaTuFile = tuFile;
+    fa.metaDepFile = depFile;
 
     constexpr uint32_t kUnset = kNoIndex;
     std::vector<uint32_t> depSet(depFile.size(), kUnset);
@@ -804,8 +811,9 @@ namespace {
 
 // Reference kinds the producer adds, numbered after the RefRole values.
 constexpr uint8_t kRefVtableEntry = kRefRoleCount; // vtable -> virtual function
-constexpr uint8_t kRefBaseClass = kRefRoleCount + 1; // vtable -> base's vtable
+constexpr uint8_t kRefInherited = kRefRoleCount + 1; // vtable -> base's virtual
 constexpr uint8_t kRefEnclosed = kRefRoleCount + 2;  // function -> its lambda
+constexpr uint8_t kRefBaseClass = kRefRoleCount + 3; // class -> base's vtable
 
 const char *referenceKindName(uint8_t kind) {
   if (kind < kRefRoleCount)
@@ -813,6 +821,8 @@ const char *referenceKindName(uint8_t kind) {
   switch (kind) {
   case kRefVtableEntry:
     return "vtable_entry";
+  case kRefInherited:
+    return "inherited_virtual";
   case kRefBaseClass:
     return "base_class";
   case kRefEnclosed:
@@ -997,7 +1007,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   std::vector<uint8_t> pending(symbolCount, kDecided);
   std::vector<uint8_t> unmappedBody(symbolCount, 0);
   std::vector<std::pair<uint32_t, uint32_t>> votes; // (header, owner set)
-  std::vector<uint32_t> scratchSet;
+  std::vector<uint32_t> scratchSet, homeTargets;
   for (uint32_t s = 0; s < symbolCount; ++s) {
     lf.symUsr[s] = out.intern(rs.resolve(usrs[s]));
     const uint32_t rb = recBegin[s], re = recBegin[s + 1];
@@ -1018,7 +1028,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     SId declPath = kNoId;
     uint32_t bodyFile = kNoIndex, homeFile = kNoIndex;
     scratchSet.clear();
-    std::vector<uint32_t> homeTargets; // rarely more than one
+    homeTargets.clear();
     for (uint32_t i = rb; i < re; ++i) {
       const SymRec &r = srec[recOrder[i]];
       const std::string &recName = rs.resolve(r.name);
@@ -1251,14 +1261,17 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     rawSoft.push_back(soft);
   }
 
+
   // What a vtable holds: the class's virtual functions (a member's USR
-  // extends its class's with "@F@"), and its bases' vtables.
+  // extends its class's with "@F@"), and those of its bases it does not
+  // override.
   auto addSynthesized = [&](uint32_t from, uint32_t to, uint8_t kind,
                             uint32_t siteOf) {
     raw.push_back({from, to, lf.symDeclFile[siteOf], declSiteFile[siteOf],
                    lf.symDeclLine[siteOf], 0, 0, kNoId, kind});
     rawSoft.push_back(0);
   };
+  std::vector<std::pair<uint32_t, uint32_t>> ownVirtual; // (class, function)
   for (uint32_t s = 0; s < symbolCount; ++s) {
     if (!isVirtual(s) ||
         lf.symKind[s] != static_cast<uint8_t>(SymbolKind::Function))
@@ -1271,15 +1284,21 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     if (!cls || symOfId[*cls] == kNoIndex)
       continue;
     addSynthesized(symOfId[*cls], s, kRefVtableEntry, s);
+    ownVirtual.emplace_back(symOfId[*cls], s);
     ++lf.counts.vtableEntryRefs;
   }
+  // The class hierarchy is recorded by name, and a name is not an
+  // identity: every specialization of a template shares one, and so do
+  // classes of two anonymous namespaces. A base is taken only where a
+  // TU saw both definitions; a derived class with a vtable home holds
+  // the reference in the home TUs that did.
+  std::vector<std::pair<uint32_t, uint32_t>> bases; // (derived, base)
   if (graph) {
     llvm::StringMap<llvm::SmallVector<uint32_t, 1>> classNamed;
     for (uint32_t s = 0; s < symbolCount; ++s)
       if (lf.symKind[s] == static_cast<uint8_t>(SymbolKind::Class) &&
           (flagsOf[s] & kSymDynamicClass))
         classNamed[out.resolve(lf.symName[s])].push_back(s);
-    std::vector<std::pair<uint32_t, uint32_t>> bases; // (derived, base)
     for (const auto &entry : classNamed)
       for (const std::string &derived :
            graph->getDerivedClasses(entry.getKey().str())) {
@@ -1293,10 +1312,243 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       }
     std::sort(bases.begin(), bases.end());
     bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
-    for (const auto &db : bases) {
-      addSynthesized(db.first, db.second, kRefBaseClass, db.first);
-      ++lf.counts.baseClassRefs;
+  }
+
+  // A weak or `used` definition in a header is emitted by every TU that
+  // includes it, used or not: what it references is held by all of them.
+  std::vector<uint32_t> emitted; // symbols
+  for (uint32_t s = 0; s < symbolCount; ++s)
+    if (pending[s] == kInline && (flagsOf[s] & (kSymWeak | kSymUsedAttr)) &&
+        !(flagsOf[s] & kSymLambda) &&
+        (lf.symKind[s] == static_cast<uint8_t>(SymbolKind::Function) ||
+         lf.symKind[s] == static_cast<uint8_t>(SymbolKind::Variable)))
+      emitted.push_back(s);
+
+  // Per symbol: its definition files, or for a class its vtable home TUs
+  // (with the path in the reference index, for the site).
+  auto classFiles = [&](uint32_t c, bool homes,
+                        llvm::SmallVectorImpl<std::pair<uint32_t, SId>> &o) {
+    o.clear();
+    for (uint32_t i = recBegin[c]; i < recBegin[c + 1]; ++i) {
+      const SymRec &r = srec[recOrder[i]];
+      if (homes ? (r.flags & kSymVtableHome) != 0
+                : (r.flags & kSymDefinition) != 0) {
+        const uint32_t f = fileOf(homes ? r.minTu : r.file);
+        if (f != kNoIndex)
+          o.emplace_back(f, homes ? r.minTu : r.file);
+      }
     }
+    std::sort(o.begin(), o.end());
+    o.erase(std::unique(o.begin(), o.end()), o.end());
+  };
+  // Which TUs opened each definition file (a TU opens its own file).
+  const bool visibility = meta != nullptr && !fa.metaTuFile.empty();
+  std::vector<uint32_t> fileTusBegin, fileTus;
+  if (visibility && (!bases.empty() || !emitted.empty())) {
+    std::vector<uint8_t> wanted(fileCount, 0);
+    llvm::SmallVector<std::pair<uint32_t, SId>, 4> defs;
+    for (const auto &db : bases)
+      for (uint32_t c : {db.first, db.second}) {
+        classFiles(c, false, defs);
+        for (const auto &d : defs)
+          wanted[d.first] = 1;
+      }
+    for (uint32_t e : emitted) {
+      classFiles(e, false, defs);
+      for (const auto &d : defs)
+        wanted[d.first] = 1;
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> pairs; // (file, tu index)
+    for (uint32_t i = 0; i < fa.metaTuFile.size(); ++i) {
+      if (fa.metaTuFile[i] < fileCount && wanted[fa.metaTuFile[i]])
+        pairs.emplace_back(fa.metaTuFile[i], i);
+      if (i >= meta->tuDeps.size())
+        continue;
+      for (uint32_t j : meta->tuDeps[i])
+        if (j < fa.metaDepFile.size() && fa.metaDepFile[j] < fileCount &&
+            wanted[fa.metaDepFile[j]])
+          pairs.emplace_back(fa.metaDepFile[j], i);
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    fileTusBegin.assign(fileCount + 1, 0);
+    for (const auto &p : pairs)
+      ++fileTusBegin[p.first + 1];
+    for (uint32_t f = 0; f < fileCount; ++f)
+      fileTusBegin[f + 1] += fileTusBegin[f];
+    fileTus.reserve(pairs.size());
+    for (const auto &p : pairs)
+      fileTus.push_back(p.second);
+  }
+  std::vector<uint32_t> tuIndexOfFile;
+  if (visibility) {
+    tuIndexOfFile.assign(fileCount, kNoIndex);
+    for (uint32_t i = 0; i < fa.metaTuFile.size(); ++i)
+      if (fa.metaTuFile[i] < fileCount)
+        tuIndexOfFile[fa.metaTuFile[i]] = i;
+  }
+  auto tusOpening = [&](uint32_t f) {
+    return llvm::ArrayRef<uint32_t>(fileTus).slice(
+        fileTusBegin[f], fileTusBegin[f + 1] - fileTusBegin[f]);
+  };
+  // The targets whose TUs emit each such definition.
+  llvm::DenseMap<uint32_t, uint32_t> emittedAnchor; // symbol -> target set
+  if (visibility) {
+    llvm::SmallVector<std::pair<uint32_t, SId>, 4> defs;
+    std::vector<uint32_t> targets;
+    for (uint32_t e : emitted) {
+      classFiles(e, false, defs);
+      targets.clear();
+      for (const auto &d : defs)
+        for (uint32_t tu : tusOpening(d.first))
+          for (uint32_t t : sets.of(fa.tuSet(fa.metaTuFile[tu])))
+            targets.push_back(t);
+      std::sort(targets.begin(), targets.end());
+      targets.erase(std::unique(targets.begin(), targets.end()),
+                    targets.end());
+      if (!targets.empty()) {
+        emittedAnchor[e] = sets.intern(targets);
+        ++lf.counts.emittedDefinitions;
+      }
+    }
+  }
+
+  if (!bases.empty()) {
+    // A base taken, and where the derived vtable that inherits from it is
+    // held: a home TU (file, path), or kNoIndex for the derived class's
+    // own anchor.
+    struct BaseLink {
+      uint32_t derived, base, file;
+      SId path;
+    };
+    std::vector<BaseLink> links;
+    llvm::SmallVector<std::pair<uint32_t, SId>, 4> dDefs, bDefs, homes;
+    std::vector<uint32_t> together, scratchTus; // TU indices
+    for (const auto &db : bases) {
+      const uint32_t d = db.first, b = db.second;
+      if (!visibility) {
+        links.push_back({d, b, kNoIndex, kNoId});
+        continue;
+      }
+      // The TUs that opened a definition of each.
+      classFiles(d, false, dDefs);
+      classFiles(b, false, bDefs);
+      together.clear();
+      for (const auto &dd : dDefs)
+        for (const auto &bd : bDefs) {
+          auto x = tusOpening(dd.first), y = tusOpening(bd.first);
+          scratchTus.clear();
+          std::set_intersection(x.begin(), x.end(), y.begin(), y.end(),
+                                std::back_inserter(scratchTus));
+          together.insert(together.end(), scratchTus.begin(),
+                          scratchTus.end());
+        }
+      if (together.empty()) {
+        ++lf.counts.baseClassUnseen;
+        continue;
+      }
+      std::sort(together.begin(), together.end());
+      if (lf.symClass[d] != SymbolClass::Defined) {
+        links.push_back({d, b, kNoIndex, kNoId});
+        continue;
+      }
+      classFiles(d, true, homes);
+      bool any = false;
+      for (const auto &h : homes) {
+        const uint32_t tu = tuIndexOfFile[h.first];
+        if (tu == kNoIndex ||
+            !std::binary_search(together.begin(), together.end(), tu))
+          continue;
+        links.push_back({d, b, h.first, h.second});
+        any = true;
+      }
+      if (!any)
+        ++lf.counts.baseClassUnseen;
+    }
+    lf.counts.baseClassRefs = links.size();
+
+    // Each class's vtable: its own virtual functions, then what its bases'
+    // vtables hold that it does not override (same USR after the class's,
+    // destructors aside: every class has its own).
+    std::sort(ownVirtual.begin(), ownVirtual.end());
+    std::sort(links.begin(), links.end(), [](const BaseLink &x,
+                                             const BaseLink &y) {
+      return std::tie(x.derived, x.base, x.file) <
+             std::tie(y.derived, y.base, y.file);
+    });
+    auto memberRest = [&](uint32_t fn) {
+      llvm::StringRef usr = rs.resolve(usrs[fn]);
+      return usr.substr(usr.find("@F@"));
+    };
+    auto ownOf = [&](uint32_t c) {
+      auto lo = std::lower_bound(ownVirtual.begin(), ownVirtual.end(),
+                                 std::make_pair(c, 0u));
+      auto hi = std::lower_bound(lo, ownVirtual.end(),
+                                 std::make_pair(c + 1, 0u));
+      return llvm::ArrayRef<std::pair<uint32_t, uint32_t>>(ownVirtual)
+          .slice(static_cast<size_t>(lo - ownVirtual.begin()),
+                 static_cast<size_t>(hi - lo));
+    };
+    auto overrides = [&](uint32_t c, llvm::StringRef rest) {
+      if (rest.starts_with("@F@~"))
+        return true;
+      for (const auto &cf : ownOf(c))
+        if (memberRest(cf.second) == rest)
+          return true;
+      return false;
+    };
+    // vtables[c]: memoized, built depth first (state 1 on the stack guards
+    // a malformed cyclic hierarchy).
+    std::vector<std::vector<uint32_t>> vtables(symbolCount);
+    std::vector<uint8_t> state(symbolCount, 0);
+    std::function<const std::vector<uint32_t> &(uint32_t)> vtableOf =
+        [&](uint32_t c) -> const std::vector<uint32_t> & {
+      std::vector<uint32_t> &vt = vtables[c];
+      if (state[c] != 0)
+        return vt;
+      state[c] = 1;
+      for (const auto &cf : ownOf(c))
+        vt.push_back(cf.second);
+      auto lo = std::lower_bound(
+          links.begin(), links.end(), c,
+          [](const BaseLink &l, uint32_t x) { return l.derived < x; });
+      std::vector<uint32_t> inherited;
+      for (auto it = lo; it != links.end() && it->derived == c; ++it) {
+        if (it != lo && std::prev(it)->base == it->base)
+          continue;
+        for (uint32_t fn : vtableOf(it->base))
+          if (!overrides(c, memberRest(fn)))
+            inherited.push_back(fn);
+      }
+      std::sort(inherited.begin(), inherited.end());
+      inherited.erase(std::unique(inherited.begin(), inherited.end()),
+                      inherited.end());
+      vt.insert(vt.end(), inherited.begin(), inherited.end());
+      state[c] = 2;
+      return vt;
+    };
+    auto addHeld = [&](const BaseLink &l, uint32_t to, uint8_t kind) {
+      if (l.file == kNoIndex) {
+        addSynthesized(l.derived, to, kind, l.derived);
+      } else {
+        // Held where the vtable is emitted: the site is the home TU.
+        raw.push_back({l.derived, to, l.file, l.path, 0, 0, 1, l.path, kind});
+        rawSoft.push_back(0);
+      }
+    };
+    for (const BaseLink &l : links) {
+      // Constructing the derived class constructs its base, whose vtable a
+      // constructor the compiler writes (or an inline one) installs.
+      addHeld(l, l.base, kRefBaseClass);
+      for (uint32_t fn : vtableOf(l.base)) {
+        if (overrides(l.derived, memberRest(fn)))
+          continue;
+        addHeld(l, fn, kRefInherited);
+        ++lf.counts.inheritedVirtualRefs;
+      }
+    }
+  }
+  if (graph) {
     // A lambda is never named by a reference; the call graph knows which
     // function calls it, and that function carries it.
     const StringInterner &gi = graph->interner();
@@ -1314,6 +1566,95 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       }
     }
   }
+
+  // An open overload set in a template names each candidate at the same
+  // site (docs/symbol-references.md): two calls (or address-ofs) from one
+  // referrer at one witness site, to different symbols of one unqualified
+  // name, are candidates the instantiation chooses among, not references
+  // every copy holds. The name keeps macro-expanded code, whose
+  // references all sit at the expansion's one site, out of the group.
+  {
+    // Per symbol: an id of its unqualified name (template arguments
+    // dropped), interned on first use; kNoIndex not yet computed.
+    std::vector<uint32_t> nameKey(symbolCount, kNoIndex);
+    llvm::StringMap<uint32_t> nameIds;
+    auto keyOf = [&](uint32_t sym) {
+      uint32_t &k = nameKey[sym];
+      if (k == kNoIndex) {
+        const llvm::StringRef full = out.resolve(lf.symName[sym]);
+        llvm::SmallString<64> plain;
+        const size_t op = full.rfind("operator");
+        if (op != llvm::StringRef::npos) {
+          plain = full.drop_front(op); // operator<<, operator()
+        } else {
+          int depth = 0;
+          for (char c : full) {
+            if (c == '<')
+              ++depth;
+            else if (c == '>')
+              depth = depth > 0 ? depth - 1 : 0;
+            else if (depth == 0)
+              plain.push_back(c);
+          }
+        }
+        llvm::StringRef n = plain;
+        const size_t colon = n.rfind("::");
+        if (op == llvm::StringRef::npos && colon != llvm::StringRef::npos)
+          n = n.drop_front(colon + 2);
+        k = nameIds.try_emplace(n, static_cast<uint32_t>(nameIds.size()))
+                .first->second;
+      }
+      return k;
+    };
+    std::vector<uint32_t> order;
+    order.reserve(raw.size());
+    for (uint32_t i = 0; i < raw.size(); ++i) {
+      const uint8_t kind = raw[i].kind;
+      if ((kind == static_cast<uint8_t>(RefRole::Call) ||
+           kind == static_cast<uint8_t>(RefRole::AddressOf)) &&
+          raw[i].siteFile != kNoId && raw[i].col != 0)
+        order.push_back(i);
+    }
+    for (uint32_t i : order)
+      keyOf(raw[i].to);
+    auto sameSite = [&](const RawRef &a, const RawRef &b) {
+      return a.from == b.from && a.siteFile == b.siteFile &&
+             a.line == b.line && a.col == b.col && a.kind == b.kind &&
+             nameKey[a.to] == nameKey[b.to];
+    };
+    std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) {
+      const RawRef &a = raw[x], &b = raw[y];
+      return std::tie(a.from, a.siteFile, a.line, a.col, a.kind,
+                      nameKey[a.to], a.to) <
+             std::tie(b.from, b.siteFile, b.line, b.col, b.kind,
+                      nameKey[b.to], b.to);
+    });
+    for (size_t i = 0; i < order.size();) {
+      size_t j = i + 1;
+      while (j < order.size() && sameSite(raw[order[i]], raw[order[j]]))
+        ++j;
+      if (j - i > 1)
+        for (size_t k = i; k < j; ++k)
+          if (!rawSoft[order[k]]) {
+            rawSoft[order[k]] = 1;
+            ++lf.counts.overloadCandidateRefs;
+          }
+      i = j;
+    }
+  }
+
+  auto intersects = [&](uint32_t a, uint32_t b) {
+    auto x = sets.of(a), y = sets.of(b);
+    for (size_t i = 0, j = 0; i < x.size() && j < y.size();) {
+      if (x[i] == y[j])
+        return true;
+      if (x[i] < y[j])
+        ++i;
+      else
+        ++j;
+    }
+    return false;
+  };
 
   // --- Anchors -----------------------------------------------------------
   // The target set whose objects hold a reference, 0 for one that travels
@@ -1335,10 +1676,27 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       return kNoIndex;
     }
     switch (lf.symClass[from]) {
-    case SymbolClass::Defined:
-      return lf.symOwner[from];
-    case SymbolClass::Inline:
-      return 0;
+    case SymbolClass::Defined: {
+      const uint32_t owner = lf.symOwner[from];
+      if (sets.of(owner).size() < 2)
+        return owner;
+      // Several target sets define the symbol: one USR for distinct code
+      // (every tool's `main`, an anonymous namespace's members). The
+      // reference belongs to the code it is written in.
+      uint32_t narrow = siteSet;
+      if (narrow == 0 && r.tus == 1 && r.minTu != kNoId) {
+        const uint32_t tuFile = fileOf(r.minTu);
+        narrow = tuFile == kNoIndex ? 0 : fa.tuSet(tuFile);
+      }
+      if (narrow == 0 || narrow == owner || !intersects(narrow, owner))
+        return owner;
+      ++lf.counts.siteAnchoredRefs;
+      return narrow;
+    }
+    case SymbolClass::Inline: {
+      auto it = emittedAnchor.find(from);
+      return it == emittedAnchor.end() ? 0u : it->second;
+    }
     default:
       if (unmappedBody[from])
         ++lf.counts.unmappedBodyRefs;
@@ -1583,16 +1941,22 @@ struct Referrers {
 
   explicit Referrers(const LinkFacts &lf) {
     const uint32_t n = lf.symbolCount();
+    // Hard and soft references alike: the closure walks both.
     begin.assign(n + 1, 0);
-    from.resize(lf.refTo.size());
+    from.resize(lf.refTo.size() + lf.softTo.size());
     for (uint32_t to : lf.refTo)
+      ++begin[to + 1];
+    for (uint32_t to : lf.softTo)
       ++begin[to + 1];
     for (uint32_t s = 0; s < n; ++s)
       begin[s + 1] += begin[s];
     std::vector<uint32_t> cursor(begin.begin(), begin.end() - 1);
-    for (uint32_t s = 0; s < n; ++s)
+    for (uint32_t s = 0; s < n; ++s) {
       for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
         from[cursor[lf.refTo[r]]++] = s;
+      for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r)
+        from[cursor[lf.softTo[r]]++] = s;
+    }
   }
 };
 
@@ -1683,34 +2047,47 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
   for (uint32_t s : seeds)
     if (ws.symStamp[s] != epoch)
       admit(s);
+  auto visit = [&](uint32_t to) noexcept {
+    if (ws.symStamp[to] == epoch)
+      return;
+    const SymbolClass cls = lf.symClass[to];
+    if (cls == SymbolClass::Inline) {
+      admit(to);
+      return;
+    }
+    ws.symStamp[to] = epoch;
+    if (cls == SymbolClass::Unattributed)
+      return;
+    const uint32_t owner = lf.symOwner[to];
+    if (lf.setHas(owner, provider)) {
+      if (cls == SymbolClass::Defined) {
+        ws.symStamp[to] = 0; // admit stamps it
+        admit(to);
+      }
+      return;
+    }
+    bool anyReachable = false;
+    for (uint32_t t : lf.targetsOf(owner))
+      anyReachable |= (providerReach[t >> 6] >> (t & 63)) & 1u;
+    for (uint32_t t : lf.targetsOf(owner))
+      if (!anyReachable || ((providerReach[t >> 6] >> (t & 63)) & 1u))
+        need(t);
+  };
   while (head < tail) {
     const uint32_t s = ws.queue[head++];
-    for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r) {
-      const uint32_t to = lf.refTo[r];
-      if (ws.symStamp[to] == epoch)
-        continue;
-      const SymbolClass cls = lf.symClass[to];
-      if (cls == SymbolClass::Inline) {
+    for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
+      visit(lf.refTo[r]);
+    // A soft reference may be needed (an overload candidate, a call
+    // through a vtable slot): the closure takes its target when the
+    // provider defines it, so that what may move with the seeds is over-
+    // rather than undercounted. It adds no need: an inline body's soft
+    // references are the union of every TU's candidates.
+    for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r) {
+      const uint32_t to = lf.softTo[r];
+      if (ws.symStamp[to] != epoch &&
+          lf.symClass[to] == SymbolClass::Defined &&
+          lf.setHas(lf.symOwner[to], provider))
         admit(to);
-        continue;
-      }
-      ws.symStamp[to] = epoch;
-      if (cls == SymbolClass::Unattributed)
-        continue;
-      const uint32_t owner = lf.symOwner[to];
-      if (lf.setHas(owner, provider)) {
-        if (cls == SymbolClass::Defined) {
-          ws.symStamp[to] = 0; // admit stamps it
-          admit(to);
-        }
-        continue;
-      }
-      bool anyReachable = false;
-      for (uint32_t t : lf.targetsOf(owner))
-        anyReachable |= (providerReach[t >> 6] >> (t & 63)) & 1u;
-      for (uint32_t t : lf.targetsOf(owner))
-        if (!anyReachable || ((providerReach[t >> 6] >> (t & 63)) & 1u))
-          need(t);
     }
   }
   return out;
@@ -2135,6 +2512,112 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       row.dropEnd = static_cast<uint32_t>(audit.droppable.size());
     }
     audit.rowBegin[consumer + 1] = static_cast<uint32_t>(audit.rows.size());
+  }
+
+  // --- Phase D: which final link targets each split would help -----------
+  // A library's gain is what the library stops linking; what matters is
+  // whether anything that links it stops too. For each final link target
+  // that links the consumer, walk what it links with the edge replaced by
+  // the closure's needs; the consumer's droppable targets it no longer
+  // reaches are what it drops. Only a target whose declared reach holds
+  // the consumer is expanded; any other contributes its reach row whole.
+  {
+    std::vector<uint32_t> finals;
+    for (uint32_t t = 0; t < targetCount; ++t) {
+      const TargetKind k = map.kinds[t];
+      if (k == TargetKind::Executable || k == TargetKind::SharedLibrary ||
+          k == TargetKind::ModuleLibrary)
+        finals.push_back(t);
+    }
+    auto isReason = [](const AuditRow &r) {
+      return r.declared == DeclaredForm::Direct ||
+             r.symbols + r.uncertainSymbols != 0;
+    };
+    std::vector<uint64_t> seen(reach.words);
+    std::vector<uint32_t> stack;
+    std::vector<std::pair<uint64_t, uint32_t>> helped; // (symbols, target)
+    auto seenHas = [&](uint32_t t) {
+      return (seen[t >> 6] >> (t & 63)) & 1u;
+    };
+    for (AuditRow &row : audit.rows) {
+      row.helpedBegin = row.helpedEnd =
+          static_cast<uint32_t>(audit.helpedTarget.size());
+      if (row.dropBegin == row.dropEnd)
+        continue;
+      const uint32_t c = row.consumer;
+      // The consumer's reasons to link, with this edge cut and the
+      // closure's needs added.
+      auto pushReasons = [&](uint32_t t) {
+        const bool cut = t == c;
+        for (uint32_t i = audit.rowBegin[t]; i < audit.rowBegin[t + 1]; ++i) {
+          const AuditRow &r = audit.rows[i];
+          if (isReason(r) && !(cut && r.provider == row.provider))
+            stack.push_back(r.provider);
+        }
+        for (uint32_t d : map.interfaceDepsOf(t))
+          if (!(cut && d == row.provider))
+            stack.push_back(d);
+        if (cut)
+          for (uint32_t n = row.needBegin; n < row.needEnd; ++n)
+            stack.push_back(audit.needs[n]);
+      };
+      helped.clear();
+      for (uint32_t e : finals) {
+        bool links = e == c || reach.test(e, c);
+        for (uint32_t i = audit.rowBegin[e]; !links && i < audit.rowBegin[e + 1];
+             ++i)
+          links = audit.rows[i].provider == c && isReason(audit.rows[i]);
+        if (!links)
+          continue;
+        std::fill(seen.begin(), seen.end(), 0);
+        stack.clear();
+        pushReasons(e);
+        while (!stack.empty()) {
+          const uint32_t s = stack.back();
+          stack.pop_back();
+          if (seenHas(s))
+            continue;
+          seen[s >> 6] |= 1ull << (s & 63);
+          if (s == c) {
+            pushReasons(c);
+          } else if (reach.test(s, c)) {
+            for (uint32_t d : map.depsOf(s))
+              stack.push_back(d);
+            for (uint32_t d : map.interfaceDepsOf(s))
+              stack.push_back(d);
+          } else {
+            const uint64_t *r = reach.row(s);
+            for (uint32_t w = 0; w < reach.words; ++w)
+              seen[w] |= r[w];
+          }
+        }
+        uint64_t symbols = 0;
+        bool any = false;
+        for (uint32_t i = row.dropBegin; i < row.dropEnd; ++i) {
+          const uint32_t x = audit.droppable[i];
+          if (seenHas(x))
+            continue;
+          any = true;
+          symbols += audit.providerSymbols[x];
+          if (x == row.provider)
+            symbols -= row.closureSymbols;
+        }
+        if (any)
+          helped.emplace_back(symbols, e);
+      }
+      std::sort(helped.begin(), helped.end(),
+                [](const auto &a, const auto &b) {
+                  return a.first != b.first ? a.first > b.first
+                                            : a.second < b.second;
+                });
+      for (const auto &h : helped) {
+        audit.helpedTarget.push_back(h.second);
+        audit.helpedSymbols.push_back(h.first);
+      }
+      row.helpedEnd = static_cast<uint32_t>(audit.helpedTarget.size());
+      row.linkTargetsHelped = static_cast<uint32_t>(helped.size());
+      row.linkTargetGain = helped.empty() ? 0 : helped.front().first;
+    }
   }
   return audit;
 }

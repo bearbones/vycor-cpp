@@ -20,6 +20,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ControlFlowOracle.h"
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/deps/DependencyAudit.h"
 #include "vycor/deps/TargetMap.h"
@@ -351,6 +352,263 @@ std::vector<std::string> findingIds(const llvm::json::Object &edge) {
     out.push_back(f.getAsObject()->getString("id")->str());
   return out;
 }
+
+// ---- a hand-built reference index -------------------------------------------
+
+// Six targets under /q. `half` has a source the index never parsed, so it is
+// not covered; `plug/plug.h` is opened by app and plug, so no target owns it
+// outright.
+const char *const kRefMap = R"({
+  "schema": 1, "generator": "test", "depsForm": "direct", "root": "/q",
+  "targets": [
+    {"name": "app", "kind": "executable", "sources": ["app/main.cpp"],
+     "deps": ["core", "extra", "plug"]},
+    {"name": "base", "kind": "static_library", "sources": ["base/x.cpp"],
+     "headers": ["base/base.h"]},
+    {"name": "core", "kind": "static_library",
+     "sources": ["core/a.cpp", "core/b.cpp"], "headers": ["core/core.h"],
+     "deps": ["base"]},
+    {"name": "extra", "kind": "static_library", "sources": ["extra/e.cpp"]},
+    {"name": "half", "kind": "static_library",
+     "sources": ["half/h1.cpp", "half/h2.cpp"], "headers": ["half/half.h"]},
+    {"name": "plug", "kind": "static_library", "sources": ["plug/p.cpp"],
+     "deps": ["core"]}
+  ]})";
+
+enum : uint32_t { rApp = 0, rBase = 1, rCore = 2, rExtra = 3, rHalf = 4,
+                  rPlug = 5 };
+
+const std::vector<TuSpec> kRefTus = {
+    {"/q/app/main.cpp",
+     {"/q/core/core.h", "/q/base/base.h", "/q/half/half.h", "/q/plug/plug.h"}},
+    {"/q/base/x.cpp", {"/q/base/base.h"}},
+    {"/q/core/a.cpp", {"/q/core/core.h", "/q/base/base.h"}},
+    {"/q/core/b.cpp", {"/q/core/core.h"}},
+    {"/q/extra/e.cpp", {}},
+    {"/q/half/h1.cpp", {"/q/half/half.h"}},
+    {"/q/plug/p.cpp", {"/q/plug/plug.h", "/q/core/core.h"}},
+};
+
+constexpr uint32_t kD = kSymDefinition;
+constexpr uint32_t kH = kSymInHeader;
+const char *const kLambdaUsr = "c:main.cpp@F@main@Sa@F@operator()#1";
+
+struct RefSymSpec {
+  const char *usr;
+  const char *name;
+  const char *file;
+  uint32_t line;
+  SymbolKind kind;
+  LinkageClass linkage;
+  uint32_t flags;
+  std::vector<const char *> tus;
+};
+
+struct RefSpec {
+  const char *from;
+  const char *to;
+  RefRole role;
+  const char *file;
+  uint32_t line, col;
+  std::vector<const char *> tus;
+};
+
+constexpr SymbolKind kFn = SymbolKind::Function;
+constexpr SymbolKind kVar = SymbolKind::Variable;
+constexpr LinkageClass kExt = LinkageClass::External;
+constexpr LinkageClass kVague = LinkageClass::Vague;
+
+// app:   main calls core_fn, the inline core_inline, gone_fn (declared in
+//        core.h, defined nowhere), half_fn (declared in half.h; half is not
+//        covered), plug_init; constructs a Shape and calls its virtual area;
+//        its lambda calls core_cb.
+// core:  core_fn calls core_helper and reads g_table; core_other calls
+//        core_helper too; core_inline (in core.h) calls base_fn; Shape's
+//        vtable is homed in b.cpp.
+// plug:  plug_init takes the address of the factory template make_plugin.
+// extra: nothing app uses; extra_reg is a static initializer.
+const std::vector<RefSymSpec> kRefSyms = {
+    {"c:@F@main", "main", "/q/app/main.cpp", 5, kFn, kExt, kD | kSymMain,
+     {"/q/app/main.cpp"}},
+    {kLambdaUsr, "main()::(lambda)::operator()", "/q/app/main.cpp", 7, kFn,
+     LinkageClass::Internal, kD | kSymLambda, {"/q/app/main.cpp"}},
+    {"c:@F@core_fn", "core_fn", "/q/core/core.h", 3, kFn, kExt, kH,
+     {"/q/app/main.cpp", "/q/core/a.cpp"}},
+    {"c:@F@core_fn", "core_fn", "/q/core/a.cpp", 3, kFn, kExt, kD,
+     {"/q/core/a.cpp"}},
+    {"c:@F@core_helper", "core_helper", "/q/core/core.h", 4, kFn, kExt, kH,
+     {"/q/core/a.cpp"}},
+    {"c:@F@core_helper", "core_helper", "/q/core/b.cpp", 2, kFn, kExt, kD,
+     {"/q/core/b.cpp"}},
+    {"c:@F@core_other", "core_other", "/q/core/a.cpp", 10, kFn, kExt, kD,
+     {"/q/core/a.cpp"}},
+    {"c:@F@core_cb", "core_cb", "/q/core/core.h", 5, kFn, kExt, kH,
+     {"/q/app/main.cpp"}},
+    {"c:@F@core_cb", "core_cb", "/q/core/a.cpp", 12, kFn, kExt, kD,
+     {"/q/core/a.cpp"}},
+    {"c:@g_table", "g_table", "/q/core/core.h", 6, kVar, kExt, kH,
+     {"/q/core/a.cpp"}},
+    {"c:@g_table", "g_table", "/q/core/b.cpp", 1, kVar, kExt, kD,
+     {"/q/core/b.cpp"}},
+    {"c:@F@core_inline", "core_inline", "/q/core/core.h", 8, kFn, kVague,
+     kD | kH, {"/q/app/main.cpp", "/q/core/a.cpp"}},
+    {"c:@F@gone_fn", "gone_fn", "/q/core/core.h", 9, kFn, kExt, kH,
+     {"/q/app/main.cpp"}},
+    {"c:@S@Shape", "Shape", "/q/core/core.h", 12, SymbolKind::Class, kExt,
+     kD | kH | kSymDynamicClass, {"/q/app/main.cpp"}},
+    {"c:@S@Shape", "Shape", "/q/core/core.h", 12, SymbolKind::Class, kExt,
+     kD | kH | kSymDynamicClass | kSymVtableHome, {"/q/core/b.cpp"}},
+    {"c:@S@Shape@F@area#", "Shape::area", "/q/core/core.h", 13, kFn, kExt,
+     kH | kSymVirtual | kSymMember, {"/q/app/main.cpp"}},
+    {"c:@S@Shape@F@area#", "Shape::area", "/q/core/b.cpp", 5, kFn, kExt,
+     kD | kSymVirtual | kSymMember, {"/q/core/b.cpp"}},
+    {"c:@F@base_fn", "base_fn", "/q/base/base.h", 2, kFn, kExt, kH,
+     {"/q/core/a.cpp"}},
+    {"c:@F@base_fn", "base_fn", "/q/base/x.cpp", 2, kFn, kExt, kD,
+     {"/q/base/x.cpp"}},
+    {"c:@F@half_fn", "half_fn", "/q/half/half.h", 2, kFn, kExt, kH,
+     {"/q/app/main.cpp"}},
+    {"c:@F@extra_fn", "extra_fn", "/q/extra/e.cpp", 1, kFn, kExt, kD,
+     {"/q/extra/e.cpp"}},
+    {"c:@extra_reg", "extra_reg", "/q/extra/e.cpp", 5, kVar, kExt, kD,
+     {"/q/extra/e.cpp"}},
+    {"c:@F@plug_init", "plug_init", "/q/plug/plug.h", 2, kFn, kExt, kH,
+     {"/q/app/main.cpp", "/q/plug/p.cpp"}},
+    {"c:@F@plug_init", "plug_init", "/q/plug/p.cpp", 3, kFn, kExt, kD,
+     {"/q/plug/p.cpp"}},
+    {"c:@FT@>1#Tmake_plugin#v#", "make_plugin", "/q/plug/plug.h", 4, kFn,
+     kVague, kD | kH, {"/q/plug/p.cpp"}},
+    {"c:@F@plug_fn", "plug_fn", "/q/plug/plug.h", 3, kFn, kExt, kH,
+     {"/q/app/main.cpp", "/q/plug/p.cpp"}},
+    {"c:@F@plug_fn", "plug_fn", "/q/plug/p.cpp", 8, kFn, kExt, kD,
+     {"/q/plug/p.cpp"}},
+    {"c:plug.h@file", "plug.h", "/q/plug/plug.h", 0, SymbolKind::File,
+     LinkageClass::None, kH, {"/q/app/main.cpp", "/q/plug/p.cpp"}},
+};
+
+const std::vector<RefSpec> kRefRefs = {
+    {"c:@F@main", "c:@F@core_fn", RefRole::Call, "/q/app/main.cpp", 6, 3,
+     {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@F@core_inline", RefRole::Call, "/q/app/main.cpp", 7, 3,
+     {"/q/app/main.cpp"}},
+    {kLambdaUsr, "c:@F@core_cb", RefRole::Call, "/q/app/main.cpp", 7, 20,
+     {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@F@gone_fn", RefRole::Call, "/q/app/main.cpp", 8, 3,
+     {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@S@Shape", RefRole::VtableUse, "/q/app/main.cpp", 9, 3,
+     {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@S@Shape@F@area#", RefRole::Call, "/q/app/main.cpp", 10,
+     3, {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@F@half_fn", RefRole::Call, "/q/app/main.cpp", 11, 3,
+     {"/q/app/main.cpp"}},
+    {"c:@F@main", "c:@F@plug_init", RefRole::Call, "/q/app/main.cpp", 12, 3,
+     {"/q/app/main.cpp"}},
+    {"c:@F@core_inline", "c:@F@base_fn", RefRole::Call, "/q/core/core.h", 8,
+     20, {"/q/app/main.cpp", "/q/core/a.cpp"}},
+    {"c:@F@core_fn", "c:@F@core_helper", RefRole::Call, "/q/core/a.cpp", 4, 3,
+     {"/q/core/a.cpp"}},
+    {"c:@F@core_fn", "c:@g_table", RefRole::Read, "/q/core/a.cpp", 4, 20,
+     {"/q/core/a.cpp"}},
+    {"c:@F@core_other", "c:@F@core_helper", RefRole::Call, "/q/core/a.cpp",
+     11, 3, {"/q/core/a.cpp"}},
+    {"c:@extra_reg", "c:@F@extra_fn", RefRole::Call, "/q/extra/e.cpp", 5, 20,
+     {"/q/extra/e.cpp"}},
+    {"c:@F@plug_init", "c:@FT@>1#Tmake_plugin#v#", RefRole::AddressOf,
+     "/q/plug/p.cpp", 4, 3, {"/q/plug/p.cpp"}},
+    {"c:plug.h@file", "c:@F@plug_fn", RefRole::Read, "/q/plug/plug.h", 6, 1,
+     {"/q/app/main.cpp", "/q/plug/p.cpp"}},
+};
+
+void fillRefs(ReferenceIndex &refs, bool reversed = false) {
+  std::vector<RefSymSpec> syms = kRefSyms;
+  std::vector<RefSpec> uses = kRefRefs;
+  if (reversed) {
+    std::reverse(syms.begin(), syms.end());
+    std::reverse(uses.begin(), uses.end());
+  }
+  for (const RefSymSpec &s : syms) {
+    SymbolFact f;
+    f.usr = s.usr;
+    f.name = s.name;
+    f.file = s.file;
+    f.line = s.line;
+    f.kind = s.kind;
+    f.linkage = s.linkage;
+    f.flags = s.flags;
+    for (const char *tu : s.tus)
+      refs.addSymbol(f, tu);
+  }
+  for (const RefSpec &u : uses) {
+    ReferenceFact r;
+    r.referrerUsr = u.from;
+    r.targetUsr = u.to;
+    r.role = u.role;
+    r.file = u.file;
+    r.line = u.line;
+    r.col = u.col;
+    for (const char *tu : u.tus)
+      refs.addReference(r, tu);
+  }
+}
+
+TargetMap refMap() {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(kRefMap, map, error, "/q"));
+  return map;
+}
+
+/// The reference fixture analysed whole.
+struct RefAnalysed {
+  ReferenceIndex refs;
+  CallGraph graph;
+  TargetMap map = refMap();
+  SnapshotMeta meta = metaOf(kRefTus);
+  LinkFacts facts;
+  DependencyAudit audit;
+
+  explicit RefAnalysed(bool withGraph = false) {
+    fillRefs(refs);
+    facts = linkFactsFromReferences(refs, withGraph ? &graph : nullptr, map,
+                                    &meta);
+    audit = auditDependencies(facts, map);
+  }
+  void rerun() {
+    facts = linkFactsFromReferences(refs, &graph, map, &meta);
+    audit = auditDependencies(facts, map);
+  }
+};
+
+struct RefToolFixture {
+  ReferenceIndex refs;
+  CallGraph graph;
+  ControlFlowIndex cf;
+  ControlFlowOracle oracle;
+  std::vector<std::string> entryPoints{"main"};
+  QueryCache cache;
+  SnapshotMeta meta = metaOf(kRefTus);
+  std::vector<ToolEntry> tools = getRegisteredTools();
+  ToolContext ctx;
+  MapFile mapFile{kRefMap};
+
+  explicit RefToolFixture(bool reversed = false)
+      : oracle(graph, cf), ctx{graph, oracle, cf, entryPoints, nullptr, &cache} {
+    fillRefs(refs, reversed);
+    ctx.meta = &meta;
+    ctx.references = &refs;
+    ctx.facts = IndexFacts::of(meta, IndexFreshness::Unchecked);
+  }
+
+  llvm::json::Object run(llvm::StringRef tool,
+                         std::initializer_list<llvm::json::Object::KV> kvs) {
+    llvm::json::Object args(kvs);
+    args["target_map"] = mapFile.path.str().str();
+    llvm::json::Value v = runTool(toolNamed(tools, tool), args, ctx);
+    const auto *obj = v.getAsObject();
+    REQUIRE(obj != nullptr);
+    return *obj;
+  }
+};
 
 } // namespace
 
@@ -1469,4 +1727,487 @@ TEST_CASE("dependency audit: a changed map file is read again",
   auto out = fx.run("audit_dependencies", {});
   CHECK(out.getObject("targetMap")->getInteger("targets") == 2);
   CHECK(out.getInteger("total") == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Link facts from reference facts
+// ---------------------------------------------------------------------------
+
+TEST_CASE("dependency audit from references: a symbol belongs to the targets "
+          "of its strong definition",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const LinkFacts &lf = a.facts;
+  CHECK(llvm::StringRef(lf.edgeSource) == "references");
+  CHECK(classOf(lf, "c:@F@core_fn") == SymbolClass::Defined);
+  CHECK(ownersOf(lf, "c:@F@core_fn") == std::vector<uint32_t>{rCore});
+  CHECK(classOf(lf, "c:@F@base_fn") == SymbolClass::Defined);
+  CHECK(ownersOf(lf, "c:@F@base_fn") == std::vector<uint32_t>{rBase});
+  // A variable is a symbol like a function.
+  CHECK(classOf(lf, "c:@g_table") == SymbolClass::Defined);
+  CHECK(lf.symKind[symbolNamed(lf, "c:@g_table")] ==
+        static_cast<uint8_t>(SymbolKind::Variable));
+  // The declaration shown is the header's, not the definition.
+  const uint32_t fn = symbolNamed(lf, "c:@F@core_fn");
+  REQUIRE(lf.symDeclFile[fn] != kNoIndex);
+  CHECK(lf.files[lf.symDeclFile[fn]] == "/q/core/core.h");
+  CHECK(lf.symDeclLine[fn] == 3);
+  CHECK(lf.files[lf.symFile[fn]] == "/q/core/a.cpp");
+  // Vague linkage and template patterns travel with whoever includes them.
+  CHECK(classOf(lf, "c:@F@core_inline") == SymbolClass::Inline);
+  CHECK(ownersOf(lf, "c:@F@core_inline") == std::vector<uint32_t>{rCore});
+  CHECK(classOf(lf, "c:@FT@>1#Tmake_plugin#v#") == SymbolClass::Inline);
+  CHECK(classOf(lf, kLambdaUsr) == SymbolClass::Inline);
+  // A class is defined where its vtable is.
+  CHECK(classOf(lf, "c:@S@Shape") == SymbolClass::Defined);
+  CHECK(ownersOf(lf, "c:@S@Shape") == std::vector<uint32_t>{rCore});
+  CHECK(lf.files[lf.symFile[symbolNamed(lf, "c:@S@Shape")]] ==
+        "/q/core/b.cpp");
+  CHECK(classOf(lf, "c:plug.h@file") == SymbolClass::Unattributed);
+  // plug.h is shared, and plug defines what it declares.
+  CHECK(classOf(lf, "c:@F@plug_fn") == SymbolClass::Defined);
+}
+
+TEST_CASE("dependency audit from references: an undefined symbol is presumed "
+          "only when its owner is not fully indexed",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const LinkFacts &lf = a.facts;
+  // half has a source the index never parsed: the definition may be there.
+  CHECK(classOf(lf, "c:@F@half_fn") == SymbolClass::Presumed);
+  CHECK(ownersOf(lf, "c:@F@half_fn") == std::vector<uint32_t>{rHalf});
+  // core is fully indexed and defines no gone_fn: nobody provides it.
+  CHECK(classOf(lf, "c:@F@gone_fn") == SymbolClass::Unattributed);
+  CHECK(lf.counts.presumed == 1);
+  CHECK(lf.counts.undefinedInCoveredOwner == 1);
+  const AuditRow &half = rowOf(a.audit, rApp, rHalf);
+  CHECK(half.symbols == 0);
+  CHECK(half.uncertainSymbols == 1);
+  CHECK(half.declared == DeclaredForm::None);
+}
+
+TEST_CASE("dependency audit from references: vtables, virtual calls, lambdas "
+          "and file scopes",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const LinkFacts &lf = a.facts;
+  // The vtable holds the virtual function: constructing a Shape needs area.
+  CHECK(lf.counts.vtableEntryRefs == 1);
+  // Without a call graph every call of a virtual function is dispatched.
+  CHECK(lf.counts.skippedVirtualCalls == 1);
+  // A file-scope reference in a header two targets include, recorded once
+  // for both, belongs to neither.
+  CHECK(lf.counts.fileScopeDropped == 1);
+
+  const AuditRow &core = rowOf(a.audit, rApp, rCore);
+  // core_fn and the Shape vtable directly, core_cb through the lambda.
+  CHECK(seedNames(lf, a.audit, core) ==
+        std::vector<std::string>{"c:@F@core_fn", "c:@F@core_cb",
+                                 "c:@S@Shape"});
+  CHECK(core.symbols == 3);
+  CHECK(core.viaInline == 0);
+  // The seeds, core_helper, g_table and Shape::area.
+  CHECK(core.closureSymbols == 6);
+  CHECK(core.closureFiles == 2);
+  // core_other also calls core_helper: extracting the closure keeps an edge
+  // from what stays in core.
+  CHECK(core.closureFanIn == 1);
+  CHECK(core.closureFanInFiles == 1);
+  std::vector<uint32_t> fanIn;
+  closureFanInOf(lf, a.audit, core, fanIn);
+  REQUIRE(fanIn.size() == 1);
+  CHECK(lf.strings->resolve(lf.symUsr[fanIn[0]]) == "c:@F@core_other");
+  // The dispatched call and the inline body are indirect uses of core.
+  CHECK(core.indirectUses == 2);
+  // plug's file scope reference never reaches app.
+  const AuditRow &plug = rowOf(a.audit, rApp, rPlug);
+  CHECK(seedNames(lf, a.audit, plug) ==
+        std::vector<std::string>{"c:@F@plug_init"});
+}
+
+TEST_CASE("dependency audit from references: the call graph binds virtual "
+          "calls and names bases and lambda callers",
+          "[dependency-audit]") {
+  RefAnalysed a(/*withGraph=*/true);
+  // A statically bound call of area: a hard reference.
+  a.graph.addNode({"main", "/q/app/main.cpp", 5, false, false, "",
+                   "c:@F@main"});
+  a.graph.addNode({"Shape::area", "/q/core/b.cpp", 5, true, false, "Shape",
+                   "c:@S@Shape@F@area#"});
+  a.graph.addEdge({"c:@F@main", "c:@S@Shape@F@area#", EdgeKind::VirtualDispatch,
+                   Confidence::Proven, "/q/app/main.cpp:10:3", 0,
+                   ExecutionContext::Synchronous},
+                  "/q/app/main.cpp");
+  // A derived class: its vtable needs the base's.
+  SymbolFact circle;
+  circle.usr = "c:@S@Circle";
+  circle.name = "Circle";
+  circle.file = "/q/core/b.cpp";
+  circle.line = 20;
+  circle.kind = SymbolKind::Class;
+  circle.flags = kD | kSymDynamicClass | kSymVtableHome;
+  a.refs.addSymbol(circle, "/q/core/b.cpp");
+  a.graph.addDerivedClass("Shape", "Circle", "/q/core/b.cpp");
+  // The lambda's caller, from the call graph.
+  a.graph.addEdge({"c:@F@main", kLambdaUsr, EdgeKind::DirectCall,
+                   Confidence::Proven, "/q/app/main.cpp:7:30", 0,
+                   ExecutionContext::Synchronous},
+                  "/q/app/main.cpp");
+  a.rerun();
+  const LinkFacts &lf = a.facts;
+  CHECK(lf.counts.skippedVirtualCalls == 0);
+  CHECK(lf.counts.baseClassRefs == 1);
+  const AuditRow &core = rowOf(a.audit, rApp, rCore);
+  CHECK(seedNames(lf, a.audit, core) ==
+        std::vector<std::string>{"c:@F@core_fn", "c:@F@core_cb",
+                                 "c:@S@Shape", "c:@S@Shape@F@area#"});
+  // main carries its lambda: one more reference from main.
+  const uint32_t mainSym = symbolNamed(lf, "c:@F@main");
+  bool enclosed = false;
+  for (uint32_t r = lf.refBegin[mainSym]; r < lf.refBegin[mainSym + 1]; ++r)
+    enclosed |= lf.strings->resolve(lf.symUsr[lf.refTo[r]]) == kLambdaUsr &&
+                std::string(lf.refKindName(lf.refKind[r])) == "enclosed_lambda";
+  CHECK(enclosed);
+  // Circle overrides nothing: its vtable holds Shape::area.
+  CHECK(lf.counts.inheritedVirtualRefs == 1);
+  const uint32_t circleSym = symbolNamed(lf, "c:@S@Circle");
+  std::vector<std::string> circleRefs;
+  for (uint32_t r = lf.refBegin[circleSym]; r < lf.refBegin[circleSym + 1]; ++r)
+    circleRefs.push_back(std::string(lf.refKindName(lf.refKind[r])) + " " +
+                         lf.strings->resolve(lf.symUsr[lf.refTo[r]]));
+  // And constructing a Circle constructs a Shape: its vtable.
+  CHECK(circleRefs ==
+        std::vector<std::string>{"inherited_virtual c:@S@Shape@F@area#",
+                                 "base_class c:@S@Shape"});
+}
+
+TEST_CASE("dependency audit from references: a dependency reached only "
+          "through a declared target's inline body says whose",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const LinkFacts &lf = a.facts;
+  const AuditRow &base = rowOf(a.audit, rApp, rBase);
+  CHECK(base.declared == DeclaredForm::Transitive);
+  CHECK(base.symbols == 1);
+  CHECK(base.viaInline == 1);
+  REQUIRE(base.throughInlineRef != kNoIndex);
+  CHECK(lf.strings->resolve(lf.symUsr[lf.refTo[base.throughInlineRef]]) ==
+        "c:@F@core_inline");
+  // A direct reference has no such excuse.
+  CHECK(rowOf(a.audit, rApp, rCore).throughInlineRef == kNoIndex);
+}
+
+TEST_CASE("dependency audit from references: registration and static "
+          "initializers are marked",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const LinkFacts &lf = a.facts;
+  CHECK((lf.symFlags[symbolNamed(lf, "c:@F@plug_init")] & kSymFlagRegisters) !=
+        0);
+  CHECK((lf.symFlags[symbolNamed(lf, "c:@F@plug_fn")] & kSymFlagRegisters) ==
+        0);
+  CHECK((lf.symFlags[symbolNamed(lf, "c:@extra_reg")] & kSymFlagStaticInit) !=
+        0);
+  CHECK((lf.symFlags[symbolNamed(lf, "c:@g_table")] & kSymFlagStaticInit) ==
+        0);
+  const AuditRow &plug = rowOf(a.audit, rApp, rPlug);
+  CHECK(plug.symbols == 1);
+  CHECK(plug.registrationSeeds == 1);
+  CHECK(a.audit.providerStaticInits[rExtra] == 1);
+  CHECK(a.audit.providerStaticInits[rCore] == 0);
+}
+
+namespace {
+
+void addSym(ReferenceIndex &refs, const char *usr, const char *name,
+            const char *file, uint32_t line, uint32_t flags,
+            std::initializer_list<const char *> tus,
+            SymbolKind kind = SymbolKind::Function,
+            LinkageClass linkage = LinkageClass::External) {
+  SymbolFact f;
+  f.usr = usr;
+  f.name = name;
+  f.file = file;
+  f.line = line;
+  f.kind = kind;
+  f.linkage = linkage;
+  f.flags = flags;
+  for (const char *tu : tus)
+    refs.addSymbol(f, tu);
+}
+
+void addRef(ReferenceIndex &refs, const char *from, const char *to,
+            RefRole role, const char *file, uint32_t line, uint32_t col,
+            const char *tu) {
+  ReferenceFact r;
+  r.referrerUsr = from;
+  r.targetUsr = to;
+  r.role = role;
+  r.file = file;
+  r.line = line;
+  r.col = col;
+  refs.addReference(r, tu);
+}
+
+std::vector<std::string> needNames(const TargetMap &map,
+                                   const DependencyAudit &audit,
+                                   const AuditRow &row) {
+  std::vector<std::string> out;
+  for (uint32_t i = row.needBegin; i < row.needEnd; ++i)
+    out.push_back(map.names[audit.needs[i]]);
+  return out;
+}
+
+} // namespace
+
+TEST_CASE("dependency audit from references: overload candidates are "
+          "indirect uses the closure still takes",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  const char *main = "/q/app/main.cpp", *coreA = "/q/core/a.cpp";
+  // Two overloads of pick in core and one in base.
+  for (const char *usr : {"c:@F@pick#I#", "c:@F@pick#d#"}) {
+    addSym(a.refs, usr, "pick", "/q/core/core.h", 20, kH, {main, coreA});
+    addSym(a.refs, usr, "pick", coreA, 20, kD, {coreA});
+  }
+  addSym(a.refs, "c:@F@pick#f#", "pick", "/q/base/base.h", 3, kH, {coreA});
+  addSym(a.refs, "c:@F@pick#f#", "pick", "/q/base/x.cpp", 3, kD,
+         {"/q/base/x.cpp"});
+  // A macro expansion: two differently named symbols at one site.
+  for (const char *usr : {"c:@F@mac_a", "c:@F@mac_b"}) {
+    addSym(a.refs, usr, usr + 4, "/q/core/core.h", 21, kH, {main});
+    addSym(a.refs, usr, usr + 4, coreA, 21, kD, {coreA});
+  }
+  // main: an open overload set at 20:5, the macro's two calls at 21:1.
+  addRef(a.refs, "c:@F@main", "c:@F@pick#I#", RefRole::Call, main, 20, 5,
+         main);
+  addRef(a.refs, "c:@F@main", "c:@F@pick#d#", RefRole::Call, main, 20, 5,
+         main);
+  addRef(a.refs, "c:@F@main", "c:@F@mac_a", RefRole::Call, main, 21, 1, main);
+  addRef(a.refs, "c:@F@main", "c:@F@mac_b", RefRole::Call, main, 21, 1, main);
+  // core_fn's own open set names candidates in core and in base.
+  for (const char *usr : {"c:@F@pick#I#", "c:@F@pick#d#", "c:@F@pick#f#"})
+    addRef(a.refs, "c:@F@core_fn", usr, RefRole::Call, coreA, 30, 3, coreA);
+  a.rerun();
+  const LinkFacts &lf = a.facts;
+  CHECK(lf.counts.overloadCandidateRefs == 5);
+
+  const AuditRow &core = rowOf(a.audit, rApp, rCore);
+  // The macro's calls are seeds; the candidates are not.
+  CHECK(seedNames(lf, a.audit, core) ==
+        std::vector<std::string>{"c:@F@core_fn", "c:@F@core_cb",
+                                 "c:@S@Shape", "c:@F@mac_a", "c:@F@mac_b"});
+  // Two more indirect uses: main's candidates.
+  CHECK(core.indirectUses == 4);
+  // The closure takes the candidates core defines (6 + mac_a, mac_b, the
+  // two picks), and base's candidate adds no need.
+  CHECK(core.closureSymbols == 10);
+  CHECK(needNames(a.map, a.audit, core).empty());
+}
+
+TEST_CASE("dependency audit from references: a symbol two targets define is "
+          "charged to the target of the reference's site",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  // dup has a body in extra and in plug (one USR, as every tool's main).
+  addSym(a.refs, "c:@F@dup", "dup", "/q/extra/e.cpp", 9, kD,
+         {"/q/extra/e.cpp"});
+  addSym(a.refs, "c:@F@dup", "dup", "/q/plug/p.cpp", 9, kD, {"/q/plug/p.cpp"});
+  addSym(a.refs, "c:@F@base_fn", "base_fn", "/q/base/base.h", 2, kH,
+         {"/q/extra/e.cpp"});
+  addRef(a.refs, "c:@F@dup", "c:@F@base_fn", RefRole::Call, "/q/extra/e.cpp",
+         10, 3, "/q/extra/e.cpp");
+  a.rerun();
+  CHECK(ownersOf(a.facts, "c:@F@dup") ==
+        std::vector<uint32_t>{rExtra, rPlug});
+  CHECK(a.facts.counts.siteAnchoredRefs == 1);
+  CHECK(rowOf(a.audit, rExtra, rBase).symbols == 1);
+  const uint32_t plugBase = a.audit.find(rPlug, rBase);
+  CHECK((plugBase == kNoIndex || a.audit.rows[plugBase].symbols == 0));
+}
+
+TEST_CASE("dependency audit from references: a weak definition in a header "
+          "is held by every target that includes it",
+          "[dependency-audit]") {
+  RefAnalysed a;
+  addSym(a.refs, "c:@F@weak_hook", "weak_hook", "/q/core/core.h", 30,
+         kD | kH | kSymWeak, {"/q/app/main.cpp", "/q/core/a.cpp"},
+         SymbolKind::Function, kVague);
+  addRef(a.refs, "c:@F@weak_hook", "c:@F@extra_fn", RefRole::Call,
+         "/q/core/core.h", 31, 3, "/q/core/a.cpp");
+  a.rerun();
+  CHECK(a.facts.counts.emittedDefinitions == 1);
+  // core.h is opened by app, core and plug: each emits the definition.
+  CHECK(rowOf(a.audit, rApp, rExtra).symbols == 1);
+  CHECK(rowOf(a.audit, rCore, rExtra).symbols == 1);
+  CHECK(rowOf(a.audit, rPlug, rExtra).symbols == 1);
+}
+
+TEST_CASE("dependency audit from references: an override keeps the base's "
+          "virtual out of the derived vtable",
+          "[dependency-audit]") {
+  RefAnalysed a(/*withGraph=*/true);
+  addSym(a.refs, "c:@S@Square", "Square", "/q/core/b.cpp", 30,
+         kD | kSymDynamicClass | kSymVtableHome, {"/q/core/b.cpp"},
+         SymbolKind::Class);
+  addSym(a.refs, "c:@S@Square@F@area#", "Square::area", "/q/core/b.cpp", 31,
+         kD | kSymVirtual | kSymMember, {"/q/core/b.cpp"});
+  a.graph.addDerivedClass("Shape", "Square", "/q/core/b.cpp");
+  a.rerun();
+  const LinkFacts &lf = a.facts;
+  CHECK(lf.counts.baseClassRefs == 1);
+  CHECK(lf.counts.inheritedVirtualRefs == 0);
+  const uint32_t square = symbolNamed(lf, "c:@S@Square");
+  std::vector<std::string> refs;
+  for (uint32_t r = lf.refBegin[square]; r < lf.refBegin[square + 1]; ++r)
+    refs.push_back(std::string(lf.refKindName(lf.refKind[r])) + " " +
+                   lf.strings->resolve(lf.symUsr[lf.refTo[r]]));
+  CHECK(refs == std::vector<std::string>{"base_class c:@S@Shape",
+                                         "vtable_entry c:@S@Square@F@area#"});
+}
+
+TEST_CASE("dependency audit from references: a split helps the executables "
+          "that link the provider only through the edge",
+          "[dependency-audit]") {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "big", "kind": "static_library",
+       "sources": ["big/b1.cpp", "big/b2.cpp"]},
+      {"name": "exe1", "kind": "executable", "sources": ["exe1/m.cpp"],
+       "deps": ["lib"]},
+      {"name": "exe2", "kind": "executable", "sources": ["exe2/m.cpp"],
+       "deps": ["big", "lib"]},
+      {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"],
+       "deps": ["big"]}]})",
+                   map, error, "/r"));
+  enum : uint32_t { tBig = 0, tExe1 = 1, tExe2 = 2, tLib = 3 };
+  SnapshotMeta meta = metaOf({{"/r/big/b1.cpp", {}},
+                              {"/r/big/b2.cpp", {}},
+                              {"/r/exe1/m.cpp", {}},
+                              {"/r/exe2/m.cpp", {}},
+                              {"/r/lib/l.cpp", {}}});
+  ReferenceIndex refs;
+  addSym(refs, "c:@F@big_a", "big_a", "/r/big/b1.cpp", 1, kD, {"/r/big/b1.cpp"});
+  addSym(refs, "c:@F@big_b", "big_b", "/r/big/b1.cpp", 2, kD, {"/r/big/b1.cpp"});
+  addSym(refs, "c:@F@big_c", "big_c", "/r/big/b2.cpp", 1, kD, {"/r/big/b2.cpp"});
+  addSym(refs, "c:@F@lib_fn", "lib_fn", "/r/lib/l.cpp", 1, kD, {"/r/lib/l.cpp"});
+  addSym(refs, "c:@F@m1", "m1", "/r/exe1/m.cpp", 1, kD, {"/r/exe1/m.cpp"});
+  addSym(refs, "c:@F@m2", "m2", "/r/exe2/m.cpp", 1, kD, {"/r/exe2/m.cpp"});
+  addRef(refs, "c:@F@lib_fn", "c:@F@big_a", RefRole::Call, "/r/lib/l.cpp", 2,
+         3, "/r/lib/l.cpp");
+  addRef(refs, "c:@F@m1", "c:@F@lib_fn", RefRole::Call, "/r/exe1/m.cpp", 2, 3,
+         "/r/exe1/m.cpp");
+  addRef(refs, "c:@F@m2", "c:@F@lib_fn", RefRole::Call, "/r/exe2/m.cpp", 2, 3,
+         "/r/exe2/m.cpp");
+  addRef(refs, "c:@F@m2", "c:@F@big_c", RefRole::Call, "/r/exe2/m.cpp", 3, 3,
+         "/r/exe2/m.cpp");
+  const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+  const DependencyAudit audit = auditDependencies(lf, map);
+
+  // lib uses one function of big: big less the closure is lib's gain.
+  const AuditRow &row = rowOf(audit, tLib, tBig);
+  CHECK(row.closureSymbols == 1);
+  CHECK(row.droppableSymbols == 2);
+  // exe1 links big only through lib; exe2 calls big itself.
+  CHECK(row.linkTargetsHelped == 1);
+  CHECK(row.linkTargetGain == 2);
+  REQUIRE(row.helpedEnd - row.helpedBegin == 1);
+  CHECK(audit.helpedTarget[row.helpedBegin] == tExe1);
+  CHECK(audit.helpedSymbols[row.helpedBegin] == 2);
+
+  // A library edge no executable gains from: exe2 → lib's closure needs
+  // big, which exe2 links anyway; exe2 itself still drops lib.
+  const AuditRow &exe2 = rowOf(audit, tExe2, tLib);
+  CHECK(exe2.linkTargetsHelped == 1);
+  CHECK(exe2.linkTargetGain == 0);
+  // exe1 does not declare big: there is no edge to split.
+  CHECK(audit.find(tExe1, tBig) == kNoIndex);
+}
+
+TEST_CASE("audit_dependencies from references: payload members",
+          "[dependency-audit]") {
+  RefToolFixture fx;
+  auto out = fx.run("audit_dependencies", {});
+  CHECK(out.getString("status") == "ok");
+  const auto *c = out.getObject("completeness");
+  REQUIRE(c != nullptr);
+  CHECK(c->getString("edgeSource") == "references");
+  CHECK(c->getObject("references")->getInteger("fileScopeDropped") == 1);
+  CHECK(c->getObject("references")->getInteger("vtableEntries") == 1);
+  CHECK(c->getObject("symbols")->getInteger("undefinedInCoveredOwner") == 1);
+
+  // extra is linked for nothing app references, but has a static
+  // initializer: the finding says so.
+  const auto *extra = edgeOf(out, "app", "extra");
+  REQUIRE(extra != nullptr);
+  CHECK(findingIds(*extra) ==
+        std::vector<std::string>{"unused-link-dependency"});
+  CHECK((*extra->getArray("findings"))[0].getAsObject()->getInteger(
+            "providerStaticInits") == 1);
+  CHECK(extra->getInteger("providerStaticInits") == 1);
+
+  const auto *base = edgeOf(out, "app", "base");
+  REQUIRE(base != nullptr);
+  CHECK(findingIds(*base) ==
+        std::vector<std::string>{"undeclared-link-dependency"});
+  const auto *through =
+      (*base->getArray("findings"))[0].getAsObject()->getObject("throughInline");
+  REQUIRE(through != nullptr);
+  CHECK(through->getString("symbol") == "core_inline");
+  CHECK(through->getString("header") == "/q/core/core.h");
+  CHECK(render(llvm::json::Value(llvm::json::Array(
+            *through->getArray("owners")))) == R"(["core"])");
+  CHECK(through->getString("site") == "/q/app/main.cpp:7:3");
+
+  const auto *core = edgeOf(out, "app", "core");
+  REQUIRE(core != nullptr);
+  CHECK(core->getInteger("closureFanIn") == 1);
+  // app is an executable: dropping extra helps app itself.
+  CHECK(extra->getInteger("linkTargetsHelped") == 1);
+  CHECK(extra->getInteger("linkTargetGain") == 2);
+  auto byLinkGain = fx.run("audit_dependencies", {{"sort", "link_gain"}});
+  CHECK(byLinkGain.getString("sort") == "link_gain");
+  CHECK((*byLinkGain.getArray("edges"))[0].getAsObject()->getString(
+            "provider") == "extra");
+  auto bad = fx.run("audit_dependencies", {{"sort", "size"}});
+  CHECK(bad.getString("status") == "usage_error");
+  auto whyExtra = fx.run("explain_dependency",
+                         {{"consumer", "app"}, {"provider", "extra"}});
+  CHECK(render(llvm::json::Value(llvm::json::Array(
+            *whyExtra.getArray("linkTargetsHelped")))) ==
+        R"([{"droppableSymbols":2,"target":"app"}])");
+
+  auto why = fx.run("explain_dependency",
+                    {{"consumer", "app"}, {"provider", "core"}});
+  const auto *fanIn = why.getArray("fanIn");
+  REQUIRE(fanIn != nullptr);
+  REQUIRE(fanIn->size() == 1);
+  CHECK((*fanIn)[0].getAsObject()->getString("name") == "core_other");
+  const auto *seed = (*why.getArray("seeds"))[0].getAsObject();
+  CHECK(seed->getObject("symbol")->getString("kind") == "function");
+  CHECK(seed->getObject("symbol")->getString("file") == "/q/core/core.h");
+
+  auto plug = fx.run("explain_dependency",
+                     {{"consumer", "app"}, {"provider", "plug"}});
+  CHECK((*plug.getArray("seeds"))[0].getAsObject()->getBoolean("registers") ==
+        true);
+}
+
+TEST_CASE("audit_dependencies from references: payloads do not depend on "
+          "insertion order",
+          "[dependency-audit]") {
+  RefToolFixture forward;
+  RefToolFixture backward(/*reversed=*/true);
+  auto strip = [](llvm::json::Object o) {
+    o.erase("targetMap");
+    return render(llvm::json::Value(std::move(o)));
+  };
+  CHECK(strip(forward.run("audit_dependencies", {})) ==
+        strip(backward.run("audit_dependencies", {})));
+  for (const char *provider : {"base", "core", "plug"})
+    CHECK(strip(forward.run("explain_dependency",
+                            {{"consumer", "app"}, {"provider", provider}})) ==
+          strip(backward.run("explain_dependency",
+                             {{"consumer", "app"}, {"provider", provider}})));
 }
