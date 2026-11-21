@@ -910,6 +910,32 @@ struct Config {
   CHECK(to[0].referrerUsr == "vycor-file:" + tu);
 }
 
+TEST_CASE("references: a default member initializer also runs in each "
+          "constructor that uses it",
+          "[references]") {
+  Project p;
+  std::string tu = p.tu("tu.cpp", R"cpp(
+int fallback();
+struct Config { int level = fallback(); Config(); Config(int); };
+Config::Config() {}
+Config::Config(int l) : level(l) {}
+struct Plain { int level = fallback(); };
+void make() { Plain p; (void)p; }
+Plain agg() { return Plain{}; }
+)cpp");
+  auto ix = p.bake();
+  const ReferenceIndex &refs = ix.references;
+  std::vector<std::string> referrers;
+  for (const auto &r : refs.referencesTo(symbolNamed(refs, "fallback").usr)) {
+    CHECK(r.role == RefRole::Call);
+    referrers.push_back(r.referrerName);
+  }
+  // Config(int) initializes the member itself; Plain's implicit constructor
+  // is read in make().
+  CHECK(referrers ==
+        std::vector<std::string>{tu, "Config::Config", "agg", "make"});
+}
+
 TEST_CASE("references: unevaluated operands reference nothing",
           "[references]") {
   Project p;
