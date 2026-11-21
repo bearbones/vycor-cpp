@@ -131,6 +131,19 @@ Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
   return lambdaIdent(lambdaQualifiedName(sm, loc, enclosing));
 }
 
+std::string lambdaEnclosingName(const clang::FunctionDecl *fn) {
+  std::string name = fn->getQualifiedNameAsString();
+  if (!fn->isTemplateInstantiation())
+    return name;
+  if (const clang::TemplateArgumentList *args =
+          fn->getTemplateSpecializationArgs()) {
+    llvm::raw_string_ostream os(name);
+    clang::printTemplateArgumentList(os, args->asArray(),
+                                     fn->getASTContext().getPrintingPolicy());
+  }
+  return name;
+}
+
 // The function a lambda's closure is declared in: the nearest enclosing
 // function that is not itself a lambda's call operator, through any local
 // class, or null at namespace or class scope. The function a traversal as
@@ -259,7 +272,7 @@ Ident CallGraphIndexerVisitor::getCurrentFunction() const {
           if (mm->getParent() && mm->getParent()->isLambda())
             continue;
         }
-        enclosing = fd->getQualifiedNameAsString();
+        enclosing = lambdaEnclosingName(fd);
         break;
       }
       return lambdaIdent(lambdaQualifiedName(
@@ -349,7 +362,31 @@ bool CallGraphIndexerVisitor::VisitCXXRecordDecl(
     clang::CXXRecordDecl *decl) {
   if (decl->isImplicit() || !decl->isThisDeclarationADefinition())
     return true;
+  recordClass(decl);
+  return true;
+}
 
+// A class template's instantiated specializations are no code as written,
+// so the traversal does not visit them; their bases and overrides are the
+// dispatch targets of a virtual call all the same (`Impl<int>::run`
+// overriding `Base::run`).
+bool CallGraphIndexerVisitor::VisitClassTemplateDecl(
+    clang::ClassTemplateDecl *decl) {
+  if (decl != decl->getCanonicalDecl())
+    return true;
+  for (const clang::ClassTemplateSpecializationDecl *spec :
+       decl->specializations()) {
+    if (spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization)
+      continue; // written, visited as such
+    const clang::CXXRecordDecl *def = spec->getDefinition();
+    if (def && def == spec && !def->isInvalidDecl() &&
+        !def->isDependentContext())
+      recordClass(def);
+  }
+  return true;
+}
+
+void CallGraphIndexerVisitor::recordClass(const clang::CXXRecordDecl *decl) {
   std::string className = decl->getQualifiedNameAsString();
 
   // Record base class relationships.
@@ -374,8 +411,6 @@ bool CallGraphIndexerVisitor::VisitCXXRecordDecl(
   // Compute effective implementations for concrete classes.
   if (!decl->isAbstract())
     computeEffectiveImpls(decl);
-
-  return true;
 }
 
 void CallGraphIndexerVisitor::computeEffectiveImpls(
@@ -446,7 +481,7 @@ bool CallGraphIndexerVisitor::VisitLambdaExpr(clang::LambdaExpr *expr) {
       if (md->getParent() && md->getParent()->isLambda())
         continue;
     }
-    enclosing = fd->getQualifiedNameAsString();
+    enclosing = lambdaEnclosingName(fd);
     break;
   }
 
@@ -515,7 +550,7 @@ Ident CallGraphEdgeVisitor::getCurrentFunction() const {
           if (mm->getParent() && mm->getParent()->isLambda())
             continue;
         }
-        enclosing = fd->getQualifiedNameAsString();
+        enclosing = lambdaEnclosingName(fd);
         break;
       }
       return lambdaIdent(lambdaQualifiedName(
@@ -594,7 +629,7 @@ Ident CallGraphEdgeVisitor::lambdaIdentOf(
   const clang::FunctionDecl *fn = lambdaEnclosingFunction(closure);
   return lambdaIdent(lambdaQualifiedName(
       sm_, closure->getBeginLoc(),
-      fn ? fn->getQualifiedNameAsString() : std::string()));
+      fn ? lambdaEnclosingName(fn) : std::string()));
 }
 
 void CallGraphEdgeVisitor::addLambdaNode(const clang::CXXRecordDecl *closure,
@@ -676,7 +711,10 @@ void CallGraphEdgeVisitor::drainBodies() {
   while (!work_.empty()) {
     const clang::FunctionDecl *fn = work_.back();
     work_.pop_back();
-    readBody(fn);
+    // A closure read where its expression is (TraverseLambdaExpr) may
+    // also have been queued by a call seen first (`[&] { ... }()`).
+    if (read_.insert(fn).second)
+      readBody(fn);
   }
   inCompilerCode_ = false;
 }
@@ -693,7 +731,7 @@ void CallGraphEdgeVisitor::readBody(const clang::FunctionDecl *decl) {
       funcStack_.push_back(const_cast<clang::FunctionDecl *>(outer));
     funcStack_.push_back(fn);
     addLambdaNode(closure, getCurrentFunction(),
-                  outer ? outer->getQualifiedNameAsString() : std::string());
+                  outer ? lambdaEnclosingName(outer) : std::string());
   } else {
     funcStack_.push_back(fn);
     const Ident &id = usrs_.identFor(fn);
@@ -705,7 +743,10 @@ void CallGraphEdgeVisitor::readBody(const clang::FunctionDecl *decl) {
       node.file = getFilePath(loc);
       node.line = sm_.getSpellingLineNumber(loc);
     }
-    node.hasBody = true;
+    // A destructor with no definition here is still read for its member
+    // destruction, but its own body is unseen unless the compiler writes it.
+    node.hasBody = fn->doesThisDeclarationHaveABody() ||
+                   isCompilerWrittenSpecialMember(fn);
     graph_.addNode(std::move(node), tuPath_);
   }
   if (fn->doesThisDeclarationHaveABody() && !fn->isInvalidDecl() &&
@@ -795,6 +836,21 @@ bool CallGraphEdgeVisitor::VisitClassTemplateDecl(
     clang::ClassTemplateDecl *decl) {
   forEachExplicitInstantiation(
       decl, [&](const clang::FunctionDecl *fn) { scheduleBody(fn); });
+  // A virtual member an instantiated class defines is reached through its
+  // vtable, not a call the TU spells: read the ones Sema instantiated (the
+  // class's vtable is used), so a dispatch to the override walks on.
+  if (decl != decl->getCanonicalDecl())
+    return true;
+  for (const clang::ClassTemplateSpecializationDecl *spec :
+       decl->specializations()) {
+    const clang::CXXRecordDecl *def = spec->getDefinition();
+    if (!def || def != spec || def->isInvalidDecl() ||
+        def->isDependentContext() || !def->isDynamicClass())
+      continue;
+    for (const clang::CXXMethodDecl *method : def->methods())
+      if (method->isVirtual() && readableDefinition(method))
+        scheduleBody(method);
+  }
   return true;
 }
 
@@ -849,12 +905,20 @@ bool CallGraphEdgeVisitor::TraverseTypeOfExprTypeLoc(
 
 // A braced initializer's semantic form holds what aggregate initialization
 // runs that the syntactic form leaves out: default member initializers and
-// the constructors of members the list omits. One form is read, so a call
-// in both is one edge.
+// the constructors of members and array elements the list omits. One form
+// is read, so a call in both is one edge.
 bool CallGraphEdgeVisitor::TraverseInitListExpr(clang::InitListExpr *expr) {
   clang::InitListExpr *semantic =
       expr->isSemanticForm() ? expr : expr->getSemanticForm();
-  return TraverseSynOrSemInitListExpr(semantic ? semantic : expr);
+  if (!semantic)
+    semantic = expr;
+  if (!TraverseSynOrSemInitListExpr(semantic))
+    return false;
+  // The elements past the written ones (`Logger a[3] = {}`) are
+  // initialized by the array filler, which is no child.
+  if (semantic->hasArrayFiller())
+    return TraverseStmt(semantic->getArrayFiller());
+  return true;
 }
 
 // A default member initializer runs in the constructor or aggregate
@@ -964,8 +1028,10 @@ bool CallGraphEdgeVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
       // A closure in a body drainBodies reads: read here, once, and given
       // a node (an instantiated class template member's lambda is named
       // by that member, not by the pattern the indexer saw).
-      if (const clang::FunctionDecl *def = readableDefinition(op))
+      if (const clang::FunctionDecl *def = readableDefinition(op)) {
         scheduled_.insert(def);
+        read_.insert(def);
+      }
       addLambdaNode(op->getParent(), getCurrentFunction(),
                     enclosingNonLambdaName());
     }
@@ -974,6 +1040,22 @@ bool CallGraphEdgeVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
   if (op)
     funcStack_.pop_back();
   return result;
+}
+
+// A capture's initializer runs where the closure is created, in the
+// enclosing function, not in the lambda's body.
+bool CallGraphEdgeVisitor::TraverseLambdaCapture(
+    clang::LambdaExpr *expr, const clang::LambdaCapture *capture,
+    clang::Expr *init) {
+  clang::CXXMethodDecl *op = expr->getCallOperator();
+  const bool lifted = op && !funcStack_.empty() && funcStack_.back() == op;
+  if (lifted)
+    funcStack_.pop_back();
+  const bool ok =
+      RecursiveASTVisitor::TraverseLambdaCapture(expr, capture, init);
+  if (lifted)
+    funcStack_.push_back(op);
+  return ok;
 }
 
 bool CallGraphEdgeVisitor::TraverseCXXDestructorDecl(
@@ -1005,7 +1087,7 @@ std::string CallGraphEdgeVisitor::enclosingNonLambdaName() const {
       if (md->getParent() && md->getParent()->isLambda())
         continue;
     }
-    return fd->getQualifiedNameAsString();
+    return lambdaEnclosingName(fd);
   }
   return "";
 }
@@ -1320,7 +1402,9 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   // An automatic variable is destroyed when it leaves scope: a
   // DestructorCall at its declaration (the stable site; the scope's end has
   // none of its own). A static local is destroyed at exit, not here.
-  if (decl->hasLocalStorage() && !decl->isInvalidDecl())
+  // An init-capture is a member of the closure, destroyed with it.
+  if (decl->hasLocalStorage() && !decl->isInvalidDecl() &&
+      !decl->isInitCapture())
     addDestructorEdge(decl->getType(), decl->getLocation());
 
   // Track callable-typed variables initialized from a direct call. The
@@ -1348,7 +1432,7 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
           if (md->getParent() && md->getParent()->isLambda())
             continue;
         }
-        enclosing = fd->getQualifiedNameAsString();
+        enclosing = lambdaEnclosingName(fd);
         break;
       }
       varLambdaSources_[decl] =

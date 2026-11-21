@@ -1411,8 +1411,9 @@ int main() {
     if (d.kind == Diagnostic::SharedGlobal_Race)
       raced.push_back(d.entities.at(0));
   // touch is reached through bump<int>, under an unknown lock against
-  // none. The access in the instantiation's body is the pattern's fact,
-  // not found at the instantiation.
+  // none. The race on inBody is real but missed: the access in the
+  // instantiation's body is the pattern's fact, not found at the
+  // instantiation (a documented limit, #156).
   CHECK(raced == std::vector<std::string>{"c:@beyond"});
 }
 

@@ -90,6 +90,15 @@ VYCOR_EXTENSION_SETUP(MyOrgHazards) {
 - Function pointers and virtual dispatch follow the call graph's
   Plausible-edge semantics; a hazard reached only through an unresolvable
   pointer may be missed.
+- The walk starts from the exact function each initializer calls (the
+  instantiation `make<Worker>()` names, not every `make`) and follows
+  the call graph's edges, template instantiation bodies and the
+  destructors and constructors the compiler writes included. A
+  constructor function (`__attribute__((constructor))`) starts from
+  every function of its name. A hazard matches by name: every overload
+  and instantiation of a listed function.
+- Exit-time destruction is not walked: a static whose destructor
+  reaches a hazard is not reported.
 
 ## See also
 

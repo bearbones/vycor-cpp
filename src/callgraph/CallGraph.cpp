@@ -936,7 +936,14 @@ size_t CallGraph::removeTUs(const std::vector<std::string> &tuPaths) {
       if (cit == nodeContributors_.end())
         continue;
       cit->second.erase(tuId);
-      if (cit->second.empty()) {
+      if (!cit->second.empty()) {
+        // The removed TU may be the one that read the body: which
+        // contributor did is not kept, so the node keeps no claim; a
+        // re-absorbed TU that reads it sets it again. Until then a body
+        // only another TU read counts as unread (conservative).
+        if (auto live = nodes_.find(nodeId); live != nodes_.end())
+          live->second.hasBody = false;
+      } else {
         auto nit2 = nodes_.find(nodeId);
         if (nit2 != nodes_.end()) {
           // Drop the disambiguation entry with the node.

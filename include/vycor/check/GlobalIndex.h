@@ -238,6 +238,10 @@ struct StaticInitEntry {
   // initializer expressions have no enclosing function, so the graph
   // itself has no edges out of them).
   std::vector<std::string> calledFunctions;
+  // The same calls as (call-graph USR, qualified name): the exact
+  // instantiation or overload called, so the hazard walk does not start
+  // from every function sharing the name.
+  std::vector<std::pair<std::string, std::string>> calledUsrs;
 };
 
 // Name-level per-function call summary, collected during the check parse

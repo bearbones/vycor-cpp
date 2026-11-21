@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v18 is current).
+and worker shards (since journal/shard format v2; v19 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -356,9 +356,16 @@ have no body), generic-lambda specializations, explicit instantiation
 definitions, and compiler-written special members (`CompilerWritten.h`,
 shared with `ReferenceVisitor`). Their calls are edges under the
 instantiation's own USR, with dependent calls resolved; the node is
-marked `hasBody` (snapshot node flag bit 4, OR-merged across TUs), which
-is how `templateLeaves` tells an instantiation that calls nothing from
-one no TU instantiated. Written definitions also get what the compiler
+marked `hasBody` (snapshot node flags value 4, OR-merged across TUs,
+cleared on a surviving node when a TU that contributed it is removed),
+which is how `templateLeaves` tells an instantiation that calls nothing
+from one no TU instantiated. The virtual members an instantiated class
+template specialization defines are read too (only a vtable reaches
+them), and its bases and overrides are recorded, so a dispatch reaches
+`Impl<int>::run`. A lambda in a function template instantiation is
+named with the instantiation's template arguments (`lambdaEnclosingName`),
+one node per instantiation; a generic lambda's specializations share
+the closure's node. Written definitions also get what the compiler
 adds to them: non-written member/base initializers, default member
 initializers, a defaulted body, member/base destruction after a
 destructor's body. Destructor edges: a local at its declaration, a

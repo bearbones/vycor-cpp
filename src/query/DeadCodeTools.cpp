@@ -47,25 +47,6 @@ static bool isCompilerDeclared(const CallGraphNode &node) {
   return node.line == 0 && llvm::StringRef(node.file).starts_with("<");
 }
 
-static bool isSystemPath(llvm::StringRef path) {
-  if (path.empty())
-    return false;
-  static constexpr llvm::StringLiteral prefixes[] = {
-      "/usr/include/",       "/usr/lib/",
-      "/usr/local/include/", "/usr/local/lib/",
-      "/Library/Developer/", "/Applications/Xcode",
-      "/opt/homebrew/",
-  };
-  for (auto p : prefixes) {
-    if (path.starts_with(p))
-      return true;
-  }
-  // Compiler-internal and SDK include directories, e.g. /opt/llvm-20/lib/clang/20/include.
-  if (path.contains("/lib/clang/") || path.contains("/lib/gcc/") ||
-      path.contains(".sdk/usr/include/") || path.contains("/include/c++/"))
-    return true;
-  return false;
-}
 
 
 // ============================================================================

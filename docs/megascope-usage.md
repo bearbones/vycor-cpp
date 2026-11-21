@@ -519,10 +519,13 @@ written or not, calls the member and base destructors after its body.
 A local's destructor is a `DestructorCall` sited at its declaration, a
 temporary's at the expression that creates it, and a
 delete-expression's at the expression (`VirtualDispatch`, Plausible,
-through a virtual destructor). A trivial constructor or destructor runs
-no code and has no edge. A lambda's closure has no identity of its own
-besides its call operator: copying or destroying one is the copy or
-destruction of its captures, at that site.
+through a virtual destructor). An implicit trivial constructor and a
+trivial destructor run no code and have no edge. A lambda's closure has
+no identity of its own besides its call operator: copying or destroying
+one is the copy or destruction of its captures, at that site, and a
+capture's initializer runs in the function that creates the closure.
+A lambda written in a function template is one node per instantiation;
+a generic lambda's specializations share one.
 
 **A `throw` is a call.** Each `throw` expression is a `DirectCall`
 edge to `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`) at the

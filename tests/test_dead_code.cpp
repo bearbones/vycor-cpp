@@ -640,3 +640,31 @@ TEST_CASE("identical edges from multiple TUs are deduplicated",
     CHECK(g.edgeCount() == 0);
   }
 }
+
+TEST_CASE("a base constructed as a member of a derived class is constructed",
+          "[dead_code][builder][virtual]") {
+  std::string code = R"(
+    struct Shape { Shape(); virtual void draw(); };
+    Shape::Shape() {}
+    void Shape::draw() {}
+    struct Group : Shape {
+      Shape inner;
+      Group() : Shape(), inner() {}
+      void draw() override {}
+    };
+    struct Only : Shape { void draw() override {} };
+    void paint(Shape &s) { s.draw(); }
+    int main() { Group g; paint(g); }
+  )";
+  CallGraph graph;
+  CallGraphBuilderFactory factory(graph);
+  REQUIRE(clang::tooling::runToolOnCodeWithArgs(factory.create(), code,
+                                                {"-std=c++17"}, "test.cpp"));
+  DeadCodeAnalyzer analyzer(graph, {"main"});
+  analyzer.analyzePessimistic();
+  analyzer.analyzeOptimistic();
+  auto results = analyzer.getResults();
+  // Group's member is a complete Shape: Shape::draw is a dispatch target.
+  REQUIRE(results.count("Shape::draw") == 1);
+  CHECK(results["Shape::draw"] != Liveness::Dead);
+}

@@ -18,6 +18,8 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/check/GlobalIndex.h"
 
+#include "llvm/ADT/StringRef.h"
+
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -30,6 +32,11 @@ enum class Liveness {
   OptimisticallyAlive, // Reachable only via plausible paths.
   Dead                // Not reachable.
 };
+
+// A path in a system or SDK include or library directory: a function
+// defined there (a standard-library instantiation) is no code the user
+// could delete.
+bool isSystemPath(llvm::StringRef path);
 
 class DeadCodeAnalyzer {
 public:

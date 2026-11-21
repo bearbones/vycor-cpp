@@ -1348,44 +1348,64 @@ void analyzeStaticInitHazards(const GlobalIndex &index,
             });
 
   for (const auto *root : roots) {
-    std::vector<std::string> seeds =
-        root->isConstructorFn ? std::vector<std::string>{root->qualifiedName}
-                              : root->calledFunctions;
-    // BFS with parent tracking; one diagnostic per root (the first — i.e.
-    // shortest — hazard chain is the actionable one).
-    std::map<std::string, std::string> parent;
+    // Seeds as (usr, name): the exact callee of each initializer call; a
+    // constructor function, or an entry without USRs, by every function
+    // of the name.
+    std::vector<std::pair<std::string, std::string>> seeds;
+    auto seedByName = [&](const std::string &name) {
+      std::vector<std::string> usrs = graph.usrsForName(name);
+      if (usrs.empty())
+        seeds.emplace_back(name, name);
+      for (std::string &usr : usrs)
+        seeds.emplace_back(std::move(usr), name);
+    };
+    if (root->isConstructorFn)
+      seedByName(root->qualifiedName);
+    else if (!root->calledUsrs.empty())
+      seeds = root->calledUsrs;
+    else
+      for (const std::string &name : root->calledFunctions)
+        seedByName(name);
+    // BFS by USR with parent tracking; one diagnostic per root (the first
+    // — i.e. shortest — hazard chain is the actionable one). A hazard is
+    // matched by name: every overload of a listed function.
+    std::map<std::string, std::string> parent; // usr -> parent usr
+    std::map<std::string, std::string> nameOf; // usr -> display name
     std::deque<std::pair<std::string, unsigned>> queue;
     std::string hit;
-    for (const auto &seed : seeds) {
-      if (!parent.emplace(seed, "").second)
+    for (const auto &[usr, name] : seeds) {
+      if (!parent.emplace(usr, "").second)
         continue;
-      if (hazards.count(seed)) {
-        hit = seed;
+      nameOf.emplace(usr, name);
+      if (hazards.count(name)) {
+        hit = usr;
         break;
       }
-      queue.push_back({seed, 0});
+      queue.push_back({usr, 0});
     }
     while (hit.empty() && !queue.empty()) {
-      auto [name, depth] = queue.front();
+      auto [usr, depth] = queue.front();
       queue.pop_front();
       if (depth >= kMaxDepth)
         continue;
-      for (const auto &edge : graph.calleesOf(name)) {
-        if (!parent.emplace(edge.calleeName, name).second)
+      for (const auto &edge : graph.calleesOf(usr)) {
+        if (!parent.emplace(edge.calleeUsr, usr).second)
           continue;
+        nameOf.emplace(edge.calleeUsr, edge.calleeName);
         if (hazards.count(edge.calleeName)) {
-          hit = edge.calleeName;
+          hit = edge.calleeUsr;
           break;
         }
-        queue.push_back({edge.calleeName, depth + 1});
+        queue.push_back({edge.calleeUsr, depth + 1});
       }
     }
     if (hit.empty())
       continue;
 
-    std::string chain = hit;
+    std::string chain = nameOf[hit];
     for (std::string cur = parent[hit]; !cur.empty(); cur = parent[cur])
-      chain = cur + " -> " + chain;
+      chain = nameOf[cur] + " -> " + chain;
+    hit = nameOf[hit];
     Diagnostic diag;
     diag.kind = Diagnostic::StaticInit_Hazard;
     diag.callLocation = root->filePath + ":" + std::to_string(root->line);

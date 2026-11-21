@@ -119,7 +119,7 @@ public:
       const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
       enclosing_ = method && clang::isLambdaCallOperator(method)
                        ? outer
-                       : fn->getQualifiedNameAsString();
+                       : lambdaEnclosingName(fn);
     }
     bool ok = TraverseStmt(expr->getExpr());
     enclosing_ = std::move(outer);

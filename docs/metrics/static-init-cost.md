@@ -248,10 +248,11 @@ before `main` at all.
   under, so a header reached as `inc/h.hpp` from one TU and
   `../lib/inc/h.hpp` from another holds two lambdas, and an initializer
   in that header reaches both.
-- **Compiler-generated constructors are looked through** to the member
-  and base constructors they run; they are not counted as functions.
-  That covers defaulted constructors and constructors inherited with
-  `using Base::Base;`.
+- **Compiler-generated constructors called directly by an initializer
+  are looked through** to the member and base constructors they run;
+  they are not counted as functions. That covers defaulted constructors
+  and constructors inherited with `using Base::Base;`. Deeper in the
+  walk they are graph nodes like any other and are counted.
 - **The effect table matches names.** A function of your own called
   `::read` or `::send` is taken for the POSIX one. The one place the
   parameters are read is `operator new`, to tell the placement forms

@@ -327,3 +327,76 @@ void second() { std::make_unique<Widget>(); }
   CHECK(calleesNamed(graph, a, "compute").size() == 1);
   CHECK(graph.calleesOf(b).empty());
 }
+
+TEST_CASE("an instantiated class's virtual override is read and dispatched "
+          "to",
+          "[callgraph][builder][templates][virtual]") {
+  CallGraph graph;
+  build(graph, R"(
+struct Base { virtual void run() = 0; virtual ~Base(); };
+template <class T> struct Impl : Base { void run() override { compute(); } };
+Base *make() { return new Impl<int>; }
+void hot(Base *b) { b->run(); }
+)");
+  // The dispatch reaches the specialization's override, whose body is
+  // read (only a vtable reaches it).
+  const CallGraphEdge toRun = only(graph, "hot", "Impl<int>::run");
+  CHECK(toRun.kind == EdgeKind::VirtualDispatch);
+  CHECK(only(graph, toRun.calleeUsr, "compute").kind == EdgeKind::DirectCall);
+  const CallGraphNode *run = graph.findNode(toRun.calleeUsr);
+  REQUIRE(run != nullptr);
+  CHECK(run->hasBody);
+}
+
+TEST_CASE("each instantiation's lambda is a node of its own",
+          "[callgraph][builder][templates]") {
+  CallGraph graph;
+  build(graph, R"(
+void cheap();
+template <class F> void each(F f) { auto run = [&] { f(); }; run(); }
+void hot() { each([] { cheap(); }); }
+void cold() { each([] { (void)new int; }); }
+)");
+  // hot -> each<L1> -> its own `run` -> L1 -> cheap; nothing reaches new.
+  const CallGraphEdge toEach = only(graph, "hot", "each");
+  std::vector<CallGraphEdge> runs;
+  for (const CallGraphEdge &edge : graph.calleesOf(toEach.calleeUsr))
+    if (edge.kind == EdgeKind::LambdaCall)
+      runs.push_back(edge);
+  REQUIRE(runs.size() == 1);
+  std::vector<std::string> reached;
+  for (const CallGraphEdge &edge : graph.calleesOf(runs[0].calleeUsr))
+    for (const CallGraphEdge &inner : graph.calleesOf(edge.calleeUsr))
+      reached.push_back(inner.calleeName);
+  CHECK(reached == std::vector<std::string>{"cheap"});
+}
+
+TEST_CASE("compiler-written edge corner cases",
+          "[callgraph][builder][destructors]") {
+  CallGraph graph;
+  build(graph, R"(
+struct Logger { Logger(); };
+struct Agg { int v = compute(); };
+struct Res { ~Res(); };
+void arrays() { Logger a[3] = {}; Agg b[2] = {}; (void)a; (void)b; }
+void capture() { auto l = [r = Res()] { (void)r; }; l(); }
+template <class T> struct Pool { ~Pool(); };
+extern template struct Pool<int>;
+void pool() { Pool<int> p; }
+)");
+  SECTION("an array's omitted elements are initialized") {
+    CHECK(calleesNamed(graph, "arrays", "Logger::Logger").size() == 1);
+    CHECK(calleesNamed(graph, "arrays", "compute").size() == 1);
+  }
+  SECTION("an init-capture is destroyed with the closure, not the body") {
+    for (const CallGraphNode *node : graph.allNodes())
+      if (llvm::StringRef(node->usr).starts_with("vycor-lambda:"))
+        CHECK(calleesNamed(graph, node->usr, "Res::~Res").empty());
+  }
+  SECTION("a destructor whose body is elsewhere has no body read") {
+    const CallGraphEdge toDtor = only(graph, "pool", "Pool<int>::~Pool");
+    const CallGraphNode *dtor = graph.findNode(toDtor.calleeUsr);
+    REQUIRE(dtor != nullptr);
+    CHECK_FALSE(dtor->hasBody);
+  }
+}

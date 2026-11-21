@@ -78,4 +78,11 @@ private:
 Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
                          const std::string &enclosing);
 
+// The enclosing-function name a lambda's identity carries: the qualified
+// name, with the template arguments of a function template instantiation
+// (`each<int>`), whose closure is a type of its own: two instantiations'
+// lambdas are two nodes. Code as written (a template's definition, an
+// explicit specialization) is named as before.
+std::string lambdaEnclosingName(const clang::FunctionDecl *fn);
+
 } // namespace vycor

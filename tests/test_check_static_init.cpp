@@ -340,3 +340,58 @@ TEST_CASE("Org-registered hazard functions extend static-init-hazards",
   CHECK(diags[0].kind == Diagnostic::StaticInit_Hazard);
   CHECK(diags[0].message.find("myorg::JniEnv::attach") != std::string::npos);
 }
+
+TEST_CASE("static-init-hazards walks the instantiation an initializer "
+          "calls, not every one of the name",
+          "[CheckStaticInit]") {
+  std::string dir = "check_sinit_inst";
+  REQUIRE(makeUniqueFixtureDir(dir));
+  llvm::SmallString<256> abs;
+  REQUIRE(!llvm::sys::fs::real_path(dir, abs));
+  const std::string absDir(abs.str());
+  auto write = [&](const std::string &name, const std::string &content) {
+    std::ofstream out(dir + "/" + name, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out << content;
+  };
+  write("make.hpp", R"cpp(
+#pragma once
+template <class T> T *make() { return new T(); }
+)cpp");
+  write("cfg.cpp", R"cpp(
+#include "make.hpp"
+struct Cfg { Cfg(); };
+Cfg::Cfg() {}
+Cfg *cfg = make<Cfg>();
+)cpp");
+  write("worker.cpp", R"cpp(
+#include "make.hpp"
+extern "C" int pthread_create(void *, const void *, void *(*)(void *),
+                              void *);
+struct Worker {
+  Worker() { pthread_create(nullptr, nullptr, nullptr, nullptr); }
+};
+void later() { make<Worker>(); }
+Worker *early = make<Worker>();
+)cpp");
+  const std::vector<std::string> files{absDir + "/cfg.cpp",
+                                       absDir + "/worker.cpp"};
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  GlobalIndex index;
+  (void)runAnalysis(compDb, files, opts, &index);
+  auto graph = buildCallGraph(compDb, files);
+  std::vector<Diagnostic> diags;
+  analyzeStaticInitHazards(index, graph, diags);
+  auto hazards = ofKind(diags, Diagnostic::StaticInit_Hazard);
+  for (const char *f : {"make.hpp", "cfg.cpp", "worker.cpp"})
+    std::remove((dir + "/" + f).c_str());
+  llvm::sys::fs::remove(dir);
+
+  // make<Worker> starts a thread; make<Cfg> does not.
+  REQUIRE(hazards.size() == 1);
+  CHECK(hazards[0].message.find("'early'") != std::string::npos);
+  CHECK(hazards[0].message.find("make -> Worker::Worker -> pthread_create") !=
+        std::string::npos);
+}

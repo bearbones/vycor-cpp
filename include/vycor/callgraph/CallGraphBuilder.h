@@ -44,6 +44,7 @@ public:
 
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl);
+  bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
   bool TraverseFunctionDecl(clang::FunctionDecl *decl);
   bool TraverseCXXMethodDecl(clang::CXXMethodDecl *decl);
   bool TraverseCXXConstructorDecl(clang::CXXConstructorDecl *decl);
@@ -66,6 +67,7 @@ private:
   std::string formatLocation(clang::SourceLocation loc) const;
   Ident getCurrentFunction() const;
   void computeEffectiveImpls(const clang::CXXRecordDecl *cls);
+  void recordClass(const clang::CXXRecordDecl *decl);
 };
 
 // Phase 2 visitor: builds call edges.
@@ -89,6 +91,9 @@ public:
   bool TraverseTranslationUnitDecl(clang::TranslationUnitDecl *decl);
   bool TraverseCXXDefaultInitExpr(clang::CXXDefaultInitExpr *expr);
   bool TraverseInitListExpr(clang::InitListExpr *expr);
+  bool TraverseLambdaCapture(clang::LambdaExpr *expr,
+                             const clang::LambdaCapture *capture,
+                             clang::Expr *init);
   // Operands that are never evaluated call nothing: not traversed.
   bool TraverseUnaryExprOrTypeTraitExpr(clang::UnaryExprOrTypeTraitExpr *expr);
   bool TraverseCXXNoexceptExpr(clang::CXXNoexceptExpr *expr);
@@ -150,6 +155,8 @@ private:
   // schedule others. Keyed by the definition read.
   std::vector<const clang::FunctionDecl *> work_;
   llvm::DenseSet<const clang::FunctionDecl *> scheduled_;
+  // The bodies already read, a subset of scheduled_.
+  llvm::DenseSet<const clang::FunctionDecl *> read_;
   // True while drainBodies reads a scheduled body: its calls are recorded
   // wherever they are spelled, a system header included.
   bool inCompilerCode_ = false;
