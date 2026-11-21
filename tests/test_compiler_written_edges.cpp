@@ -348,7 +348,7 @@ void hot(Base *b) { b->run(); }
   CHECK(run->hasBody);
 }
 
-TEST_CASE("each instantiation's lambda is a node of its own",
+TEST_CASE("a lambda written in a template is one node for every instantiation",
           "[callgraph][builder][templates]") {
   CallGraph graph;
   build(graph, R"(
@@ -357,18 +357,23 @@ template <class F> void each(F f) { auto run = [&] { f(); }; run(); }
 void hot() { each([] { cheap(); }); }
 void cold() { each([] { (void)new int; }); }
 )");
-  // hot -> each<L1> -> its own `run` -> L1 -> cheap; nothing reaches new.
+  // Both each<L1> and each<L2> call the one `run` node, whose edges are
+  // both instantiations' calls (the lambda keeps its written identity).
   const CallGraphEdge toEach = only(graph, "hot", "each");
   std::vector<CallGraphEdge> runs;
   for (const CallGraphEdge &edge : graph.calleesOf(toEach.calleeUsr))
     if (edge.kind == EdgeKind::LambdaCall)
       runs.push_back(edge);
   REQUIRE(runs.size() == 1);
-  std::vector<std::string> reached;
-  for (const CallGraphEdge &edge : graph.calleesOf(runs[0].calleeUsr))
-    for (const CallGraphEdge &inner : graph.calleesOf(edge.calleeUsr))
-      reached.push_back(inner.calleeName);
-  CHECK(reached == std::vector<std::string>{"cheap"});
+  const CallGraphEdge toEachCold = only(graph, "cold", "each");
+  REQUIRE(toEachCold.calleeUsr != toEach.calleeUsr);
+  std::vector<CallGraphEdge> coldRuns;
+  for (const CallGraphEdge &edge : graph.calleesOf(toEachCold.calleeUsr))
+    if (edge.kind == EdgeKind::LambdaCall)
+      coldRuns.push_back(edge);
+  REQUIRE(coldRuns.size() == 1);
+  CHECK(coldRuns[0].calleeUsr == runs[0].calleeUsr);
+  CHECK(graph.calleesOf(runs[0].calleeUsr).size() == 2);
 }
 
 TEST_CASE("compiler-written edge corner cases",

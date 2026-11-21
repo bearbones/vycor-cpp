@@ -429,9 +429,8 @@ private:
     if (std::find(into.begin(), into.end(), name) == into.end())
       into.push_back(std::move(name));
   }
-  // The identity the call graph gives the callee. A lambda called in a
-  // namespace-scope initializer is named by its closure (no enclosing
-  // function).
+  // The identity the call graph gives the callee; a lambda's is its
+  // closure's.
   void recordUsr(const clang::FunctionDecl *callee) {
     if (!usrs_ || !sm_)
       return;
@@ -439,8 +438,8 @@ private:
     const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
     if (method && method->getParent()->isLambda() &&
         method->getOverloadedOperator() == clang::OO_Call)
-      id = lambdaClosureIdent(const_cast<clang::SourceManager &>(*sm_),
-                              method->getParent()->getBeginLoc(), "");
+      id = lambdaClosureIdentOf(const_cast<clang::SourceManager &>(*sm_),
+                                method->getParent());
     else
       id = usrs_->identFor(callee);
     std::pair<std::string, std::string> entry{std::move(id.usr),

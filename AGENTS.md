@@ -356,16 +356,13 @@ have no body), generic-lambda specializations, explicit instantiation
 definitions, and compiler-written special members (`CompilerWritten.h`,
 shared with `ReferenceVisitor`). Their calls are edges under the
 instantiation's own USR, with dependent calls resolved; the node is
-marked `hasBody` (snapshot node flags value 4, OR-merged across TUs,
-cleared on a surviving node when a TU that contributed it is removed),
-which is how `templateLeaves` tells an instantiation that calls nothing
+marked `hasBody` (snapshot node flags value 4, OR-merged across TUs), which is how `templateLeaves` tells an instantiation that calls nothing
 from one no TU instantiated. The virtual members an instantiated class
 template specialization defines are read too (only a vtable reaches
 them), and its bases and overrides are recorded, so a dispatch reaches
-`Impl<int>::run`. A lambda in a function template instantiation is
-named with the instantiation's template arguments (`lambdaEnclosingName`),
-one node per instantiation; a generic lambda's specializations share
-the closure's node. Written definitions also get what the compiler
+`Impl<int>::run`. A lambda written in a function template keeps its
+written identity: one node whose edges are every instantiation's calls;
+a generic lambda's specializations share the closure's node too. Written definitions also get what the compiler
 adds to them: non-written member/base initializers, default member
 initializers, a defaulted body, member/base destruction after a
 destructor's body. Destructor edges: a local at its declaration, a

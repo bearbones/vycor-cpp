@@ -131,19 +131,6 @@ Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
   return lambdaIdent(lambdaQualifiedName(sm, loc, enclosing));
 }
 
-std::string lambdaEnclosingName(const clang::FunctionDecl *fn) {
-  std::string name = fn->getQualifiedNameAsString();
-  if (!fn->isTemplateInstantiation())
-    return name;
-  if (const clang::TemplateArgumentList *args =
-          fn->getTemplateSpecializationArgs()) {
-    llvm::raw_string_ostream os(name);
-    clang::printTemplateArgumentList(os, args->asArray(),
-                                     fn->getASTContext().getPrintingPolicy());
-  }
-  return name;
-}
-
 // The function a lambda's closure is declared in: the nearest enclosing
 // function that is not itself a lambda's call operator, through any local
 // class, or null at namespace or class scope. The function a traversal as
@@ -272,7 +259,7 @@ Ident CallGraphIndexerVisitor::getCurrentFunction() const {
           if (mm->getParent() && mm->getParent()->isLambda())
             continue;
         }
-        enclosing = lambdaEnclosingName(fd);
+        enclosing = fd->getQualifiedNameAsString();
         break;
       }
       return lambdaIdent(lambdaQualifiedName(
@@ -481,7 +468,7 @@ bool CallGraphIndexerVisitor::VisitLambdaExpr(clang::LambdaExpr *expr) {
       if (md->getParent() && md->getParent()->isLambda())
         continue;
     }
-    enclosing = lambdaEnclosingName(fd);
+    enclosing = fd->getQualifiedNameAsString();
     break;
   }
 
@@ -550,7 +537,7 @@ Ident CallGraphEdgeVisitor::getCurrentFunction() const {
           if (mm->getParent() && mm->getParent()->isLambda())
             continue;
         }
-        enclosing = lambdaEnclosingName(fd);
+        enclosing = fd->getQualifiedNameAsString();
         break;
       }
       return lambdaIdent(lambdaQualifiedName(
@@ -624,12 +611,17 @@ CallGraphNode CallGraphEdgeVisitor::calleeNode(const clang::FunctionDecl *decl,
   return node;
 }
 
-Ident CallGraphEdgeVisitor::lambdaIdentOf(
-    const clang::CXXRecordDecl *closure) const {
+Ident lambdaClosureIdentOf(clang::SourceManager &sm,
+                           const clang::CXXRecordDecl *closure) {
   const clang::FunctionDecl *fn = lambdaEnclosingFunction(closure);
   return lambdaIdent(lambdaQualifiedName(
-      sm_, closure->getBeginLoc(),
-      fn ? lambdaEnclosingName(fn) : std::string()));
+      sm, closure->getBeginLoc(),
+      fn ? fn->getQualifiedNameAsString() : std::string()));
+}
+
+Ident CallGraphEdgeVisitor::lambdaIdentOf(
+    const clang::CXXRecordDecl *closure) const {
+  return lambdaClosureIdentOf(sm_, closure);
 }
 
 void CallGraphEdgeVisitor::addLambdaNode(const clang::CXXRecordDecl *closure,
@@ -731,7 +723,7 @@ void CallGraphEdgeVisitor::readBody(const clang::FunctionDecl *decl) {
       funcStack_.push_back(const_cast<clang::FunctionDecl *>(outer));
     funcStack_.push_back(fn);
     addLambdaNode(closure, getCurrentFunction(),
-                  outer ? lambdaEnclosingName(outer) : std::string());
+                  outer ? outer->getQualifiedNameAsString() : std::string());
   } else {
     funcStack_.push_back(fn);
     const Ident &id = usrs_.identFor(fn);
@@ -753,8 +745,7 @@ void CallGraphEdgeVisitor::readBody(const clang::FunctionDecl *decl) {
       !fn->isDependentContext()) {
     if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
       for (const clang::CXXCtorInitializer *init : ctor->inits())
-        if (init->getInit())
-          TraverseStmt(init->getInit());
+        traverseInitializer(init);
     TraverseStmt(fn->getBody());
   }
   if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
@@ -773,12 +764,33 @@ void CallGraphEdgeVisitor::readCompilerWritten(clang::FunctionDecl *fn) {
     return;
   if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
     for (const clang::CXXCtorInitializer *init : ctor->inits())
-      if (!init->isWritten() && init->getInit())
-        TraverseStmt(init->getInit());
+      if (!init->isWritten())
+        traverseInitializer(init);
   if (fn->isDefaulted() && fn->getBody())
     TraverseStmt(fn->getBody());
   if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
     addMemberDestruction(dtor);
+}
+
+// A constructor's initializer. The compiler sites an initializer it writes
+// at the constructor, a base's and a member's alike: a member default
+// constructed there is sited at the member instead, so the construction of
+// a base and of a member of the same class stay two edges.
+void CallGraphEdgeVisitor::traverseInitializer(
+    const clang::CXXCtorInitializer *init) {
+  clang::Expr *expr = init->getInit();
+  if (!expr)
+    return;
+  const clang::Expr *saved = implicitInit_;
+  const clang::SourceLocation savedSite = implicitInitSite_;
+  if (!init->isWritten() && init->isAnyMemberInitializer() &&
+      llvm::isa<clang::CXXConstructExpr>(expr)) {
+    implicitInit_ = expr;
+    implicitInitSite_ = init->getAnyMember()->getLocation();
+  }
+  TraverseStmt(expr);
+  implicitInit_ = saved;
+  implicitInitSite_ = savedSite;
 }
 
 // After its body a destructor destroys the members, then the bases: each a
@@ -1022,16 +1034,29 @@ bool CallGraphEdgeVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
   if (inDefaultInit_ > 0)
     return true;
   auto *op = expr->getCallOperator();
+  if (op && inCompilerCode_) {
+    if (const clang::FunctionDecl *def = readableDefinition(op)) {
+      scheduled_.insert(def);
+      if (!read_.insert(def).second) {
+        // Its body was read already (drainBodies reached it first): what
+        // runs here is the captures' initialization.
+        for (unsigned i = 0, n = expr->capture_size(); i != n; ++i) {
+          const clang::LambdaCapture *capture = expr->capture_begin() + i;
+          if (capture->isExplicit() || shouldVisitImplicitCode())
+            if (!TraverseLambdaCapture(expr, capture,
+                                       expr->capture_init_begin()[i]))
+              return false;
+        }
+        return true;
+      }
+    }
+  }
   if (op) {
     funcStack_.push_back(op);
     if (inCompilerCode_) {
       // A closure in a body drainBodies reads: read here, once, and given
       // a node (an instantiated class template member's lambda is named
       // by that member, not by the pattern the indexer saw).
-      if (const clang::FunctionDecl *def = readableDefinition(op)) {
-        scheduled_.insert(def);
-        read_.insert(def);
-      }
       addLambdaNode(op->getParent(), getCurrentFunction(),
                     enclosingNonLambdaName());
     }
@@ -1087,7 +1112,7 @@ std::string CallGraphEdgeVisitor::enclosingNonLambdaName() const {
       if (md->getParent() && md->getParent()->isLambda())
         continue;
     }
-    return lambdaEnclosingName(fd);
+    return fd->getQualifiedNameAsString();
   }
   return "";
 }
@@ -1269,7 +1294,9 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
     return true;
   }
 
-  if (!recordsCallAt(expr->getBeginLoc()))
+  const clang::SourceLocation site =
+      expr == implicitInit_ ? implicitInitSite_ : expr->getBeginLoc();
+  if (!recordsCallAt(site))
     return true;
 
   // An implicit constructor runs the code the compiler writes for it
@@ -1303,7 +1330,7 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   if (spawnerCtx != ExecutionContext::Synchronous) {
     processCallableArgs(
         llvm::ArrayRef<clang::Expr *>(expr->getArgs(), expr->getNumArgs()),
-        caller.usr, expr->getBeginLoc(), spawnerCtx);
+        caller.usr, site, spawnerCtx);
   }
 
   // Add constructor edge.
@@ -1316,7 +1343,7 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   ctorNode.enclosingClass = ctor->getParent()->getQualifiedNameAsString();
   graph_.addNode(std::move(ctorNode), tuPath_);
   graph_.addEdge({caller.usr, ctorId.usr, EdgeKind::ConstructorCall,
-                  Confidence::Proven, formatLocation(expr->getBeginLoc()), 0}, tuPath_);
+                  Confidence::Proven, formatLocation(site), 0}, tuPath_);
 
   return true;
 }
@@ -1432,7 +1459,7 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
           if (md->getParent() && md->getParent()->isLambda())
             continue;
         }
-        enclosing = lambdaEnclosingName(fd);
+        enclosing = fd->getQualifiedNameAsString();
         break;
       }
       varLambdaSources_[decl] =

@@ -524,8 +524,8 @@ trivial destructor run no code and have no edge. A lambda's closure has
 no identity of its own besides its call operator: copying or destroying
 one is the copy or destruction of its captures, at that site, and a
 capture's initializer runs in the function that creates the closure.
-A lambda written in a function template is one node per instantiation;
-a generic lambda's specializations share one.
+A lambda written in a function template is one node whose edges are
+every instantiation's calls; a generic lambda's specializations share it.
 
 **A `throw` is a call.** Each `throw` expression is a `DirectCall`
 edge to `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`) at the

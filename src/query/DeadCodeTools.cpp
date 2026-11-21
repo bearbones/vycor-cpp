@@ -36,7 +36,7 @@
 namespace vycor {
 
 // ============================================================================
-// System path heuristic for analyze_dead_code filtering
+// Compiler-declared functions, filtered from analyze_dead_code
 // ============================================================================
 
 // A function the compiler declares (the global `operator new` and
@@ -46,8 +46,6 @@ namespace vycor {
 static bool isCompilerDeclared(const CallGraphNode &node) {
   return node.line == 0 && llvm::StringRef(node.file).starts_with("<");
 }
-
-
 
 // ============================================================================
 // Tool 7: analyze_dead_code

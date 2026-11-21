@@ -164,6 +164,10 @@ private:
   // constructor, an aggregate initialization): a lambda in one was read
   // where it is written.
   unsigned inDefaultInit_ = 0;
+  // The member initializer the compiler wrote that is being read, and the
+  // member it is sited at (traverseInitializer).
+  const clang::Expr *implicitInit_ = nullptr;
+  clang::SourceLocation implicitInitSite_;
   // Whether this TU has registered the node of the throw / rethrow entry
   // point (throwCalleeIdent), indexed by `rethrow`.
   bool throwNodes_[2] = {false, false};
@@ -205,6 +209,7 @@ private:
   // base initializers not written, a defaulted body, and the destruction
   // of members and bases after a destructor's body.
   void readCompilerWritten(clang::FunctionDecl *fn);
+  void traverseInitializer(const clang::CXXCtorInitializer *init);
   void addMemberDestruction(const clang::CXXDestructorDecl *dtor);
   // A DestructorCall edge to the destructor of `type` (an array's element
   // type) when it is not trivial.
