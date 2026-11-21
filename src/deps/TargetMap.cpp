@@ -50,6 +50,7 @@ struct RawTarget {
   std::vector<std::string> sources;
   std::vector<std::string> headers;
   std::vector<std::string> deps;
+  std::vector<std::string> interfaceDeps;
 };
 
 bool readPathList(const llvm::json::Object &obj, llvm::StringRef key,
@@ -77,6 +78,32 @@ bool readPathList(const llvm::json::Object &obj, llvm::StringRef key,
   }
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
+  return true;
+}
+
+bool readNameList(const llvm::json::Object &obj, llvm::StringRef key,
+                  llvm::StringRef targetName, std::vector<std::string> &out,
+                  std::string &error) {
+  const llvm::json::Value *v = obj.get(key);
+  if (!v)
+    return true;
+  const auto *arr = v->getAsArray();
+  if (!arr) {
+    error = ("target '" + targetName + "': `" + key + "` must be an array")
+                .str();
+    return false;
+  }
+  out.reserve(arr->size());
+  for (const auto &e : *arr) {
+    auto s = e.getAsString();
+    if (!s || s->empty()) {
+      error = ("target '" + targetName + "': `" + key +
+               "` must hold target names")
+                  .str();
+      return false;
+    }
+    out.push_back(s->str());
+  }
   return true;
 }
 
@@ -216,22 +243,9 @@ bool parseTargetMap(const llvm::json::Value &doc, llvm::StringRef baseDir,
     if (!readPathList(*to, "sources", t.name, root, t.sources, error) ||
         !readPathList(*to, "headers", t.name, root, t.headers, error))
       return false;
-    if (const llvm::json::Value *dv = to->get("deps")) {
-      const auto *arr = dv->getAsArray();
-      if (!arr) {
-        error = "target '" + t.name + "': `deps` must be an array";
-        return false;
-      }
-      t.deps.reserve(arr->size());
-      for (const auto &e : *arr) {
-        auto s = e.getAsString();
-        if (!s || s->empty()) {
-          error = "target '" + t.name + "': `deps` must hold target names";
-          return false;
-        }
-        t.deps.push_back(s->str());
-      }
-    }
+    if (!readNameList(*to, "deps", t.name, t.deps, error) ||
+        !readNameList(*to, "interfaceDeps", t.name, t.interfaceDeps, error))
+      return false;
     raw.push_back(std::move(t));
   }
 
@@ -252,8 +266,30 @@ bool parseTargetMap(const llvm::json::Value &doc, llvm::StringRef baseDir,
   out.sourceBegin.reserve(n + 1);
   out.headerBegin.reserve(n + 1);
   out.depBegin.reserve(n + 1);
+  out.interfaceDepBegin.reserve(n + 1);
   for (uint32_t i : order)
     out.names.push_back(raw[i].name);
+  // One target's names resolved into `into`, ascending and unique, without
+  // the target itself and without anything in `except`.
+  auto resolveDeps = [&](const RawTarget &t, const std::vector<std::string> &from,
+                         uint32_t self, llvm::ArrayRef<uint32_t> except,
+                         std::vector<uint32_t> &into) {
+    const size_t start = into.size();
+    for (const auto &d : from) {
+      auto idx = out.find(d);
+      if (!idx) {
+        error = "target '" + t.name + "' depends on '" + d +
+                "', which the map does not declare";
+        return false;
+      }
+      if (*idx != self && !std::binary_search(except.begin(), except.end(), *idx))
+        into.push_back(*idx);
+    }
+    const auto first = into.begin() + static_cast<ptrdiff_t>(start);
+    std::sort(first, into.end());
+    into.erase(std::unique(first, into.end()), into.end());
+    return true;
+  };
   for (uint32_t i : order) {
     RawTarget &t = raw[i];
     const auto self = static_cast<uint32_t>(out.kinds.size());
@@ -265,24 +301,20 @@ bool parseTargetMap(const llvm::json::Value &doc, llvm::StringRef baseDir,
       out.sources.push_back(std::move(s));
     for (auto &h : t.headers)
       out.headers.push_back(std::move(h));
+    out.interfaceDepBegin.push_back(
+        static_cast<uint32_t>(out.interfaceDeps.size()));
     const size_t depStart = out.deps.size();
-    for (const auto &d : t.deps) {
-      auto idx = out.find(d);
-      if (!idx) {
-        error = "target '" + t.name + "' depends on '" + d +
-                "', which the map does not declare";
-        return false;
-      }
-      if (*idx != self)
-        out.deps.push_back(*idx);
-    }
-    std::sort(out.deps.begin() + static_cast<ptrdiff_t>(depStart),
-              out.deps.end());
-    out.deps.erase(
-        std::unique(out.deps.begin() + static_cast<ptrdiff_t>(depStart),
-                    out.deps.end()),
-        out.deps.end());
+    if (!resolveDeps(t, t.deps, self, {}, out.deps))
+      return false;
+    // Copied: `out.deps` is not touched again for this target, but the
+    // ArrayRef must not outlive a later growth.
+    const std::vector<uint32_t> own(
+        out.deps.begin() + static_cast<ptrdiff_t>(depStart), out.deps.end());
+    if (!resolveDeps(t, t.interfaceDeps, self, own, out.interfaceDeps))
+      return false;
   }
+  out.interfaceDepBegin.push_back(
+      static_cast<uint32_t>(out.interfaceDeps.size()));
   out.sourceBegin.push_back(static_cast<uint32_t>(out.sources.size()));
   out.headerBegin.push_back(static_cast<uint32_t>(out.headers.size()));
   out.depBegin.push_back(static_cast<uint32_t>(out.deps.size()));

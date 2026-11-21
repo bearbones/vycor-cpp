@@ -154,6 +154,7 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
   llvm::json::Object refs;
   refs["anchored"] = static_cast<int64_t>(c.anchoredRefs);
   refs["inlineBody"] = static_cast<int64_t>(c.inlineBodyRefs);
+  refs["unmappedBody"] = static_cast<int64_t>(c.unmappedBodyRefs);
   refs["virtualDispatchSkipped"] = static_cast<int64_t>(c.skippedVirtualCalls);
   refs["deferredSkipped"] = static_cast<int64_t>(c.skippedDeferred);
   refs["unresolvedSite"] = static_cast<int64_t>(c.unresolvedSites);
@@ -239,6 +240,9 @@ llvm::json::Object rowJson(const AuditAnalysis &a, const AuditRow &row,
   obj["symbols"] = static_cast<int64_t>(row.symbols);
   obj["uncertainSymbols"] = static_cast<int64_t>(row.uncertainSymbols);
   obj["viaInline"] = static_cast<int64_t>(row.viaInline);
+  obj["indirectUses"] = static_cast<int64_t>(row.indirectUses);
+  obj["consumerUnplacedUses"] =
+      static_cast<int64_t>(audit.unplacedUses[row.consumer]);
   obj["closureSymbols"] = static_cast<int64_t>(row.closureSymbols);
   obj["providerSymbols"] = static_cast<int64_t>(providerSymbols);
   obj["providerPresumedSymbols"] =
@@ -380,8 +384,8 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
     for (size_t k = 0; k < std::size(kFindingNames); ++k)
       counts[k] += (f & kFindingNames[k].bit) != 0;
     // A declared dependency with no observed use and no finding: coverage
-    // of one side is incomplete or unstated, or the index holds no symbol
-    // of the provider at all.
+    // of one side is incomplete or unstated, the consumer uses the
+    // provider indirectly, or the index holds no symbol of the provider.
     if (!(f & kFindingUnused) && row.declared == DeclaredForm::Direct &&
         row.symbols == 0 && row.uncertainSymbols == 0)
       ++unusedWithheld;

@@ -35,7 +35,9 @@ Which dependencies it can state depends on the CMake version:
 
   codemodel >= 2.9 (CMake 4.2)  `linkLibraries` and `objectDependencies`
         per target: what each target's own build file names. The map says
-        "depsForm": "direct", and INTERFACE libraries are listed.
+        "depsForm": "direct", and INTERFACE libraries are listed. What a
+        target only forwards to its consumers (`interfaceLinkLibraries`
+        it does not link itself) goes under `interfaceDeps`.
   older                          only `dependencies`, the transitive
         build-order closure. The map says "depsForm": "closure"; the audit
         then cannot tell a direct dependency from an inherited one.
@@ -164,22 +166,30 @@ def build_map(build: Path, config: str | None) -> dict:
     direct = minor >= (2, 9)
     kept = {}
     for t in raw:
-        kind = KINDS.get(t.get("type", ""))
+        # An imported target is external whatever its type (an import of
+        # unknown type is UNKNOWN_LIBRARY).
+        kind = "external" if t.get("imported") else KINDS.get(t.get("type", ""))
         if kind is None:  # UTILITY and anything newer CMake invents
             continue
-        if t.get("imported"):
-            kind = "external"
         kept[t["id"]] = (t, kind)
 
+    # Imported targets are scoped to a directory, so two directories may
+    # each import one of the same name (and CMake 4.2+ reports both). They
+    # are one target of the map; anything else sharing a name is an error.
     names: dict[str, str] = {}
-    seen: set[str] = set()
-    for tid, (t, _) in kept.items():
-        if t["name"] in seen:
-            fail(f"two targets are named {t['name']!r}; the target map needs unique names")
-        seen.add(t["name"])
-        names[tid] = t["name"]
+    seen: dict[str, str] = {}
+    for tid, (t, kind) in kept.items():
+        name = t["name"]
+        if name in seen and not (kind == "external" and seen[name] == "external"):
+            fail(f"two targets are named {name!r}; the target map needs unique names")
+        seen[name] = kind
+        names[tid] = name
 
-    targets = []
+    def named(t: dict, members: tuple[str, ...]) -> set[str]:
+        ids = {e["id"] for m in members for e in t.get(m, []) if "id" in e}
+        return {names[i] for i in ids if i in names} - {t["name"]}
+
+    by_name: dict[str, dict] = {}
     other_sources = 0
     for tid, (t, kind) in kept.items():
         groups = t.get("compileGroups", [])
@@ -196,16 +206,30 @@ def build_map(build: Path, config: str | None) -> dict:
                 headers.append(path)
         other_sources += len(others)
 
+        # What the target links itself, and what it only tells its
+        # consumers to link (`target_link_libraries(t INTERFACE ...)`, the
+        # whole of a header-only library's dependencies).
         if direct:
-            edges = t.get("linkLibraries", []) + t.get("objectDependencies", [])
+            deps = named(t, ("linkLibraries", "objectDependencies"))
+            forwarded = named(t, ("interfaceLinkLibraries",)) - deps
         else:
-            edges = t.get("dependencies", [])
-        deps = sorted({names[e["id"]] for e in edges if e.get("id") in names and e["id"] != tid})
+            deps = named(t, ("dependencies",))
+            forwarded = set()
+
+        previous = by_name.get(t["name"])
+        if previous is not None:  # a second import of the same name
+            previous["deps"] = sorted(set(previous["deps"]) | deps)
+            merged = (set(previous.get("interfaceDeps", [])) | forwarded) - set(previous["deps"])
+            if merged:
+                previous["interfaceDeps"] = sorted(merged)
+            continue
 
         entry = {"name": t["name"], "kind": kind, "sources": sorted(set(sources))}
         if headers:
             entry["headers"] = sorted(set(headers))
-        entry["deps"] = deps
+        entry["deps"] = sorted(deps)
+        if forwarded:
+            entry["interfaceDeps"] = sorted(forwarded)
         if others:
             entry["otherSources"] = sorted(set(others))
         artifacts = [resolve(a["path"], build_dir) for a in t.get("artifacts", [])]
@@ -217,9 +241,9 @@ def build_map(build: Path, config: str | None) -> dict:
                 entry["artifact"] = artifacts[0]
         if objects:
             entry["objects"] = sorted(objects)
-        targets.append(entry)
+        by_name[t["name"]] = entry
 
-    targets.sort(key=lambda e: e["name"])
+    targets = sorted(by_name.values(), key=lambda e: e["name"])
     cmake_version = index.get("cmake", {}).get("version", {}).get("string", "?")
     result = {
         "schema": 1,

@@ -234,12 +234,6 @@ const char *callEdgeKindName(uint8_t kind) {
   return edgeKindToString(static_cast<EdgeKind>(kind));
 }
 
-/// Lexicographic order of two target sets' contents.
-bool setContentLess(const SetTable &sets, uint32_t a, uint32_t b) {
-  auto x = sets.of(a), y = sets.of(b);
-  return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -309,7 +303,8 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
 
   // --- Index meta: per-TU outcomes, and headers private to one target set -
   // fileStatus: 0 not in the index, 1 parsed cleanly, 2 parse not clean.
-  std::vector<uint8_t> fileStatus;
+  // unmappedTu: an indexed translation unit no target lists.
+  std::vector<uint8_t> fileStatus, unmappedTu;
   if (meta) {
     const size_t tuCount = meta->files.size();
     std::vector<uint32_t> tuFile(tuCount), depFile(meta->deps.size());
@@ -319,6 +314,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       depFile[j] = files.add(normalizeAuditPath(toIndexText(meta->deps[j].path), ""));
     growFileAttrs();
     fileStatus.assign(files.paths.size(), 0);
+    unmappedTu.assign(files.paths.size(), 0);
 
     constexpr uint32_t kUnset = kNoIndex;
     std::vector<uint32_t> depSet(depFile.size(), kUnset);
@@ -327,8 +323,10 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       const bool clean = i < meta->outcomes.size() &&
                          meta->outcomes[i].status == TuStatus::Indexed;
       const uint32_t tuSet = isSource[tuFile[i]] ? fileSet[tuFile[i]] : 0;
-      if (tuSet == 0)
+      if (tuSet == 0) {
         ++lf.counts.unmappedTus;
+        unmappedTu[tuFile[i]] = 1;
+      }
       fileStatus[tuFile[i]] = clean ? 1 : 2;
       if (i >= meta->tuDeps.size())
         continue;
@@ -425,10 +423,14 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   };
 
   // --- Raw references, in storage order -----------------------------------
+  // Every stored edge is kept: whatever it is, it shows that its caller
+  // has a body in the site's file. rawSoft marks the ones that are no
+  // link-time reference (kRawSoft) or no reference at all (kRawSelf).
+  enum : uint8_t { kRawHard = 0, kRawSoft = 1, kRawSelf = 2 };
   std::vector<uint32_t> rawFrom, rawTo, rawFile;
   std::vector<uint64_t> rawLineCol;
   std::vector<SId> rawSite;
-  std::vector<uint8_t> rawKind;
+  std::vector<uint8_t> rawKind, rawSoft;
   {
     const size_t expected = graph.edgeCount();
     rawFrom.reserve(expected);
@@ -437,24 +439,27 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
     rawLineCol.reserve(expected);
     rawSite.reserve(expected);
     rawKind.reserve(expected);
+    rawSoft.reserve(expected);
   }
   graph.forEachStoredEdge([&](const CallGraph::EdgeRef &e) {
-    // A call through a vtable slot needs no definition of its static
-    // target at link time; the vtable does, and that reference is recorded
-    // where the object is constructed (the Proven edges).
-    if (e.kind == EdgeKind::VirtualDispatch &&
-        e.confidence != Confidence::Proven) {
+    uint8_t soft = kRawHard;
+    if (e.caller == e.callee) {
+      soft = kRawSelf;
+    } else if (e.kind == EdgeKind::VirtualDispatch &&
+               e.confidence != Confidence::Proven) {
+      // A call through a vtable slot needs no definition of its static
+      // target at link time; the vtable does, and that reference is
+      // recorded where the object is constructed (the Proven edges). The
+      // index gives a qualified call (`Base::f()`), which does need the
+      // definition, the same kind: soft, so it still counts as a use.
+      soft = kRawSoft;
       ++lf.counts.skippedVirtualCalls;
-      return;
-    }
-    // The callee is the function that returns the pointer, joined at query
-    // time; the pointer's own address-of is recorded as its own edge.
-    if (e.kind == EdgeKind::FunctionPointerReturn) {
+    } else if (e.kind == EdgeKind::FunctionPointerReturn) {
+      // The callee is the function that returns the pointer, joined at
+      // query time; the pointer's own address-of is its own edge.
+      soft = kRawSoft;
       ++lf.counts.skippedDeferred;
-      return;
     }
-    if (e.caller == e.callee)
-      return;
     llvm::StringRef file;
     uint32_t line = 0, col = 0;
     uint32_t fileId = kNoIndex;
@@ -468,6 +473,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
     rawLineCol.push_back((static_cast<uint64_t>(line) << 32) | col);
     rawSite.push_back(e.callSite);
     rawKind.push_back(static_cast<uint8_t>(e.kind));
+    rawSoft.push_back(soft);
   });
   const uint32_t symbolCount = lf.symbolCount();
   const size_t rawCount = rawFrom.size();
@@ -516,19 +522,26 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
   lf.symOwner.assign(symbolCount, 0);
   lf.symFile.assign(symbolCount, kNoIndex);
+  lf.symUnplaced.assign(symbolCount, 0);
 
   // 1. A reference held by a target's own file: the body is there.
   // 2. Else declared in such a file (a function with no calls in it).
   std::vector<std::pair<uint32_t, uint32_t>> votes; // (header, owner set)
+  // unmappedBody[s]: s makes a call written in an indexed translation
+  // unit no target lists, and none in a target's file.
+  std::vector<uint8_t> unmappedBody(symbolCount, 0);
   for (uint32_t s = 0; s < symbolCount; ++s) {
     uint32_t owner = 0, bodyFile = kNoIndex;
     uint64_t bestKey = ~0ull;
-    bool mixed = false;
+    bool mixed = false, inUnmappedTu = false;
     for (uint32_t i = rawBegin[s]; i < rawBegin[s + 1]; ++i) {
       const uint32_t r = byFrom[i];
       const uint32_t set = siteSetOf(r);
-      if (set == 0)
+      if (set == 0) {
+        inUnmappedTu |= rawFile[r] != kNoIndex && rawFile[r] < unmappedTu.size() &&
+                        unmappedTu[rawFile[r]];
         continue;
+      }
       if (owner == 0)
         owner = set;
       else if (owner != set)
@@ -558,6 +571,8 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       if (decl != kNoIndex && fileSet[decl] == 0 && headerOwner[decl] == 0 &&
           map.underRoots(files.paths[decl]))
         votes.emplace_back(decl, owner);
+    } else if (inUnmappedTu) {
+      unmappedBody[s] = 1;
     } else if (decl != kNoIndex && fileSet[decl] != 0) {
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = fileSet[decl];
@@ -572,21 +587,32 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   std::sort(votes.begin(), votes.end());
   for (size_t i = 0; i < votes.size();) {
     const uint32_t header = votes[i].first;
-    uint32_t best = 0;
+    const size_t first = i;
     size_t bestCount = 0;
     while (i < votes.size() && votes[i].first == header) {
       size_t j = i;
       while (j < votes.size() && votes[j] == votes[i])
         ++j;
-      const size_t count = j - i;
-      if (count > bestCount ||
-          (count == bestCount && setContentLess(sets, votes[i].second, best))) {
-        bestCount = count;
-        best = votes[i].second;
-      }
+      bestCount = std::max(bestCount, j - i);
       i = j;
     }
-    headerOwner[header] = best;
+    // Every set with the most votes: one winner owns the header; on a tie
+    // nothing tells the tied sets apart, so the header is presumed to
+    // belong to all of them.
+    scratchSet.clear();
+    for (size_t k = first; k < i;) {
+      size_t j = k;
+      while (j < i && votes[j] == votes[k])
+        ++j;
+      if (j - k == bestCount)
+        for (uint32_t t : sets.of(votes[k].second))
+          scratchSet.push_back(t);
+      k = j;
+    }
+    std::sort(scratchSet.begin(), scratchSet.end());
+    scratchSet.erase(std::unique(scratchSet.begin(), scratchSet.end()),
+                     scratchSet.end());
+    headerOwner[header] = sets.intern(scratchSet);
   }
   for (uint32_t f = 0; f < headerOwner.size(); ++f)
     if (headerOwner[f] == 0 && fileSet[f] == 0 && stemOwner[f] != 0 &&
@@ -602,9 +628,16 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       continue;
     }
     const uint32_t decl = declFile[s];
-    if (rawBegin[s + 1] != rawBegin[s] ||
-        templateLikeUsr(strings.resolve(lf.symUsr[s]))) {
+    if (unmappedBody[s]) {
+      // Code of a source no target compiles: neither a provider's symbol
+      // nor a carrier of references.
+      ++lf.counts.unattributed;
+    } else if (rawBegin[s + 1] != rawBegin[s] ||
+               templateLikeUsr(strings.resolve(lf.symUsr[s]))) {
       lf.symClass[s] = SymbolClass::Inline;
+      // Whose header it is, for indirect uses; no link owner.
+      if (decl != kNoIndex)
+        lf.symOwner[s] = headerOwner[decl];
       ++lf.counts.inlined;
     } else if (decl != kNoIndex && headerOwner[decl] != 0) {
       lf.symClass[s] = SymbolClass::Presumed;
@@ -612,6 +645,9 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       ++lf.counts.presumed;
     } else {
       ++lf.counts.unattributed;
+      lf.symUnplaced[s] = decl != kNoIndex && !resolver.unresolved(decl) &&
+                          !(decl < unmappedTu.size() && unmappedTu[decl]) &&
+                          map.underRoots(files.paths[decl]);
     }
   }
 
@@ -631,9 +667,31 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.refKey.reserve(rawCount);
   lf.refSite.reserve(rawCount);
   lf.refKind.reserve(rawCount);
+  lf.softBegin.assign(symbolCount + 1, 0);
   std::vector<uint32_t> range, rangeAnchor;
+  std::vector<std::pair<uint32_t, uint32_t>> softPairs; // (to, anchor)
   for (uint32_t s = 0; s < symbolCount; ++s) {
-    range.assign(byFrom.begin() + rawBegin[s], byFrom.begin() + rawBegin[s + 1]);
+    range.clear();
+    softPairs.clear();
+    if (unmappedBody[s]) {
+      lf.counts.unmappedBodyRefs += rawBegin[s + 1] - rawBegin[s];
+    } else {
+      for (uint32_t i = rawBegin[s]; i < rawBegin[s + 1]; ++i) {
+        const uint32_t r = byFrom[i];
+        if (rawSoft[r] == kRawHard)
+          range.push_back(r);
+        else if (rawSoft[r] == kRawSoft)
+          softPairs.emplace_back(rawTo[r], anchorOf(r));
+      }
+    }
+    std::sort(softPairs.begin(), softPairs.end());
+    softPairs.erase(std::unique(softPairs.begin(), softPairs.end()),
+                    softPairs.end());
+    for (const auto &p : softPairs) {
+      lf.softTo.push_back(p.first);
+      lf.softAnchor.push_back(p.second);
+    }
+    lf.softBegin[s + 1] = static_cast<uint32_t>(lf.softTo.size());
     // Anchors index by raw reference; a per-range side table keeps the
     // comparator free of the class lookup.
     rangeAnchor.resize(range.size());
@@ -651,7 +709,11 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
         return rangeAnchor[a] < rangeAnchor[b];
       if (rawKey[ra] != rawKey[rb])
         return rawKey[ra] < rawKey[rb];
-      return rawKind[ra] < rawKind[rb];
+      if (rawKind[ra] != rawKind[rb])
+        return rawKind[ra] < rawKind[rb];
+      // Sites whose files share a rank (unresolved spellings): the text.
+      return rawSite[ra] != rawSite[rb] &&
+             strings.resolve(rawSite[ra]) < strings.resolve(rawSite[rb]);
     });
     order.erase(std::unique(order.begin(), order.end(),
                             [&](uint32_t a, uint32_t b) {
@@ -743,6 +805,7 @@ void forEachBit(const uint64_t *row, uint32_t words, Fn &&fn) {
 struct Workspace {
   std::vector<uint32_t> symStamp;    // per symbol: visited in this traversal
   std::vector<uint32_t> useStamp;    // per symbol: recorded as a use
+  std::vector<uint32_t> softStamp;   // per symbol: counted as indirect use
   std::vector<uint32_t> queue;       // per symbol: BFS frontier
   std::vector<uint32_t> queueRoot;   // per symbol: root reference
   std::vector<uint32_t> fileStamp;   // per file
@@ -751,7 +814,8 @@ struct Workspace {
   uint32_t epoch = 0;
 
   Workspace(uint32_t symbols, uint32_t files, uint32_t targets)
-      : symStamp(symbols, 0), useStamp(symbols, 0), queue(symbols),
+      : symStamp(symbols, 0), useStamp(symbols, 0), softStamp(symbols, 0),
+        queue(symbols),
         queueRoot(symbols), fileStamp(files, 0), targetStamp(targets, 0),
         needScratch(targets) {}
 };
@@ -889,6 +953,7 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
   audit.providerSymbols.assign(targetCount, 0);
   audit.providerFiles.assign(targetCount, 0);
   audit.presumedSymbols.assign(targetCount, 0);
+  audit.unplacedUses.assign(targetCount, 0);
   {
     std::vector<std::pair<uint32_t, uint32_t>> bodies; // (target, file)
     for (uint32_t s = 0; s < symbolCount; ++s) {
@@ -912,15 +977,23 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
   // --- Target-level reachability over the declared dependencies -----------
   // reach(t): every target t's dependencies pull in, t itself excluded
   // unless the declarations form a cycle through it.
+  // What a target forwards to its consumers (`interfaceDeps`) is reached
+  // through it like what it links itself.
   BitMatrix reach(targetCount);
-  for (uint32_t t = 0; t < targetCount; ++t)
+  for (uint32_t t = 0; t < targetCount; ++t) {
     for (uint32_t d : map.depsOf(t))
       reach.set(t, d);
+    for (uint32_t d : map.interfaceDepsOf(t))
+      reach.set(t, d);
+  }
   for (bool changed = true; changed;) {
     changed = false;
-    for (uint32_t t = targetCount; t-- > 0;)
+    for (uint32_t t = targetCount; t-- > 0;) {
       for (uint32_t d : map.depsOf(t))
         changed |= reach.orInto(t, d);
+      for (uint32_t d : map.interfaceDepsOf(t))
+        changed |= reach.orInto(t, d);
+    }
   }
 
   // The dependencies the build file is known to name. In the closure form
@@ -969,9 +1042,27 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
                 return a.from != b.from && usrOf(a.from) < usrOf(b.from);
               });
 
+  // --- Soft references each target's objects hold (counted, unordered) ---
+  std::vector<uint32_t> heldSoftBegin(targetCount + 1, 0);
+  for (uint32_t r = 0, e = static_cast<uint32_t>(lf.softTo.size()); r < e; ++r)
+    for (uint32_t t : lf.targetsOf(lf.softAnchor[r]))
+      ++heldSoftBegin[t + 1];
+  for (uint32_t t = 0; t < targetCount; ++t)
+    heldSoftBegin[t + 1] += heldSoftBegin[t];
+  std::vector<uint32_t> heldSoft(heldSoftBegin[targetCount]);
+  {
+    std::vector<uint32_t> cursor(heldSoftBegin.begin(),
+                                 heldSoftBegin.end() - 1);
+    for (uint32_t r = 0, e = static_cast<uint32_t>(lf.softTo.size()); r < e;
+         ++r)
+      for (uint32_t t : lf.targetsOf(lf.softAnchor[r]))
+        heldSoft[cursor[t]++] = lf.softTo[r];
+  }
+
   Workspace ws(symbolCount, static_cast<uint32_t>(lf.files.size()),
                targetCount);
   std::vector<Use> uses;
+  std::vector<uint32_t> softUses; // providers, one entry per indirect use
   std::vector<uint32_t> seedScratch;
   std::vector<uint32_t> reachCount(targetCount, 0);
   std::vector<uint32_t> directStamp(targetCount, 0);
@@ -1004,8 +1095,12 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
           ws.queue[tail] = to;
           ws.queueRoot[tail++] = root;
         }
-      } else if (cls != SymbolClass::Unattributed &&
-                 ws.useStamp[to] != epoch &&
+      } else if (cls == SymbolClass::Unattributed) {
+        if (lf.symUnplaced[to] && ws.useStamp[to] != epoch) {
+          ws.useStamp[to] = epoch;
+          ++audit.unplacedUses[consumer];
+        }
+      } else if (ws.useStamp[to] != epoch &&
                  !lf.setHas(lf.symOwner[to], consumer)) {
         record(to, ref, root, via);
       }
@@ -1018,6 +1113,32 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
         visit(lf.refTo[r], r, root, true);
     }
+    // Indirect uses: symbols of another target the consumer's code touches
+    // without a reference counted above — the inline bodies it walked
+    // through, and the targets of the soft references it and they hold.
+    softUses.clear();
+    auto touch = [&](uint32_t sym) {
+      if (ws.softStamp[sym] == epoch || ws.useStamp[sym] == epoch)
+        return;
+      ws.softStamp[sym] = epoch;
+      const uint32_t owner = lf.symOwner[sym];
+      if (lf.symClass[sym] == SymbolClass::Unattributed || owner == 0 ||
+          lf.setHas(owner, consumer))
+        return;
+      for (uint32_t t : lf.targetsOf(owner))
+        softUses.push_back(t);
+    };
+    for (uint32_t i = heldSoftBegin[consumer]; i < heldSoftBegin[consumer + 1];
+         ++i)
+      touch(heldSoft[i]);
+    for (uint32_t q = 0; q < tail; ++q) {
+      const uint32_t s = ws.queue[q];
+      touch(s);
+      for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r)
+        touch(lf.softTo[r]);
+    }
+    std::sort(softUses.begin(), softUses.end());
+
     std::sort(uses.begin(), uses.end(), [&](const Use &a, const Use &b) {
       if (a.provider != b.provider)
         return a.provider < b.provider;
@@ -1077,6 +1198,11 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
         }
       }
       row.seedEnd = static_cast<uint32_t>(audit.seedSym.size());
+      {
+        const auto range =
+            std::equal_range(softUses.begin(), softUses.end(), provider);
+        row.indirectUses = static_cast<uint32_t>(range.second - range.first);
+      }
 
       // --- Phase B: the closure of the certain seeds inside the provider --
       row.needBegin = static_cast<uint32_t>(audit.needs.size());
@@ -1163,9 +1289,10 @@ unsigned rowFindings(const DependencyAudit &audit, const LinkFacts &facts,
   const uint64_t providerTotal = static_cast<uint64_t>(providerSymbols) +
                                  audit.presumedSymbols[row.provider];
   // Unused: the index knows functions of the provider and the consumer's
-  // objects call none of them, not even one whose owner is presumed.
+  // objects call none of them, not even one whose owner is presumed, and
+  // the consumer's code touches nothing of the provider's indirectly.
   if (row.declared == DeclaredForm::Direct && row.symbols == 0 &&
-      row.uncertainSymbols == 0 && coverageStated &&
+      row.uncertainSymbols == 0 && row.indirectUses == 0 && coverageStated &&
       facts.targetCovered[row.consumer] && facts.targetCovered[row.provider] &&
       providerTotal != 0)
     findings |= kFindingUnused;

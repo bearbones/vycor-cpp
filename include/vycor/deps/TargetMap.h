@@ -73,6 +73,13 @@ struct TargetMap {
   std::vector<std::string> headers; // absolute, lexically normal
   std::vector<uint32_t> depBegin;
   std::vector<uint32_t> deps; // target indices, ascending, no self, unique
+  /// `interfaceDeps`: what a target tells its consumers to link without
+  /// linking it itself (a header-only library forwarding the library its
+  /// headers call into). They extend what is reached through the target;
+  /// they are never the target's own declared dependencies, so they make
+  /// no row and no unused finding.
+  std::vector<uint32_t> interfaceDepBegin;
+  std::vector<uint32_t> interfaceDeps; // as deps, and disjoint from them
 
   [[nodiscard]] uint32_t size() const noexcept {
     return static_cast<uint32_t>(names.size());
@@ -89,6 +96,11 @@ struct TargetMap {
   [[nodiscard]] llvm::ArrayRef<uint32_t> depsOf(uint32_t t) const {
     return llvm::ArrayRef<uint32_t>(deps).slice(depBegin[t],
                                                 depBegin[t + 1] - depBegin[t]);
+  }
+  [[nodiscard]] llvm::ArrayRef<uint32_t> interfaceDepsOf(uint32_t t) const {
+    return llvm::ArrayRef<uint32_t>(interfaceDeps)
+        .slice(interfaceDepBegin[t],
+               interfaceDepBegin[t + 1] - interfaceDepBegin[t]);
   }
 };
 

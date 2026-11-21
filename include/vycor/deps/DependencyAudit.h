@@ -101,8 +101,16 @@ struct LinkFacts {
   std::vector<StringInterner::Id> symUsr;
   std::vector<const CallGraphNode *> symNode; // null: endpoint without node
   std::vector<SymbolClass> symClass;
-  std::vector<uint32_t> symOwner; // target-set id (0 unless Defined/Presumed)
+  /// Target-set id. Defined, Presumed: the owning targets. Inline: the
+  /// owner of the header that declares it, or 0 — never a link owner, only
+  /// whose code it is (indirect uses). Unattributed: 0.
+  std::vector<uint32_t> symOwner;
   std::vector<uint32_t> symFile;  // defining file id (Defined), else kNoIndex
+  /// Unattributed, yet declared in a file under the map's roots that is no
+  /// unlisted source: the build's own code, owner unknown. It may belong
+  /// to any target, so a consumer that references one is never told a
+  /// dependency is unused.
+  std::vector<uint8_t> symUnplaced;
 
   [[nodiscard]] uint32_t symbolCount() const noexcept {
     return static_cast<uint32_t>(symUsr.size());
@@ -121,6 +129,17 @@ struct LinkFacts {
   std::vector<StringInterner::Id> refSite; // "file:line:col"
   std::vector<uint8_t> refKind;
 
+  // --- Soft references, CSR by referencing symbol ----------------------
+  // References the source recorded but that name no symbol the linker is
+  // known to need (with call edges: a call through a vtable slot, a
+  // function-pointer-through-return join). They seed nothing and no
+  // closure walks them; a consumer that holds one onto a provider's symbol
+  // is counted as using the provider indirectly. One per (from, to,
+  // anchor), in no contractual order: they are only ever counted.
+  std::vector<uint32_t> softBegin; // size = symbols + 1
+  std::vector<uint32_t> softTo;
+  std::vector<uint32_t> softAnchor; // as refAnchor
+
   // --- Coverage, per target --------------------------------------------
   std::vector<uint32_t> targetSources; // sources the map lists
   std::vector<uint32_t> targetIndexed; // of those, parsed cleanly
@@ -135,6 +154,7 @@ struct LinkFacts {
     uint32_t defined = 0, presumed = 0, inlined = 0, unattributed = 0;
     uint64_t anchoredRefs = 0;   // references held by a target's objects
     uint64_t inlineBodyRefs = 0; // references that travel with a caller
+    uint64_t unmappedBodyRefs = 0; // held by an indexed TU no target lists
     uint64_t skippedVirtualCalls = 0; // calls through a vtable slot
     uint64_t skippedDeferred = 0;     // function-pointer-through-return
     uint64_t unresolvedSites = 0;     // site file matched nothing known
@@ -181,6 +201,10 @@ struct AuditRow {
   uint32_t symbols = 0;          // Defined provider symbols referenced
   uint32_t uncertainSymbols = 0; // Presumed provider symbols referenced
   uint32_t viaInline = 0;        // of `symbols`, reached only through inlines
+  /// Provider symbols the consumer touches without a reference the
+  /// linker is known to need: inline code declared in the provider's
+  /// headers, static targets of soft references. Disjoint from the seeds.
+  uint32_t indirectUses = 0;
   uint32_t closureSymbols = 0;   // Defined provider symbols the seeds need
   uint32_t closureFiles = 0;     // files holding those definitions
   uint32_t onlyViaEdge = 0;      // targets linked only because of this edge
@@ -215,6 +239,9 @@ struct DependencyAudit {
   std::vector<uint32_t> providerSymbols; // Defined symbols per target
   std::vector<uint32_t> providerFiles;   // files holding them
   std::vector<uint32_t> presumedSymbols; // Presumed symbols per target
+  /// Per target: distinct unplaced symbols (LinkFacts::symUnplaced) its
+  /// objects reference, directly or through inline bodies.
+  std::vector<uint32_t> unplacedUses;
 
   /// Row of (consumer, provider), or kNoIndex.
   [[nodiscard]] uint32_t find(uint32_t consumer, uint32_t provider) const;

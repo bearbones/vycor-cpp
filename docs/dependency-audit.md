@@ -99,6 +99,7 @@ a build system; an adapter writes this file (see [Adapters](#adapters)).
 | `targets[].sources` | no | the translation units compiled into the target's objects. One source may be listed by several targets |
 | `targets[].headers` | no | headers the target claims: a function *declared* in one and whose body the index never saw is presumed to be the target's. Listing is needed only where [attribution](#attribution) cannot work it out |
 | `targets[].deps` | no | names of the targets it declares a dependency on. Every name must be a target of the map; duplicates and the target's own name are dropped |
+| `targets[].interfaceDeps` | no | names of the targets it tells its consumers to link without linking them itself (a header-only library forwarding the library its headers call; CMake's `target_link_libraries(t INTERFACE ...)`). They extend what a consumer reaches through the target and so decide `declared: "transitive"` against `"none"`; they are not the target's own dependencies, so they make no row and no unused finding. A name also in `deps` counts as a dependency only |
 
 Paths are made absolute against `root` and normalized lexically (`.` and
 `..` removed; symlinks are **not** resolved, so the map must spell a
@@ -132,13 +133,29 @@ and so does the code in it.
 | 5 | makes no call and is declared in a shared header that has an owner | `presumed` | the header's owner |
 | 6 | anything else | unattributed | none: ignored |
 
-The owner of a shared header, for rule 5, is the first that applies:
+"A call" in rules 1 to 3 is any call the index recorded in the body,
+whatever its kind: a call that creates no reference (below) still shows
+where the body is written. One case comes before rule 2: a function
+whose calls are written in an indexed source that no target lists, and
+in no target's file, is unattributed — its body is in a file the map
+leaves out, so it is neither a provider's symbol nor an inline body
+that carries references (`completeness.references.unmappedBody` counts
+the references dropped with it).
+
+The owner of a shared header is the first that applies:
 
 1. the target that lists it under `headers`;
-2. the target set that owns the most `defined` functions declared in
-   that header (a tie is no owner), when the header is under `roots`;
+2. the target sets that own the most `defined` functions declared in
+   that header, when the header is under `roots`. Several sets tied for
+   the most are all presumed: the header's leaves could be any of
+   theirs, so each counts as an uncertain use;
 3. the one target set with a source of the same file stem that opens
    it (`tokenizer.hpp` and `tokenizer.cpp`).
+
+Rule 5 takes a `presumed` symbol's owner from it. An `inline` function
+keeps the owner of its declaring header as its *home*: not a link
+owner — nothing links against an inline body — but enough to say the
+consumer uses that target's code ([indirect uses](#indirect-uses)).
 
 What the rules mean for the cases that matter:
 
@@ -170,10 +187,30 @@ that links nothing.
 A call through a vtable slot whose target is not proven
 (`VirtualDispatch`, `Plausible`) and a call through a function pointer
 joined at query time (`FunctionPointerReturn`) create no reference:
-the object file names no function symbol for either. They are counted
-in `completeness.references` (`virtualDispatchSkipped`,
-`deferredSkipped`). A virtual call the index proved (`Proven`) is a
-direct reference.
+a dispatched call names a vtable slot, not a function symbol. They are
+counted in `completeness.references` (`virtualDispatchSkipped`,
+`deferredSkipped`) and kept as [indirect uses](#indirect-uses). A
+virtual call the index proved (`Proven`) is a direct reference.
+
+The index also records a *qualified* call to a virtual function
+(`Base::run()` from an override) as an unproven `VirtualDispatch`,
+although it is bound statically and the object does name the symbol.
+The audit cannot tell the two apart, so such a call is an indirect use
+and not a symbol of the row.
+
+### Indirect uses
+
+A row's `indirectUses` counts the provider's code the consumer touches
+without a reference the linker is known to need:
+
+- a `defined` or `presumed` symbol of the provider reached only by an
+  unproven virtual call or a function-pointer return, from the
+  consumer's objects or from an inline body they use;
+- an `inline` function the consumer uses whose home is the provider.
+
+They are disjoint from the row's symbols, enter no closure and no thin
+finding, and do one thing: a row with an indirect use is never reported
+as unused.
 
 ## Inline bodies and the closure
 
@@ -227,6 +264,7 @@ symbol or uncertain symbol referenced).
 | `symbols` | `defined` symbols of the provider the consumer's objects reference |
 | `uncertainSymbols` | `presumed` symbols of the provider they reference |
 | `viaInline` | of `symbols`, those reached only through an inline body |
+| `indirectUses` | the provider's symbols the consumer touches without a reference the linker is known to need — [Indirect uses](#indirect-uses) |
 | `closureSymbols`, `closureFiles` | the closure of `symbols` inside the provider, and the files holding it |
 | `providerSymbols`, `providerFiles`, `providerPresumedSymbols` | the provider's size: `defined` symbols, the files holding them, `presumed` symbols |
 | `separabilityPct` | the share of the provider's `defined` symbols *outside* the closure, 0–100: how much of the provider the consumer would not need |
@@ -236,6 +274,7 @@ symbol or uncertain symbol referenced).
 | `droppableSymbols` | the `defined` symbols in `droppableTargets`, less the closure itself when the provider is among them — the gain |
 | `providerDroppable` | the provider is one of `droppableTargets` |
 | `consumerCovered`, `providerCovered` | every mapped source of the target was indexed cleanly |
+| `consumerUnplacedUses` | a property of the consumer, repeated on its rows: the functions its objects reference that are declared under `roots` and that no rule could place in a target. Any of them may belong to this row's provider. Information only: no finding depends on it |
 | `witness` | the first seed in canonical order: `site`, `from`, `to`, `kind` (absent without one) |
 | `findings` | the row's findings, each `{"id", "evidence": "call-edges", "universal": false}` |
 
@@ -271,20 +310,21 @@ all (CMake's `add_dependencies`); they look declared here.
 
 | Finding | Condition |
 |---|---|
-| `unused-link-dependency` | `declared: "direct"`; no symbol and no uncertain symbol referenced; consumer and provider both covered; the index's coverage is stated and it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
+| `unused-link-dependency` | `declared: "direct"`; no symbol, no uncertain symbol and no indirect use; consumer and provider both covered; the index's coverage is stated and it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
 | `undeclared-link-dependency` | at least one `defined` symbol referenced, and `declared` is `transitive` or `none` |
 | `thin-dependency` | `declared` is `direct` or `closure`; `1 ≤ symbols + uncertainSymbols ≤ thin_max_symbols`; `closureSymbols + uncertainSymbols` is at most `thin_max_closure_pct` percent of `providerSymbols + providerPresumedSymbols` |
 
 `unused-link-dependency` **fails closed**: a target with a source that
 is missing from the index or did not parse cleanly, an index without
-stated coverage, an index baked with collapsed paths, or a provider the
-index holds no symbol of yields no finding. `unusedWithheld` counts
-the declared-direct rows with no observed use that got no finding for
-one of those reasons, so "no unused findings" is never mistaken for
-"everything is used". When the
+stated coverage, an index baked with collapsed paths, a provider the
+index holds no symbol of, or an indirect use yields no finding.
+`unusedWithheld` counts the declared-direct rows with no symbol and no
+uncertain symbol that got no finding for one of those reasons, so "no
+unused findings" is never mistaken for "everything is used". When the
 finding is reported it is still not a verdict: the objects may need the
 provider for a variable, a vtable, a static initializer, or a function
-the audit could not attribute (below).
+the audit could not attribute (below; `consumerUnplacedUses` says how
+many of the consumer's callees that is).
 
 `thin-dependency` describes the shape of an edge, not its value. Rank
 thin rows by `droppableSymbols` (`--sort gain`), then read the closure
@@ -322,7 +362,7 @@ Every payload of both tools carries `completeness`:
 | `targets` | `total`, `withSources`, `covered` |
 | `sources` | `mapped` (distinct sources in the map), `indexed` (parsed cleanly), `failed`, `notIndexed`, `unmappedTus` |
 | `symbols` | `defined`, `presumed`, `inline`, `unattributed` |
-| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with a caller), `virtualDispatchSkipped`, `deferredSkipped`, `unresolvedSite` (the call site's file matched no known file) |
+| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with a caller), `virtualDispatchSkipped`, `deferredSkipped`, `unmappedBody` (made by a function whose body is in an indexed source no target lists), `unresolvedSite` (the call site's file matched no known file) |
 
 `invisible`:
 
@@ -353,7 +393,20 @@ Known ways an answer is wrong, beyond what the tags say:
   files outside `roots`** has no call in a target's file and looks
   `inline` or `presumed`.
 - **An explicit template instantiation** is template code by its USR,
-  so `inline`, though one target's object emits it.
+  so `inline`, though one target's object emits it. A consumer that
+  calls it shows an indirect use of the header's owner, not a symbol.
+- **A function with a body in several targets** (the same function
+  defined in sources of different targets) holds the references of
+  every copy, so a closure through it over-counts.
+- **A source another translation unit includes** (a unity build, an
+  `#include "impl.cpp"`) counts as indexed when the including unit
+  parsed cleanly, though its own compile command was never used.
+- **A call site the index cannot match to one file**
+  (`references.unresolvedSite`) loses its reference, and no finding is
+  withheld for it.
+- **The map and the index are not checked against each other.** A map
+  written from another checkout or configuration than the index was
+  baked from is compared as it stands.
 - **A function template named `operator<`** spells its instantiations
   `operator<<#...`, the same as `operator<<` itself; the name is read as
   the stream inserter, so the instantiation looks `presumed` rather
@@ -383,7 +436,8 @@ scripts/dep-audit-nm-compare.py --binary build/src/vycor-cpp \
 It needs the object files, or the static archive, of each target: the
 map's `objects` / `artifact` members, which the CMake adapter fills
 from the build directory. Targets without them are counted as not
-built and skipped.
+built and skipped. `--strip-underscore` (default `auto`: on macOS)
+drops the underscore Mach-O puts before every symbol.
 
 The report splits every difference by cause:
 
@@ -422,14 +476,15 @@ cmake itself with `--configure`.
 
 | CMake | `depsForm` | Dependencies from |
 |---|---|---|
-| 4.2 and newer (codemodel 2.9+) | `direct` | each target's `linkLibraries` and `objectDependencies`: what `target_link_libraries` and `$<TARGET_OBJECTS:...>` name. `INTERFACE` libraries are listed |
+| 4.2 and newer (codemodel 2.9+) | `direct` | each target's `linkLibraries` and `objectDependencies`: what `target_link_libraries` and `$<TARGET_OBJECTS:...>` name. `interfaceLinkLibraries` the target does not link itself become `interfaceDeps`. `INTERFACE` libraries are listed |
 | 3.14 – 4.1 | `closure` | each target's `dependencies`: the transitive build-order closure, `add_dependencies` included. No `INTERFACE` libraries |
 
 Sources are the entries CMake compiles as C, C++, Objective-C or
 Objective-C++ (other languages go to `otherSources`); `headers` are the
 header files a target lists among its sources; `roots` are the source
-and build directories; imported targets are `external`; `UTILITY`
-targets are dropped. With a `compile_commands.json` in the build
+and build directories; imported targets are `external` (imports of one
+name in several directories are one target); `UTILITY` targets are
+dropped. With a `compile_commands.json` in the build
 directory each target also gets `objects`.
 
 **Bazel and Buck2** — not implemented. The rules under `bazel/` and

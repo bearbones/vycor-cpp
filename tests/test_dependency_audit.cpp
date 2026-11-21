@@ -922,7 +922,28 @@ TEST_CASE("dependency audit: deferred and virtual edges are counted and "
   CHECK(lf.counts.skippedVirtualCalls == 1);
   CHECK(lf.counts.skippedDeferred == 1);
   DependencyAudit audit = auditDependencies(lf, map);
-  CHECK(rowOf(audit, 1, 0).symbols == 0);
+  const AuditRow &row = rowOf(audit, 1, 0);
+  CHECK(row.symbols == 0);
+  CHECK(row.uncertainSymbols == 0);
+  // Neither is a reference the linker is known to need, but both touch
+  // the provider: an indirect use, which is enough to withhold "unused".
+  CHECK(row.indirectUses == 2);
+  CHECK(rowFindings(audit, lf, row, {}, true) == 0);
+
+  // Without them the same row is reported.
+  CallGraph g0;
+  fill(g0,
+       {{"Base::run", "/p/lib/base.h", 1},
+        {"lib_detail", "/p/lib/l.cpp", 1},
+        {"user", "/p/user/u.cpp", 1},
+        {"user_detail", "/p/user/u.cpp", 5}},
+       {{"Base::run", "lib_detail", "/p/lib/l.cpp:5:3"},
+        {"user", "user_detail", "/p/user/u.cpp:2:3"}});
+  LinkFacts lf0 = linkFactsFromCallEdges(g0, map, &meta);
+  DependencyAudit audit0 = auditDependencies(lf0, map);
+  CHECK(rowOf(audit0, 1, 0).indirectUses == 0);
+  CHECK(rowFindings(audit0, lf0, rowOf(audit0, 1, 0), {}, true) ==
+        kFindingUnused);
 
   // A virtual call whose concrete type is known is a direct reference.
   CallGraph g2;
@@ -936,6 +957,240 @@ TEST_CASE("dependency audit: deferred and virtual edges are counted and "
   LinkFacts lf2 = linkFactsFromCallEdges(g2, map, &meta);
   CHECK(lf2.counts.skippedVirtualCalls == 0);
   CHECK(rowOf(auditDependencies(lf2, map), 1, 0).symbols == 1);
+}
+
+TEST_CASE("dependency audit: any call written in a source pins the body "
+          "there",
+          "[dependency-audit]") {
+  // via_virtual's only call is a virtual one, recurse's only call is to
+  // itself, and deferred's is a function pointer return. None of the three
+  // is a reference, but each shows where the body is.
+  CallGraph g;
+  fill(g,
+       {{"Base::run", "/usr/include/base.h", 1},
+        {"via_virtual", "/p/lib/api.h", 1},
+        {"recurse", "/p/lib/api.h", 2},
+        {"deferred", "/p/lib/api.h", 3},
+        {"user", "/p/user/u.cpp", 1}},
+       {{"via_virtual", "Base::run", "/p/lib/l.cpp:3:3",
+         EdgeKind::VirtualDispatch, Confidence::Plausible},
+        {"recurse", "recurse", "/p/lib/l.cpp:5:3"},
+        {"deferred", "Base::run", "/p/lib/l.cpp:7:3",
+         EdgeKind::FunctionPointerReturn},
+        {"user", "via_virtual", "/p/user/u.cpp:2:3"},
+        {"user", "recurse", "/p/user/u.cpp:3:3"},
+        {"user", "deferred", "/p/user/u.cpp:4:3"}});
+  TargetMap map = theMap(R"({"schema": 1, "targets": [
+    {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["lib"]}]})");
+  SnapshotMeta meta = metaOf({{"/p/lib/l.cpp", {"/p/lib/api.h"}},
+                              {"/p/user/u.cpp", {"/p/lib/api.h"}}});
+  LinkFacts lf = linkFactsFromCallEdges(g, map, &meta);
+  for (const char *name : {"via_virtual", "recurse", "deferred"}) {
+    INFO(name);
+    CHECK(classOf(lf, name) == SymbolClass::Defined);
+    CHECK(ownersOf(lf, name) == std::vector<uint32_t>{0});
+  }
+  DependencyAudit audit = auditDependencies(lf, map);
+  const AuditRow &row = rowOf(audit, 1, 0);
+  CHECK(row.symbols == 3);
+  CHECK(rowFindings(audit, lf, row, {5, 100}, true) == kFindingThin);
+}
+
+TEST_CASE("dependency audit: a body in an indexed source no target lists "
+          "is not carried",
+          "[dependency-audit]") {
+  // gen/g.cpp was indexed but belongs to no target in the map. gen_fn's
+  // body is there, so it is not an inline body that travels with its
+  // callers, and its reference into lib is not user's.
+  CallGraph g;
+  fill(g,
+       {{"gen_fn", "/p/gen/g.h", 1},
+        {"lib_fn", "/p/lib/lib.h", 1},
+        {"lib_detail", "/p/lib/l.cpp", 1},
+        {"user", "/p/user/u.cpp", 1}},
+       {{"gen_fn", "lib_fn", "/p/gen/g.cpp:3:3"},
+        {"lib_fn", "lib_detail", "/p/lib/l.cpp:3:3"},
+        {"user", "gen_fn", "/p/user/u.cpp:2:3"}});
+  TargetMap map = theMap(R"({"schema": 1, "targets": [
+    {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"]}]})");
+  SnapshotMeta meta =
+      metaOf({{"/p/gen/g.cpp", {"/p/gen/g.h", "/p/lib/lib.h"}},
+              {"/p/lib/l.cpp", {"/p/lib/lib.h", "/p/gen/g.h"}},
+              {"/p/user/u.cpp", {"/p/gen/g.h"}}});
+  LinkFacts lf = linkFactsFromCallEdges(g, map, &meta);
+  CHECK(classOf(lf, "gen_fn") == SymbolClass::Unattributed);
+  CHECK(lf.counts.unmappedBodyRefs == 1);
+  DependencyAudit audit = auditDependencies(lf, map);
+  CHECK(audit.find(1, 0) == kNoIndex);
+  // Its file is one the build compiles, so it is not an unplaced use
+  // either: the map says where it is not.
+  CHECK(audit.unplacedUses[1] == 0);
+
+  // The same graph when the source was never indexed: the call site is in
+  // a file nothing is known about, and the body travels as before.
+  SnapshotMeta partial =
+      metaOf({{"/p/lib/l.cpp", {"/p/lib/lib.h", "/p/gen/g.h"}},
+              {"/p/user/u.cpp", {"/p/gen/g.h"}}});
+  LinkFacts lf2 = linkFactsFromCallEdges(g, map, &partial);
+  CHECK(classOf(lf2, "gen_fn") == SymbolClass::Inline);
+  CHECK(lf2.counts.unmappedBodyRefs == 0);
+}
+
+TEST_CASE("dependency audit: a tied header vote presumes every tied owner",
+          "[dependency-audit]") {
+  // both.h declares one function defined in `a` and one defined in `b`;
+  // the leaf beside them could be either's.
+  CallGraph g;
+  fill(g,
+       {{"a_fn", "/p/both/both.h", 1},
+        {"b_fn", "/p/both/both.h", 2},
+        {"leaf", "/p/both/both.h", 3},
+        {"a_detail", "/p/a/a.cpp", 1},
+        {"b_detail", "/p/b/b.cpp", 1},
+        {"user", "/p/user/u.cpp", 1}},
+       {{"a_fn", "a_detail", "/p/a/a.cpp:3:3"},
+        {"b_fn", "b_detail", "/p/b/b.cpp:3:3"},
+        {"user", "leaf", "/p/user/u.cpp:2:3"}});
+  TargetMap map = theMap(R"({"schema": 1, "targets": [
+    {"name": "a", "kind": "static_library", "sources": ["a/a.cpp"]},
+    {"name": "b", "kind": "static_library", "sources": ["b/b.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["a", "b"]}]})");
+  SnapshotMeta meta = metaOf({{"/p/a/a.cpp", {"/p/both/both.h"}},
+                              {"/p/b/b.cpp", {"/p/both/both.h"}},
+                              {"/p/user/u.cpp", {"/p/both/both.h"}}});
+  LinkFacts lf = linkFactsFromCallEdges(g, map, &meta);
+  CHECK(classOf(lf, "leaf") == SymbolClass::Presumed);
+  CHECK(ownersOf(lf, "leaf") == std::vector<uint32_t>{0, 1});
+  DependencyAudit audit = auditDependencies(lf, map);
+  for (uint32_t provider : {0u, 1u}) {
+    const AuditRow &row = rowOf(audit, 2, provider);
+    CHECK(row.symbols == 0);
+    CHECK(row.uncertainSymbols == 1);
+    CHECK(rowFindings(audit, lf, row, {}, true) == 0);
+  }
+}
+
+TEST_CASE("dependency audit: an inline body from a provider's header is an "
+          "indirect use",
+          "[dependency-audit]") {
+  // user's only contact with lib is an inline function in a header lib
+  // lists. It needs no symbol from lib, so it is not a seed; but user does
+  // use lib, so the dependency is not reported as unused.
+  CallGraph g;
+  fill(g,
+       {{"lib_inline", "/p/lib/inl.h", 1},
+        {"lib_fn", "/p/lib/lib.h", 1},
+        {"lib_detail", "/p/lib/l.cpp", 1},
+        {"orphan", "/p/misc/orphan.h", 1},
+        {"strlen", "/usr/include/string.h", 1},
+        {"user", "/p/user/u.cpp", 1}},
+       {{"lib_inline", "strlen", "/p/lib/inl.h:2:3"},
+        {"lib_fn", "lib_detail", "/p/lib/l.cpp:3:3"},
+        {"user", "lib_inline", "/p/user/u.cpp:2:3"},
+        {"user", "orphan", "/p/user/u.cpp:3:3"}});
+  const char *listed = R"({"schema": 1, "targets": [
+    {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"],
+     "headers": ["lib/inl.h"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["lib"]}]})";
+  TargetMap map = theMap(listed);
+  SnapshotMeta meta =
+      metaOf({{"/p/lib/l.cpp",
+               {"/p/lib/lib.h", "/p/lib/inl.h", "/p/misc/orphan.h"}},
+              {"/p/user/u.cpp",
+               {"/p/lib/inl.h", "/p/misc/orphan.h",
+                "/usr/include/string.h"}}});
+  LinkFacts lf = linkFactsFromCallEdges(g, map, &meta);
+  CHECK(classOf(lf, "lib_inline") == SymbolClass::Inline);
+  // The header's owner is recorded as the body's home, never a link owner.
+  CHECK(ownersOf(lf, "lib_inline") == std::vector<uint32_t>{0});
+  DependencyAudit audit = auditDependencies(lf, map);
+  const AuditRow &row = rowOf(audit, 1, 0);
+  CHECK(row.symbols == 0);
+  CHECK(row.uncertainSymbols == 0);
+  CHECK(row.indirectUses == 1);
+  CHECK(rowFindings(audit, lf, row, {}, true) == 0);
+
+  // orphan is declared under the map's root in a header nothing places;
+  // strlen is outside the build. Only the first is an unplaced use.
+  CHECK(classOf(lf, "orphan") == SymbolClass::Unattributed);
+  CHECK(audit.unplacedUses[1] == 1);
+  CHECK(audit.unplacedUses[0] == 0);
+
+  // Without the listing nothing places inl.h, and the row is reported.
+  TargetMap bare = theMap(R"({"schema": 1, "targets": [
+    {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["lib"]}]})");
+  LinkFacts lf2 = linkFactsFromCallEdges(g, bare, &meta);
+  DependencyAudit audit2 = auditDependencies(lf2, bare);
+  CHECK(lf2.targetsOf(lf2.symOwner[symbolNamed(lf2, "lib_inline")]).empty());
+  CHECK(rowOf(audit2, 1, 0).indirectUses == 0);
+  CHECK(rowFindings(audit2, lf2, rowOf(audit2, 1, 0), {}, true) ==
+        kFindingUnused);
+}
+
+TEST_CASE("dependency audit: what a target forwards to its consumers is "
+          "reached through it",
+          "[dependency-audit]") {
+  // hdr is header-only and forwards impl, the library its headers call.
+  CallGraph g;
+  fill(g,
+       {{"impl_fn", "/p/impl/impl.h", 1},
+        {"impl_detail", "/p/impl/i.cpp", 1},
+        {"user", "/p/user/u.cpp", 1}},
+       {{"impl_fn", "impl_detail", "/p/impl/i.cpp:3:3"},
+        {"user", "impl_fn", "/p/user/u.cpp:2:3"}});
+  SnapshotMeta meta = metaOf({{"/p/impl/i.cpp", {"/p/impl/impl.h"}},
+                              {"/p/user/u.cpp", {"/p/impl/impl.h"}}});
+  TargetMap map = theMap(R"({"schema": 1, "targets": [
+    {"name": "hdr", "kind": "interface_library", "sources": [],
+     "interfaceDeps": ["impl", "hdr", "impl"]},
+    {"name": "impl", "kind": "static_library", "sources": ["impl/i.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["hdr"]}]})");
+  CHECK(map.interfaceDepsOf(0) == llvm::ArrayRef<uint32_t>{1u});
+  CHECK(map.depsOf(0).empty());
+  LinkFacts lf = linkFactsFromCallEdges(g, map, &meta);
+  DependencyAudit audit = auditDependencies(lf, map);
+  const AuditRow &row = rowOf(audit, 2, 1);
+  CHECK(row.declared == DeclaredForm::Transitive);
+  // Still a provider user calls without naming it.
+  CHECK(rowFindings(audit, lf, row, {0, 0}, true) == kFindingUndeclared);
+  // The forwarding target does not link impl itself: no row of its own.
+  CHECK(audit.find(0, 1) == kNoIndex);
+
+  // Without the forwarding the same use has no declared path.
+  TargetMap bare = theMap(R"({"schema": 1, "targets": [
+    {"name": "hdr", "kind": "interface_library", "sources": []},
+    {"name": "impl", "kind": "static_library", "sources": ["impl/i.cpp"]},
+    {"name": "user", "kind": "executable", "sources": ["user/u.cpp"],
+     "deps": ["hdr"]}]})");
+  LinkFacts lf2 = linkFactsFromCallEdges(g, bare, &meta);
+  DependencyAudit audit2 = auditDependencies(lf2, bare);
+  CHECK(rowOf(audit2, 2, 1).declared == DeclaredForm::None);
+
+  // A target named in both lists is the target's own dependency.
+  TargetMap both = theMap(R"({"schema": 1, "targets": [
+    {"name": "a", "kind": "static_library", "sources": ["a.cpp"],
+     "deps": ["b"], "interfaceDeps": ["b", "c"]},
+    {"name": "b", "kind": "static_library", "sources": ["b.cpp"]},
+    {"name": "c", "kind": "static_library", "sources": ["c.cpp"]}]})");
+  CHECK(both.depsOf(0) == llvm::ArrayRef<uint32_t>{1u});
+  CHECK(both.interfaceDepsOf(0) == llvm::ArrayRef<uint32_t>{2u});
+
+  CHECK(parseError(R"({"schema": 1, "targets": [
+    {"name": "a", "kind": "static_library", "sources": [],
+     "interfaceDeps": ["nope"]}]})") ==
+        "target 'a' depends on 'nope', which the map does not declare");
+  CHECK(parseError(R"({"schema": 1, "targets": [
+    {"name": "a", "kind": "static_library", "sources": [],
+     "interfaceDeps": "b"}]})") ==
+        "target 'a': `interfaceDeps` must be an array");
 }
 
 TEST_CASE("dependency audit: an empty map and an empty graph",

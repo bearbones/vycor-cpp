@@ -80,8 +80,13 @@ def fail(message: str, code: int = 2) -> "NoReturn":  # noqa: F821
 # --- Object side ---------------------------------------------------------
 
 
-def nm_files(nm: str, files: list[str]):
-    """Yield (name, type letter) for every symbol of the given files."""
+def nm_files(nm: str, files: list[str], strip_underscore: bool = False):
+    """Yield (name, type letter) for every symbol of the given files.
+
+    Mach-O prefixes every C-level symbol with one underscore (`__ZTV1S`
+    for the Itanium name `_ZTV1S`); `strip_underscore` removes it so the
+    names compare and classify as on ELF.
+    """
     for i in range(0, len(files), CHUNK):
         out = subprocess.run([nm, "-P", "--no-sort", *files[i:i + CHUNK]],
                              check=True, capture_output=True, text=True).stdout
@@ -90,7 +95,10 @@ def nm_files(nm: str, files: list[str]):
             # "<name> <type> [value size]"; file and member headers end in ':'
             if len(parts) < 2 or len(parts[1]) != 1 or line.endswith(":"):
                 continue
-            yield parts[0], parts[1]
+            name = parts[0]
+            if strip_underscore and name.startswith("_"):
+                name = name[1:]
+            yield name, parts[1]
 
 
 class TargetObjects:
@@ -105,9 +113,9 @@ class TargetObjects:
         self.undefined -= self.defined.keys()
 
 
-def read_target(nm: str, files: list[str]) -> TargetObjects:
+def read_target(nm: str, files: list[str], strip_underscore: bool = False) -> TargetObjects:
     t = TargetObjects()
-    for name, kind in nm_files(nm, files):
+    for name, kind in nm_files(nm, files, strip_underscore):
         if kind in "Uwv":
             t.undefined.add(name)
         elif kind.isupper() or kind == "u":
@@ -201,12 +209,16 @@ def demangle(cxxfilt: str, names: list[str]) -> dict[str, str]:
     text = "\n".join(names) + "\n"
     out = subprocess.run([cxxfilt, "--no-params"], input=text, check=True,
                          capture_output=True, text=True).stdout.splitlines()
+    if len(out) != len(names):
+        fail(f"{cxxfilt} answered {len(out)} lines for {len(names)} names")
     # --no-params gives up on a few manglings (conversion operators): those
     # are demangled in full and cut at the parameter list.
     retry = [i for i, (m, d) in enumerate(zip(names, out)) if d == m and m.startswith("_Z")]
     if retry:
         full = subprocess.run([cxxfilt], input="\n".join(names[i] for i in retry) + "\n",
                               check=True, capture_output=True, text=True).stdout.splitlines()
+        if len(full) != len(retry):
+            fail(f"{cxxfilt} answered {len(full)} lines for {len(retry)} names")
         for i, d in zip(retry, full):
             out[i] = strip_params(d)
     result = {}
@@ -230,9 +242,13 @@ def megascope(binary: str, index: str, argv: list[str]) -> dict:
 
 
 def batch(binary: str, index: str, requests: list[dict]):
-    """Run requests through `megascope batch`; yield results in order."""
+    """Run requests through `megascope batch`; the results, in order.
+
+    Fails when the answers do not match the requests one for one: a batch
+    that died part-way would otherwise silently drop the tail.
+    """
     if not requests:
-        return
+        return []
     proc = subprocess.Popen([binary, "megascope", "batch", "--index", index],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
@@ -244,10 +260,13 @@ def batch(binary: str, index: str, requests: list[dict]):
     import threading
     writer = threading.Thread(target=feed, daemon=True)
     writer.start()
-    for line in proc.stdout:
-        yield json.loads(line).get("result", {})
+    results = [json.loads(line).get("result", {}) for line in proc.stdout]
     writer.join()
     proc.wait()
+    if len(results) != len(requests):
+        fail(f"`megascope batch` answered {len(results)} of {len(requests)} requests "
+             f"(exit code {proc.returncode})")
+    return results
 
 
 def site_file(site: str) -> str:
@@ -268,6 +287,9 @@ def main() -> int:
     ap.add_argument("--target-map", required=True, type=Path)
     ap.add_argument("--nm", default=shutil.which("llvm-nm") or "nm")
     ap.add_argument("--cxxfilt", default=shutil.which("llvm-cxxfilt") or "c++filt")
+    ap.add_argument("--strip-underscore", choices=("auto", "yes", "no"), default="auto",
+                    help="drop the leading underscore Mach-O puts on every symbol "
+                         "(auto: yes on macOS)")
     ap.add_argument("--out", type=Path, help="write the full JSON report here")
     ap.add_argument("--top", type=int, default=15, help="rows per table in the text summary")
     args = ap.parse_args()
@@ -277,6 +299,9 @@ def main() -> int:
 
     def resolve(p: str) -> str:
         return os.path.normpath(p if os.path.isabs(p) else os.path.join(root, p))
+
+    strip_underscore = args.strip_underscore == "yes" or (
+        args.strip_underscore == "auto" and sys.platform == "darwin")
 
     # 1. Objects.
     objects: dict[str, TargetObjects] = {}
@@ -294,7 +319,7 @@ def main() -> int:
             if t.get("sources"):
                 not_built.append(t["name"])
             continue
-        objects[t["name"]] = read_target(args.nm, files)
+        objects[t["name"]] = read_target(args.nm, files, strip_underscore)
     if len(objects) < 2:
         fail("fewer than two targets of the map have object files on disk; "
              "build the tree and regenerate the map (see scripts/cmake-target-map.py)")

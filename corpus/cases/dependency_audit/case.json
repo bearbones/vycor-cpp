@@ -123,6 +123,7 @@
          "declared": "direct",
          "symbols": 1,
          "viaInline": 1,
+         "indirectUses": 1,
          "closureSymbols": 2,
          "providerSymbols": 22,
          "closureFiles": 1,
