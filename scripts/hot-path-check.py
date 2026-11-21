@@ -109,8 +109,28 @@ def main():
         run(['--hot-root', 'hot', '--hot-min-count', '5'], 2)
         findings, _ = run(['--org-config', str(org)], 1)
         assert findings, findings
+
+        # An index baked with --collapse-paths lacks the edges inside them
+        # (here hot -> sink): the check must not read it and pass, and the
+        # tool must not call it clean.
+        index = root / '.vycor' / 'megascope.vycs'
+        bake = subprocess.run(
+            [str(binary), 'megascope', 'index', '--build-path', tmp,
+             '--index', str(index), '--threads', '1',
+             '--collapse-paths', root.name],
+            capture_output=True, text=True, timeout=120)
+        assert bake.returncode == 0, (bake.stdout, bake.stderr)
+        query = subprocess.run(
+            [str(binary), 'megascope', 'query-path-effects', '--index',
+             str(index), '--roots', 'hot', '--effects', 'lock'],
+            capture_output=True, text=True, timeout=120)
+        payload = json.loads(query.stdout)
+        assert payload['collapsed'] is True and payload['exhaustive'] is False, payload
+        assert payload['verdict'] != 'clean', payload
+        findings, _ = run(['--hot-root', 'hot'], 1)
+        assert findings, findings
         print('PASS: hot-path-effects configured/profile/org roots, quiet and wrong '
-              'profiles, ignored flags and usage errors')
+              'profiles, ignored flags, usage errors and collapsed indexes')
 
 
 if __name__ == '__main__':

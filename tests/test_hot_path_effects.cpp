@@ -26,6 +26,7 @@
 #include "vycor/callgraph/CoverageProfile.h"
 #include "vycor/callgraph/Effects.h"
 #include "vycor/callgraph/HotPath.h"
+#include "vycor/callgraph/Snapshot.h"
 #include "vycor/check/HotPathEffects.h"
 #include "vycor/check/Report.h"
 #include "vycor/ext/Extensions.h"
@@ -803,6 +804,15 @@ TEST_CASE("query_path_effects answers through the tool contract",
   CHECK(out.getInteger("reachedFunctions").value_or(0) >= 2);
   out = call(R"({"roots": ["cold", "no_such_function"], "effects": ["lock"]})");
   CHECK(out.getString("verdict").value_or("") == "unknown");
+  // An index baked with collapse paths lacks edges: not exhaustive.
+  SnapshotMeta collapsedMeta;
+  collapsedMeta.collapsePaths = {"third_party"};
+  ctx.meta = &collapsedMeta;
+  out = call(R"({"roots": ["cold"], "effects": ["lock"]})");
+  CHECK(out.getBoolean("collapsed") == std::optional<bool>(true));
+  CHECK(out.getBoolean("exhaustive") == std::optional<bool>(false));
+  CHECK(out.getString("verdict").value_or("") == "unknown");
+  ctx.meta = nullptr;
 
   // The org config's minCount needs a profile only when one is given: the
   // configured roots still answer without one.

@@ -239,8 +239,12 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
 
   // The search visits everything reachable, so "no effect reachable" is
   // universal once there were roots, the index covers what was asked, and
-  // no reached template instantiation hid its calls (#106).
-  const bool exhaustive = report.templateLeaves == 0;
+  // no reached template instantiation hid its calls (#106). An index
+  // baked with --collapse-paths dropped the edges inside those paths, so
+  // what it reaches is not everything the program reaches.
+  const bool collapsed = ctx.meta && !ctx.meta->collapsePaths.empty();
+  const bool exhaustive = report.templateLeaves == 0 && !collapsed;
+  out["collapsed"] = collapsed;
   out["exhaustive"] = exhaustive;
   const char *verdict = "unknown";
   if (!report.findings.empty())
@@ -299,7 +303,8 @@ void registerEffectTools(std::vector<ToolEntry> &tools) {
        "path and `evidence` says whether the path ran (observed), "
        "never ran (latent) or is not covered by the profile (unprofiled). "
        "`verdict` is `clean` only with roots, every configured root "
-       "matched, no finding, complete coverage and no `templateLeaves` (reached template instantiations "
+       "matched, no finding, complete coverage, an index baked without "
+       "collapse paths (`collapsed`) and no `templateLeaves` (reached template instantiations "
        "whose calls the graph does not hold). See "
        "docs/checks/hot-path-effects.md.",
        llvm::json::Value(std::move(schema)), handlePathEffects, "findings",

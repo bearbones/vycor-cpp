@@ -236,9 +236,13 @@ A finding's identity (its baseline fingerprint) includes its evidence,
 so a finding that moves from latent to observed when a new profile is
 used comes back as new: that change is the news.
 
-Grouped **compute-heavy**: it builds the full cross-TU call graph (shared
-with `dead-code` and `static-init-hazards` when they are enabled, or read
-from the build directory's megascope index when that index is clean).
+Grouped **compute-heavy**: it builds the full cross-TU call graph, shared
+with the other graph-backed checks. It reads the megascope index instead
+(`--index`, default `<build-path>/.vycor/megascope.vycs`) when every
+selected TU in it is fresh, unless that index was baked with
+`--collapse-paths`: collapsing drops edges, so the check bakes the sources
+itself. An index that holds more TUs than were selected is read as a
+whole, and its unselected TUs are not checked for freshness.
 
 ## The tool: `query_path_effects`
 
@@ -258,8 +262,9 @@ Payload:
 | `allow` | `functions` (entries), `calls` (calls skipped). |
 | `reachedFunctions` | Functions visited from the roots, roots included. |
 | `templateLeaves` | Reached template instantiations with no recorded call: functions whose calls the graph does not hold (#106, below). |
-| `exhaustive` | True when `templateLeaves` is 0. The search has no depth or fan-out limit; what it cannot see is inside instantiations. |
-| `verdict` | `effects`; `clean` when there were roots, every configured root matched, no finding, no template leaf, and the index states complete coverage of what was requested; otherwise `unknown`. |
+| `collapsed` | True when the index was baked with `--collapse-paths`: the edges inside those paths are missing, so the search cannot see everything the program reaches. |
+| `exhaustive` | True when `templateLeaves` is 0 and the index is not `collapsed`. The search has no depth or fan-out limit; what it cannot see is inside instantiations. |
+| `verdict` | `effects`; `clean` when there were roots, every configured root matched, no finding, an exhaustive search (no template leaf, not `collapsed`), and the index states complete coverage of what was requested; otherwise `unknown`. |
 
 Usage errors (exit 2): no root from any source; `min_count` without a
 profile; an unreadable or malformed profile; an unknown effect or an

@@ -1289,8 +1289,17 @@ int main(int argc, const char **argv) {
                 snapPath, nullptr, vycor::LoadMode::ReadOnly, needs)) {
           // dead-code and could-be-internal answer for the whole index, so
           // it must hold exactly the selected sources.
-          if (!(wantDeadCode || wantInternal) ||
-              snap->meta.files.size() == files.size()) {
+          // hot-path-effects needs every edge: an index baked with
+          // --collapse-paths lacks the ones inside those paths.
+          const bool collapsedForHot =
+              wantHotPaths && !snap->meta.collapsePaths.empty();
+          if (collapsedForHot && CheckVerbose)
+            llvm::errs() << "check: not reading the index " << snapPath
+                         << ": it was baked with --collapse-paths, which "
+                            "hot-path-effects cannot use\n";
+          if ((!(wantDeadCode || wantInternal) ||
+               snap->meta.files.size() == files.size()) &&
+              !collapsedForHot) {
             // A TU dirty only because its unchanged inputs parsed with
             // errors (Partial) is not a reason to bake again: the bake
             // would record the same partial facts, and could-be-internal
@@ -1424,8 +1433,10 @@ int main(int argc, const char **argv) {
                        << (!hotProfile ? "\n"
                            : hotReport.join.callSitesInProfile == 0
                                ? " and the profile matched no call site\n"
-                               : " and no profiled function reached the "
-                                 "minimum count\n");
+                           : hotConfig.minCount != 0
+                               ? " and no profiled function reached the "
+                                 "minimum count\n"
+                               : "\n");
           return kUsage;
         }
         if (hotReport.templateLeaves != 0)
