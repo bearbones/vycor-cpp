@@ -630,6 +630,17 @@ private:
       return;
     }
     switch (id) {
+    // Library functions Clang treats as builtins and CodeGen folds into
+    // a cast: no code of their own, whatever their operand's type.
+    case clang::Builtin::BImove:
+    case clang::Builtin::BImove_if_noexcept:
+    case clang::Builtin::BIforward:
+    case clang::Builtin::BIforward_like:
+    case clang::Builtin::BIas_const:
+    case clang::Builtin::BIaddressof:
+    case clang::Builtin::BI__addressof:
+    case clang::Builtin::BI__builtin_addressof:
+      return;
     case clang::Builtin::BI__builtin_popcount:
     case clang::Builtin::BI__builtin_popcountl:
     case clang::Builtin::BI__builtin_popcountll:
@@ -722,6 +733,9 @@ private:
     case clang::Builtin::BI__builtin_copysignl:
     case clang::Builtin::BI__builtin_copysignf16:
     case clang::Builtin::BI__builtin_copysignf128:
+    case clang::Builtin::BInan:
+    case clang::Builtin::BInanf:
+    case clang::Builtin::BInanl:
     case clang::Builtin::BI__builtin_nan:
     case clang::Builtin::BI__builtin_nanf:
     case clang::Builtin::BI__builtin_nanl:
@@ -1453,7 +1467,10 @@ enum Relevance : unsigned {
 static_assert(kRelFeatureVex < (1u << 8), "relevance must fit in 8 bits");
 
 bool moveFeature(llvm::StringRef f) {
-  return f == "avx" || f == "avx512fp16";
+  // sse/sse2/x87 are on in every ordinary x86-64 profile; they differ only
+  // for -mno-sse2 or soft-float builds, where moves change too.
+  return f == "avx" || f == "avx512fp16" || f == "sse" || f == "sse2" ||
+         f == "x87";
 }
 
 // On i386 (x87 or SSE), ARM (VFP), RISC-V (F/D) and the rest, which

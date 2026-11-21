@@ -83,9 +83,11 @@ classes the body can be affected by:
   ...) are compared for bodies with a loop (a vectorization candidate),
   floating-point arithmetic, vector types or `memcpy`/`memset`. A body whose
   only floating-point code is values loaded, passed or returned is compared,
-  on x86-64, on `avx` and `avx512fp16` alone: under `-mavx` every scalar
-  floating-point move is VEX-encoded, `avx512fp16` moves `_Float16` with an
-  EVEX `vmovsh`, and no other feature changes how a value moves. On other
+  on x86-64, on `avx`, `avx512fp16`, `sse`, `sse2` and `x87` alone: under
+  `-mavx` every scalar floating-point move is VEX-encoded, `avx512fp16`
+  moves `_Float16` with an EVEX `vmovsh`, the last three differ only in
+  `-mno-sse2` or soft-float builds, and no other feature changes how a
+  value moves. On other
   targets (i386 x87 or SSE, ARM VFP, RISC-V F/D, ...) such a body is
   compared on the whole vector class.
 - **Bit manipulation** (`popcnt`, `lzcnt`, `bmi`, `bmi2`, `movbe`, RISC-V

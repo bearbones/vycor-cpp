@@ -1268,3 +1268,19 @@ TEST_CASE("isa-leak rejects a shard whose profile features are unsorted",
   CHECK_FALSE(called);
   llvm::sys::fs::remove_directories(dir);
 }
+
+TEST_CASE("isa-leak leaves fast-math alone for addressof on a double",
+          "[CheckIsaLeak]") {
+  // __builtin_addressof (like std::move, std::forward, std::addressof) is
+  // folded into a cast: no floating-point code, whatever its operand.
+  IsaFixture fixture(R"cpp(
+inline const double *where(const double &d) { return __builtin_addressof(d); }
+)cpp",
+                     "  double d = 1;\n  (void)where(d);\n");
+  fixture.database({"-ffast-math"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  CHECK(emittedNames(index).count("where(const double &)"));
+}
