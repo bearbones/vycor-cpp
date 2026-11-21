@@ -346,10 +346,10 @@ struct AuditRow {
   uint32_t dropBegin = 0, dropEnd = 0; // DependencyAudit::droppable
   /// Final link targets (executables, shared and module libraries) that
   /// link the consumer and would load less if the closure were split out
-  /// of the provider into an object of its own — the consumer itself when
+  /// of the provider into a target of its own — the consumer itself when
   /// it is one — and the most one of them would stop loading, in emitted
-  /// symbols (LinkModel), with the number of objects (archive members)
-  /// that target stops loading. Direct rows only.
+  /// symbols (LinkModel), with the number of that target's members
+  /// (objects) of which it loads no code any more. Direct rows only.
   uint32_t linkTargetsHelped = 0;
   uint64_t linkTargetGain = 0;
   uint32_t linkTargetMembers = 0;
@@ -390,13 +390,13 @@ struct DependencyAudit {
   /// Targets a row's consumer would stop linking, ascending.
   std::vector<uint32_t> droppable;
   /// The final link targets a row's split would help, what each would
-  /// stop loading (emitted symbols, and objects), by gain descending, then
-  /// target.
+  /// stop loading (emitted symbols, and members it loads nothing of any
+  /// more), by gain descending, then target.
   std::vector<uint32_t> helpedTarget;
   std::vector<uint64_t> helpedGain;
   std::vector<uint32_t> helpedMembers;
   /// Per final link target: what it loads as the map stands (emitted
-  /// symbols, and objects); 0 for any other target.
+  /// symbols, and members); 0 for any other target.
   std::vector<uint64_t> linkInput;
   std::vector<uint32_t> linkInputMembers;
 

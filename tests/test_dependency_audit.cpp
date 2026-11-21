@@ -2122,17 +2122,18 @@ TEST_CASE("dependency audit from references: a split helps the executables "
   const AuditRow &row = rowOf(audit, tLib, tBig);
   CHECK(row.closureSymbols == 1);
   CHECK(row.droppableSymbols == 2);
-  // Split big_a out: b1 keeps big_b, which nothing references, so every
-  // program that loaded b1 for big_a loads the one-symbol split instead.
-  // exe1 loads m, l, b1 (2) = 4 symbols, then m, l, split = 3; exe2
-  // still loads b2 for its own call, and drops b1 just the same.
+  // Split big_a out: b1's rest keeps big_b, which nothing references, so
+  // every program that loaded b1 for big_a loads only b1's part instead.
+  // exe1 loads m, l, b1 (2) = 4 symbols, then m, l, the part = 3; exe2
+  // still loads b2 for its own call, and sheds big_b just the same. b1
+  // still contributes code to both: no member drops.
   CHECK(row.linkTargetsHelped == 2);
   CHECK(row.linkTargetGain == 1);
-  CHECK(row.linkTargetMembers == 1);
+  CHECK(row.linkTargetMembers == 0);
   REQUIRE(row.helpedEnd - row.helpedBegin == 2);
   CHECK(audit.helpedTarget[row.helpedBegin] == tExe1);
   CHECK(audit.helpedGain[row.helpedBegin] == 1);
-  CHECK(audit.helpedMembers[row.helpedBegin] == 1);
+  CHECK(audit.helpedMembers[row.helpedBegin] == 0);
   CHECK(audit.helpedTarget[row.helpedBegin + 1] == tExe2);
   CHECK(audit.linkInput[tExe1] == 4);
   CHECK(audit.linkInputMembers[tExe1] == 3);
@@ -2230,11 +2231,11 @@ TEST_CASE("dependency audit link gain: an archive member pulled only "
   CHECK(s.audit.linkInputMembers[ChainSplit::tExe] == 5);
   const AuditRow &row = rowOf(s.audit, ChainSplit::tLib, ChainSplit::tP);
   CHECK(row.closureSymbols == 1);
-  // Split a out: p1 keeps b, which nothing references now, so p1, p2 and
-  // p3 all drop. After: m, l, and the split (a and its copy of h).
+  // Split a out: p1's rest keeps b, which nothing references now, so p2
+  // and p3 drop with it. After: m, l, and p1's part (a and its copy of h).
   CHECK(row.linkTargetsHelped == 1);
   CHECK(row.linkTargetGain == 7 - 4);
-  CHECK(row.linkTargetMembers == 3);
+  CHECK(row.linkTargetMembers == 2);
   CHECK(row.fanInPct == 0);
   CHECK(row.splitGain == row.linkTargetGain);
 }
@@ -2261,14 +2262,14 @@ TEST_CASE("dependency audit link gain: an object library links every "
   CHECK(s.audit.linkInput[ChainSplit::tExe] == 7);
   CHECK(s.audit.linkInput[ChainSplit::tExe2] == 7);
   const AuditRow &row = rowOf(s.audit, ChainSplit::tLib, ChainSplit::tP);
-  // exe reaches p only through lib: after the split only the new object
-  // is linked. exe2 links p itself and keeps every object of it, the rest
-  // of p1 included, so it loads the split's copy of h on top.
+  // exe reaches p only through lib: after the split only the new
+  // target's part of p1 is linked. exe2 links p itself and keeps every
+  // object of it, p1's rest included, besides the part: the same load.
   CHECK(row.linkTargetsHelped == 1);
   REQUIRE(row.helpedEnd - row.helpedBegin == 1);
   CHECK(s.audit.helpedTarget[row.helpedBegin] == ChainSplit::tExe);
   CHECK(row.linkTargetGain == 3);
-  CHECK(row.linkTargetMembers == 3);
+  CHECK(row.linkTargetMembers == 2);
 }
 
 TEST_CASE("dependency audit link gain: a shared library is loaded whole",
@@ -2571,13 +2572,14 @@ TEST_CASE("audit_dependencies from references: payload members",
   CHECK(edgeAt(byLinkGain, 1) == "app>core");
   const auto *plugEdge = edgeOf(byLinkGain, "app", "plug");
   CHECK(plugEdge->getInteger("linkTargetGain") == 1);
-  CHECK(plugEdge->getInteger("linkTargetMembers") == 1);
+  // p.cpp still contributes its part: no member drops.
+  CHECK(plugEdge->getInteger("linkTargetMembers") == 0);
   CHECK(plugEdge->getInteger("fanInPct") == 0);
   CHECK(plugEdge->getInteger("splitGain") == 1);
   // core's closure is all of core but core_other, which calls into it:
   // the whole rest references the closure, and the split gain is nil.
   CHECK(core->getInteger("linkTargetGain") == 1);
-  CHECK(core->getInteger("linkTargetMembers") == 2);
+  CHECK(core->getInteger("linkTargetMembers") == 0);
   CHECK(core->getInteger("fanInPct") == 100);
   CHECK(core->getInteger("splitGain") == 0);
   auto bySplit = fx.run("audit_dependencies", {{"sort", "split_gain"}});
@@ -2599,7 +2601,7 @@ TEST_CASE("audit_dependencies from references: payload members",
   const auto *h = (*helped)[0].getAsObject();
   CHECK(h->getString("target") == "app");
   CHECK(h->getInteger("gain") == 1);
-  CHECK(h->getInteger("members") == 1);
+  CHECK(h->getInteger("members") == 0);
   CHECK(h->getInteger("linkInput") > 3);
   CHECK(h->getInteger("linkInputMembers") >= 3);
 

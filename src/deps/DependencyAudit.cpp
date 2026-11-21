@@ -2584,72 +2584,90 @@ struct LinkModel {
 
 /// Simulates what a final link target loads (docs/dependency-audit.md,
 /// "Link-target gain"), optionally with one row's closure split out of its
-/// provider into an object of its own. Scratch sized once per audit.
+/// provider into a target of its own. Scratch sized once per audit.
+///
+/// Nodes: the members [0, M); with a split, the rest of each member that
+/// held part of the closure [M, M + R) and that part itself
+/// [M + R, M + 2R), plus one part for closure symbols no member holds.
 class LinkSim {
 public:
   struct Result {
     uint64_t weight = 0;  // emitted symbols loaded
-    uint32_t members = 0; // objects loaded, the split part not counted
+    uint32_t members = 0; // members any of whose code is loaded
   };
 
   LinkSim(const LinkFacts &lf, const LinkModel &lm)
       : lf_(lf), lm_(lm), members_(lm.memberCount()),
-        stamp_(2 * static_cast<size_t>(members_) + 1, 0),
-        queue_(stamp_.size()), targetStamp_(lm.mode.size(), 0),
-        kStamp_(lf.symbolCount(), 0), restStamp_(members_, 0),
-        restIdx_(members_, 0) {}
+        stamp_(3 * static_cast<size_t>(members_) + 1, 0),
+        queue_(stamp_.size()), memberStamp_(members_, 0),
+        targetStamp_(lm.mode.size(), 0), kStamp_(lf.symbolCount(), 0),
+        kPart_(lf.symbolCount(), 0), splitStamp_(members_, 0),
+        splitIdx_(members_, 0) {}
 
-  /// Split `closure` (Defined symbols of `provider`) out: its symbols move
-  /// to a new object, and each member that held one keeps the rest of its
-  /// code. Both parts compile their own copies of the inline bodies they
-  /// use.
+  /// Split `closure` (Defined symbols of `provider`) out into a new target
+  /// of the provider's kind, file by file: each member that held part of
+  /// the closure becomes two objects, the part (a member of the new
+  /// target) and the rest (still the provider's). Each object compiles its
+  /// own copies of the inline bodies its code uses.
   void setSplit(uint32_t provider, llvm::ArrayRef<uint32_t> closure,
                 Workspace &ws) {
     ++kEpoch_;
     provider_ = provider;
-    restMember_.clear();
-    restWeight_.clear();
-    restBegin_.assign(1, 0);
-    restOut_.clear();
-    splitOut_.clear();
+    split_.clear();
     for (uint32_t s : closure) {
       kStamp_[s] = kEpoch_;
       const uint32_t m = lm_.memberOf(lf_, s, provider);
-      if (m != kNoIndex && restStamp_[m] != kEpoch_) {
-        restStamp_[m] = kEpoch_;
-        restIdx_[m] = static_cast<uint32_t>(restMember_.size());
-        restMember_.push_back(m);
+      if (m != kNoIndex && splitStamp_[m] != kEpoch_) {
+        splitStamp_[m] = kEpoch_;
+        splitIdx_[m] = static_cast<uint32_t>(split_.size());
+        split_.push_back(m);
       }
     }
-    splitWeight_ = closure.size() +
-                   walkObject(lf_, provider, closure, {}, ws,
-                              [&](uint32_t to) noexcept {
-                                splitOut_.push_back(to);
-                              });
-    for (uint32_t m : restMember_) {
-      restStarts_.clear();
-      for (uint32_t i = lm_.symBegin[m]; i < lm_.symBegin[m + 1]; ++i)
-        if (kStamp_[lm_.syms[i]] != kEpoch_)
-          restStarts_.push_back(lm_.syms[i]);
-      const auto fileScope = llvm::ArrayRef<uint32_t>(lm_.extra).slice(
-          lm_.extraBegin[m], lm_.extraBegin[m + 1] - lm_.extraBegin[m]);
-      restWeight_.push_back(restStarts_.size() +
-                            walkObject(lf_, provider, restStarts_, fileScope,
-                                       ws, [&](uint32_t to) noexcept {
-                                         restOut_.push_back(to);
-                                       }));
-      restBegin_.push_back(static_cast<uint32_t>(restOut_.size()));
+    const uint32_t parts = static_cast<uint32_t>(split_.size());
+    for (uint32_t s : closure) {
+      const uint32_t m = lm_.memberOf(lf_, s, provider);
+      kPart_[s] = m == kNoIndex ? parts : splitIdx_[m];
     }
+    // Rest i, then part i, then the part of the closure no member holds.
+    nodeWeight_.clear();
+    outBegin_.assign(1, 0);
+    out_.clear();
+    auto addNode = [&](llvm::ArrayRef<uint32_t> starts,
+                       llvm::ArrayRef<uint32_t> fileScope) {
+      nodeWeight_.push_back(starts.size() +
+                            walkObject(lf_, provider, starts, fileScope, ws,
+                                       [&](uint32_t to) noexcept {
+                                         out_.push_back(to);
+                                       }));
+      outBegin_.push_back(static_cast<uint32_t>(out_.size()));
+    };
+    for (int part = 0; part < 2; ++part)
+      for (uint32_t m : split_) {
+        starts_.clear();
+        for (uint32_t i = lm_.symBegin[m]; i < lm_.symBegin[m + 1]; ++i)
+          if ((kStamp_[lm_.syms[i]] == kEpoch_) == (part == 1))
+            starts_.push_back(lm_.syms[i]);
+        // File-scope code stays where it is written.
+        addNode(starts_, part == 0 ? llvm::ArrayRef<uint32_t>(lm_.extra).slice(
+                                         lm_.extraBegin[m],
+                                         lm_.extraBegin[m + 1] -
+                                             lm_.extraBegin[m])
+                                   : llvm::ArrayRef<uint32_t>());
+      }
+    starts_.clear();
+    for (uint32_t s : closure)
+      if (kPart_[s] == parts)
+        starts_.push_back(s);
+    addNode(starts_, {});
   }
 
   /// What final link target `e` loads when the targets in `avail` (bits)
   /// are on its link line; with the split of setSplit when `split`.
   Result run(uint32_t e, const uint64_t *avail, bool split) noexcept {
-    split_ = split;
+    split_on_ = split;
     e_ = e;
     avail_ = avail;
-    const uint32_t epoch = ++epoch_;
-    epochNow_ = epoch;
+    epochNow_ = ++epoch_;
     result_ = Result{};
     head_ = tail_ = 0;
     const uint32_t targets = static_cast<uint32_t>(lm_.mode.size());
@@ -2658,22 +2676,20 @@ public:
       if (own || (lm_.mode[t] == LinkMode::Whole && has(t)))
         pullTarget(t);
     }
-    // The split part of an object library is an object library too.
-    if (split_ && lm_.mode[provider_] == LinkMode::Whole)
-      pullNode(splitNode());
+    // The split out of an object library is an object library too.
+    if (split_on_ && lm_.mode[provider_] == LinkMode::Whole)
+      for (uint32_t i = 0; i <= parts(); ++i)
+        pullNode(partNode(i));
     while (head_ < tail_) {
       const uint32_t n = queue_[head_++];
       const uint32_t *first, *last;
       if (n < members_) {
         first = lm_.out.data() + lm_.outBegin[n];
         last = lm_.out.data() + lm_.outBegin[n + 1];
-      } else if (n < splitNode()) {
-        const uint32_t i = n - members_;
-        first = restOut_.data() + restBegin_[i];
-        last = restOut_.data() + restBegin_[i + 1];
       } else {
-        first = splitOut_.data();
-        last = splitOut_.data() + splitOut_.size();
+        const uint32_t i = n - members_;
+        first = out_.data() + outBegin_[i];
+        last = out_.data() + outBegin_[i + 1];
       }
       for (; first != last; ++first)
         resolve(*first);
@@ -2685,8 +2701,17 @@ private:
   [[nodiscard]] bool has(uint32_t t) const noexcept {
     return (avail_[t >> 6] >> (t & 63)) & 1u;
   }
-  [[nodiscard]] uint32_t splitNode() const noexcept {
-    return members_ + static_cast<uint32_t>(restMember_.size());
+  [[nodiscard]] uint32_t parts() const noexcept {
+    return static_cast<uint32_t>(split_.size());
+  }
+  [[nodiscard]] uint32_t partNode(uint32_t i) const noexcept {
+    return members_ + parts() + i;
+  }
+  void touch(uint32_t m) noexcept {
+    if (memberStamp_[m] != epochNow_) {
+      memberStamp_[m] = epochNow_;
+      ++result_.members;
+    }
   }
   void pullNode(uint32_t n) noexcept {
     if (stamp_[n] == epochNow_)
@@ -2695,17 +2720,27 @@ private:
     queue_[tail_++] = n;
     if (n < members_) {
       result_.weight += lm_.weight[n];
-      ++result_.members;
-    } else if (n < splitNode()) {
-      result_.weight += restWeight_[n - members_];
-      ++result_.members;
-    } else {
-      result_.weight += splitWeight_;
+      touch(n);
+      return;
     }
+    const uint32_t i = n - members_;
+    const uint32_t k = i < parts() ? i : i - parts();
+    if (k == parts()) { // the part no member holds
+      result_.weight += nodeWeight_[i];
+      return;
+    }
+    // A member's part and rest together emit what the member did: an
+    // inline body both use is one copy, as when the linker keeps one.
+    const uint32_t other = i < parts() ? i + parts() : k;
+    if (stamp_[members_ + other] == epochNow_)
+      result_.weight += lm_.weight[split_[k]] - nodeWeight_[other];
+    else
+      result_.weight += nodeWeight_[i];
+    touch(split_[k]);
   }
   void pullMember(uint32_t m) noexcept {
-    if (split_ && restStamp_[m] == kEpoch_)
-      pullNode(members_ + restIdx_[m]);
+    if (split_on_ && splitStamp_[m] == kEpoch_)
+      pullNode(members_ + splitIdx_[m]); // the rest
     else
       pullNode(m);
   }
@@ -2716,13 +2751,13 @@ private:
     for (uint32_t m = lm_.memberBegin[t]; m < lm_.memberBegin[t + 1]; ++m)
       pullMember(m);
   }
-  /// Load what defines `s`: the split part, else the member of the best
-  /// owner — the program itself, an object or shared library on the link
-  /// line, an archive on it, any archive (a reference the build resolves
-  /// some other way still loads the member).
+  /// Load what defines `s`: its part of the split, else the member of the
+  /// best owner — the program itself, an object or shared library on the
+  /// link line, an archive on it, any archive (a reference the build
+  /// resolves some other way still loads the member).
   void resolve(uint32_t s) noexcept {
-    if (split_ && kStamp_[s] == kEpoch_) {
-      pullNode(splitNode());
+    if (split_on_ && kStamp_[s] == kEpoch_) {
+      pullNode(partNode(kPart_[s]));
       return;
     }
     const auto owners = lf_.targetsOf(lf_.symOwner[s]);
@@ -2761,17 +2796,16 @@ private:
   const LinkFacts &lf_;
   const LinkModel &lm_;
   uint32_t members_;
-  std::vector<uint32_t> stamp_, queue_, targetStamp_;
+  std::vector<uint32_t> stamp_, queue_, memberStamp_, targetStamp_;
   uint32_t epoch_ = 0, epochNow_ = 0, head_ = 0, tail_ = 0;
   // The split.
-  std::vector<uint32_t> kStamp_, restStamp_, restIdx_;
+  std::vector<uint32_t> kStamp_, kPart_, splitStamp_, splitIdx_;
   uint32_t kEpoch_ = 0, provider_ = kNoIndex;
-  std::vector<uint32_t> restMember_, restBegin_, restOut_, restStarts_;
-  std::vector<uint64_t> restWeight_;
-  std::vector<uint32_t> splitOut_;
-  uint64_t splitWeight_ = 0;
+  std::vector<uint32_t> split_;                  // members holding a part
+  std::vector<uint64_t> nodeWeight_;             // rests, parts, orphan part
+  std::vector<uint32_t> outBegin_, out_, starts_;
   // The current run.
-  bool split_ = false;
+  bool split_on_ = false;
   uint32_t e_ = kNoIndex;
   const uint64_t *avail_ = nullptr;
   Result result_;

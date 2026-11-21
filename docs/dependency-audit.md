@@ -360,7 +360,7 @@ symbol or uncertain symbol referenced).
 | `droppableTargets` | of those, the ones the closure would not pull back in: what the consumer stops linking if the closure is split out into a target of its own |
 | `droppableSymbols` | the `defined` symbols in `droppableTargets`, less the closure itself when the provider is among them — the gain |
 | `providerDroppable` | the provider is one of `droppableTargets` |
-| `linkTargetsHelped`, `linkTargetGain`, `linkTargetMembers` | the final link targets (executables, shared and module libraries) that would load less if the closure were split out of the provider, the most emitted symbols one of them would stop loading, and the objects that target stops loading — [Link-target gain](#link-target-gain) |
+| `linkTargetsHelped`, `linkTargetGain`, `linkTargetMembers` | the final link targets (executables, shared and module libraries) that would load less if the closure were split out of the provider, the most emitted symbols one of them would stop loading, and that target's members of which nothing is loaded any more — [Link-target gain](#link-target-gain) |
 | `fanInPct`, `splitGain` | the share of the rest of the provider that references the closure, and `linkTargetGain` discounted by it — [Link-target gain](#link-target-gain) |
 | `closureFanIn`, `closureFanInFiles` | `defined` provider symbols outside the closure that reference into it, and their files — [the closure](#inline-bodies-and-the-closure) |
 | `registrationSeeds` | certain seeds that register a factory — [Registration seeds](#registration-seeds) |
@@ -419,25 +419,26 @@ weight this loads as the map stands, and `linkInputMembers` the
 members.
 
 **The split.** For a `declared: "direct"` row, the row's closure moves
-out of the provider into an object of its own, symbol by symbol: each
-provider member that held part of the closure keeps the rest of its
-code (and its own copies of the inline bodies the rest uses), and the
-new object compiles its own copies of the inline bodies the closure
-uses. Every final link target that links the consumer is simulated
-again with the row's edge replaced by the closure's needs: references
-to the closure load the new object, and a provider member is loaded
-only if something still references what is left in it, so members
-pulled in only through the closure — in the provider and transitively
-in any other target — drop out. When the provider is an object library
-the new object is one too, and nothing of the rest is loaded unless the
-provider is still on the line another way. A row with an empty closure
-gains only what leaves the line (an object or shared library no longer
-reached).
+out of the provider into a new target of the provider's kind, file by
+file: each provider member that held part of the closure becomes two
+objects, its part of the closure (a member of the new target) and the
+rest of its code (still the provider's), each with the inline bodies it
+uses; when a link loads both, they weigh what the member did (an inline
+body both use is one copy). Every final link target that links
+the consumer is simulated again with the row's edge replaced by the
+closure's needs: a reference to a closure symbol loads the part that
+holds it, and a provider member's rest is loaded only if something
+still references what is left in it, so members pulled in only through
+the closure — in the provider and transitively in any other target —
+drop out. When the provider is an object library every part is linked,
+and the rest only if the provider is still on the line another way. A
+row with an empty closure gains only what leaves the line (an object or
+shared library no longer reached).
 
 | Member | Meaning |
 |---|---|
-| `linkTargetGain` | the most emitted symbols one final link target stops loading: `linkInput` before less the weight after, the new object included. Never negative: a target that would load more is not helped |
-| `linkTargetMembers` | the objects that target stops loading (the new object not counted) |
+| `linkTargetGain` | the most emitted symbols one final link target stops loading: `linkInput` before less the weight after, the new target's parts included. Never negative: a target that would load more is not helped |
+| `linkTargetMembers` | that target's members of which no code is loaded after the split: neither the member, nor its rest, nor its part |
 | `linkTargetsHelped` | how many final link targets gain anything |
 | `fanInPct` | `closureFanIn` as a percentage of the provider's `defined` symbols outside the closure, 0–100: how much of what stays behind still calls into what moved |
 | `splitGain` | `linkTargetGain × (100 − fanInPct) / 100`: the gain, discounted by that share |
@@ -446,20 +447,20 @@ reached).
 cut through the middle of the provider: after the split the rest depends
 on the new target, every program that links the rest links it too, and
 the refactor is as large as the fan-in. The simulation already charges
-for it where it changes what a link loads (the rest member that calls
-into the closure keeps the new object loaded), but not for the cost of
-making the cut. `splitGain` is the separate rank key that weighs that
+for it where it changes what a link loads (a rest that calls into the
+closure keeps the parts it calls loaded), but not for the cost of making
+the cut. `splitGain` is the separate rank key that weighs that
 cost (`--sort split_gain`); `linkTargetGain` stays the physical
 quantity.
 
 `link_gain` (the default sort) ranks a row that helps a program above
-one whose library gain no program sees. Measured against the archive
-members GNU ld really loads on the LLVM testbed (13 tools, 34 static
-and 3 object libraries; `-Wl,-Map`), the simulated loads match 95% of
-the archive members both ways, and `linkTargetGain` ranks the 206
-direct rows with rank correlation 0.83 against the bytes a section-level
-split of the true closure saves; 9 of its top 10 rows are among the 12
-largest real gains.
+one whose library gain no program sees. On an LLVM testbed (13 tools,
+34 static and 3 object libraries) the simulated loads match the archive
+members GNU ld loads (its `-Wl,-Map`) to 96% both ways, and against the
+input bytes each link saves when the true closure is split out of the
+objects section by section, `linkTargetGain` ranks the 206 direct rows
+with rank correlation 0.76, against 0.17 for the target-level walk it
+replaced.
 
 What it does not see:
 
@@ -553,7 +554,7 @@ observed) answers `ok` with empty `seeds` and exit code 1.
 | Member | Meaning |
 |---|---|
 | `edge` | the row, as in the edge table |
-| `linkTargetsHelped` | each final link target the split would help: `target`, `gain` (emitted symbols it stops loading), `members` (objects it stops loading), `linkInput` and `linkInputMembers` (what it loads as the map stands) — by gain descending, then name |
+| `linkTargetsHelped` | each final link target the split would help: `target`, `gain` (emitted symbols it stops loading), `members` (members of which it loads nothing any more), `linkInput` and `linkInputMembers` (what it loads as the map stands) — by gain descending, then name |
 | `seeds` | every provider symbol the consumer references — certain before uncertain, named by a source before via-inline, then by site. Each: `symbol` (`name`, `usr`, `kind` — `function`, `variable`, `class` — and the declaration's `file`, `line`), `owner` (`defined` / `presumed`), `via` (`direct` / `inline`), `kind` (the reference's role or added kind), `site` (where the reference to the symbol is written), `from` (the symbol that makes it), `registers: true` for a registration, and for `via: "inline"` `through`: the reference in the consumer's own files (`site`, `from`, `to`) the walk started from |
 | `closure` | the closure's symbols by qualified name, then USR: `name`, `usr`, `kind`, `file`, `line` (the declaration), `definedIn` (the file that defines it, when known) |
 | `closureTotal`, `closureTruncated` | the full count, and whether `closure_limit` cut the list |
@@ -751,7 +752,14 @@ complete adapter.
   above), `linkFactsFromCallEdges` from the call graph (the fallback).
   `auditDependencies` is the kernel: it reads `LinkFacts` and the map
   only, and computes seeds, closures, needs, fan-in and gains with bit
-  matrices and stamp arrays sized once per audit.
+  matrices and stamp arrays sized once per audit. The link-target gain
+  runs on a member table built once per audit (`LinkModel`: per member
+  its symbols, what its code references and its weight, in CSR form) and
+  a simulator (`LinkSim`) whose queue and stamps are sized once; a row's
+  split adds its parts and rests to the simulator's node arrays, cleared
+  and refilled per row without reallocating once they have grown. On
+  the LLVM testbed above (892 sources, 50 targets) the whole audit runs
+  in under a second in 340 MB, most of it the loaded references.
   `completeness.edgeSource` and `invisible` come from the producer.
 
 `src/query/DependencyTools.cpp` holds the two tools; they read the

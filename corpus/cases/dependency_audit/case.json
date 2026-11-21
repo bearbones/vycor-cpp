@@ -74,7 +74,8 @@
        },
        "unusedWithheld": 0,
        "total": 7,
-       "truncated": false
+       "truncated": false,
+       "sort": "link_gain"
       },
       "count": {
        "edges": 7
@@ -85,31 +86,38 @@
         "match": [
          {
           "consumer": "app",
-          "provider": "core"
-         },
-         {
-          "consumer": "app",
-          "provider": "extra"
-         },
-         {
-          "consumer": "app",
-          "provider": "plugin"
+          "provider": "core",
+          "linkTargetGain": 7
          },
          {
           "consumer": "plugin",
-          "provider": "core"
+          "provider": "core",
+          "linkTargetGain": 7
+         },
+         {
+          "consumer": "app",
+          "provider": "extra",
+          "linkTargetGain": 0
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin",
+          "linkTargetGain": 0
          },
          {
           "consumer": "tool",
-          "provider": "core"
+          "provider": "util",
+          "linkTargetGain": 0
          },
          {
           "consumer": "tool",
-          "provider": "util"
+          "provider": "core",
+          "linkTargetGain": 0
          },
          {
           "consumer": "util",
-          "provider": "core"
+          "provider": "core",
+          "linkTargetGain": 0
          }
         ]
        }
@@ -130,7 +138,7 @@
          "providerFiles": 2,
          "providerDroppable": false,
          "closureFanIn": 1,
-         "linkTargetsHelped": 0,
+         "linkTargetsHelped": 1,
          "findings": [
           {
            "id": "thin-dependency",
@@ -142,7 +150,10 @@
           "from": "twice",
           "to": "core_scale",
           "kind": "call"
-         }
+         },
+         "linkTargetGain": 7,
+         "linkTargetMembers": 0,
+         "splitGain": 6
         }
        },
        {
@@ -206,14 +217,17 @@
          "closureSymbols": 2,
          "closureFanIn": 1,
          "linkTargetsHelped": 1,
-         "linkTargetGain": 24,
+         "linkTargetGain": 7,
          "findings": [
           {
            "id": "thin-dependency",
            "evidence": "references",
            "universal": false
           }
-         ]
+         ],
+         "linkTargetMembers": 0,
+         "fanInPct": 4,
+         "splitGain": 6
         }
        },
        {
@@ -508,19 +522,19 @@
      }
     },
     {
-     "id": "by-link-gain",
+     "id": "by-split-gain",
      "argv": [
       "audit-dependencies",
       "--target-map",
       "{dir}/targets.json",
       "--sort",
-      "link_gain"
+      "split_gain"
      ],
      "expect": {
       "exit": 0,
       "status": "ok",
       "fields": {
-       "sort": "link_gain"
+       "sort": "split_gain"
       },
       "count": {
        "edges": 7
@@ -530,32 +544,34 @@
         "in": "edges",
         "match": [
          {
+          "consumer": "app",
+          "provider": "core",
+          "splitGain": 6,
+          "linkTargetGain": 7
+         },
+         {
           "consumer": "plugin",
           "provider": "core",
-          "linkTargetGain": 24,
-          "linkTargetsHelped": 1
+          "splitGain": 6,
+          "linkTargetGain": 7
          },
          {
           "consumer": "app",
           "provider": "extra",
-          "linkTargetGain": 2
+          "splitGain": 0,
+          "linkTargetGain": 0
          },
          {
           "consumer": "app",
           "provider": "plugin",
-          "linkTargetGain": 2
+          "splitGain": 0,
+          "linkTargetGain": 0
          },
          {
           "consumer": "tool",
           "provider": "util",
-          "linkTargetGain": 0,
-          "linkTargetsHelped": 1
-         },
-         {
-          "consumer": "app",
-          "provider": "core",
-          "linkTargetGain": 0,
-          "linkTargetsHelped": 0
+          "splitGain": 0,
+          "linkTargetGain": 0
          }
         ]
        }
@@ -568,6 +584,61 @@
          "provider": "core",
          "linkTargetsHelped": 1
         }
+       }
+      ]
+     }
+    },
+    {
+     "id": "by-name",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--sort",
+      "name"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "sort": "name"
+      },
+      "count": {
+       "edges": 7
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "app",
+          "provider": "core"
+         },
+         {
+          "consumer": "app",
+          "provider": "extra"
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin"
+         },
+         {
+          "consumer": "plugin",
+          "provider": "core"
+         },
+         {
+          "consumer": "tool",
+          "provider": "core"
+         },
+         {
+          "consumer": "tool",
+          "provider": "util"
+         },
+         {
+          "consumer": "util",
+          "provider": "core"
+         }
+        ]
        }
       ]
      }
@@ -786,7 +857,10 @@
        "linkTargetsHelped": [
         {
          "target": "plugin",
-         "droppableSymbols": 24
+         "gain": 7,
+         "members": 0,
+         "linkInput": 11,
+         "linkInputMembers": 2
         }
        ]
       },
