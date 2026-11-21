@@ -1068,6 +1068,8 @@ int main(int argc, const char **argv) {
         enabledChecks.count("noexcept-candidate-move") > 0;
     opts.enableNoexceptCandidateVirtualDiag =
         enabledChecks.count("noexcept-candidate-virtual") > 0;
+    opts.enableExceptionBoundaryDiag =
+        enabledChecks.count("exception-boundary-escape") > 0;
     opts.warnSameScore = CheckWarnSameScore;
     opts.modelConvertibility = CheckModelConvertibility;
     opts.includeCallSiteLocations = CheckExceptionEscapeCallSiteLocations;

@@ -76,6 +76,77 @@ constexpr uint8_t kMayThrow = 1;
 constexpr uint8_t kExit = NoexceptFactEntry::Exit;
 constexpr uint8_t kCall = NoexceptFactEntry::Call;
 constexpr uint8_t kElsewhere = NoexceptFactEntry::Elsewhere;
+constexpr uint8_t kBare = NoexceptFactEntry::Bare;
+
+// How a statement is guarded: by no try, by a try whose handlers are all
+// typed, or by a try with a catch (...). Only the last discharges
+// anything; the first two are told apart for exception-boundary-escape.
+constexpr uint8_t kGuardNone = 0;
+constexpr uint8_t kGuardTyped = 1;
+constexpr uint8_t kGuardAll = 2;
+
+// What made a statement able to throw (the leaf reasons).
+enum Why : uint8_t { kWhyThrow, kWhyLibraryThrow, kWhyDynamic, kWhyOther,
+                     kWhyAlloc };
+
+uint8_t reasonBit(Why why, uint8_t guard) {
+  using F = NoexceptFactEntry;
+  if (guard == kGuardTyped)
+    return why == kWhyThrow || why == kWhyLibraryThrow ? F::ThrowTyped
+                                                       : F::OpaqueTyped;
+  switch (why) {
+  case kWhyThrow:
+    return F::ThrowBare;
+  case kWhyLibraryThrow:
+    return F::LibraryThrowBare;
+  case kWhyDynamic:
+    return F::DynamicBare;
+  case kWhyOther:
+    return F::OtherBare;
+  case kWhyAlloc:
+    return F::AllocBare;
+  }
+  return F::OtherBare;
+}
+
+// Leaf reasons of a body reached through a path guarded at `guard`.
+uint8_t throughGuard(uint8_t reasons, uint8_t guard) {
+  using F = NoexceptFactEntry;
+  if (guard == kGuardNone)
+    return reasons;
+  if (guard == kGuardAll)
+    return 0;
+  uint8_t out = 0;
+  if (reasons & (F::ThrowBare | F::LibraryThrowBare | F::ThrowTyped))
+    out |= F::ThrowTyped;
+  if (reasons & (F::DynamicBare | F::OtherBare | F::AllocBare | F::OpaqueTyped))
+    out |= F::OpaqueTyped;
+  return out;
+}
+
+// The standard library's throw helpers (libstdc++'s out-of-line
+// std::__throw_out_of_range and kin, libc++'s inline ones,
+// std::rethrow_exception): a call is a throw, whether or not a body says
+// so. The out-of-memory and size-limit ones (bad_alloc,
+// bad_array_new_length, length_error past max_size()) count as
+// allocation, which every container growth reaches. False when `fd` is
+// not one.
+bool libraryThrowHelper(const clang::FunctionDecl *fd, Why &why) {
+  if (!fd->isInStdNamespace() || !fd->getIdentifier())
+    return false;
+  llvm::StringRef name = fd->getName();
+  if (name == "rethrow_exception") {
+    why = kWhyLibraryThrow;
+    return true;
+  }
+  if (!name.consume_front("__throw_"))
+    return false;
+  why = name == "bad_alloc" || name == "bad_array_new_length" ||
+                name == "length_error"
+            ? kWhyAlloc
+            : kWhyLibraryThrow;
+  return true;
+}
 
 // True when the function's own type promises no exception leaves it. An
 // exception specification Sema never had to resolve (an unused defaulted
@@ -113,7 +184,12 @@ class Collector {
 public:
   explicit Collector(clang::ASTContext &ctx)
       : ctx_(ctx), sm_(ctx.getSourceManager()),
-        mangle_(ctx.createMangleContext()) {}
+        mangle_(ctx.createMangleContext()) {
+    // An exception can only start in C++ code compiled with exceptions;
+    // anywhere else the boundaries that matter are the frames themselves.
+    const clang::LangOptions &lang = ctx.getLangOpts();
+    collectBoundaries_ = lang.CPlusPlus && lang.CXXExceptions;
+  }
 
   void run(GlobalIndex &index) {
     scan(ctx_.getTranslationUnitDecl());
@@ -251,6 +327,9 @@ private:
     state_.push_back(state);
     usrOff_.push_back(off);
     usrLen_.push_back(len);
+    // Written off before any walk: nothing says what it runs.
+    leaf_.push_back(state & kMayThrow ? NoexceptFactEntry::OtherBare : 0);
+    leafLoc_.push_back(def->getLocation());
     return id;
   }
 
@@ -330,35 +409,51 @@ private:
 
   // ---- body walk -------------------------------------------------------
 
-  void push(const clang::Stmt *s, bool guarded) {
+  void push(const clang::Stmt *s, uint8_t guard) {
     if (s)
-      stack_.push_back({s, guarded});
+      stack_.push_back({s, guard});
   }
 
-  void pushChildren(const clang::Stmt *s, bool guarded) {
+  void pushChildren(const clang::Stmt *s, uint8_t guard) {
     for (const clang::Stmt *child : s->children())
-      push(child, guarded);
+      push(child, guard);
   }
 
   // An expression shared between several parents (a default argument, a
   // default member initializer, an opaque value's source). Walked once
   // per guard level, which also ends a default member initializer that
   // names its own class.
-  void pushShared(const clang::Stmt *s, bool guarded) {
-    if (s && shared_[guarded].insert(s).second)
-      stack_.push_back({s, guarded});
+  void pushShared(const clang::Stmt *s, uint8_t guard) {
+    if (s && shared_[guard].insert(s).second)
+      stack_.push_back({s, guard});
+  }
+
+  // Records why the current body can throw, at the statement being
+  // walked. The site kept is that of the most telling reason.
+  void leaf(Why why, uint8_t guard) {
+    if (guard == kGuardAll)
+      return;
+    const uint8_t bit = reasonBit(why, guard);
+    if (NoexceptFactEntry::reasonRank(bit) <
+        NoexceptFactEntry::reasonRank(leaf_[cur_]))
+      leafLoc_[cur_] = curLoc_;
+    leaf_[cur_] |= bit;
   }
 
   // Something here can throw and nothing statically bounds it.
-  void opaque(bool guarded) {
-    if (!guarded)
-      state_[cur_] |= kMayThrow;
+  void opaque(uint8_t guard, Why why = kWhyOther) {
+    if (guard == kGuardAll)
+      return;
+    state_[cur_] |= kMayThrow;
+    leaf(why, guard);
   }
 
-  void addEdge(uint32_t dst, bool guarded) {
+  void addEdge(uint32_t dst, uint8_t guard) {
     // Consecutive duplicates (a loop of calls to one function) are the
     // common repetition; the rest is merged when the fact is built.
-    uint8_t bits = guarded ? kCall : (kCall | kExit);
+    uint8_t bits = guard == kGuardAll    ? kCall
+                   : guard == kGuardNone ? (kCall | kExit | kBare)
+                                         : (kCall | kExit);
     if (edgeDst_.size() > edgeBegin_.back() && edgeDst_.back() == dst &&
         edgeBits_.back() == bits)
       return;
@@ -366,20 +461,25 @@ private:
     edgeBits_.push_back(bits);
   }
 
-  void callee(const clang::FunctionDecl *fd, bool guarded) {
+  void callee(const clang::FunctionDecl *fd, uint8_t guard) {
     if (!fd) {
-      opaque(guarded);
+      opaque(guard);
       return;
     }
     // A trivial special member runs no code at all.
     if (fd->isTrivial() || cannotThrowByDecl(fd))
       return;
-    addEdge(nodeFor(fd), guarded);
+    // A throw of the library's own, not an unknown callee.
+    if (Why why; libraryThrowHelper(fd, why)) {
+      opaque(guard, why);
+      return;
+    }
+    addEdge(nodeFor(fd), guard);
   }
 
   // The destructor that runs for an object of type `type` (an array's
   // elements included). Trivial and deleted destructors run nothing.
-  void destroy(clang::QualType type, bool guarded) {
+  void destroy(clang::QualType type, uint8_t guard) {
     if (type.isNull())
       return;
     const clang::CXXRecordDecl *rd =
@@ -387,44 +487,44 @@ private:
     if (!rd)
       return;
     if (!rd->hasDefinition()) {
-      opaque(guarded);
+      opaque(guard);
       return;
     }
     if (rd->hasTrivialDestructor())
       return;
     const clang::CXXDestructorDecl *dtor = rd->getDestructor();
     if (!dtor) {
-      opaque(guarded);
+      opaque(guard);
       return;
     }
     if (!dtor->isDeleted())
-      callee(dtor, guarded);
+      callee(dtor, guard);
   }
 
-  void localDecl(const clang::Decl *d, bool guarded) {
+  void localDecl(const clang::Decl *d, uint8_t guard) {
     if (const auto *v = llvm::dyn_cast<clang::VarDecl>(d)) {
       if (v->getType()->isVariablyModifiedType())
-        opaque(guarded); // the bound is an expression the AST hides here
+        opaque(guard); // the bound is an expression the AST hides here
       // A constexpr variable's initializer was evaluated at compile time;
       // an evaluation that reaches a throw is not a constant expression.
       if (!v->isConstexpr())
-        push(v->getInit(), guarded);
+        push(v->getInit(), guard);
       // Static and thread locals are destroyed at exit, not here.
       if (v->hasLocalStorage())
-        destroy(v->getType(), guarded);
+        destroy(v->getType(), guard);
       if (const auto *cleanup = v->getAttr<clang::CleanupAttr>())
-        callee(cleanup->getFunctionDecl(), guarded); // runs at scope exit
+        callee(cleanup->getFunctionDecl(), guard); // runs at scope exit
       if (const auto *dd = llvm::dyn_cast<clang::DecompositionDecl>(v))
         for (const clang::BindingDecl *b : dd->bindings())
           if (const clang::VarDecl *holding = b->getHoldingVar()) {
-            push(holding->getInit(), guarded);
-            destroy(holding->getType(), guarded);
+            push(holding->getInit(), guard);
+            destroy(holding->getType(), guard);
           }
       return;
     }
     if (const auto *t = llvm::dyn_cast<clang::TypedefNameDecl>(d))
       if (t->getUnderlyingType()->isVariablyModifiedType())
-        opaque(guarded);
+        opaque(guard);
   }
 
   // A call with no statically known callee cannot throw only if the
@@ -455,14 +555,14 @@ private:
            proto->isNothrow();
   }
 
-  void call(const clang::CallExpr *ce, bool guarded) {
+  void call(const clang::CallExpr *ce, uint8_t guard) {
     const clang::FunctionDecl *fd = ce->getDirectCallee();
     if (!fd) {
       // `p->~T()` on a scalar runs nothing.
       if (!llvm::isa<clang::CXXPseudoDestructorExpr>(
               ce->getCallee()->IgnoreParens()) &&
           !indirectCallCannotThrow(ce))
-        opaque(guarded);
+        opaque(guard, kWhyDynamic);
       return;
     }
     const auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
@@ -470,14 +570,14 @@ private:
         overridersCannotThrow(md, ctx_.getLangOpts())) {
       // Not dispatched, or dispatched to overriders that must all be at
       // least as restrictive as this non-throwing declaration.
-      callee(fd, guarded);
+      callee(fd, guard);
       return;
     }
     const clang::Expr *object = nullptr;
     if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(
             ce->getCallee()->IgnoreParens())) {
       if (me->hasQualifier()) { // `Base::f()` names its target
-        callee(fd, guarded);
+        callee(fd, guard);
         return;
       }
       object = me->getBase();
@@ -489,9 +589,9 @@ private:
         object ? md->getDevirtualizedMethod(object, /*IsAppleKext=*/false)
                : nullptr;
     if (target)
-      callee(target, guarded);
+      callee(target, guard);
     else
-      opaque(guarded); // any overrider, including ones not written yet
+      opaque(guard, kWhyDynamic); // any overrider, including future ones
   }
 
   // The first use of a thread_local variable on a thread goes through its
@@ -499,14 +599,14 @@ private:
   // its TU defines. Only a definition seen here that needs neither a
   // dynamic initializer nor a destructor (registered on first use) has
   // no wrapper.
-  void threadLocalUse(const clang::ValueDecl *d, bool guarded) {
+  void threadLocalUse(const clang::ValueDecl *d, uint8_t guard) {
     const auto *v = llvm::dyn_cast_or_null<clang::VarDecl>(d);
     if (!v || v->getTLSKind() != clang::VarDecl::TLS_Dynamic ||
         v->isLocalVarDeclOrParm())
       return;
     const clang::VarDecl *def = v->getDefinition();
     if (!def || def->needsDestruction(ctx_) != clang::QualType::DK_none) {
-      opaque(guarded);
+      opaque(guard);
       return;
     }
     for (const clang::VarDecl *r : v->redecls())
@@ -514,62 +614,111 @@ private:
         return;
     if (!def->hasInit() || def->hasConstantInitialization())
       return;
-    opaque(guarded);
+    opaque(guard);
   }
 
-  void visit(const clang::Stmt *s, bool guarded) {
+  // Records the `throw;` statements of a handler body, outside nested
+  // try statements and lambdas, and says whether there was one.
+  bool noteRethrows(const clang::Stmt *body) {
+    bool found = false;
+    llvm::SmallVector<const clang::Stmt *, 32> todo;
+    todo.push_back(body);
+    while (!todo.empty()) {
+      const clang::Stmt *s = todo.pop_back_val();
+      if (!s || llvm::isa<clang::LambdaExpr>(s) ||
+          llvm::isa<clang::CXXTryStmt>(s))
+        continue;
+      if (const auto *te = llvm::dyn_cast<clang::CXXThrowExpr>(s);
+          te && !te->getSubExpr()) {
+        rethrows_.insert(te);
+        found = true;
+        continue;
+      }
+      for (const clang::Stmt *child : s->children())
+        todo.push_back(child);
+    }
+    return found;
+  }
+
+  void visit(const clang::Stmt *s, uint8_t guard) {
+    curLoc_ = s->getBeginLoc();
+    if (collectBoundaries_)
+      noteBoundary(s);
     if (const auto *e = llvm::dyn_cast<clang::Expr>(s)) {
       if (e->containsErrors() || e->isInstantiationDependent()) {
-        opaque(guarded);
+        opaque(guard);
         return;
       }
       // A variably modified type (a cast to a pointer to a VLA, say)
       // evaluates its bound where the expression runs.
       if (e->getType()->isVariablyModifiedType())
-        opaque(guarded);
+        opaque(guard);
     }
 
     switch (s->getStmtClass()) {
-    case clang::Stmt::CXXThrowExprClass:
-      opaque(guarded);
+    case clang::Stmt::CXXThrowExprClass: {
+      if (rethrows_.count(s))
+        break; // raises only what its try block did, recorded there
+      clang::SourceLocation loc = sm_.getExpansionLoc(curLoc_);
+      opaque(guard, loc.isValid() && sm_.isInSystemHeader(loc)
+                        ? kWhyLibraryThrow
+                        : kWhyThrow);
       break;
+    }
 
     case clang::Stmt::CXXTryStmtClass: {
       const auto *t = llvm::cast<clang::CXXTryStmt>(s);
-      bool catchAll = false;
-      for (unsigned i = 0; i < t->getNumHandlers(); ++i)
+      const clang::CXXCatchStmt *catchAll = nullptr;
+      bool typedHandler = false;
+      for (unsigned i = 0; i < t->getNumHandlers(); ++i) {
         if (!t->getHandler(i)->getExceptionDecl())
-          catchAll = true;
+          catchAll = t->getHandler(i);
+        else
+          typedHandler = true;
+      }
       // Only catch (...) stops everything; a typed handler would need the
-      // thrown types. Handlers run outside the try they belong to.
-      push(t->getTryBlock(), guarded || (catchAll && t != functionTry_));
+      // thrown types. Handlers run outside the try they belong to. A
+      // constructor's or destructor's function-try-block rethrows, and so
+      // does `catch (...) { cleanup(); throw; }` (the standard library's
+      // containers are full of it): every exception of the try block
+      // leaves, but for what a typed handler before it catches.
+      uint8_t inner = guard;
+      if (t != functionTry_) {
+        if (!catchAll)
+          inner = std::max(guard, kGuardTyped);
+        else if (!noteRethrows(catchAll->getHandlerBlock()))
+          inner = kGuardAll;
+        else if (typedHandler)
+          inner = std::max(guard, kGuardTyped);
+      }
+      push(t->getTryBlock(), inner);
       for (unsigned i = 0; i < t->getNumHandlers(); ++i)
-        push(t->getHandler(i), guarded);
+        push(t->getHandler(i), guard);
       return;
     }
 
     case clang::Stmt::CXXCatchStmtClass: {
       const auto *c = llvm::cast<clang::CXXCatchStmt>(s);
       if (const clang::VarDecl *v = c->getExceptionDecl()) {
-        push(v->getInit(), guarded);
-        destroy(v->getType(), guarded);
+        push(v->getInit(), guard);
+        destroy(v->getType(), guard);
       }
-      push(c->getHandlerBlock(), guarded);
+      push(c->getHandlerBlock(), guard);
       return;
     }
 
     case clang::Stmt::DeclRefExprClass:
-      threadLocalUse(llvm::cast<clang::DeclRefExpr>(s)->getDecl(), guarded);
+      threadLocalUse(llvm::cast<clang::DeclRefExpr>(s)->getDecl(), guard);
       break;
 
     case clang::Stmt::MemberExprClass:
       threadLocalUse(llvm::cast<clang::MemberExpr>(s)->getMemberDecl(),
-                     guarded);
+                     guard);
       break;
 
     case clang::Stmt::DeclStmtClass:
       for (const clang::Decl *d : llvm::cast<clang::DeclStmt>(s)->decls())
-        localDecl(d, guarded);
+        localDecl(d, guard);
       return;
 
     case clang::Stmt::IfStmtClass: {
@@ -577,15 +726,15 @@ private:
       if (i->isConsteval()) {
         // The compile-time branch never runs.
         push(i->isNonNegatedConsteval() ? i->getElse() : i->getThen(),
-             guarded);
+             guard);
         return;
       }
       if (i->isConstexpr() && i->getCond() &&
           !i->getCond()->containsErrors() &&
           !i->getCond()->isValueDependent()) {
         if (auto taken = i->getNondiscardedCase(ctx_)) {
-          push(i->getInit(), guarded);
-          push(*taken, guarded);
+          push(i->getInit(), guard);
+          push(*taken, guard);
           return;
         }
       }
@@ -600,39 +749,39 @@ private:
       const auto *ce = llvm::cast<clang::CallExpr>(s);
       if (ce->isUnevaluatedBuiltinCall(ctx_))
         return;
-      call(ce, guarded);
+      call(ce, guard);
       break;
     }
 
     case clang::Stmt::CXXConstructExprClass:
     case clang::Stmt::CXXTemporaryObjectExprClass:
-      callee(llvm::cast<clang::CXXConstructExpr>(s)->getConstructor(), guarded);
+      callee(llvm::cast<clang::CXXConstructExpr>(s)->getConstructor(), guard);
       break;
 
     case clang::Stmt::CXXInheritedCtorInitExprClass:
       callee(llvm::cast<clang::CXXInheritedCtorInitExpr>(s)->getConstructor(),
-             guarded);
+             guard);
       return;
 
     case clang::Stmt::CXXBindTemporaryExprClass:
       callee(llvm::cast<clang::CXXBindTemporaryExpr>(s)
                  ->getTemporary()
                  ->getDestructor(),
-             guarded);
+             guard);
       break;
 
     case clang::Stmt::CXXNewExprClass: {
       const auto *n = llvm::cast<clang::CXXNewExpr>(s);
       const clang::FunctionDecl *op = n->getOperatorNew();
       if (!op)
-        opaque(guarded);
+        opaque(guard);
       else if (!cannotThrowByDecl(op)) {
         // The replaceable global forms report failure by throwing,
         // whatever definition the program ends up linking.
         if (op->isReplaceableGlobalAllocationFunction())
-          opaque(guarded);
+          opaque(guard, kWhyAlloc);
         else
-          callee(op, guarded);
+          callee(op, guard);
         // With an allocation function that may throw, an array size that
         // is negative or too large throws std::bad_array_new_length before
         // the function is called ([expr.new]/9).
@@ -640,7 +789,7 @@ private:
           auto size = n->getArraySize();
           if (!size || !*size || (*size)->isValueDependent() ||
               !(*size)->isIntegerConstantExpr(ctx_))
-            opaque(guarded);
+            opaque(guard, kWhyAlloc);
         }
       }
       break; // placement arguments, array size, initializer
@@ -649,10 +798,10 @@ private:
     case clang::Stmt::CXXDeleteExprClass: {
       const auto *d = llvm::cast<clang::CXXDeleteExpr>(s);
       if (const clang::FunctionDecl *op = d->getOperatorDelete())
-        callee(op, guarded);
+        callee(op, guard);
       clang::QualType t = d->getDestroyedType();
       if (t.isNull()) {
-        opaque(guarded);
+        opaque(guard);
         break;
       }
       const clang::CXXRecordDecl *rd =
@@ -660,20 +809,20 @@ private:
       if (!rd)
         break;
       if (!rd->hasDefinition()) {
-        opaque(guarded);
+        opaque(guard);
         break;
       }
       if (rd->hasTrivialDestructor())
         break;
       const clang::CXXDestructorDecl *dtor = rd->getDestructor();
       if (!dtor)
-        opaque(guarded);
+        opaque(guard);
       else if (dtor->isVirtual() &&
                !overridersCannotThrow(dtor, ctx_.getLangOpts()) &&
                !rd->isEffectivelyFinal())
-        opaque(guarded); // the dynamic type's destructor runs
+        opaque(guard, kWhyDynamic); // the dynamic type's destructor runs
       else if (!dtor->isDeleted())
-        callee(dtor, guarded);
+        callee(dtor, guard);
       break;
     }
 
@@ -682,36 +831,36 @@ private:
       // when its call operator is called, which is a call like any other.
       for (const clang::Expr *init :
            llvm::cast<clang::LambdaExpr>(s)->capture_inits())
-        push(init, guarded);
+        push(init, guard);
       return;
 
     case clang::Stmt::CXXDefaultArgExprClass:
-      pushShared(llvm::cast<clang::CXXDefaultArgExpr>(s)->getExpr(), guarded);
+      pushShared(llvm::cast<clang::CXXDefaultArgExpr>(s)->getExpr(), guard);
       return;
 
     case clang::Stmt::CXXDefaultInitExprClass:
-      pushShared(llvm::cast<clang::CXXDefaultInitExpr>(s)->getExpr(), guarded);
+      pushShared(llvm::cast<clang::CXXDefaultInitExpr>(s)->getExpr(), guard);
       return;
 
     case clang::Stmt::OpaqueValueExprClass:
       pushShared(llvm::cast<clang::OpaqueValueExpr>(s)->getSourceExpr(),
-                 guarded);
+                 guard);
       return;
 
     case clang::Stmt::InitListExprClass:
-      push(llvm::cast<clang::InitListExpr>(s)->getArrayFiller(), guarded);
+      push(llvm::cast<clang::InitListExpr>(s)->getArrayFiller(), guard);
       break;
 
     case clang::Stmt::CXXParenListInitExprClass:
       push(llvm::cast<clang::CXXParenListInitExpr>(s)->getArrayFiller(),
-           guarded);
+           guard);
       break;
 
     case clang::Stmt::CXXTypeidExprClass: {
       const auto *t = llvm::cast<clang::CXXTypeidExpr>(s);
       if (!t->isTypeOperand() && t->isPotentiallyEvaluated()) {
-        opaque(guarded); // std::bad_typeid on a null pointer
-        push(t->getExprOperand(), guarded);
+        opaque(guard); // std::bad_typeid on a null pointer
+        push(t->getExprOperand(), guard);
       }
       return;
     }
@@ -719,7 +868,7 @@ private:
     case clang::Stmt::CXXDynamicCastExprClass: {
       const auto *c = llvm::cast<clang::CXXDynamicCastExpr>(s);
       if (c->getCastKind() == clang::CK_Dynamic && c->isGLValue())
-        opaque(guarded); // std::bad_cast
+        opaque(guard); // std::bad_cast
       break;
     }
 
@@ -730,7 +879,7 @@ private:
       // Evaluated at compile time, but an object it produces is still
       // destroyed at run time.
       if (c->isPRValue())
-        destroy(c->getType(), guarded);
+        destroy(c->getType(), guard);
       return;
     }
 
@@ -739,9 +888,9 @@ private:
       const auto *u = llvm::cast<clang::UnaryExprOrTypeTraitExpr>(s);
       if (u->isArgumentType()) {
         if (u->getArgumentType()->isVariablyModifiedType())
-          opaque(guarded);
+          opaque(guard);
       } else if (u->getArgumentExpr()->getType()->isVariablyModifiedType()) {
-        push(u->getArgumentExpr(), guarded);
+        push(u->getArgumentExpr(), guard);
       }
       return;
     }
@@ -752,7 +901,7 @@ private:
       for (unsigned i = 0; i < o->getNumComponents(); ++i)
         if (o->getComponent(i).getKind() == clang::OffsetOfNode::Array)
           push(o->getIndexExpr(o->getComponent(i).getArrayExprIndex()),
-               guarded);
+               guard);
       return;
     }
 
@@ -766,14 +915,14 @@ private:
     case clang::Stmt::GenericSelectionExprClass: {
       const auto *g = llvm::cast<clang::GenericSelectionExpr>(s);
       if (!g->isResultDependent())
-        push(g->getResultExpr(), guarded);
+        push(g->getResultExpr(), guard);
       return;
     }
 
     case clang::Stmt::ChooseExprClass: {
       const auto *c = llvm::cast<clang::ChooseExpr>(s);
       if (!c->getCond()->isValueDependent())
-        push(c->getChosenSubExpr(), guarded);
+        push(c->getChosenSubExpr(), guard);
       return;
     }
 
@@ -785,7 +934,7 @@ private:
     case clang::Stmt::DependentCoawaitExprClass:
     case clang::Stmt::CapturedStmtClass:
     case clang::Stmt::BlockExprClass:
-      opaque(guarded);
+      opaque(guard);
       return;
 
     // Objective-C constructs that send messages or unwind in ways this
@@ -801,25 +950,26 @@ private:
     case clang::Stmt::ObjCAtTryStmtClass:
     case clang::Stmt::ObjCAtSynchronizedStmtClass:
     case clang::Stmt::ObjCAutoreleasePoolStmtClass:
-      opaque(guarded);
+      opaque(guard);
       break;
 
     default:
       if (llvm::isa<clang::OMPExecutableDirective>(s)) {
-        opaque(guarded);
+        opaque(guard);
         return;
       }
       break;
     }
-    pushChildren(s, guarded);
+    pushChildren(s, guard);
   }
 
   void walk(uint32_t n) {
     const clang::FunctionDecl *def = decl_[n];
     cur_ = n;
+    curLoc_ = def->getLocation();
     stack_.clear();
-    shared_[0].clear();
-    shared_[1].clear();
+    for (auto &shared : shared_)
+      shared.clear();
     const clang::Stmt *body = def->getBody();
 
     // A constructor's or destructor's function-try-block rethrows when a
@@ -831,7 +981,7 @@ private:
 
     if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(def))
       for (const clang::CXXCtorInitializer *init : ctor->inits())
-        push(init->getInit(), false);
+        push(init->getInit(), kGuardNone);
 
     if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(def)) {
       // After the body: non-variant members, then bases. These calls are
@@ -839,12 +989,12 @@ private:
       const clang::CXXRecordDecl *cls = dtor->getParent();
       if (!cls->isUnion())
         for (const clang::FieldDecl *field : cls->fields())
-          destroy(field->getType(), false);
+          destroy(field->getType(), kGuardNone);
       for (const clang::CXXBaseSpecifier &base : cls->bases())
         if (!base.isVirtual())
-          destroy(base.getType(), false);
+          destroy(base.getType(), kGuardNone);
       for (const clang::CXXBaseSpecifier &base : cls->vbases())
-        destroy(base.getType(), false);
+        destroy(base.getType(), kGuardNone);
     }
 
     // By-value class parameters are destroyed by the caller on the
@@ -853,16 +1003,16 @@ private:
     for (const clang::ParmVarDecl *p : def->parameters()) {
       if (const clang::CXXRecordDecl *rd = p->getType()->getAsCXXRecordDecl())
         if (rd->hasDefinition() && rd->isParamDestroyedInCallee())
-          destroy(p->getType(), false);
+          destroy(p->getType(), kGuardNone);
       // A VLA bound in a parameter's type is evaluated on entry.
       if (p->getType()->isVariablyModifiedType())
-        opaque(false);
+        opaque(kGuardNone);
     }
 
-    push(body, false);
+    push(body, kGuardNone);
     while (!stack_.empty()) {
-      auto [s, guarded] = stack_.pop_back_val();
-      visit(s, guarded);
+      auto [s, guard] = stack_.pop_back_val();
+      visit(s, guard);
     }
   }
 
@@ -937,6 +1087,16 @@ private:
         def->getTemplateSpecializationKind() ==
             clang::TSK_ExplicitInstantiationDefinition)
       flags |= NoexceptFactEntry::NotReportable;
+    // Whether the frames this TU compiles can be unwound through: Clang
+    // marks every function nounwind when LangOptions::Exceptions is off,
+    // which is the TU's effective -f[no-]exceptions after the driver (the
+    // setting isa-leak's codegen profile reads, as CXXExceptions, from the
+    // same LangOptions). A C TU built with -fexceptions unwinds too.
+    flags |= lang.Exceptions ? NoexceptFactEntry::CompiledWithExceptions
+                             : NoexceptFactEntry::CompiledWithoutExceptions;
+    if (lang.CPlusPlus && lang.Exceptions && def->isExternC() &&
+        !def->isMain())
+      flags |= NoexceptFactEntry::ExternC;
     return flags;
   }
 
@@ -950,15 +1110,146 @@ private:
     return files_[it->second];
   }
 
-  // One fact per exported definition. Its callees are what it reaches
-  // outside this TU's folded code: the search runs through kLocal nodes
-  // and stops at everything that has a USR.
+  // What a body and everything folded into it reach: the reason bits of
+  // the folded bodies seen through the path's guard, the most telling
+  // site, and the calls that leave this TU's folded code (or reach an
+  // exported definition here). The search runs through kLocal nodes and
+  // stops at everything that has a key. Round stamps instead of clearing
+  // per root; a node reached first under a stronger guard is expanded
+  // again when a weaker one reaches it, so its callees get the bits of
+  // the weaker path.
+  struct Summary {
+    uint8_t reasons = 0;
+    uint32_t siteNode = UINT32_MAX;
+    uint8_t siteRank = 8;
+  };
+
+  Summary summarize(uint32_t root) {
+    ++round_;
+    out_.clear();
+    dfs_.clear();
+    Summary sum;
+    auto fold = [&](uint32_t node, uint8_t guard) {
+      const uint8_t bits = throughGuard(leaf_[node], guard);
+      if (!bits)
+        return;
+      sum.reasons |= bits;
+      const unsigned rank = NoexceptFactEntry::reasonRank(bits);
+      if (rank < sum.siteRank) {
+        sum.siteRank = static_cast<uint8_t>(rank);
+        sum.siteNode = node;
+      }
+    };
+    auto expand = [&](uint32_t from, uint8_t pathGuard) {
+      for (uint32_t e = edgeBegin_[from]; e < edgeBegin_[from + 1]; ++e) {
+        const uint32_t to = edgeDst_[e];
+        const uint8_t bits = edgeBits_[e];
+        const uint8_t edgeGuard = !(bits & kExit)  ? kGuardAll
+                                  : (bits & kBare) ? kGuardNone
+                                                   : kGuardTyped;
+        const uint8_t guard = std::max(pathGuard, edgeGuard);
+        const bool newCall = seenCall_[to] != round_;
+        const bool newExit = guard <= kGuardTyped && seenExit_[to] != round_;
+        const bool newBare = guard == kGuardNone && seenBare_[to] != round_;
+        if (!newCall && !newExit && !newBare)
+          continue;
+        seenCall_[to] = round_;
+        if (guard <= kGuardTyped)
+          seenExit_[to] = round_;
+        if (guard == kGuardNone)
+          seenBare_[to] = round_;
+        if (kind_[to] == kLocal) {
+          fold(to, guard);
+          dfs_.push_back((to << 2) | guard);
+        } else if (kind_[to] == kOpaque) {
+          fold(to, guard);
+        } else if (newCall) {
+          out_.push_back(to);
+        }
+      }
+    };
+    fold(root, kGuardNone);
+    expand(root, kGuardNone);
+    while (!dfs_.empty()) {
+      const uint32_t item = dfs_.back();
+      dfs_.pop_back();
+      expand(item >> 2, static_cast<uint8_t>(item & 3u));
+    }
+    std::sort(out_.begin(), out_.end(), [&](uint32_t a, uint32_t b) {
+      return usrOf(a) < usrOf(b);
+    });
+    return sum;
+  }
+
+  // The callees summarize() found, with the bits of the paths that reach
+  // them, into a sorted (key, bits) list.
+  void emitCallees(std::vector<std::string> &callees,
+                   std::vector<uint8_t> &calleeBits) const {
+    callees.reserve(out_.size());
+    calleeBits.reserve(out_.size());
+    for (uint32_t to : out_) {
+      uint8_t bits = kCall;
+      if (seenExit_[to] == round_)
+        bits |= kExit;
+      if (seenBare_[to] == round_)
+        bits |= kBare;
+      if (kind_[to] == kExternal)
+        bits |= kElsewhere;
+      std::string_view usr = usrOf(to);
+      if (!callees.empty() && callees.back() == usr) {
+        calleeBits.back() |= bits; // two entities, one USR
+        continue;
+      }
+      callees.emplace_back(usr);
+      calleeBits.push_back(bits);
+    }
+  }
+
+  std::string siteOf(clang::SourceLocation raw) {
+    clang::SourceLocation loc = sm_.getExpansionLoc(raw);
+    if (loc.isInvalid())
+      return std::string();
+    return fileOf(sm_.getFileID(loc)) + ":" +
+           std::to_string(sm_.getExpansionLineNumber(loc));
+  }
+
+  // A name a reader recognizes: a lambda is named by where it is written
+  // and the function it is written in, an instantiation by its arguments.
+  std::string displayName(const clang::FunctionDecl *fd) {
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    const auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
+    if (md && md->getParent()->isLambda()) {
+      os << "lambda";
+      const clang::DeclContext *dc = md->getParent()->getDeclContext();
+      while (dc && !llvm::isa<clang::FunctionDecl>(dc) &&
+             !dc->isFileContext())
+        dc = dc->getParent();
+      if (const auto *outer = llvm::dyn_cast_or_null<clang::FunctionDecl>(dc))
+        os << " in '" << displayName(outer) << "'";
+      return name;
+    }
+    fd->getNameForDiagnostic(os, ctx_.getPrintingPolicy(), /*Qualified=*/true);
+    return name;
+  }
+
+  void setReasons(const Summary &sum, uint32_t root, uint8_t &reasons,
+                  std::string &site, std::string &function) {
+    reasons = sum.reasons;
+    if (sum.siteNode == UINT32_MAX)
+      return;
+    site = siteOf(leafLoc_[sum.siteNode]);
+    if (sum.siteNode != root)
+      function = displayName(decl_[sum.siteNode]);
+  }
+
+  // One fact per exported definition.
   void exportFacts(GlobalIndex &index) {
     const auto n = static_cast<uint32_t>(decl_.size());
     size_t exported = 0;
     for (uint32_t i = 0; i < n; ++i)
       exported += kind_[i] == kExported;
-    if (exported == 0)
+    if (exported == 0 && boundaries_.empty())
       return;
 
     // An AST built from a TU with errors can be missing statements.
@@ -966,46 +1257,18 @@ private:
     const bool unreliable = diags.hasUncompilableErrorOccurred() ||
                             diags.hasFatalErrorOccurred();
 
+    seenCall_.assign(n, 0);
+    seenExit_.assign(n, 0);
+    seenBare_.assign(n, 0);
+    dfs_.reserve(3 * static_cast<size_t>(n));
+    round_ = 0;
+
     std::vector<NoexceptFactEntry> facts;
     facts.reserve(exported);
-    // Round stamps instead of clearing per root. A local node reached
-    // first through a guarded call and later through an unguarded path is
-    // expanded a second time, so that its callees gain the Exit bit.
-    std::vector<uint32_t> seenCall(n, 0), seenExit(n, 0);
-    std::vector<uint32_t> dfs, out;
-    dfs.reserve(2 * static_cast<size_t>(n));
-    uint32_t round = 0;
-
     for (uint32_t root = 0; root < n; ++root) {
       if (kind_[root] != kExported)
         continue;
-      ++round;
-      out.clear();
-      dfs.clear();
-      auto expand = [&](uint32_t from, bool exitPath) {
-        for (uint32_t e = edgeBegin_[from]; e < edgeBegin_[from + 1]; ++e) {
-          uint32_t to = edgeDst_[e];
-          bool exit = exitPath && (edgeBits_[e] & kExit);
-          bool newCall = seenCall[to] != round;
-          bool newExit = exit && seenExit[to] != round;
-          if (!newCall && !newExit)
-            continue;
-          seenCall[to] = round;
-          if (exit)
-            seenExit[to] = round;
-          if (kind_[to] == kLocal)
-            dfs.push_back((to << 1) | (exit ? 1u : 0u));
-          else if (newCall && kind_[to] != kOpaque)
-            out.push_back(to);
-        }
-      };
-      expand(root, true);
-      while (!dfs.empty()) {
-        uint32_t item = dfs.back();
-        dfs.pop_back();
-        expand(item >> 1, item & 1u);
-      }
-
+      const Summary sum = summarize(root);
       const clang::FunctionDecl *def = decl_[root];
       NoexceptFactEntry fact;
       fact.usr = std::string(usrOf(root));
@@ -1021,32 +1284,332 @@ private:
       fact.flags = flagsOf(def, state_[root]);
       if (unreliable)
         fact.flags |= NoexceptFactEntry::Unreliable;
-
-      std::sort(out.begin(), out.end(), [&](uint32_t a, uint32_t b) {
-        return usrOf(a) < usrOf(b);
-      });
-      // A refuted function's obligations no longer matter; its calls
-      // still count towards its callees' fan-in.
-      const bool refuted = fact.flags & NoexceptFactEntry::MayThrow;
-      fact.callees.reserve(out.size());
-      fact.calleeBits.reserve(out.size());
-      for (uint32_t to : out) {
-        uint8_t bits = kCall;
-        if (!refuted && seenExit[to] == round)
-          bits |= kExit;
-        if (kind_[to] == kExternal)
-          bits |= kElsewhere;
-        std::string_view usr = usrOf(to);
-        if (!fact.callees.empty() && fact.callees.back() == usr) {
-          fact.calleeBits.back() |= bits; // two entities, one USR
-          continue;
-        }
-        fact.callees.emplace_back(usr);
-        fact.calleeBits.push_back(bits);
-      }
+      setReasons(sum, root, fact.reasons, fact.reasonSite,
+                 fact.reasonFunction);
+      // A refuted function keeps its Exit callees: the proof no longer
+      // needs them, but exception-boundary-escape's witness paths do.
+      emitCallees(fact.callees, fact.calleeBits);
       facts.push_back(std::move(fact));
     }
-    index.addNoexceptFacts(std::move(facts));
+    if (!facts.empty())
+      index.addNoexceptFacts(std::move(facts));
+    exportBoundaries(index);
+  }
+
+  // ---- exception boundaries --------------------------------------------
+
+  struct PendingBoundary {
+    uint8_t kind;
+    uint32_t target;
+    uint32_t receiver; // UINT32_MAX: none
+    std::string api;
+    clang::SourceLocation site;
+  };
+
+  // The function an expression hands over as a callable: a function or
+  // its address, a lambda (or its conversion to a function pointer), a
+  // local variable initialized with one of those, an object whose class
+  // has one call operator. Null when it cannot be told.
+  const clang::FunctionDecl *callableTarget(const clang::Expr *e,
+                                            unsigned depth = 0) const {
+    if (!e || depth > 4)
+      return nullptr;
+    e = e->IgnoreParenCasts();
+    if (const auto *m = llvm::dyn_cast<clang::MaterializeTemporaryExpr>(e))
+      return callableTarget(m->getSubExpr(), depth + 1);
+    if (const auto *b = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(e))
+      return callableTarget(b->getSubExpr(), depth + 1);
+    if (const auto *u = llvm::dyn_cast<clang::UnaryOperator>(e))
+      if (u->getOpcode() == clang::UO_AddrOf ||
+          u->getOpcode() == clang::UO_Plus)
+        return callableTarget(u->getSubExpr(), depth + 1);
+    if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(e)) {
+      if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(ref->getDecl()))
+        return fd;
+      if (const auto *v = llvm::dyn_cast<clang::VarDecl>(ref->getDecl())) {
+        if (v->isLocalVarDecl() && v->getInit() &&
+            !v->getType()->isReferenceType() &&
+            (v->getType().isConstQualified() ||
+             v->getType()->getAsCXXRecordDecl()))
+          return callableTarget(v->getInit(), depth + 1);
+        return classCallOperator(v->getType());
+      }
+      return nullptr;
+    }
+    if (const auto *le = llvm::dyn_cast<clang::LambdaExpr>(e))
+      return lambdaCallOperator(le->getLambdaClass());
+    // A lambda converted to a function pointer: the conversion function
+    // returns the static invoker, which calls the call operator.
+    if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(e)) {
+      if (llvm::isa_and_nonnull<clang::CXXConversionDecl>(
+              mc->getMethodDecl()) &&
+          mc->getRecordDecl() && mc->getRecordDecl()->isLambda())
+        return lambdaCallOperator(mc->getRecordDecl());
+      return nullptr;
+    }
+    if (const auto *ce = llvm::dyn_cast<clang::CXXConstructExpr>(e)) {
+      if (ce->getNumArgs() == 1 &&
+          ce->getConstructor()->isCopyOrMoveConstructor())
+        return callableTarget(ce->getArg(0), depth + 1);
+      return classCallOperator(ce->getType());
+    }
+    return nullptr;
+  }
+
+  static const clang::FunctionDecl *
+  lambdaCallOperator(const clang::CXXRecordDecl *rd) {
+    if (!rd)
+      return nullptr;
+    const clang::CXXMethodDecl *op = rd->getLambdaCallOperator();
+    if (!op)
+      return nullptr;
+    // A generic lambda: the one specialization that was instantiated.
+    if (const clang::FunctionTemplateDecl *tmpl =
+            op->getDescribedFunctionTemplate()) {
+      const clang::FunctionDecl *only = nullptr;
+      for (const clang::FunctionDecl *spec : tmpl->specializations()) {
+        if (only)
+          return nullptr;
+        only = spec;
+      }
+      return only;
+    }
+    return op;
+  }
+
+  static const clang::FunctionDecl *classCallOperator(clang::QualType type) {
+    const clang::CXXRecordDecl *rd =
+        type.isNull() ? nullptr : type->getAsCXXRecordDecl();
+    if (!rd || !rd->hasDefinition())
+      return nullptr;
+    if (rd->isLambda())
+      return lambdaCallOperator(rd);
+    const clang::FunctionDecl *only = nullptr;
+    for (const clang::CXXMethodDecl *md : rd->methods()) {
+      if (md->getOverloadedOperator() != clang::OO_Call)
+        continue;
+      if (only)
+        return nullptr;
+      only = md;
+    }
+    return only;
+  }
+
+  static bool isStdThreadClass(const clang::CXXRecordDecl *rd) {
+    if (!rd || !rd->isInStdNamespace() || !rd->getIdentifier())
+      return false;
+    llvm::StringRef name = rd->getName();
+    return name == "thread" || name == "jthread";
+  }
+
+  // C thread-creation functions: their start routine is a thread entry.
+  // Index of the start-routine parameter, or -1.
+  static int threadStartParam(const clang::FunctionDecl *fd) {
+    if (!fd->getIdentifier())
+      return -1;
+    llvm::StringRef name = fd->getName();
+    if (name == "pthread_create")
+      return 2;
+    if (name == "thrd_create")
+      return 1;
+    return -1;
+  }
+
+  static bool isFunctionPointer(clang::QualType t) {
+    return !t.isNull() && t->isFunctionPointerType();
+  }
+
+  void addBoundary(uint8_t kind, const clang::FunctionDecl *target,
+                   const clang::FunctionDecl *receiver, std::string api,
+                   clang::SourceLocation site) {
+    if (!target)
+      return;
+    PendingBoundary b;
+    b.kind = kind;
+    b.target = nodeFor(target);
+    b.receiver = receiver ? nodeFor(receiver) : UINT32_MAX;
+    b.api = std::move(api);
+    b.site = site;
+    boundaries_.push_back(std::move(b));
+  }
+
+  void noteCallbackField(const clang::FieldDecl *field,
+                         const clang::Expr *value,
+                         clang::SourceLocation site) {
+    if (!field || !isFunctionPointer(field->getType()))
+      return;
+    const clang::RecordDecl *rd = field->getParent();
+    if (!rd || !rd->isExternCContext())
+      return;
+    std::string api;
+    llvm::raw_string_ostream os(api);
+    rd->printQualifiedName(os);
+    os << "::" << field->getName();
+    addBoundary(ExceptionBoundaryEntry::CCallback, callableTarget(value),
+                nullptr, std::move(api), site);
+  }
+
+  // Hand-over sites in C++ code compiled with exceptions: a callable given
+  // to std::thread, a function given to a C function's function-pointer
+  // parameter or stored in a C struct's function-pointer field.
+  void noteBoundary(const clang::Stmt *s) {
+    switch (s->getStmtClass()) {
+    case clang::Stmt::CXXConstructExprClass:
+    case clang::Stmt::CXXTemporaryObjectExprClass: {
+      const auto *ce = llvm::cast<clang::CXXConstructExpr>(s);
+      const clang::CXXConstructorDecl *ctor = ce->getConstructor();
+      if (ce->getNumArgs() == 0 || !isStdThreadClass(ctor->getParent()) ||
+          ctor->isCopyOrMoveConstructor())
+        return;
+      addBoundary(ExceptionBoundaryEntry::ThreadEntry,
+                  callableTarget(ce->getArg(0)), nullptr,
+                  "std::" + ctor->getParent()->getName().str(),
+                  ce->getBeginLoc());
+      return;
+    }
+    case clang::Stmt::CallExprClass: {
+      const auto *ce = llvm::cast<clang::CallExpr>(s);
+      const clang::FunctionDecl *fd = ce->getDirectCallee();
+      if (!fd || !fd->isExternC())
+        return;
+      const int start = threadStartParam(fd);
+      const unsigned n = std::min(ce->getNumArgs(), fd->getNumParams());
+      for (unsigned i = 0; i < n; ++i) {
+        if (!isFunctionPointer(fd->getParamDecl(i)->getType()))
+          continue;
+        const bool thread = static_cast<int>(i) == start;
+        addBoundary(thread ? ExceptionBoundaryEntry::ThreadEntry
+                           : ExceptionBoundaryEntry::CCallback,
+                    callableTarget(ce->getArg(i)), thread ? nullptr : fd,
+                    fd->getName().str(), ce->getBeginLoc());
+      }
+      return;
+    }
+    case clang::Stmt::CXXMemberCallExprClass: {
+      // A thread built in place in a standard container
+      // (`workers.emplace_back([this] { run(); })`): the constructor call
+      // is inside the library, on a forwarded parameter, so the hand-over
+      // is taken here. The first argument that names a function is it
+      // (emplace's first is a position).
+      const auto *ce = llvm::cast<clang::CXXMemberCallExpr>(s);
+      const clang::CXXMethodDecl *md = ce->getMethodDecl();
+      if (!md || !md->getIdentifier() ||
+          !md->getName().starts_with("emplace"))
+        return;
+      const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(
+              md->getParent());
+      if (!spec || !spec->isInStdNamespace() ||
+          spec->getTemplateArgs().size() == 0 ||
+          spec->getTemplateArgs()[0].getKind() !=
+              clang::TemplateArgument::Type)
+        return;
+      const clang::CXXRecordDecl *element =
+          spec->getTemplateArgs()[0].getAsType()->getAsCXXRecordDecl();
+      if (!isStdThreadClass(element))
+        return;
+      for (const clang::Expr *arg : ce->arguments()) {
+        if (const clang::FunctionDecl *target = callableTarget(arg)) {
+          addBoundary(ExceptionBoundaryEntry::ThreadEntry, target, nullptr,
+                      "std::" + element->getName().str(), ce->getBeginLoc());
+          break;
+        }
+      }
+      return;
+    }
+    case clang::Stmt::BinaryOperatorClass: {
+      const auto *bo = llvm::cast<clang::BinaryOperator>(s);
+      if (bo->getOpcode() != clang::BO_Assign)
+        return;
+      if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(
+              bo->getLHS()->IgnoreParenImpCasts()))
+        noteCallbackField(
+            llvm::dyn_cast<clang::FieldDecl>(me->getMemberDecl()),
+            bo->getRHS(), bo->getBeginLoc());
+      return;
+    }
+    case clang::Stmt::InitListExprClass: {
+      const auto *il = llvm::cast<clang::InitListExpr>(s);
+      const clang::RecordDecl *rd =
+          il->getType().isNull() ? nullptr : il->getType()->getAsRecordDecl();
+      if (!rd || rd->isUnion() || !rd->isExternCContext() ||
+          !rd->getDefinition())
+        return;
+      unsigned i = 0;
+      for (const clang::FieldDecl *field : rd->getDefinition()->fields()) {
+        // An unnamed bit-field takes no initializer.
+        if (field->isBitField() && !field->getIdentifier())
+          continue;
+        if (i >= il->getNumInits())
+          break;
+        noteCallbackField(field, il->getInit(i++), il->getBeginLoc());
+      }
+      return;
+    }
+    default:
+      return;
+    }
+  }
+
+  std::string fullSiteOf(clang::SourceLocation raw) {
+    clang::SourceLocation loc = sm_.getExpansionLoc(raw);
+    if (loc.isInvalid())
+      return std::string();
+    return fileOf(sm_.getFileID(loc)) + ":" +
+           std::to_string(sm_.getExpansionLineNumber(loc)) + ":" +
+           std::to_string(sm_.getExpansionColumnNumber(loc));
+  }
+
+  void exportBoundaries(GlobalIndex &index) {
+    std::vector<ExceptionBoundaryEntry> out;
+    out.reserve(boundaries_.size());
+    for (const PendingBoundary &b : boundaries_) {
+      const clang::FunctionDecl *def = decl_[b.target];
+      clang::SourceLocation site = sm_.getExpansionLoc(b.site);
+      // Hand-overs inside the standard library (std::async starting its
+      // own thread, say), targets it defines (what std::bind or
+      // std::packaged_task wrap is not visible), and targets declared
+      // noexcept (exception-escape's) are not this check's.
+      if (site.isInvalid() || sm_.isInSystemHeader(site) ||
+          inSystemHeader(def) || cannotThrowByDecl(def))
+        continue;
+      ExceptionBoundaryEntry e;
+      e.kind = b.kind;
+      e.qualifiedName = displayName(def);
+      clang::SourceLocation loc = sm_.getExpansionLoc(def->getLocation());
+      e.filePath = fileOf(sm_.getFileID(loc));
+      e.line = sm_.getExpansionLineNumber(loc);
+      e.column = sm_.getExpansionColumnNumber(loc);
+      e.api = b.api;
+      e.apiSite = fullSiteOf(b.site);
+      if (b.receiver != UINT32_MAX && usrLen_[b.receiver] != 0)
+        e.receiver = std::string(usrOf(b.receiver));
+      if (kind_[b.target] == kLocal) {
+        llvm::SmallString<128> usr;
+        if (clang::index::generateUSRForDecl(def->getCanonicalDecl(), usr) ||
+            usr.empty())
+          e.target = e.filePath + ":" + std::to_string(e.line) + ":" +
+                     std::to_string(e.column);
+        else
+          e.target = std::string(usr);
+        const Summary sum = summarize(b.target);
+        setReasons(sum, b.target, e.reasons, e.reasonSite, e.reasonFunction);
+        emitCallees(e.callees, e.calleeBits);
+      } else if (kind_[b.target] == kOpaque) {
+        e.target = e.qualifiedName;
+        e.reasons = NoexceptFactEntry::OtherBare;
+      } else {
+        // Its own fact (here or in another TU) says what it can raise.
+        e.target = std::string(usrOf(b.target));
+        e.callees.push_back(e.target);
+        e.calleeBits.push_back(static_cast<uint8_t>(
+            kCall | kExit | kBare |
+            (kind_[b.target] == kExternal ? kElsewhere : 0)));
+      }
+      out.push_back(std::move(e));
+    }
+    if (!out.empty())
+      index.addExceptionBoundaries(std::move(out));
   }
 
   clang::ASTContext &ctx_;
@@ -1066,11 +1629,30 @@ private:
   std::vector<uint32_t> edgeDst_;
   std::vector<uint8_t> edgeBits_;
 
+  // Leaf reasons per node (NoexceptFactEntry::Reason bits) and the site of
+  // the most telling one.
+  std::vector<uint8_t> leaf_;
+  std::vector<clang::SourceLocation> leafLoc_;
+
+  // Hand-overs found while walking; walked bodies only, so code no
+  // exported definition reaches is not looked at.
+  std::vector<PendingBoundary> boundaries_;
+  bool collectBoundaries_ = false;
+
+  // Rethrows of a catch (...) that lets its try block's exceptions out.
+  llvm::SmallPtrSet<const clang::Stmt *, 16> rethrows_;
+
+  // summarize() state, sized once per TU.
+  std::vector<uint32_t> seenCall_, seenExit_, seenBare_;
+  std::vector<uint32_t> dfs_, out_;
+  uint32_t round_ = 0;
+
   // Body walk state, reused across bodies.
-  llvm::SmallVector<std::pair<const clang::Stmt *, bool>, 128> stack_;
-  llvm::SmallPtrSet<const clang::Stmt *, 32> shared_[2];
+  llvm::SmallVector<std::pair<const clang::Stmt *, uint8_t>, 128> stack_;
+  llvm::SmallPtrSet<const clang::Stmt *, 32> shared_[3]; // per guard level
   const clang::CXXTryStmt *functionTry_ = nullptr;
   uint32_t cur_ = 0;
+  clang::SourceLocation curLoc_;
 
   llvm::DenseMap<clang::FileID, size_t> fileIndex_;
   std::vector<std::string> files_;

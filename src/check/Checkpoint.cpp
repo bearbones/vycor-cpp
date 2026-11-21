@@ -46,8 +46,9 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // Diagnostic kinds renumber Custom. v14: noexcept facts; diagnostics
 // carry rank; three more Diagnostic kinds precede Custom. v15: isa-leak
 // codegen profiles and emitted functions; IsaLeak_Divergent and
-// IsaLeak_Inlined precede Custom.
-constexpr uint32_t kVersion = 15;
+// IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons and
+// keep a refuted function's Exit callees; exception-boundary entries.
+constexpr uint32_t kVersion = 16;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -172,6 +173,43 @@ std::vector<std::pair<std::string, std::string>> readStringPairs(Reader &r) {
   return v;
 }
 
+void putReasons(std::string &b, uint8_t reasons, const std::string &site,
+                const std::string &function) {
+  putU8(b, reasons);
+  putStr(b, site);
+  putStr(b, function);
+}
+
+void readReasons(Reader &r, uint8_t &reasons, std::string &site,
+                 std::string &function) {
+  reasons = r.u8();
+  site = r.str();
+  function = r.str();
+}
+
+// One (key, bits) pair per callee, so the two lists cannot decode to
+// different lengths. A hand-built entry with too few bits writes the most
+// constraining value, as addNoexceptFacts would have stored.
+void putCallees(std::string &b, const std::vector<std::string> &callees,
+                const std::vector<uint8_t> &bits) {
+  putU32(b, static_cast<uint32_t>(callees.size()));
+  for (size_t i = 0; i < callees.size(); ++i) {
+    putStr(b, callees[i]);
+    putU8(b, i < bits.size()
+                 ? bits[i]
+                 : static_cast<uint8_t>(NoexceptFactEntry::AllCalleeBits));
+  }
+}
+
+void readCallees(Reader &r, std::vector<std::string> &callees,
+                 std::vector<uint8_t> &bits) {
+  uint32_t n = r.u32();
+  for (uint32_t k = 0; k < n && r.ok; ++k) {
+    callees.push_back(r.str());
+    bits.push_back(r.u8());
+  }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -199,6 +237,7 @@ uint64_t checkOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.enableNoexceptCandidateDiag ? '1' : '0';
   canon += opts.enableNoexceptCandidateMoveDiag ? '1' : '0';
   canon += opts.enableNoexceptCandidateVirtualDiag ? '1' : '0';
+  canon += opts.enableExceptionBoundaryDiag ? '1' : '0';
   canon += "|isa=";
   canon += opts.enableIsaLeakDiag ? '1' : '0';
   canon += "|odr=";
@@ -261,6 +300,10 @@ CheckIndexPayload CheckIndexPayload::capture(const GlobalIndex &shard) {
   p.noexceptFacts.reserve(shard.noexceptFactCount());
   shard.forEachNoexceptFact(
       [&](const NoexceptFactEntry &e) { p.noexceptFacts.push_back(e); });
+  p.exceptionBoundaries.reserve(shard.exceptionBoundaryCount());
+  shard.forEachExceptionBoundary([&](const ExceptionBoundaryEntry &e) {
+    p.exceptionBoundaries.push_back(e);
+  });
   shard.isaLeakFacts().capture(p.isaLeak);
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
@@ -301,6 +344,9 @@ void CheckIndexPayload::applyTo(GlobalIndex &into) const {
     into.addAbiLayout(e);
   if (!noexceptFacts.empty())
     into.addNoexceptFacts(std::vector<NoexceptFactEntry>(noexceptFacts));
+  if (!exceptionBoundaries.empty())
+    into.addExceptionBoundaries(
+        std::vector<ExceptionBoundaryEntry>(exceptionBoundaries));
   if (!isaLeak.empty())
     into.mutableIsaLeakFacts().apply(isaLeak);
   for (const auto &e : specializations)
@@ -496,17 +542,22 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
     putU32(out, e.line);
     putU32(out, e.column);
     putU32(out, e.flags);
-    // One (usr, bits) pair per callee, so the two lists cannot decode to
-    // different lengths. A hand-built entry with too few bits writes the
-    // most constraining value, as addNoexceptFacts would have stored.
-    putU32(out, static_cast<uint32_t>(e.callees.size()));
-    for (size_t i = 0; i < e.callees.size(); ++i) {
-      putStr(out, e.callees[i]);
-      putU8(out, i < e.calleeBits.size()
-                     ? e.calleeBits[i]
-                     : static_cast<uint8_t>(
-                           NoexceptFactEntry::AllCalleeBits));
-    }
+    putReasons(out, e.reasons, e.reasonSite, e.reasonFunction);
+    putCallees(out, e.callees, e.calleeBits);
+  }
+  putU32(out, static_cast<uint32_t>(p.exceptionBoundaries.size()));
+  for (const auto &e : p.exceptionBoundaries) {
+    putU8(out, e.kind);
+    putStr(out, e.target);
+    putStr(out, e.qualifiedName);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+    putU32(out, e.column);
+    putStr(out, e.api);
+    putStr(out, e.apiSite);
+    putStr(out, e.receiver);
+    putReasons(out, e.reasons, e.reasonSite, e.reasonFunction);
+    putCallees(out, e.callees, e.calleeBits);
   }
   putU32(out, static_cast<uint32_t>(p.isaLeak.profiles.size()));
   for (const auto &cp : p.isaLeak.profiles) {
@@ -705,12 +756,27 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     e.line = r.u32();
     e.column = r.u32();
     e.flags = r.u32();
-    uint32_t nCallees = r.u32();
-    for (uint32_t k = 0; k < nCallees && r.ok; ++k) {
-      e.callees.push_back(r.str());
-      e.calleeBits.push_back(r.u8());
-    }
+    readReasons(r, e.reasons, e.reasonSite, e.reasonFunction);
+    readCallees(r, e.callees, e.calleeBits);
     p.noexceptFacts.push_back(std::move(e));
+  }
+  uint32_t nBoundaries = r.u32();
+  for (uint32_t i = 0; i < nBoundaries && r.ok; ++i) {
+    ExceptionBoundaryEntry e;
+    e.kind = r.u8();
+    if (e.kind > ExceptionBoundaryEntry::CCallback)
+      r.ok = false;
+    e.target = r.str();
+    e.qualifiedName = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    e.column = r.u32();
+    e.api = r.str();
+    e.apiSite = r.str();
+    e.receiver = r.str();
+    readReasons(r, e.reasons, e.reasonSite, e.reasonFunction);
+    readCallees(r, e.callees, e.calleeBits);
+    p.exceptionBoundaries.push_back(std::move(e));
   }
   IsaLeakPayload &isa = p.isaLeak;
   uint32_t nProfiles = r.u32();
@@ -1155,8 +1221,9 @@ namespace {
 // could-be-internal Diagnostic kinds renumber Custom. v14: noexcept facts;
 // diagnostics carry rank; three more Diagnostic kinds precede Custom.
 // v15: isa-leak codegen profiles and emitted functions; IsaLeak_Divergent
-// and IsaLeak_Inlined precede Custom.
-constexpr uint32_t kShardVersion = 15;
+// and IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons
+// and keep a refuted function's Exit callees; exception-boundary entries.
+constexpr uint32_t kShardVersion = 16;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>
@@ -1307,6 +1374,7 @@ bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index) {
           // read only by the parent's index-only pass: on a large project
           // they would be the bulk of a file every worker decodes.
           payload.noexceptFacts.clear();
+          payload.exceptionBoundaries.clear();
           payload.isaLeak = IsaLeakPayload();
           encodeIndexPayload(bytes, payload);
           return bytes;

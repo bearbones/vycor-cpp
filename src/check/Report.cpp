@@ -314,6 +314,7 @@ Severity checkSeverity(const std::string &check) {
       {"noexcept-candidate", Severity::Note},
       {"noexcept-candidate-move", Severity::Note},
       {"noexcept-candidate-virtual", Severity::Note},
+      {"exception-boundary-escape", Severity::Warning},
       {"hot-path-effects", Severity::Warning},
       {"isa-leak", Severity::Warning},
   };

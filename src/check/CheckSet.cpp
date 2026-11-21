@@ -115,6 +115,11 @@ const std::vector<CheckInfo> &builtinChecks() {
        "noexcept (constrains every override)",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"exception-boundary-escape",
+       "Exceptions that can reach a thread entry, a callback handed to C, "
+       "an extern \"C\" function, or a frame compiled without exceptions",
+       /*defaultOn=*/false,
+       {"noisy"}},
       {"hot-path-effects",
        "Allocation, locks, I/O and throws reachable from hot roots "
        "(configured, or from a coverage profile)",

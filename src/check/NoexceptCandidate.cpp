@@ -15,6 +15,8 @@
 
 #include "vycor/check/Analyzer.h"
 
+#include "NoexceptGraph.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -41,24 +43,6 @@ constexpr uint8_t propagated(uint8_t why) {
       (why & (kUnknown | kUnreliable)));
 }
 
-// Edges are packed (callee, caller, bits) so that one sort groups them by
-// callee, which is the direction both the proof and the ranking read.
-constexpr unsigned kBitsWidth = 3;
-constexpr unsigned kIdWidth = 30;
-static_assert(NoexceptFactEntry::AllCalleeBits < (1u << kBitsWidth),
-              "a callee bit does not fit the packed edge");
-constexpr uint64_t kIdMask = (uint64_t{1} << kIdWidth) - 1;
-constexpr uint64_t packEdge(uint32_t callee, uint32_t caller, uint8_t bits) {
-  return (uint64_t{callee} << (kIdWidth + kBitsWidth)) |
-         (uint64_t{caller} << kBitsWidth) | bits;
-}
-constexpr uint32_t edgeCaller(uint64_t e) {
-  return static_cast<uint32_t>((e >> kBitsWidth) & kIdMask);
-}
-constexpr uint32_t edgeCallee(uint64_t e) {
-  return static_cast<uint32_t>(e >> (kIdWidth + kBitsWidth));
-}
-
 struct Candidate {
   uint32_t fact = 0;
   uint32_t nothrowCallers = 0;
@@ -79,95 +63,29 @@ void analyzeNoexceptCandidates(const GlobalIndex &index,
                                std::vector<Diagnostic> &diagnostics,
                                NoexceptCandidateStats *stats) {
   NoexceptCandidateStats counted;
-  const size_t factCount = index.noexceptFactCount();
-  if (factCount == 0) {
+  // Nothing to build, or past what an edge can address: report nothing
+  // rather than a proof over a truncated graph.
+  NoexceptGraph graph;
+  if (!graph.build(index)) {
     if (stats)
       *stats = counted;
     return;
   }
-
-  // Facts arrive in whatever order the TUs finished. Everything below
-  // (node ids, edge order, ranks) derives from this sorted view, so the
-  // output is a function of the facts alone.
-  std::vector<const NoexceptFactEntry *> facts;
-  facts.reserve(factCount);
-  size_t edgeTotal = 0;
-  index.forEachNoexceptFact([&](const NoexceptFactEntry &f) {
-    facts.push_back(&f);
-    edgeTotal += f.callees.size();
-  });
-  std::sort(facts.begin(), facts.end(),
-            [](const NoexceptFactEntry *a, const NoexceptFactEntry *b) {
-              return std::tie(a->usr, a->filePath, a->line, a->column) <
-                     std::tie(b->usr, b->filePath, b->line, b->column);
-            });
-
-  // One node per USR. Definition sites sharing a USR (a function defined
-  // differently in two binaries of one build, two overloads the USR does
-  // not tell apart) are one node: a caller cannot say which it gets, so
-  // the node is proven only if every site is.
-  std::unordered_map<std::string_view, uint32_t> ids;
-  ids.reserve(factCount * 2);
-  std::vector<uint32_t> nodeOfFact(factCount);
-  std::vector<uint32_t> firstFactOfNode;
-  firstFactOfNode.reserve(factCount);
-  for (size_t i = 0; i < factCount; ++i) {
-    if (i > 0 && facts[i]->usr == facts[i - 1]->usr) {
-      nodeOfFact[i] = nodeOfFact[i - 1];
-      continue;
-    }
-    nodeOfFact[i] = static_cast<uint32_t>(firstFactOfNode.size());
-    ids.emplace(facts[i]->usr, nodeOfFact[i]);
-    firstFactOfNode.push_back(static_cast<uint32_t>(i));
-  }
-  const auto definedCount = static_cast<uint32_t>(firstFactOfNode.size());
-
-  std::vector<uint64_t> edges;
-  edges.reserve(edgeTotal);
-  for (size_t i = 0; i < factCount; ++i) {
-    const NoexceptFactEntry &f = *facts[i];
-    for (size_t c = 0; c < f.callees.size(); ++c) {
-      auto next = static_cast<uint32_t>(ids.size());
-      uint32_t callee = ids.try_emplace(f.callees[c], next).first->second;
-      uint8_t bits = c < f.calleeBits.size()
-                         ? f.calleeBits[c] & NoexceptFactEntry::AllCalleeBits
-                         : NoexceptFactEntry::AllCalleeBits;
-      edges.push_back(packEdge(callee, nodeOfFact[i], bits));
-    }
-  }
-  const size_t nodeCount = ids.size();
-  if (nodeCount > kIdMask) {
-    // Past what an edge can address. Report nothing rather than a proof
-    // over a truncated graph.
-    if (stats)
-      *stats = counted;
-    return;
-  }
-
-  // Group by callee; fold the sightings of one (callee, caller) pair.
-  std::sort(edges.begin(), edges.end());
-  {
-    size_t out = 0;
-    for (size_t i = 0; i < edges.size(); ++i) {
-      if (out > 0 && (edges[out - 1] >> kBitsWidth) == (edges[i] >> kBitsWidth))
-        edges[out - 1] |= edges[i];
-      else
-        edges[out++] = edges[i];
-    }
-    edges.resize(out);
-  }
-  std::vector<uint32_t> callersBegin(nodeCount + 1, 0);
-  for (uint64_t e : edges)
-    ++callersBegin[edgeCallee(e) + 1];
-  for (size_t i = 0; i < nodeCount; ++i)
-    callersBegin[i + 1] += callersBegin[i];
+  using noexcept_graph::edgeCallee;
+  using noexcept_graph::edgeCaller;
+  const auto &facts = graph.facts;
+  const auto &nodeOfFact = graph.nodeOfFact;
+  const auto &firstFactOfNode = graph.firstFactOfNode;
+  const auto &edges = graph.edges;
+  const auto &callersBegin = graph.callersBegin;
+  const auto &flags = graph.flags;
+  const size_t factCount = facts.size();
+  const size_t nodeCount = graph.nodeCount;
+  const uint32_t definedCount = graph.definedCount;
 
   // Per-node state. `terminal` is a function every sighting declares
   // non-throwing: the language stops exceptions at it, so its body and
   // callees are not part of anyone's proof.
-  std::vector<uint32_t> flags(nodeCount, 0);
-  for (size_t i = 0; i < factCount; ++i)
-    flags[nodeOfFact[i]] |= facts[i]->flags;
   std::vector<uint8_t> terminal(nodeCount, 0);
   std::vector<uint8_t> why(nodeCount, 0);
   std::vector<uint8_t> queued(nodeCount, 0);

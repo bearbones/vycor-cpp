@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <string_view>
+#include <tuple>
 
 namespace vycor {
 
@@ -204,6 +205,9 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
         [&](const NoexceptFactEntry &e) { facts.push_back(e); });
     addNoexceptFacts(std::move(facts));
   }
+  if (shard.exceptionBoundaryCount() > 0)
+    addExceptionBoundaries(std::vector<ExceptionBoundaryEntry>(
+        shard.exceptionBoundaries_.begin(), shard.exceptionBoundaries_.end()));
   shard.forEachSpecialization(
       [this](const SpecializationEntry &e) { addSpecialization(e); });
   shard.forEachDefaultArg(
@@ -512,6 +516,18 @@ void GlobalIndex::addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries) {
     // another TU. Nothing to merge beyond the flags.
     auto &existing = noexceptFacts_[it->second];
     existing.flags |= entry.flags;
+    // Sightings arrive in TU completion order: the smaller site wins, so
+    // the merged fact does not depend on it.
+    const unsigned rankNew = NoexceptFactEntry::reasonRank(entry.reasons);
+    const unsigned rankOld = NoexceptFactEntry::reasonRank(existing.reasons);
+    if (rankNew < rankOld ||
+        (rankNew == rankOld && rankNew < 8 &&
+         std::tie(entry.reasonSite, entry.reasonFunction) <
+             std::tie(existing.reasonSite, existing.reasonFunction))) {
+      existing.reasonSite = std::move(entry.reasonSite);
+      existing.reasonFunction = std::move(entry.reasonFunction);
+    }
+    existing.reasons |= entry.reasons;
     if (existing.callees != entry.callees)
       mergeNoexceptCallees(existing, entry);
     else
@@ -527,6 +543,25 @@ void GlobalIndex::addNoexceptFact(NoexceptFactEntry entry) {
 }
 
 size_t GlobalIndex::noexceptFactCount() const { return noexceptFacts_.size(); }
+
+void GlobalIndex::addExceptionBoundaries(
+    std::vector<ExceptionBoundaryEntry> &&entries) {
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  for (auto &entry : entries) {
+    std::string key;
+    key.reserve(entry.target.size() + entry.apiSite.size() + 4);
+    key += static_cast<char>('0' + entry.kind);
+    key += entry.target;
+    key += '\n';
+    key += entry.apiSite;
+    if (exceptionBoundaryKeys_.insert(std::move(key)).second)
+      exceptionBoundaries_.push_back(std::move(entry));
+  }
+}
+
+size_t GlobalIndex::exceptionBoundaryCount() const {
+  return exceptionBoundaries_.size();
+}
 
 std::vector<const FunctionOverloadEntry *>
 GlobalIndex::findOverloads(const std::string &qualifiedName) const {

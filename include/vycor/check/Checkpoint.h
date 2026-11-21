@@ -96,6 +96,9 @@ struct CheckIndexPayload {
   // parent->worker handoff file (writeGlobalIndexFile): phase 2 never
   // reads it.
   std::vector<NoexceptFactEntry> noexceptFacts;
+  // Collected with the noexcept facts (exception-boundary-escape), and
+  // left out of the handoff file like them.
+  std::vector<ExceptionBoundaryEntry> exceptionBoundaries;
   // Populated when isa-leak is enabled: profile, TU and function tables
   // plus flat id sightings. Left out of the handoff file like
   // noexceptFacts.
