@@ -441,7 +441,9 @@ public:
   bool VisitVarDecl(clang::VarDecl *decl) {
     if (scopeStack_.empty())
       return true;
-    if (!decl->isLocalVarDecl())
+    // An init-capture is a member of the closure, not a local of the
+    // function that creates it.
+    if (!decl->isLocalVarDecl() || decl->isInitCapture())
       return true;
     LockTypeConfig emptyCfg;
     const auto &cfg = lockCfg_ ? *lockCfg_ : emptyCfg;

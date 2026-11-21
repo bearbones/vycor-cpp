@@ -395,3 +395,42 @@ Worker *early = make<Worker>();
   CHECK(hazards[0].message.find("make -> Worker::Worker -> pthread_create") !=
         std::string::npos);
 }
+
+TEST_CASE("static-init-hazards walks a lambda an initializer calls",
+          "[CheckStaticInit]") {
+  std::string dir = "check_sinit_lambda";
+  REQUIRE(makeUniqueFixtureDir(dir));
+  llvm::SmallString<256> abs;
+  REQUIRE(!llvm::sys::fs::real_path(dir, abs));
+  const std::string absDir(abs.str());
+  {
+    std::ofstream out(dir + "/lambda.cpp", std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out << R"cpp(
+extern "C" int pthread_create(void *, const void *, void *(*)(void *),
+                              void *);
+auto factory() {
+  return [] { return pthread_create(nullptr, nullptr, nullptr, nullptr); };
+}
+int started = factory()();
+)cpp";
+  }
+  const std::vector<std::string> files{absDir + "/lambda.cpp"};
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  AnalysisOptions opts;
+  opts.threadCount = 1;
+  GlobalIndex index;
+  (void)runAnalysis(compDb, files, opts, &index);
+  auto graph = buildCallGraph(compDb, files);
+  std::vector<Diagnostic> diags;
+  analyzeStaticInitHazards(index, graph, diags);
+  auto hazards = ofKind(diags, Diagnostic::StaticInit_Hazard);
+  std::remove((dir + "/lambda.cpp").c_str());
+  llvm::sys::fs::remove(dir);
+
+  // The lambda is named by the function it is written in, as the graph
+  // names it.
+  REQUIRE(hazards.size() == 1);
+  CHECK(hazards[0].message.find("'started'") != std::string::npos);
+  CHECK(hazards[0].message.find("pthread_create") != std::string::npos);
+}

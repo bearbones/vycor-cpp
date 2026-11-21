@@ -645,11 +645,22 @@ TEST_CASE("a base constructed as a member of a derived class is constructed",
           "[dead_code][builder][virtual]") {
   // The constructor written, and the one the compiler writes: its base
   // and member construction are both sited at the class otherwise.
-  const char *const groupCtor[] = {"Group() : Shape(), inner() {}", ""};
-  for (const char *ctor : groupCtor) {
+  // A default argument's temporary wraps the construction in cleanups.
+  struct Variant {
+    const char *shapeCtor;
+    const char *groupCtor;
+  };
+  const Variant variants[] = {
+      {"Shape(); };\n    Shape::Shape() {}", "Group() : Shape(), inner() {}"},
+      {"Shape(); };\n    Shape::Shape() {}", "Group() {}"},
+      {"Shape(); };\n    Shape::Shape() {}", ""},
+      {"Shape(const Tmp & = Tmp()); };\n    Shape::Shape(const Tmp &) {}", ""},
+  };
+  for (const Variant &variant : variants) {
+    const char *ctor = variant.groupCtor;
     std::string code = R"(
-    struct Shape { Shape(); virtual void draw(); };
-    Shape::Shape() {}
+    struct Tmp { Tmp(); ~Tmp(); };
+    struct Shape { virtual void draw(); )" + std::string(variant.shapeCtor) + R"(
     void Shape::draw() {}
     struct Group : Shape {
       Shape inner;
@@ -660,7 +671,7 @@ TEST_CASE("a base constructed as a member of a derived class is constructed",
     void paint(Shape &s) { s.draw(); }
     int main() { Group g; paint(g); }
   )";
-    CAPTURE(ctor);
+    CAPTURE(variant.shapeCtor, ctor);
     CallGraph graph;
     CallGraphBuilderFactory factory(graph);
     REQUIRE(clang::tooling::runToolOnCodeWithArgs(factory.create(), code,

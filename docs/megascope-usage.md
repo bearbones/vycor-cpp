@@ -516,6 +516,8 @@ context, so the exception tools answer `unknown` for a path through one.
 writes (default, copy, move, inherited) calls the member and base
 constructors and runs the default member initializers; a destructor,
 written or not, calls the member and base destructors after its body.
+A member the compiler constructs is sited at the member's declaration
+(a base, at the constructor).
 A local's destructor is a `DestructorCall` sited at its declaration, a
 temporary's at the expression that creates it, and a
 delete-expression's at the expression (`VirtualDispatch`, Plausible,

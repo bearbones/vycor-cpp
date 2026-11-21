@@ -388,6 +388,9 @@ void capture() { auto l = [r = Res()] { (void)r; }; l(); }
 template <class T> struct Pool { ~Pool(); };
 extern template struct Pool<int>;
 void pool() { Pool<int> p; }
+struct Elem { Elem(); Elem(const Elem &); };
+struct Derived : Elem { Elem arr[2]; };
+void copyDerived(const Derived &d) { Derived e(d); }
 )");
   SECTION("an array's omitted elements are initialized") {
     CHECK(calleesNamed(graph, "arrays", "Logger::Logger").size() == 1);
@@ -397,6 +400,10 @@ void pool() { Pool<int> p; }
     for (const CallGraphNode *node : graph.allNodes())
       if (llvm::StringRef(node->usr).starts_with("vycor-lambda:"))
         CHECK(calleesNamed(graph, node->usr, "Res::~Res").empty());
+  }
+  SECTION("an implicit copy constructs a base and an array member apart") {
+    const CallGraphEdge toDerived = only(graph, "copyDerived", "Derived::Derived");
+    CHECK(calleesNamed(graph, toDerived.calleeUsr, "Elem::Elem").size() == 2);
   }
   SECTION("a destructor whose body is elsewhere has no body read") {
     const CallGraphEdge toDtor = only(graph, "pool", "Pool<int>::~Pool");

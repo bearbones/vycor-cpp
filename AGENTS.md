@@ -349,30 +349,33 @@ replacement; the forms only `<new>` declares (`nothrow`, placement) sit
 in that header.
 
 **Instantiation and compiler-written edges**: after the code as written,
-`CallGraphEdgeVisitor` drains a worklist (LIFO, each body once per TU) of
-the bodies the TU uses that no written definition holds: function and
+`CallGraphEdgeVisitor` drains a worklist (LIFO, each body once per TU)
+of the bodies the TU uses that no written definition holds: function and
 member instantiations (system headers included; `extern template` ones
 have no body), generic-lambda specializations, explicit instantiation
 definitions, and compiler-written special members (`CompilerWritten.h`,
 shared with `ReferenceVisitor`). Their calls are edges under the
 instantiation's own USR, with dependent calls resolved; the node is
-marked `hasBody` (snapshot node flags value 4, OR-merged across TUs), which is how `templateLeaves` tells an instantiation that calls nothing
+marked `hasBody` (snapshot node flags value 4, OR-merged across TUs),
+which is how `templateLeaves` tells an instantiation that calls nothing
 from one no TU instantiated. The virtual members an instantiated class
 template specialization defines are read too (only a vtable reaches
 them), and its bases and overrides are recorded, so a dispatch reaches
 `Impl<int>::run`. A lambda written in a function template keeps its
 written identity: one node whose edges are every instantiation's calls;
-a generic lambda's specializations share the closure's node too. Written definitions also get what the compiler
-adds to them: non-written member/base initializers, default member
-initializers, a defaulted body, member/base destruction after a
-destructor's body. Destructor edges: a local at its declaration, a
-temporary at its expression, `delete` (`VirtualDispatch` Plausible
-through a virtual destructor). Trivial members add nothing; a closure's
-special members are transparent (its captures' constructors and
-destructors at the use). Unevaluated operands (`sizeof`, `noexcept`,
-`decltype`, requires-expressions) add nothing. Nodes are located at the
-first declaration so every TU agrees. The control-flow index reads only
-the code as written: these edges have no context of their own.
+a generic lambda's specializations share the closure's node too. Written
+definitions also get what the compiler adds to them: non-written
+member/base initializers, default member initializers, a defaulted body,
+member/base destruction after a destructor's body; a member the compiler
+constructs is sited at the member. Destructor edges: a local at
+its declaration, a temporary at its expression, `delete`
+(`VirtualDispatch` Plausible through a virtual destructor). Trivial
+members add nothing; a closure's special members are transparent (its
+captures' constructors and destructors at the use). Unevaluated operands
+(`sizeof`, `noexcept`, `decltype`, requires-expressions) add nothing.
+Nodes are located at the first declaration so every TU agrees. The
+control-flow index reads only the code as written: these edges have no
+context of their own.
 
 **Throw edges**: a `throw` expression is a Proven `DirectCall` edge to
 `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`), whose node sits at

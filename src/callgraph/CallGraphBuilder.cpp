@@ -783,10 +783,22 @@ void CallGraphEdgeVisitor::traverseInitializer(
     return;
   const clang::Expr *saved = implicitInit_;
   const clang::SourceLocation savedSite = implicitInitSite_;
-  if (!init->isWritten() && init->isAnyMemberInitializer() &&
-      llvm::isa<clang::CXXConstructExpr>(expr)) {
-    implicitInit_ = expr;
-    implicitInitSite_ = init->getAnyMember()->getLocation();
+  if (!init->isWritten() && init->isAnyMemberInitializer()) {
+    // The construction under the cleanups of a default argument's
+    // temporary, or the element construction of an array copy.
+    const clang::Expr *inner = expr;
+    for (;;) {
+      if (const auto *cleanups = llvm::dyn_cast<clang::ExprWithCleanups>(inner))
+        inner = cleanups->getSubExpr();
+      else if (const auto *loop = llvm::dyn_cast<clang::ArrayInitLoopExpr>(inner))
+        inner = loop->getSubExpr();
+      else
+        break;
+    }
+    if (llvm::isa<clang::CXXConstructExpr>(inner)) {
+      implicitInit_ = inner;
+      implicitInitSite_ = init->getAnyMember()->getLocation();
+    }
   }
   TraverseStmt(expr);
   implicitInit_ = saved;
@@ -1294,10 +1306,10 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
     return true;
   }
 
+  if (!recordsCallAt(expr->getBeginLoc()))
+    return true;
   const clang::SourceLocation site =
       expr == implicitInit_ ? implicitInitSite_ : expr->getBeginLoc();
-  if (!recordsCallAt(site))
-    return true;
 
   // An implicit constructor runs the code the compiler writes for it
   // (member and base construction, default member initializers) unless it

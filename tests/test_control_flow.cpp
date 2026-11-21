@@ -675,11 +675,18 @@ TEST_CASE("a lambda capture's initializer has the enclosing function's context",
     os << R"cpp(
       int seed();
       void body();
+      void after();
+      struct Res { ~Res(); };
+      template <class F> void submit(F f) { f(); }
       void outer() {
         try {
           auto l = [v = seed()] { try { body(); } catch (...) {} };
           l();
         } catch (int) {}
+      }
+      void handOff() {
+        submit([r = Res()] {});
+        after();
       }
     )cpp";
   }
@@ -701,4 +708,9 @@ TEST_CASE("a lambda capture's initializer has the enclosing function's context",
   auto bodyCtxs = baked.cfIndex.contextsForCallee("body");
   REQUIRE(bodyCtxs.size() == 1);
   CHECK(bodyCtxs[0].enclosingTryCatches.size() == 1);
+
+  // An init-capture is the closure's member, not a local of handOff.
+  auto afterCtxs = baked.cfIndex.contextsForCallee("after");
+  REQUIRE(afterCtxs.size() == 1);
+  CHECK(afterCtxs[0].liveRaiiLocals.empty());
 }
