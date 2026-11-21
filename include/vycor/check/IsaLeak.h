@@ -81,7 +81,8 @@ bool parseIsaLeakFacets(const std::string &spec, unsigned &facets,
 // those into it.
 enum IsaLeakBodyBit : uint32_t {
   kBodyLoop = 1u << 0,          // a loop: a vectorization candidate
-  kBodyFloat = 1u << 1,         // floating-point arithmetic or conversion
+  kBodyFloat = 1u << 1,         // floating-point arithmetic, comparison or
+                                // conversion (what FP flags change)
   kBodyVector = 1u << 2,        // vector-typed values (intrinsics, ext vectors)
   kBodyBulkMemory = 1u << 3,    // memcpy / memset / memmove
   kBodyBitBuiltin = 1u << 4,    // popcount / clz / ctz / bswap / rotate
@@ -92,19 +93,36 @@ enum IsaLeakBodyBit : uint32_t {
   kBodySignedArith = 1u << 9,   // signed integer arithmetic
   kBodyTargetAttr = 1u << 10,   // own target / target_clones / cpu_* attribute
   kBodyMathCall = 1u << 11,     // a floating-point math builtin (sqrt, exp...)
+  kBodyFloatMove = 1u << 12,    // a floating-point value at all, even only
+                                // loaded, passed or returned (VEX under -mavx)
 };
 
-// One vague-linkage function one compile command emitted. The value form
-// payloads carry; `profile` indexes the profile table that travels with it.
-struct EmittedFunctionEntry {
+// One vague-linkage function a TU emitted: what the collector hands over.
+struct EmittedFunction {
   std::string linkageName; // mangled: the COMDAT key the linker merges by
   std::string qualifiedName;
   std::string filePath; // definition site
   unsigned line = 0;
   uint32_t bodyBits = 0; // own body plus what it can inline
   uint32_t ownBits = 0;  // own body only
-  std::string tuPath;
+};
+
+// One sighting: record `function` emitted by `tu` under `profile`, as
+// indexes into the tables that travel with it.
+struct IsaLeakSighting {
+  uint32_t function = 0;
   uint32_t profile = 0;
+  uint32_t tu = 0;
+};
+
+// The value form payloads carry (checkpoint journal, worker shards): string
+// tables once, sightings as flat id triples.
+struct IsaLeakPayload {
+  std::vector<CodegenProfile> profiles;
+  std::vector<std::string> tus;
+  std::vector<EmittedFunction> functions;
+  std::vector<IsaLeakSighting> sightings;
+  bool empty() const { return sightings.empty(); }
 };
 
 // The isa-leak facts of an index: a profile table and, per linkage name, one
@@ -113,22 +131,22 @@ struct EmittedFunctionEntry {
 class IsaLeakFacts {
 public:
   struct Record {
-    std::string linkageName;
-    std::string qualifiedName;
-    std::string filePath;
-    unsigned line = 0;
-    uint32_t bodyBits = 0; // OR over every sighting
-    uint32_t ownBits = 0;  // likewise, own body only
+    EmittedFunction function; // location: the smallest seen; bits: OR-ed
     // (profile id, TU id), in insertion order; may repeat.
     std::vector<std::pair<uint32_t, uint32_t>> sightings;
   };
 
   // Interns a profile; returns its id in this store.
   uint32_t addProfile(const CodegenProfile &profile);
-  // Entries whose `profile` is an id of this store.
-  void addFunctions(std::vector<EmittedFunctionEntry> &&entries);
-  // Adds another store's facts, remapping its profile ids.
+  // One TU's emitted functions under `profile` (an id of this store).
+  void addTu(const std::string &tuPath, uint32_t profile,
+             std::vector<EmittedFunction> &&functions);
+  // Adds another store's facts, remapping its ids.
   void absorb(const IsaLeakFacts &other);
+  // Value form, and back (ids remapped into this store; out-of-range
+  // sightings are dropped).
+  void capture(IsaLeakPayload &out) const;
+  void apply(const IsaLeakPayload &payload);
   void clear();
 
   const std::vector<CodegenProfile> &profiles() const { return profiles_; }
@@ -137,27 +155,8 @@ public:
   size_t functionCount() const { return records_.size(); }
   size_t sightingCount() const;
 
-  // Every sighting in value form (payload capture), profile ids of this
-  // store.
-  template <typename Fn> void forEachEntry(Fn fn) const {
-    EmittedFunctionEntry e;
-    for (const Record &r : records_) {
-      e.linkageName = r.linkageName;
-      e.qualifiedName = r.qualifiedName;
-      e.filePath = r.filePath;
-      e.line = r.line;
-      e.bodyBits = r.bodyBits;
-      e.ownBits = r.ownBits;
-      for (const auto &[profile, tu] : r.sightings) {
-        e.tuPath = tus_[tu];
-        e.profile = profile;
-        fn(e);
-      }
-    }
-  }
-
 private:
-  void addFunctionLocked(const EmittedFunctionEntry &e, uint32_t profile);
+  uint32_t recordLocked(const EmittedFunction &f);
   uint32_t tuIdLocked(const std::string &tu);
 
   mutable std::mutex mutex_;

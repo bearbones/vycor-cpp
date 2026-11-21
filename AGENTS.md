@@ -191,10 +191,12 @@ exceptions; `--isa-leak-facets`, default `isa,fp,eh`). Phase 1
 (`check/IsaLeak.cpp`, `collectIsaLeakFacts`) reads one `CodegenProfile` per
 compile command from the parsed invocation (effective `TargetOptions`
 features, `LangOptions` FP/EH state) and walks the TU's emission graph the
-way codegen does: from strong definitions, global initializers and homed
-vtables through every referenced body, so an inline function no emitted code
-reaches is not a sighting. Each emitted non-system `GVA_DiscardableODR`
-function gets body bits (loop, float, vector, bulk memory, bit/target
+way codegen does: from strong definitions, the global variables
+`DeclMustBeEmitted` keeps and homed vtables (every slot, inherited ones
+included) through every referenced body, skipping unevaluated and
+constant-evaluated code, so an inline function no emitted code reaches is
+not a sighting. Each emitted non-system `GVA_DiscardableODR`
+function gets body bits (loop, FP arithmetic, FP values, vector, bulk memory, bit/target
 builtins, cleanup around may-throw calls, signed arithmetic), folded over
 what it can inline. Phase 1.5 (`analyzeIsaLeaks`) projects each profile onto
 the feature classes and facets the body is sensitive to and reports a
@@ -202,8 +204,9 @@ function with two or more projections on one triple: `IsaLeak_Divergent`
 (warning) when its own body is sensitive, `IsaLeak_Inlined` (note) when only
 what it can inline is (the copies then differ only in optimizing builds that
 keep it out of line). Facts live in
-`IsaLeakFacts` (own lock, interned profile and TU ids); they ride worker
-shards (v15) but not the phase-2 handoff. Enabling it turns the
+`IsaLeakFacts` (own lock, interned profile, TU and function ids); they ride
+worker shards (v15) in that interned form (`IsaLeakPayload`: tables plus
+flat id triples) but not the phase-2 handoff. Enabling it turns the
 `--checkpoint` journal off. Reference: `docs/checks/isa-leak.md`; tests in
 `tests/test_check_isa_leak.cpp`.
 

@@ -261,14 +261,7 @@ CheckIndexPayload CheckIndexPayload::capture(const GlobalIndex &shard) {
   p.noexceptFacts.reserve(shard.noexceptFactCount());
   shard.forEachNoexceptFact(
       [&](const NoexceptFactEntry &e) { p.noexceptFacts.push_back(e); });
-  {
-    const IsaLeakFacts &isa = shard.isaLeakFacts();
-    p.codegenProfiles = isa.profiles();
-    p.emittedFunctions.reserve(isa.sightingCount());
-    isa.forEachEntry([&](const EmittedFunctionEntry &e) {
-      p.emittedFunctions.push_back(e);
-    });
-  }
+  shard.isaLeakFacts().capture(p.isaLeak);
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
   shard.forEachDefaultArg(
@@ -308,22 +301,8 @@ void CheckIndexPayload::applyTo(GlobalIndex &into) const {
     into.addAbiLayout(e);
   if (!noexceptFacts.empty())
     into.addNoexceptFacts(std::vector<NoexceptFactEntry>(noexceptFacts));
-  if (!emittedFunctions.empty()) {
-    IsaLeakFacts &isa = into.mutableIsaLeakFacts();
-    std::vector<uint32_t> remap;
-    remap.reserve(codegenProfiles.size());
-    for (const auto &profile : codegenProfiles)
-      remap.push_back(isa.addProfile(profile));
-    std::vector<EmittedFunctionEntry> entries;
-    entries.reserve(emittedFunctions.size());
-    for (const auto &e : emittedFunctions) {
-      if (e.profile >= remap.size())
-        continue; // a corrupt record names no profile: drop the sighting
-      entries.push_back(e);
-      entries.back().profile = remap[e.profile];
-    }
-    isa.addFunctions(std::move(entries));
-  }
+  if (!isaLeak.empty())
+    into.mutableIsaLeakFacts().apply(isaLeak);
   for (const auto &e : specializations)
     into.addSpecialization(e);
   for (const auto &e : defaultArgs)
@@ -529,8 +508,8 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
                            NoexceptFactEntry::AllCalleeBits));
     }
   }
-  putU32(out, static_cast<uint32_t>(p.codegenProfiles.size()));
-  for (const auto &cp : p.codegenProfiles) {
+  putU32(out, static_cast<uint32_t>(p.isaLeak.profiles.size()));
+  for (const auto &cp : p.isaLeak.profiles) {
     putStr(out, cp.triple);
     putU32(out, static_cast<uint32_t>(cp.features.size()));
     for (const auto &f : cp.features)
@@ -539,16 +518,23 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
     putU8(out, cp.exceptions ? 1 : 0);
     putU8(out, cp.signedOverflow);
   }
-  putU32(out, static_cast<uint32_t>(p.emittedFunctions.size()));
-  for (const auto &e : p.emittedFunctions) {
-    putStr(out, e.linkageName);
-    putStr(out, e.qualifiedName);
-    putStr(out, e.filePath);
-    putU32(out, e.line);
-    putU32(out, e.bodyBits);
-    putU32(out, e.ownBits);
-    putStr(out, e.tuPath);
-    putU32(out, e.profile);
+  putU32(out, static_cast<uint32_t>(p.isaLeak.tus.size()));
+  for (const auto &tu : p.isaLeak.tus)
+    putStr(out, tu);
+  putU32(out, static_cast<uint32_t>(p.isaLeak.functions.size()));
+  for (const auto &f : p.isaLeak.functions) {
+    putStr(out, f.linkageName);
+    putStr(out, f.qualifiedName);
+    putStr(out, f.filePath);
+    putU32(out, f.line);
+    putU32(out, f.bodyBits);
+    putU32(out, f.ownBits);
+  }
+  putU32(out, static_cast<uint32_t>(p.isaLeak.sightings.size()));
+  for (const auto &st : p.isaLeak.sightings) {
+    putU32(out, st.function);
+    putU32(out, st.profile);
+    putU32(out, st.tu);
   }
 }
 
@@ -726,6 +712,7 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     }
     p.noexceptFacts.push_back(std::move(e));
   }
+  IsaLeakPayload &isa = p.isaLeak;
   uint32_t nProfiles = r.u32();
   for (uint32_t i = 0; i < nProfiles && r.ok; ++i) {
     CodegenProfile cp;
@@ -736,22 +723,32 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     cp.fp = r.str();
     cp.exceptions = r.u8() != 0;
     cp.signedOverflow = r.u8();
-    p.codegenProfiles.push_back(std::move(cp));
+    isa.profiles.push_back(std::move(cp));
   }
-  uint32_t nEmitted = r.u32();
-  for (uint32_t i = 0; i < nEmitted && r.ok; ++i) {
-    EmittedFunctionEntry e;
-    e.linkageName = r.str();
-    e.qualifiedName = r.str();
-    e.filePath = r.str();
-    e.line = r.u32();
-    e.bodyBits = r.u32();
-    e.ownBits = r.u32();
-    e.tuPath = r.str();
-    e.profile = r.u32();
-    if (e.profile >= p.codegenProfiles.size())
+  uint32_t nTus = r.u32();
+  for (uint32_t i = 0; i < nTus && r.ok; ++i)
+    isa.tus.push_back(r.str());
+  uint32_t nFunctions = r.u32();
+  for (uint32_t i = 0; i < nFunctions && r.ok; ++i) {
+    EmittedFunction f;
+    f.linkageName = r.str();
+    f.qualifiedName = r.str();
+    f.filePath = r.str();
+    f.line = r.u32();
+    f.bodyBits = r.u32();
+    f.ownBits = r.u32();
+    isa.functions.push_back(std::move(f));
+  }
+  uint32_t nSightings = r.u32();
+  for (uint32_t i = 0; i < nSightings && r.ok; ++i) {
+    IsaLeakSighting st;
+    st.function = r.u32();
+    st.profile = r.u32();
+    st.tu = r.u32();
+    if (st.function >= isa.functions.size() ||
+        st.profile >= isa.profiles.size() || st.tu >= isa.tus.size())
       r.ok = false;
-    p.emittedFunctions.push_back(std::move(e));
+    isa.sightings.push_back(st);
   }
   return r.ok;
 }
@@ -1306,8 +1303,7 @@ bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index) {
           // read only by the parent's index-only pass: on a large project
           // they would be the bulk of a file every worker decodes.
           payload.noexceptFacts.clear();
-          payload.codegenProfiles.clear();
-          payload.emittedFunctions.clear();
+          payload.isaLeak = IsaLeakPayload();
           encodeIndexPayload(bytes, payload);
           return bytes;
         }()}});

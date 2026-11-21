@@ -70,7 +70,7 @@ profile are compared. The default is `isa,fp,eh`; `all` adds `overflow`.
 | Facet | Compared | Changes code for a body that has |
 |-------|----------|----------------------------------|
 | `isa` | The effective target features (`-march`, `-mcpu`, `-m<feature>`, `-mno-<feature>`) | See the feature classes below |
-| `fp` | `-ffp-contract`, `-fassociative-math`, `-f[no-]honor-nans`/`-infinities`, `-f[no-]signed-zeros`, `-freciprocal-math`, `-frounding-math`, `-ffp-exception-behavior`, `-ffp-eval-method`, `-mfpmath` (all set by `-ffast-math` and friends) | Floating-point arithmetic, conversions or vector types |
+| `fp` | `-ffp-contract`, `-fassociative-math`, `-f[no-]honor-nans`/`-infinities`, `-f[no-]signed-zeros`, `-freciprocal-math`, `-frounding-math`, `-ffp-exception-behavior`, `-ffp-eval-method`, `-mfpmath` (all set by `-ffast-math` and friends) | Floating-point arithmetic, comparisons, conversions or vector types (not values that are only loaded, passed or returned) |
 | `fp` | `-f[no-]math-errno`, `-fapprox-func` | Calls to math builtins (`sqrt`, `exp`, ...) |
 | `eh` | `-fexceptions` vs `-fno-exceptions` | A `try` block, or a destructor-bearing local or temporary around a call not declared non-throwing |
 | `overflow` | `-fwrapv`, `-ftrapv` | Signed integer `+ - * <<`, increments and negation |
@@ -81,10 +81,13 @@ classes the body can be affected by:
 - **Vector and floating-point units** (`sse*`, `avx*`, `fma`, `f16c`, AArch64
   `neon`/`sve*`, PowerPC `altivec`/`vsx`, WebAssembly `simd128`, RISC-V `v`/`zv*`,
   ...) are compared for bodies with a loop (a vectorization candidate),
-  floating-point code, vector types or `memcpy`/`memset`.
+  floating-point values (even ones only loaded, passed or returned: under
+  `-mavx` every scalar floating-point move is VEX-encoded), vector types or
+  `memcpy`/`memset`.
 - **Bit manipulation** (`popcnt`, `lzcnt`, `bmi`, `bmi2`, `movbe`, RISC-V
   `zb*`, ...) is compared for bodies with a loop or a bit builtin
-  (`__builtin_popcount`, `clz`, `ctz`, `bswap`, rotates).
+  (`__builtin_popcount`, `clz`, `ctz`, `ffs`, `parity`, `clrsb`, `bswap`,
+  rotates, and the generic `popcountg`/`clzg`/`ctzg` where Clang has them).
 - **Every other feature** (AES, CRC32, SHA, ...) is compared only for bodies
   that call a target-specific builtin, which also makes every other class
   relevant.
@@ -105,14 +108,30 @@ how code generation decides what to emit: start from what the TU must emit,
 then follow every function a walked body references. A TU must emit:
 
 - its strong definitions;
-- `used` and `constructor` functions;
-- global initializers;
+- `used`, `constructor` and `destructor` functions;
+- the dynamic initialization and destruction of global variables, as Clang
+  decides (`ASTContext::DeclMustBeEmitted`): every variable another TU can
+  need, and an inline or template variable whose destructor is non-trivial
+  or whose initializer has side effects and is not a constant. Any other
+  variable is emitted only where emitted code references it. A constant
+  initializer runs nothing, so a `constexpr` constructor it names is not
+  emitted for it;
 - the vtables it homes, meaning those of classes whose key function it
   defines, and the vtables of dynamic classes without a key function that it
-  constructs.
+  constructs. A vtable emits every function in its slots, the final
+  overriders inherited from bases included.
 
 An inline function referenced only by another inline function that nothing
-calls is not emitted. `Decl::isUsed` is not consulted.
+calls is not emitted. `Decl::isUsed` is not consulted. A virtual call does
+not emit its callee: the callee is reached through a vtable or not at all.
+The exception is a call on a complete object (a variable of class type or a
+temporary), which Clang makes a direct call.
+Code the compiler evaluates or discards emits nothing: unevaluated operands
+(`sizeof`, `noexcept`, `decltype`, a non-polymorphic `typeid`),
+initializers of `constexpr` locals, `case` labels and other constant
+expressions, and the discarded branch of `if constexpr`. By-value
+parameters are destroyed by the caller in the Itanium ABI and by the callee
+only where the target's C++ ABI says so (Microsoft).
 
 These are excluded:
 
@@ -122,8 +141,9 @@ These are excluded:
   their enclosing function);
 - `consteval` and `always_inline` functions;
 - functions with their own `target`, `target_clones`, `target_version`,
-  `cpu_specific` or `cpu_dispatch` attribute (the attribute pins their code
-  generation; their bits are also not folded into callers);
+  `cpu_specific` or `cpu_dispatch` attribute, from every facet (the
+  attribute pins their target features; their bits are also not folded into
+  callers);
 - definitions in system headers;
 - non-C++ TUs.
 
@@ -170,6 +190,8 @@ Profiles come from the compile command, so `--checkpoint` reuse is turned off
 when this check is enabled. The stderr output says so. The legacy journal does
 not revalidate compile-command changes (issue
 [#84](https://github.com/bearbones/vycor-cpp/issues/84)). Profiles and emitted
-functions travel in isolated-worker shards (journal/shard format version 15).
+functions travel in isolated-worker shards (journal/shard format version 15)
+as a profile table, a TU table, a function table and flat id triples; a
+sighting that names no table entry fails the shard.
 They are left out of the phase-2 handoff, because the analysis runs only in
 the parent. `--isa-leak-facets` is applied there too, so workers never see it.

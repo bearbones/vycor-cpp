@@ -209,6 +209,10 @@ TEST_CASE("isa-leak is silent when both TUs are built identically",
   fixture.database({"-mavx2"}, {"-mavx", "-mavx2"});
   db = fixture.db();
   CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions())).empty());
+  // A CPU name and a feature it already implies.
+  fixture.database({"-march=haswell"}, {"-march=haswell", "-mavx2", "-mfma"});
+  db = fixture.db();
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions())).empty());
 }
 
 TEST_CASE("isa-leak excludes functions with a target attribute",
@@ -229,7 +233,7 @@ inline float pinned(const float *a, unsigned long n) {
   GlobalIndex index;
   CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
             .empty());
-  CHECK(index.isaLeakFacts().functionCount() == 1); // collected, then skipped
+  CHECK(index.isaLeakFacts().functionCount() == 0); // never a sighting
 }
 
 TEST_CASE("isa-leak ignores inline functions no emitted code reaches",
@@ -314,6 +318,13 @@ TEST_CASE("isa-leak signed-overflow facet is opt-in", "[CheckIsaLeak]") {
       *db, fixture.files(), isaOptions(kIsaLeakDefaultFacets | kIsaLeakOverflow)));
   REQUIRE(result.size() == 1);
   CHECK(mentions(result[0], "-fwrapv"));
+  fixture.database({"-ftrapv"}, {});
+  db = fixture.db();
+  result = isaOnly(runAnalysis(
+      *db, fixture.files(), isaOptions(kIsaLeakDefaultFacets | kIsaLeakOverflow)));
+  REQUIRE(result.size() == 1);
+  CHECK(mentions(result[0], "-ftrapv"));
+  CHECK(mentions(result[0], "signed overflow undefined"));
 }
 
 TEST_CASE("isa-leak partitions by target triple and skips system headers",
@@ -321,7 +332,12 @@ TEST_CASE("isa-leak partitions by target triple and skips system headers",
   IsaFixture fixture(mixedHeader, mixedUses);
   fixture.database({"--target=i386-unknown-linux-gnu", "-mavx2"}, {});
   auto db = fixture.db();
-  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions())).empty());
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  // Both TUs emitted all three: the silence is the partition.
+  CHECK(index.isaLeakFacts().sightingCount() == 6);
+  CHECK(index.isaLeakFacts().profiles().size() == 2);
   // The same header as a system header: out of scope by default.
   fixture.write("a.cpp", "#include <shared.h>\nvoid entry_a() {\n" +
                              std::string(mixedUses) + "}\n");
@@ -330,7 +346,10 @@ TEST_CASE("isa-leak partitions by target triple and skips system headers",
   fixture.database({"-isystem" + fixture.dir, "-mavx2"},
                    {"-isystem" + fixture.dir});
   db = fixture.db();
-  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions())).empty());
+  GlobalIndex system;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &system))
+            .empty());
+  CHECK(system.isaLeakFacts().functionCount() == 0);
 }
 
 TEST_CASE("isa-leak reports template instantiations emitted by both TUs",
@@ -463,6 +482,16 @@ struct Shape {
   CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
             .empty());
   CHECK(index.isaLeakFacts().functionCount() == 0);
+  // On a complete object the call is direct: both TUs emit area.
+  fixture.write("a.cpp", "#include \"shared.h\"\nextern Shape make();\n"
+                         "float entry_a(const float *v) { return make().area(v, 2); }\n");
+  fixture.write("b.cpp", "#include \"shared.h\"\nextern Shape &shape;\n"
+                         "float entry_b(const float *v) {\n"
+                         "  Shape copy = shape; return copy.area(v, 2); }\n");
+  db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl.find("Shape::area") != std::string::npos);
 }
 
 TEST_CASE("isa-leak folds bits through a long inline chain", "[CheckIsaLeak]") {
@@ -509,7 +538,7 @@ struct Buffer {
   // Both overloads were collected, under distinct display names.
   std::set<std::string> names;
   for (const auto &r : index.isaLeakFacts().records())
-    names.insert(r.qualifiedName);
+    names.insert(r.function.qualifiedName);
   CHECK(names.count("Buffer::row(int)"));
   CHECK(names.count("Buffer::row(int) const"));
 }
@@ -529,4 +558,292 @@ inline float first(const Pair &p) { return narrow(p.re); }
   auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
   REQUIRE(result.size() == 1);
   CHECK(result[0].kind == Diagnostic::IsaLeak_Divergent);
+  CHECK(mentions(result[0], "floating-point values"));
+  // FP flags change arithmetic, not moves: -ffast-math leaves it alone.
+  fixture.database({"-ffast-math"}, {});
+  db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  CHECK(index.isaLeakFacts().functionCount() == 1);
+}
+
+TEST_CASE("isa-leak leaves by-value parameters to the caller in the Itanium "
+          "ABI",
+          "[CheckIsaLeak]") {
+  // The caller destroys `o` (Itanium): take has no cleanup of its own, so
+  // the exception mode does not change its code.
+  IsaFixture fixture(R"cpp(
+struct Owner { Owner(); Owner(const Owner &); ~Owner(); int v; };
+void may_throw();
+inline void take(Owner o) { may_throw(); }
+)cpp",
+                     "  Owner o;\n  take(o);\n");
+  fixture.database({"-fno-exceptions"}, {"-fexceptions"});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  CHECK(index.isaLeakFacts().functionCount() == 1);
+}
+
+TEST_CASE("isa-leak skips code the compiler evaluates or discards",
+          "[CheckIsaLeak]") {
+  // sum is only ever constant-evaluated or unevaluated: no TU emits it.
+  IsaFixture fixture(R"cpp(
+constexpr int sum(int n) { int s = 0; for (int i = 0; i < n; ++i) s += i; return s; }
+inline int use(int x) {
+  constexpr int k = sum(4);
+  static_assert(sum(3) == 3, "");
+  switch (x) { case sum(2): return 1; default: break; }
+  return k + int(sizeof(sum(2))) + int(noexcept(sum(1)));
+}
+template <bool B> inline int pick() {
+  if constexpr (B) return sum(5); else return 0;
+}
+)cpp",
+                     "  (void)use(1);\n  (void)pick<false>();\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  std::set<std::string> names;
+  for (const auto &r : index.isaLeakFacts().records())
+    names.insert(r.function.qualifiedName);
+  CHECK(names.count("use(int)"));
+  CHECK(names.count("pick<false>()"));
+  CHECK_FALSE(names.count("sum(int)"));
+}
+
+TEST_CASE("isa-leak emits the inherited slots of a constructed vtable",
+          "[CheckIsaLeak]") {
+  // Base's vtable is homed elsewhere (key function anchor). Derived has no
+  // key function, so constructing it emits its vtable here, and with it
+  // Base::sum, which Derived inherits without overriding.
+  IsaFixture fixture(R"cpp(
+struct Base {
+  virtual void anchor();
+  virtual float sum(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+struct Derived : Base { void anchor() override {} };
+)cpp",
+                     "  Derived d;\n  (void)&d;\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl == "Base::sum(const float *, unsigned long) const");
+}
+
+TEST_CASE("isa-leak emits the virtual functions of a vtable the TU homes",
+          "[CheckIsaLeak]") {
+  // a.cpp defines Homed's key function, so it emits the vtable and every
+  // virtual function in it; b.cpp only names the class.
+  IsaFixture fixture(R"cpp(
+struct Homed {
+  virtual void key();
+  virtual float sum(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+)cpp");
+  fixture.write("a.cpp", "#include \"shared.h\"\nvoid Homed::key() {}\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  const auto &records = index.isaLeakFacts().records();
+  REQUIRE(records.size() == 1);
+  CHECK(records[0].function.qualifiedName ==
+        "Homed::sum(const float *, unsigned long) const");
+  REQUIRE(records[0].sightings.size() == 1);
+  CHECK(index.isaLeakFacts().tuPath(records[0].sightings[0].second) ==
+        fixture.dir + "/a.cpp");
+}
+
+TEST_CASE("isa-leak emits a global variable's initializer only when it runs",
+          "[CheckIsaLeak]") {
+  // fill and eagerInit run in dynamic initializers of every TU (a strong
+  // variable; an inline one whose initializer has side effects); folded
+  // only in a constant one; lazyInit only where Holder<int>::value is
+  // referenced and so instantiated.
+  IsaFixture fixture(R"cpp(
+inline float fill(unsigned long n) {
+  float s = 0;
+  for (unsigned long i = 0; i < n; ++i) s += 1.5f;
+  return s;
+}
+inline float eagerInit(unsigned long n) {
+  float s = 1;
+  for (unsigned long i = 0; i < n; ++i) s *= 2.0f;
+  return s;
+}
+constexpr int folded(int n) { int s = 0; for (int i = 0; i < n; ++i) s += i; return s; }
+inline float lazyInit(unsigned long n) {
+  float s = 1;
+  for (unsigned long i = 0; i < n; ++i) s -= 0.5f;
+  return s;
+}
+float runs = fill(4);
+inline float eager = eagerInit(3);
+inline int constant = folded(3);
+template <typename T> struct Holder { static float value; };
+template <typename T> float Holder<T>::value = lazyInit(3);
+)cpp");
+  fixture.write("b.cpp", "#include \"shared.h\"\n"
+                         "float entry_b() { return Holder<int>::value; }\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  // Two strong definitions of `runs` would not link, but each TU is
+  // parsed on its own: both emit fill.
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index));
+  std::set<std::string> reported;
+  for (const auto &d : result)
+    reported.insert(d.resolvedDecl);
+  CHECK(reported == std::set<std::string>{"eagerInit(unsigned long)",
+                                          "fill(unsigned long)"});
+  std::set<std::string> names;
+  for (const auto &r : index.isaLeakFacts().records()) {
+    names.insert(r.function.qualifiedName);
+    if (r.function.qualifiedName == "lazyInit(unsigned long)") {
+      REQUIRE(r.sightings.size() == 1);
+      CHECK(index.isaLeakFacts().tuPath(r.sightings[0].second) ==
+            fixture.dir + "/b.cpp");
+    }
+  }
+  CHECK_FALSE(names.count("folded(int)"));
+  CHECK(names.count("lazyInit(unsigned long)"));
+}
+
+namespace {
+CodegenProfile x86Profile(std::vector<std::string> features) {
+  CodegenProfile p;
+  p.triple = "x86_64-unknown-linux-gnu";
+  p.features = std::move(features);
+  p.exceptions = true;
+  return p;
+}
+EmittedFunction loopFunction() {
+  EmittedFunction f;
+  f.linkageName = "_Z4loopv";
+  f.qualifiedName = "loop()";
+  f.filePath = "/p/shared.h";
+  f.line = 3;
+  f.bodyBits = kBodyLoop;
+  f.ownBits = kBodyLoop;
+  return f;
+}
+std::vector<std::string> analyze(const GlobalIndex &index) {
+  std::vector<Diagnostic> out;
+  analyzeIsaLeaks(index, kIsaLeakDefaultFacets, out);
+  return messages(out);
+}
+} // namespace
+
+TEST_CASE("isa-leak names one witness per group and counts the rest",
+          "[CheckIsaLeak]") {
+  GlobalIndex index;
+  IsaLeakFacts &facts = index.mutableIsaLeakFacts();
+  const uint32_t avx = facts.addProfile(x86Profile({"avx", "sse2"}));
+  const uint32_t base = facts.addProfile(x86Profile({"sse2"}));
+  facts.addTu("/p/z.cpp", base, {loopFunction()});
+  facts.addTu("/p/a.cpp", avx, {loopFunction()});
+  facts.addTu("/p/c.cpp", base, {loopFunction()});
+  facts.addTu("/p/b.cpp", base, {loopFunction()});
+  auto result = analyze(index);
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].find("[1] /p/a.cpp (target features +avx)") !=
+        std::string::npos);
+  CHECK(result[0].find("[2] /p/b.cpp and 2 more TUs (no extra target "
+                       "features)") != std::string::npos);
+}
+
+TEST_CASE("isa-leak remaps ids when stores intern profiles in another order",
+          "[CheckIsaLeak]") {
+  GlobalIndex source;
+  {
+    IsaLeakFacts &facts = source.mutableIsaLeakFacts();
+    const uint32_t avx = facts.addProfile(x86Profile({"avx", "sse2"}));
+    const uint32_t base = facts.addProfile(x86Profile({"sse2"}));
+    facts.addTu("/p/a.cpp", avx, {loopFunction()});
+    facts.addTu("/p/b.cpp", base, {loopFunction()});
+  }
+  const auto expected = analyze(source);
+  REQUIRE(expected.size() == 1);
+
+  // Pre-seeded with the profiles reversed and an unrelated TU first.
+  auto seeded = [] {
+    auto index = std::make_unique<GlobalIndex>();
+    IsaLeakFacts &facts = index->mutableIsaLeakFacts();
+    facts.addProfile(x86Profile({"sse2"}));
+    const uint32_t other = facts.addProfile(x86Profile({"avx2", "sse2"}));
+    EmittedFunction f = loopFunction();
+    f.linkageName = "_Z5otherv";
+    f.qualifiedName = "other()";
+    facts.addTu("/p/other.cpp", other, {f});
+    return index;
+  };
+  auto absorbed = seeded();
+  absorbed->mutableIsaLeakFacts().absorb(source.isaLeakFacts());
+  CHECK(analyze(*absorbed) == expected);
+
+  IsaLeakPayload payload;
+  source.isaLeakFacts().capture(payload);
+  CHECK(payload.tus.size() == 2);
+  CHECK(payload.functions.size() == 1);
+  CHECK(payload.sightings.size() == 2);
+  auto applied = seeded();
+  applied->mutableIsaLeakFacts().apply(payload);
+  CHECK(analyze(*applied) == expected);
+
+  // Out-of-range ids (a damaged payload) drop the sighting, nothing else.
+  payload.sightings.push_back({7, 0, 0});
+  payload.sightings.push_back({0, 9, 0});
+  payload.sightings.push_back({0, 0, 5});
+  auto damaged = seeded();
+  damaged->mutableIsaLeakFacts().apply(payload);
+  CHECK(analyze(*damaged) == expected);
+  CHECK(damaged->isaLeakFacts().sightingCount() == 3);
+}
+
+TEST_CASE("isa-leak rejects a shard whose sightings name no table entry",
+          "[CheckIsaLeak]") {
+  GlobalIndex index;
+  IsaLeakFacts &facts = index.mutableIsaLeakFacts();
+  facts.addTu("/p/a.cpp", facts.addProfile(x86Profile({"sse2"})),
+              {loopFunction()});
+  auto payload = CheckIndexPayload::capture(index);
+  REQUIRE(payload.isaLeak.sightings.size() == 1);
+  payload.isaLeak.sightings[0].tu = 4;
+  llvm::SmallString<128> dir;
+  REQUIRE_FALSE(llvm::sys::fs::createUniqueDirectory("isa_leak_shard", dir));
+  const std::string shard = std::string(dir) + "/worker.bin";
+  REQUIRE(writeCheckIndexShard(shard, {{"a.cpp", payload}},
+                               {{TuStatus::Indexed, ""}}));
+  bool called = false;
+  CHECK_FALSE(readCheckIndexShard(
+      shard, [&](const auto &, const auto &) { called = true; }));
+  CHECK_FALSE(called);
+  llvm::sys::fs::remove_directories(dir);
+}
+
+TEST_CASE("isa-leak turns the checkpoint journal off", "[CheckIsaLeak]") {
+  IsaFixture fixture(mixedHeader, mixedUses);
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  auto opts = isaOptions();
+  const auto expected = messages(runAnalysis(*db, fixture.files(), opts));
+  REQUIRE(expected.size() == 2);
+  opts.checkpointPath = fixture.dir + "/journal.bin";
+  CHECK(messages(runAnalysis(*db, fixture.files(), opts)) == expected);
+  CHECK_FALSE(llvm::sys::fs::exists(opts.checkpointPath));
 }

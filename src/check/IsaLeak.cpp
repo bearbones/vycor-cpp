@@ -17,9 +17,11 @@
 
 #include "vycor/check/GlobalIndex.h"
 #include "vycor/check/Indexer.h"
+#include "vycor/compat/ClangVersion.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
+#include "clang/AST/CXXInheritance.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclFriend.h"
@@ -37,6 +39,7 @@
 #include "clang/Basic/TargetOptions.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -132,52 +135,103 @@ uint32_t IsaLeakFacts::tuIdLocked(const std::string &tu) {
   return it->second;
 }
 
-void IsaLeakFacts::addFunctionLocked(const EmittedFunctionEntry &e,
-                                     uint32_t profile) {
-  uint32_t tu = tuIdLocked(e.tuPath);
+uint32_t IsaLeakFacts::recordLocked(const EmittedFunction &f) {
   auto [it, inserted] = recordByName_.try_emplace(
-      e.linkageName, static_cast<uint32_t>(records_.size()));
+      f.linkageName, static_cast<uint32_t>(records_.size()));
   if (inserted) {
-    Record r;
-    r.linkageName = e.linkageName;
-    r.qualifiedName = e.qualifiedName;
-    r.filePath = e.filePath;
-    r.line = e.line;
-    records_.push_back(std::move(r));
+    records_.emplace_back();
+    records_.back().function = f;
+    return it->second;
   }
-  Record &r = records_[it->second];
+  EmittedFunction &r = records_[it->second].function;
   // One linkage name, one definition in a well-formed program; when two
   // sightings disagree on where it is, keep the smallest so the merged
   // record is the same whatever order TUs arrive in.
-  if (std::tie(e.filePath, e.line, e.qualifiedName) <
+  if (std::tie(f.filePath, f.line, f.qualifiedName) <
       std::tie(r.filePath, r.line, r.qualifiedName)) {
-    r.filePath = e.filePath;
-    r.line = e.line;
-    r.qualifiedName = e.qualifiedName;
+    r.filePath = f.filePath;
+    r.line = f.line;
+    r.qualifiedName = f.qualifiedName;
   }
-  r.bodyBits |= e.bodyBits;
-  r.ownBits |= e.ownBits;
-  r.sightings.emplace_back(profile, tu);
+  r.bodyBits |= f.bodyBits;
+  r.ownBits |= f.ownBits;
+  return it->second;
 }
 
-void IsaLeakFacts::addFunctions(std::vector<EmittedFunctionEntry> &&entries) {
+void IsaLeakFacts::addTu(const std::string &tuPath, uint32_t profile,
+                         std::vector<EmittedFunction> &&functions) {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (const auto &e : entries)
-    if (e.profile < profiles_.size())
-      addFunctionLocked(e, e.profile);
+  if (profile >= profiles_.size())
+    return;
+  const uint32_t tu = tuIdLocked(tuPath);
+  for (const EmittedFunction &f : functions)
+    records_[recordLocked(f)].sightings.emplace_back(profile, tu);
 }
 
 void IsaLeakFacts::absorb(const IsaLeakFacts &other) {
   if (&other == this)
     return;
-  std::vector<uint32_t> remap;
-  remap.reserve(other.profiles_.size());
+  std::vector<uint32_t> profileMap;
+  profileMap.reserve(other.profiles_.size());
   for (const auto &p : other.profiles_)
-    remap.push_back(addProfile(p));
+    profileMap.push_back(addProfile(p));
   std::lock_guard<std::mutex> lock(mutex_);
-  other.forEachEntry([&](const EmittedFunctionEntry &e) {
-    addFunctionLocked(e, remap[e.profile]);
-  });
+  std::vector<uint32_t> tuMap;
+  tuMap.reserve(other.tus_.size());
+  for (const auto &tu : other.tus_)
+    tuMap.push_back(tuIdLocked(tu));
+  for (const Record &r : other.records_) {
+    Record &into = records_[recordLocked(r.function)];
+    into.sightings.reserve(into.sightings.size() + r.sightings.size());
+    for (const auto &[profile, tu] : r.sightings)
+      into.sightings.emplace_back(profileMap[profile], tuMap[tu]);
+  }
+}
+
+void IsaLeakFacts::capture(IsaLeakPayload &out) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  out.profiles = profiles_;
+  out.tus = tus_;
+  out.functions.clear();
+  out.functions.reserve(records_.size());
+  out.sightings.clear();
+  size_t n = 0;
+  for (const Record &r : records_)
+    n += r.sightings.size();
+  out.sightings.reserve(n);
+  for (const Record &r : records_) {
+    const auto function = static_cast<uint32_t>(out.functions.size());
+    out.functions.push_back(r.function);
+    for (const auto &[profile, tu] : r.sightings)
+      out.sightings.push_back({function, profile, tu});
+  }
+}
+
+void IsaLeakFacts::apply(const IsaLeakPayload &payload) {
+  if (payload.sightings.empty())
+    return;
+  std::vector<uint32_t> profileMap;
+  profileMap.reserve(payload.profiles.size());
+  for (const auto &p : payload.profiles)
+    profileMap.push_back(addProfile(p));
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<uint32_t> tuMap;
+  tuMap.reserve(payload.tus.size());
+  for (const auto &tu : payload.tus)
+    tuMap.push_back(tuIdLocked(tu));
+  // Records are interned lazily: a function no valid sighting names adds
+  // nothing.
+  constexpr uint32_t kUnmapped = ~0u;
+  std::vector<uint32_t> functionMap(payload.functions.size(), kUnmapped);
+  for (const IsaLeakSighting &s : payload.sightings) {
+    if (s.function >= functionMap.size() || s.profile >= profileMap.size() ||
+        s.tu >= tuMap.size())
+      continue; // a corrupt sighting: drop it
+    uint32_t &rec = functionMap[s.function];
+    if (rec == kUnmapped)
+      rec = recordLocked(payload.functions[s.function]);
+    records_[rec].sightings.emplace_back(profileMap[s.profile], tuMap[s.tu]);
+  }
 }
 
 void IsaLeakFacts::clear() {
@@ -286,6 +340,7 @@ public:
       return;
     // Node 0: the TU. Its edges are the roots.
     decl_.push_back(nullptr);
+    vars_.push_back(nullptr);
     bits_.push_back(0);
     edgeBegin_.push_back(0);
     cur_ = 0;
@@ -297,7 +352,10 @@ public:
     for (uint32_t i = 1; i < decl_.size(); ++i) {
       edgeBegin_.push_back(static_cast<uint32_t>(edgeDst_.size()));
       cur_ = i;
-      walkFunction(decl_[i]);
+      if (vars_[i])
+        walkVariable(vars_[i]);
+      else
+        walkFunction(decl_[i]);
       drain();
     }
     edgeBegin_.push_back(static_cast<uint32_t>(edgeDst_.size()));
@@ -325,8 +383,41 @@ private:
           !def->isInvalidDecl() && !def->isDependentContext()))
       def = nullptr;
     decl_.push_back(def);
+    vars_.push_back(nullptr);
     bits_.push_back(def && hasTargetAttr(def) ? uint32_t(kBodyTargetAttr) : 0u);
     return id;
+  }
+
+  // A global variable's dynamic initialization and destruction run in the
+  // TU's global initializer, not in the body that references it: the
+  // variable is a node of its own (no body, never folded) whose walk adds
+  // the functions they reference.
+  void reachVariable(const clang::VarDecl *vd) {
+    if (!vd->hasGlobalStorage() || vd->isStaticLocal() || vd->isTemplated())
+      return;
+    const clang::VarDecl *def = vd->getDefinition();
+    if (!def || def->isInvalidDecl())
+      return;
+    auto id = static_cast<uint32_t>(decl_.size());
+    auto [it, inserted] = varNode_.try_emplace(def->getCanonicalDecl(), id);
+    if (inserted) {
+      decl_.push_back(nullptr);
+      vars_.push_back(def);
+      bits_.push_back(0);
+    }
+    if (edgeDst_.size() > edgeBegin_.back() && edgeDst_.back() == it->second)
+      return;
+    edgeDst_.push_back(it->second);
+    edgeBits_.push_back(0);
+  }
+
+  void walkVariable(const clang::VarDecl *vd) {
+    // A constant initializer is emitted as data: nothing runs, nothing it
+    // names (a constexpr constructor, say) is emitted for it.
+    const clang::Expr *init = vd->getInit();
+    if (init && (init->isValueDependent() || !vd->evaluateValue()))
+      push(init);
+    destroy(vd->getType());
   }
 
   void addEdge(const clang::FunctionDecl *fd, uint8_t bits = kFold) {
@@ -357,16 +448,23 @@ private:
       addEdge(fd, 0);
   }
 
+  // ASTContext::DeclMustBeEmitted for variables: a variable another TU
+  // can need, or one whose initialization or destruction has side
+  // effects. Any other is emitted only where emitted code references it
+  // (reachVariable from the body walk).
   void rootVariable(const clang::VarDecl *vd) {
     if (!vd->hasGlobalStorage() || vd->isStaticLocal() ||
         vd->isTemplated() || vd->isInvalidDecl() ||
         vd->isThisDeclarationADefinition() != clang::VarDecl::Definition)
       return;
-    if (!emittedUnconditionally(ctx_.GetGVALinkageForVariable(vd)) &&
-        !vd->isUsed(false))
+    const clang::GVALinkage gva = ctx_.GetGVALinkageForVariable(vd);
+    if (gva == clang::GVA_AvailableExternally)
       return;
-    push(vd->getInit());
-    destroy(vd->getType());
+    const clang::Expr *init = vd->getInit();
+    if (!clang::isDiscardableGVALinkage(gva) || vd->needsDestruction(ctx_) ||
+        (init && init->HasSideEffects(ctx_) &&
+         (init->isValueDependent() || !vd->evaluateValue())))
+      reachVariable(vd);
   }
 
   // A dynamic class whose key function this TU defines emits its vtable
@@ -380,10 +478,19 @@ private:
       vtableMembers(rd);
   }
 
+  // Every slot of the class's vtables, its bases' included: the final
+  // overrider of each virtual function. Reached through the vtable, so
+  // never inlined into the referencing body.
   void vtableMembers(const clang::CXXRecordDecl *rd) {
-    for (const clang::CXXMethodDecl *md : rd->methods())
-      if (md->isVirtual() && !md->isPureVirtual())
-        addEdge(md, 0); // reached through the vtable, not inlined
+    if (!vtablesDone_.insert(rd->getCanonicalDecl()).second)
+      return;
+    clang::CXXFinalOverriderMap overriders;
+    rd->getFinalOverriders(overriders);
+    for (const auto &entry : overriders)
+      for (const auto &subobject : entry.second)
+        for (const clang::UniqueVirtualMethod &m : subobject.second)
+          if (m.Method && !m.Method->isPureVirtual())
+            addEdge(m.Method, 0);
   }
 
   void scan(const clang::DeclContext *dc) {
@@ -526,6 +633,24 @@ private:
     case clang::Builtin::BI__builtin_rotateleft64:
     case clang::Builtin::BI__builtin_rotateright32:
     case clang::Builtin::BI__builtin_rotateright64:
+    case clang::Builtin::BI__builtin_rotateleft8:
+    case clang::Builtin::BI__builtin_rotateleft16:
+    case clang::Builtin::BI__builtin_rotateright8:
+    case clang::Builtin::BI__builtin_rotateright16:
+    case clang::Builtin::BI__builtin_ffs:
+    case clang::Builtin::BI__builtin_ffsl:
+    case clang::Builtin::BI__builtin_ffsll:
+    case clang::Builtin::BI__builtin_parity:
+    case clang::Builtin::BI__builtin_parityl:
+    case clang::Builtin::BI__builtin_parityll:
+    case clang::Builtin::BI__builtin_clrsb:
+    case clang::Builtin::BI__builtin_clrsbl:
+    case clang::Builtin::BI__builtin_clrsbll:
+#if VYCOR_LLVM_AT_LEAST(19)
+    case clang::Builtin::BI__builtin_popcountg:
+    case clang::Builtin::BI__builtin_clzg:
+    case clang::Builtin::BI__builtin_ctzg:
+#endif
       bits_[cur_] |= kBodyBitBuiltin;
       return;
     case clang::Builtin::BImemcpy:
@@ -592,13 +717,19 @@ private:
       for (const clang::CXXBaseSpecifier &base : rd->bases())
         destroy(base.getType());
     }
+    // By-value parameters are destroyed by the callee only in ABIs that
+    // say so (Microsoft); in Itanium the caller destroys them, which the
+    // caller's walk sees as a bound temporary.
+    const bool calleeDestroys =
+        ctx_.getTargetInfo().getCXXABI().areArgsDestroyedLeftToRightInCallee();
     for (const clang::ParmVarDecl *param : def->parameters()) {
-      destroy(param->getType()); // callee-destroyed in some ABIs; harmless
+      if (calleeDestroys)
+        destroy(param->getType());
       if (param->getType()->isFloatingType())
-        bits_[cur_] |= kBodyFloat;
+        bits_[cur_] |= kBodyFloatMove;
     }
     if (def->getReturnType()->isFloatingType())
-      bits_[cur_] |= kBodyFloat;
+      bits_[cur_] |= kBodyFloatMove;
     push(def->getBody());
     drain();
   }
@@ -608,6 +739,20 @@ private:
       const clang::Stmt *s = stack_.pop_back_val();
       visit(s);
     }
+  }
+
+  // A call on an object whose dynamic type is its static type (a variable
+  // of class type, or a temporary): code generation calls the function
+  // directly, as CodeGen's CanDevirtualizeMemberFunctionCall does.
+  static bool completeObject(const clang::MemberExpr *member) {
+    if (member->isArrow())
+      return false;
+    const clang::Expr *base = member->getBase()->IgnoreParenImpCasts();
+    if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(base))
+      if (const auto *vd = llvm::dyn_cast<clang::VarDecl>(ref->getDecl()))
+        return !vd->getType()->isReferenceType();
+    return base->isPRValue() ||
+           llvm::isa<clang::MaterializeTemporaryExpr>(base);
   }
 
   bool constantFalse(const clang::Expr *cond) const {
@@ -639,10 +784,53 @@ private:
       break;
     case clang::Stmt::DeclStmtClass:
       for (const clang::Decl *d : llvm::cast<clang::DeclStmt>(s)->decls())
-        if (const auto *v = llvm::dyn_cast<clang::VarDecl>(d))
+        if (const auto *v = llvm::dyn_cast<clang::VarDecl>(d)) {
           if (v->hasLocalStorage())
             destroy(v->getType());
+          // A constexpr local's initializer is evaluated by the compiler.
+          if (!v->isConstexpr())
+            push(v->getInit());
+        }
+      return;
+    case clang::Stmt::IfStmtClass: {
+      const auto *ifs = llvm::cast<clang::IfStmt>(s);
+      if (ifs->isConsteval()) {
+        // if consteval: only the runtime branch is code.
+        push(ifs->isNegatedConsteval() ? ifs->getThen() : ifs->getElse());
+        return;
+      }
+      if (auto taken = ifs->getNondiscardedCase(ctx_)) {
+        // if constexpr: the discarded branch is never emitted.
+        push(ifs->getInit());
+        push(*taken);
+        return;
+      }
       break;
+    }
+    // Unevaluated operands and values the compiler computed: no code.
+    case clang::Stmt::UnaryExprOrTypeTraitExprClass:
+      if (llvm::cast<clang::UnaryExprOrTypeTraitExpr>(s)
+              ->getTypeOfArgument()
+              ->isVariablyModifiedType())
+        break; // sizeof a VLA is evaluated
+      return;
+    case clang::Stmt::CXXNoexceptExprClass:
+    case clang::Stmt::RequiresExprClass:
+      return;
+    case clang::Stmt::CXXTypeidExprClass:
+      if (!llvm::cast<clang::CXXTypeidExpr>(s)->isPotentiallyEvaluated())
+        return;
+      break;
+    case clang::Stmt::ConstantExprClass:
+      if (llvm::cast<clang::ConstantExpr>(s)->hasAPValueResult())
+        return;
+      break;
+    case clang::Stmt::GenericSelectionExprClass: {
+      const auto *gse = llvm::cast<clang::GenericSelectionExpr>(s);
+      if (!gse->isResultDependent())
+        push(gse->getResultExpr());
+      return;
+    }
     case clang::Stmt::LambdaExprClass: {
       // The closure's call operator is its own function, inlined where it
       // is called; only the captures are evaluated here.
@@ -668,14 +856,18 @@ private:
           (type->isVectorType() || type->isSizelessBuiltinType()))
         bits_[cur_] |= kBodyVector;
       // Any floating-point value, even one only loaded, passed or returned:
-      // with -mavx every scalar FP move is VEX-encoded.
+      // with -mavx every scalar FP move is VEX-encoded. FP flags change
+      // only arithmetic, comparisons and conversions (kBodyFloat).
       if (!type.isNull() && type->isFloatingType())
-        bits_[cur_] |= kBodyFloat;
+        bits_[cur_] |= kBodyFloatMove;
       if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(e)) {
         clang::QualType operand = bo->getLHS()->getType();
         if (operand->isFloatingType() ||
-            bo->getRHS()->getType()->isFloatingType())
-          bits_[cur_] |= kBodyFloat;
+            bo->getRHS()->getType()->isFloatingType()) {
+          if (bo->getOpcode() != clang::BO_Assign &&
+              bo->getOpcode() != clang::BO_Comma)
+            bits_[cur_] |= kBodyFloat;
+        }
         else if (signedArithmetic(bo->getOpcode()) &&
                  type->isSignedIntegerType())
           bits_[cur_] |= kBodySignedArith;
@@ -705,20 +897,27 @@ private:
                     llvm::dyn_cast<clang::CXXMethodDecl>(member->getMemberDecl()))
               if (md->isVirtual() && !member->hasQualifier() &&
                   !md->hasAttr<clang::FinalAttr>() &&
-                  !md->getParent()->hasAttr<clang::FinalAttr>()) {
+                  !md->getParent()->hasAttr<clang::FinalAttr>() &&
+                  !completeObject(member)) {
                 push(member->getBase());
                 for (const clang::Expr *arg : mc->arguments())
                   push(arg);
                 return;
               }
       } else if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(e)) {
-        if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(ref->getDecl()))
+        if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(ref->getDecl())) {
           if (!fd->getBuiltinID())
             addEdge(fd);
+        } else if (const auto *vd = llvm::dyn_cast<clang::VarDecl>(ref->getDecl())) {
+          reachVariable(vd);
+        }
       } else if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(e)) {
         if (const auto *md =
                 llvm::dyn_cast<clang::CXXMethodDecl>(member->getMemberDecl()))
           addEdge(md);
+        else if (const auto *vd =
+                     llvm::dyn_cast<clang::VarDecl>(member->getMemberDecl()))
+          reachVariable(vd); // a static data member named through an object
       } else if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructExpr>(e)) {
         construct(ctor->getConstructor());
       } else if (const auto *bind =
@@ -801,7 +1000,7 @@ private:
   bool reportable(const clang::FunctionDecl *def) const {
     if (def->isImplicit() || def->getCanonicalDecl()->isDefaulted() ||
         def->isConsteval() || def->hasAttr<clang::AlwaysInlineAttr>() ||
-        def->getParentFunctionOrMethod())
+        def->getParentFunctionOrMethod() || hasTargetAttr(def))
       return false;
     if (const auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(def))
       if (md->getParent()->isLambda())
@@ -839,7 +1038,7 @@ private:
   }
 
   void exportFacts(GlobalIndex &index) {
-    std::vector<EmittedFunctionEntry> out;
+    std::vector<EmittedFunction> out;
     std::string tu;
     if (auto mainFile = sm_.getFileEntryRefForID(sm_.getMainFileID()))
       tu = absoluteFileName(sm_, mainFile->getName());
@@ -847,7 +1046,7 @@ private:
       const clang::FunctionDecl *def = decl_[i];
       if (!def || !reportable(def))
         continue;
-      EmittedFunctionEntry e;
+      EmittedFunction e;
       if (!linkageName(def, e.linkageName))
         continue;
       {
@@ -877,16 +1076,12 @@ private:
       e.line = sm_.getExpansionLineNumber(loc);
       e.bodyBits = bits_[i];
       e.ownBits = own_[i];
-      e.tuPath = tu;
       out.push_back(std::move(e));
     }
     if (out.empty())
       return;
     IsaLeakFacts &facts = index.mutableIsaLeakFacts();
-    uint32_t profile = facts.addProfile(profileOf(ctx_));
-    for (auto &e : out)
-      e.profile = profile;
-    facts.addFunctions(std::move(out));
+    facts.addTu(tu, facts.addProfile(profileOf(ctx_)), std::move(out));
   }
 
   clang::ASTContext &ctx_;
@@ -896,6 +1091,9 @@ private:
   // Node table (struct of arrays), one slot per function this TU reaches.
   llvm::DenseMap<const clang::FunctionDecl *, uint32_t> nodeOf_;
   std::vector<const clang::FunctionDecl *> decl_; // the definition, if any
+  std::vector<const clang::VarDecl *> vars_; // set for a variable's node
+  llvm::DenseMap<const clang::VarDecl *, uint32_t> varNode_;
+  llvm::DenseSet<const clang::CXXRecordDecl *> vtablesDone_;
   std::vector<uint32_t> bits_;
   std::vector<uint32_t> own_; // bits_ before the fold
   // Edges in CSR form: node i's are [edgeBegin_[i], edgeBegin_[i + 1]).
@@ -971,8 +1169,9 @@ enum Relevance : unsigned {
 
 unsigned relevanceOf(uint32_t bits, unsigned facets) {
   unsigned r = 0;
-  if ((facets & kIsaLeakIsa) && !(bits & kBodyTargetAttr)) {
-    if (bits & (kBodyLoop | kBodyFloat | kBodyVector | kBodyBulkMemory))
+  if (facets & kIsaLeakIsa) {
+    if (bits & (kBodyLoop | kBodyFloat | kBodyFloatMove | kBodyVector |
+                kBodyBulkMemory))
       r |= kRelFeatureVector;
     if (bits & (kBodyBitBuiltin | kBodyLoop))
       r |= kRelFeatureBit;
@@ -980,7 +1179,7 @@ unsigned relevanceOf(uint32_t bits, unsigned facets) {
       r |= kRelAnyFeature;
   }
   if ((facets & kIsaLeakFp) && (bits & (kBodyFloat | kBodyVector)))
-    r |= kRelFp;
+    r |= kRelFp; // moving an FP value is the same under any FP flags
   if ((facets & kIsaLeakFp) && (bits & kBodyMathCall))
     r |= kRelFpMath;
   if ((facets & kIsaLeakEh) &&
@@ -1099,22 +1298,24 @@ std::string fpSpelling(const std::string &key, const std::string &value) {
   return key + "=" + value;
 }
 
+// What in the body the differing classes `rel` change, in words.
 std::string bodyPhrase(uint32_t bits, unsigned rel) {
   std::vector<const char *> parts;
-  if (rel & (kRelAnyFeature | kRelFp)) {
-    if (bits & kBodyLoop)
-      parts.push_back("a loop");
-    if (bits & kBodyFloat)
-      parts.push_back("floating-point arithmetic");
-    if (bits & kBodyVector)
-      parts.push_back("vector types");
-    if (bits & kBodyBulkMemory)
-      parts.push_back("memcpy/memset");
-    if (bits & kBodyBitBuiltin)
-      parts.push_back("bit-manipulation builtins");
-    if (bits & kBodyTargetBuiltin)
-      parts.push_back("target-specific builtins");
-  }
+  const bool vectorUnits = rel & kRelFeatureVector;
+  if ((vectorUnits || (rel & kRelFeatureBit)) && (bits & kBodyLoop))
+    parts.push_back("a loop");
+  if ((vectorUnits || (rel & kRelFp)) && (bits & kBodyFloat))
+    parts.push_back("floating-point arithmetic");
+  else if (vectorUnits && (bits & kBodyFloatMove))
+    parts.push_back("floating-point values");
+  if ((vectorUnits || (rel & kRelFp)) && (bits & kBodyVector))
+    parts.push_back("vector types");
+  if (vectorUnits && (bits & kBodyBulkMemory))
+    parts.push_back("memcpy/memset");
+  if ((rel & kRelFeatureBit) && (bits & kBodyBitBuiltin))
+    parts.push_back("bit-manipulation builtins");
+  if ((rel & kRelAnyFeature) && (bits & kBodyTargetBuiltin))
+    parts.push_back("target-specific builtins");
   if ((rel & kRelFpMath) && (bits & kBodyMathCall))
     parts.push_back("math-library calls");
   if (rel & kRelEh) {
@@ -1151,13 +1352,18 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
     return;
 
   // Triples partition the comparison: two targets are two link units.
+  // Ids follow the triple's spelling, so findings come out in the same
+  // order whatever order the profiles were interned in.
   std::vector<uint32_t> tripleOf(profiles.size());
   {
     std::map<std::string, uint32_t> ids;
+    for (const auto &p : profiles)
+      ids.emplace(p.triple, 0);
+    uint32_t next = 0;
+    for (auto &kv : ids)
+      kv.second = next++;
     for (size_t i = 0; i < profiles.size(); ++i)
-      tripleOf[i] = ids.try_emplace(profiles[i].triple,
-                                    static_cast<uint32_t>(ids.size()))
-                        .first->second;
+      tripleOf[i] = ids[profiles[i].triple];
   }
 
   // (profile, relevance) -> projection id, computed once per pair.
@@ -1183,22 +1389,23 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
   for (uint32_t i = 0; i < order.size(); ++i)
     order[i] = i;
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
-    return std::tie(records[a].filePath, records[a].line,
-                    records[a].linkageName) <
-           std::tie(records[b].filePath, records[b].line,
-                    records[b].linkageName);
+    const EmittedFunction &fa = records[a].function;
+    const EmittedFunction &fb = records[b].function;
+    return std::tie(fa.filePath, fa.line, fa.linkageName) <
+           std::tie(fb.filePath, fb.line, fb.linkageName);
   });
 
   // (triple, projection, TU) per sighting; reused across records.
   std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> seen;
   std::vector<Group> groups;
   for (uint32_t ri : order) {
-    const IsaLeakFacts::Record &rec = records[ri];
+    const IsaLeakFacts::Record &entry = records[ri];
+    const EmittedFunction &rec = entry.function;
     const unsigned rel = relevanceOf(rec.bodyBits, facets);
-    if (!rel || rec.sightings.size() < 2)
+    if (!rel || entry.sightings.size() < 2)
       continue;
     seen.clear();
-    for (const auto &[profile, tu] : rec.sightings)
+    for (const auto &[profile, tu] : entry.sightings)
       seen.emplace_back(tripleOf[profile], projectionFor(profile, rel), tu);
     std::sort(seen.begin(), seen.end());
     seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
@@ -1269,6 +1476,7 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
             }
 
       std::string groupsText;
+      unsigned featureDiff = 0; // the feature classes that differ
       for (size_t gi = 0; gi < groups.size(); ++gi) {
         const Group &g = groups[gi];
         const Projection &p = projections[g.projection];
@@ -1278,6 +1486,8 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
           std::set_difference(p.features.begin(), p.features.end(),
                               common.begin(), common.end(),
                               std::back_inserter(extra));
+          for (const std::string &f : extra)
+            featureDiff |= classifyFeature(f);
           if (extra.empty()) {
             desc.push_back("no extra target features");
           } else {
@@ -1323,10 +1533,10 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
       }
 
       unsigned differing = 0;
-      if (isaDiffers)
-        differing |= kRelAnyFeature & rel;
-      if (fpDiffers)
-        differing |= kRelFp | (kRelFpMath & rel);
+      differing |= featureDiff & rel;
+      for (const std::string &k : fpDifferingKeys)
+        differing |= (k == "errno" || k == "afn") ? kRelFpMath : kRelFp;
+      differing &= rel | ~(kRelFp | kRelFpMath);
       if (ehDiffers)
         differing |= kRelEh;
       if (ovfDiffers)
@@ -1379,7 +1589,7 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
       diag.resolvedDecl = rec.qualifiedName;
       // The triple of this partition, from any of its sightings.
       diag.entities = {rec.linkageName, std::string()};
-      for (const auto &[profile, tu] : rec.sightings)
+      for (const auto &[profile, tu] : entry.sightings)
         if (tripleOf[profile] == triple) {
           diag.entities[1] = profiles[profile].triple;
           break;
