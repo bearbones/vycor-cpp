@@ -109,11 +109,20 @@ std::string effectLookupName(llvm::StringRef displayName) {
 }
 
 bool isPlacementNewUsr(llvm::StringRef usr) {
-  // "c:@F@operator new#<size>#<param>#...": each parameter type is
-  // followed by '#'.
-  if (!usr.consume_front("c:@F@operator new"))
+  // "c:[<file>]@F@operator new[[]][<template args>]#<size>#<param>#...":
+  // each parameter type is followed by '#'. <file> is there when a
+  // parameter type has internal linkage; a class's own operator has its
+  // scope ("@S@Pool") before "@F@" and is not a global one.
+  if (!usr.consume_front("c:"))
+    return false;
+  usr = usr.substr(usr.find('@'));
+  if (!usr.consume_front("@F@operator new"))
     return false;
   usr.consume_front("[]");
+  // A function template is never a replaceable allocation function, so an
+  // instantiation of one (`operator new<...>`) is a placement form.
+  if (usr.starts_with("<"))
+    return true;
   if (!usr.consume_front("#"))
     return false;
   size_t sizeEnd = usr.find('#');

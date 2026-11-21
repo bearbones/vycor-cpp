@@ -39,13 +39,17 @@ namespace vycor {
 // System path heuristic for analyze_dead_code filtering
 // ============================================================================
 
+// A function the compiler declares (the global `operator new` and
+// `operator delete`) sits at "<unknown>", line 0, and has no source to
+// delete. The line matters: a function whose name a macro pastes together
+// also reads "<unknown>" but has a line, and is the user's.
+static bool isCompilerDeclared(const CallGraphNode &node) {
+  return node.line == 0 && llvm::StringRef(node.file).starts_with("<");
+}
+
 static bool isSystemPath(llvm::StringRef path) {
   if (path.empty())
     return false;
-  // "<unknown>", "<built-in>": a function the compiler declares (the global
-  // `operator new` and `operator delete`) has no source to delete.
-  if (path.starts_with("<"))
-    return true;
   static constexpr llvm::StringLiteral prefixes[] = {
       "/usr/include/",       "/usr/lib/",
       "/usr/local/include/", "/usr/local/lib/",
@@ -159,7 +163,8 @@ static llvm::json::Value handleAnalyzeDeadCode(const llvm::json::Object &args,
 
   auto passesFilter = [&](const CallGraphNode *node,
                           const std::string &name) {
-    if (!includeSystem && node && isSystemPath(node->file))
+    if (!includeSystem && node &&
+        (isSystemPath(node->file) || isCompilerDeclared(*node)))
       return false;
     if (!namePrefix.empty() && !llvm::StringRef(name).starts_with(namePrefix))
       return false;

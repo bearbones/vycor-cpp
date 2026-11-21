@@ -197,12 +197,16 @@ Proven `VirtualDispatch` edges (concrete type known) are never expanded.
 **Allocation edges**: a new-expression and a delete-expression each add
 a `DirectCall` edge to the allocation or deallocation function overload
 resolution selected (`operator new`, `operator new[]`, a placement
-overload, a class's own), at the expression. `Proven`, except a `delete`
-through a virtual destructor, where the function is the dynamic type's
-and the edge is `Plausible`. A type-dependent `new` in a template's
-definition resolves nothing and adds no edge. The global `operator new`
-and `operator delete` nodes are the compiler's implicit declarations
-(file `<unknown>`, line 0) whether or not a TU includes `<new>`.
+overload, a class's own), at the expression. `Proven`, except a plain
+`delete p` through a virtual destructor, where the function is the
+dynamic type's and the edge is `Plausible` (`delete[]`, `::delete` and a
+destroying `operator delete` stay `Proven`). A type-dependent `new` in a
+template's definition resolves nothing and adds no edge. The global
+`operator new` / `operator delete` forms the compiler declares on its own
+have one node at that implicit declaration (file `<unknown>`, line 0),
+whether or not a TU includes `<new>` and even where a program defines a
+replacement; the forms only `<new>` declares (`nothrow`, placement) sit
+in that header.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)

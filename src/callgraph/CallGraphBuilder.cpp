@@ -486,6 +486,18 @@ Ident CallGraphEdgeVisitor::getCurrentFunction() const {
   return usrs_.identFor(top);
 }
 
+static bool isAllocationOperator(const clang::FunctionDecl *decl) {
+  switch (decl->getOverloadedOperator()) {
+  case clang::OO_New:
+  case clang::OO_Array_New:
+  case clang::OO_Delete:
+  case clang::OO_Array_Delete:
+    return true;
+  default:
+    return false;
+  }
+}
+
 Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
   Ident id = usrs_.identFor(decl);
   // The indexer never visits implicit members, and RecursiveASTVisitor
@@ -495,14 +507,16 @@ Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
   // here so the display-name index can resolve its edges. Redundant
   // registration is a no-op (addNode unions).
   //
-  // A function the compiler declares before any header does (the global
-  // `operator new` and `operator delete`) is implicit only in its first
-  // declaration; once <new> redeclares it, lookup finds the redeclaration,
-  // which the indexer skipped as one. The node is then the implicit
-  // declaration's, so it reads the same in a TU that includes <new> and
-  // one that does not.
-  const clang::FunctionDecl *first = decl->getFirstDecl();
-  const clang::FunctionDecl *where = first->isImplicit() ? first : decl;
+  // The global `operator new` and `operator delete` the compiler declares
+  // before any header does are implicit only in that first declaration;
+  // once <new> redeclares one, lookup finds the redeclaration, which the
+  // indexer skipped as one. The node is then the implicit declaration's
+  // (`<unknown>`, line 0), so it reads the same in a TU that includes
+  // <new> and one that does not. Only these operators: a C library builtin
+  // is implicit in its first declaration too, and stays without a node.
+  const clang::FunctionDecl *where = decl;
+  if (isAllocationOperator(decl) && decl->getFirstDecl()->isImplicit())
+    where = decl->getFirstDecl();
   if ((where->isImplicit() ||
        decl->getTemplateSpecializationKind() != clang::TSK_Undeclared) &&
       auxNodes_.insert(decl).second) {
@@ -865,19 +879,25 @@ bool CallGraphEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
 }
 
 // `delete p` calls the destructor (not recorded: #113) and then the
-// deallocation function. With a virtual destructor the function is the one
-// looked up at the *dynamic* type's destructor, so the statically resolved
-// one is the likely callee rather than the certain one.
+// deallocation function. When the destructor is virtual, a plain `delete p`
+// uses the function looked up at the *dynamic* type's destructor, so the
+// statically resolved one is the likely callee rather than the certain
+// one. The other forms are settled at compile time: `delete[] p` (the
+// static and dynamic types must agree), `::delete p` (the global function,
+// whatever the class declares) and a destroying `operator delete` (called
+// in place of the destructor, never through it).
 bool CallGraphEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
+  const clang::FunctionDecl *fn = expr->getOperatorDelete();
   Confidence confidence = Confidence::Proven;
   clang::QualType destroyed = expr->getDestroyedType();
-  if (!destroyed.isNull())
+  if (fn && !expr->isArrayForm() && !expr->isGlobalDelete() &&
+      !fn->isDestroyingOperatorDelete() && !destroyed.isNull())
     if (const clang::CXXRecordDecl *record = destroyed->getAsCXXRecordDecl())
       if (record->hasDefinition())
         if (const clang::CXXDestructorDecl *dtor = record->getDestructor())
           if (dtor->isVirtual())
             confidence = Confidence::Plausible;
-  addAllocationEdge(expr->getOperatorDelete(), expr->getBeginLoc(), confidence);
+  addAllocationEdge(fn, expr->getBeginLoc(), confidence);
   return true;
 }
 

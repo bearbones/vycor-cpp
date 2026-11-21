@@ -244,6 +244,10 @@ before `main` at all.
   under, so a header reached as `inc/h.hpp` from one TU and
   `../lib/inc/h.hpp` from another holds two lambdas, and an initializer
   in that header reaches both.
+- **Default member initializers are not edges.** `struct S { int *p =
+  new int(3); S(); };` runs the `new` in whichever constructor leaves
+  `p` out of its initializer list, and the call graph records it from
+  none of them (#120). The same holds for a plain call written there.
 - **Compiler-generated constructors are looked through** to the member
   and base constructors they run; they are not counted as functions.
   That covers defaulted constructors and constructors inherited with

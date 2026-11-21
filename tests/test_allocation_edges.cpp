@@ -49,10 +49,11 @@ void *operator new(size_t, std::align_val_t);
 struct Widget { Widget(); ~Widget(); int x; };
 )";
 
-void build(CallGraph &graph, const std::string &code) {
+void build(CallGraph &graph, const std::string &code,
+           const char *standard = "-std=c++17") {
   CallGraphBuilderFactory factory(graph);
   REQUIRE(clang::tooling::runToolOnCodeWithArgs(
-      factory.create(), std::string(kPrelude) + code, {"-std=c++17"},
+      factory.create(), std::string(kPrelude) + code, {standard},
       "test.cpp"));
 }
 
@@ -200,6 +201,60 @@ TEST_CASE("a delete-expression is a call of its deallocation function",
         Confidence::Plausible);
 }
 
+TEST_CASE("only a plain delete through a virtual destructor is uncertain",
+          "[callgraph][builder][allocation]") {
+  // The forms that settle the deallocation function at compile time even
+  // when the destructor is virtual.
+  CallGraph graph;
+  build(graph, R"(
+    namespace std {
+    struct destroying_delete_t { explicit destroying_delete_t() = default; };
+    }
+    struct Poly { virtual ~Poly(); };
+    struct Dest {
+      virtual ~Dest();
+      static void operator delete(Dest *, std::destroying_delete_t);
+    };
+    void dropPolyArray(Poly *p) { delete[] p; }
+    void dropPolyGlobal(Poly *p) { ::delete p; }
+    void dropDest(Dest *d) { delete d; }
+  )",
+        "-std=c++20");
+
+  CHECK(only(graph, "dropPolyArray", "operator delete[]").confidence ==
+        Confidence::Proven);
+  CHECK(only(graph, "dropPolyGlobal", "operator delete").confidence ==
+        Confidence::Proven);
+  CHECK(only(graph, "dropDest", "Dest::operator delete").confidence ==
+        Confidence::Proven);
+}
+
+TEST_CASE("a program's own placement overloads are not the allocation "
+          "function",
+          "[callgraph][builder][allocation]") {
+  // Two shapes whose identity is not the plain `c:@F@operator new#...`: a
+  // parameter type with internal linkage, and a function template.
+  CallGraph graph;
+  build(graph, R"(
+    namespace { struct Arena { char buf[64]; }; Arena arena; }
+    void *operator new(size_t, Arena &a) noexcept { return a.buf; }
+    struct Bump { char buf[64]; };
+    template <class A> void *operator new(size_t, A *a) noexcept;
+    int *viaArena() { return new (arena) int(1); }
+    int *viaBump(Bump *b) { return new (b) int(2); }
+    int *viaHeap() { return new int(3); }
+  )");
+
+  CallGraphEdge arena = only(graph, "viaArena", "operator new");
+  CallGraphEdge bump = only(graph, "viaBump", "operator new");
+  CallGraphEdge heap = only(graph, "viaHeap", "operator new");
+  CHECK(arena.calleeUsr != heap.calleeUsr);
+  CHECK(bump.calleeUsr != heap.calleeUsr);
+  CHECK_FALSE(allocates(arena));
+  CHECK_FALSE(allocates(bump));
+  CHECK(allocates(heap));
+}
+
 TEST_CASE("allocation edges belong to the function that evaluates the "
           "expression",
           "[callgraph][builder][allocation]") {
@@ -294,7 +349,14 @@ TEST_CASE("placement operator new is told apart by its parameters",
   CHECK(isPlacementNewUsr(
       "c:@F@operator new#l#$@N@std@E@align_val_t#&$@S@Arena#"));
 
+  // With a file prefix (a parameter type of internal linkage), and as an
+  // instantiation of a function template, which is never replaceable.
+  CHECK(isPlacementNewUsr("c:a.cpp@F@operator new#l#&$@aN@S@Arena#"));
+  CHECK(isPlacementNewUsr("c:@F@operator new<#$@S@Bump>#l#*S0_#"));
+
   // Not a global operator new at all.
+  CHECK_FALSE(isPlacementNewUsr("c:a.cpp@aN@S@Pooled@F@operator new#l#S"));
+  CHECK_FALSE(isPlacementNewUsr("c:"));
   CHECK_FALSE(isPlacementNewUsr("c:@S@Pooled@F@operator new#l#*v#S"));
   CHECK_FALSE(isPlacementNewUsr("c:@F@operator delete#*v#"));
   CHECK_FALSE(isPlacementNewUsr("c:@F@operator newish#l#*v#"));
