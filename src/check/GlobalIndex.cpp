@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <string_view>
+#include <tuple>
 
 namespace vycor {
 
@@ -204,6 +205,9 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
         [&](const NoexceptFactEntry &e) { facts.push_back(e); });
     addNoexceptFacts(std::move(facts));
   }
+  if (shard.exceptionBoundaryCount() > 0)
+    addExceptionBoundaries(std::vector<ExceptionBoundaryEntry>(
+        shard.exceptionBoundaries_.begin(), shard.exceptionBoundaries_.end()));
   shard.forEachSpecialization(
       [this](const SpecializationEntry &e) { addSpecialization(e); });
   shard.forEachDefaultArg(
@@ -435,8 +439,10 @@ std::string noexceptFactKey(const NoexceptFactEntry &e) {
 // Union of two sorted callee lists, bits OR-ed. Only reached when two
 // sightings of one definition disagree (a preprocessor-dependent body), so
 // the merged vectors are built fresh.
-void mergeNoexceptCallees(NoexceptFactEntry &into,
-                          const NoexceptFactEntry &from) {
+// Facts and boundary entries both carry a sorted callee list with one
+// bit set per callee.
+template <typename Entry>
+void mergeNoexceptCallees(Entry &into, const Entry &from) {
   std::vector<std::string> names;
   std::vector<uint8_t> bits;
   names.reserve(into.callees.size() + from.callees.size());
@@ -462,7 +468,7 @@ void mergeNoexceptCallees(NoexceptFactEntry &into,
   into.calleeBits = std::move(bits);
 }
 
-void normalizeNoexceptCallees(NoexceptFactEntry &e) {
+template <typename Entry> void normalizeNoexceptCallees(Entry &e) {
   e.calleeBits.resize(e.callees.size(),
                       NoexceptFactEntry::AllCalleeBits);
   if (std::adjacent_find(e.callees.begin(), e.callees.end(),
@@ -512,6 +518,18 @@ void GlobalIndex::addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries) {
     // another TU. Nothing to merge beyond the flags.
     auto &existing = noexceptFacts_[it->second];
     existing.flags |= entry.flags;
+    // Sightings arrive in TU completion order: the smaller site wins, so
+    // the merged fact does not depend on it.
+    const unsigned rankNew = NoexceptFactEntry::reasonRank(entry.reasons);
+    const unsigned rankOld = NoexceptFactEntry::reasonRank(existing.reasons);
+    if (rankNew < rankOld ||
+        (rankNew == rankOld && rankNew < 8 &&
+         std::tie(entry.reasonSite, entry.reasonFunction) <
+             std::tie(existing.reasonSite, existing.reasonFunction))) {
+      existing.reasonSite = std::move(entry.reasonSite);
+      existing.reasonFunction = std::move(entry.reasonFunction);
+    }
+    existing.reasons |= entry.reasons;
     if (existing.callees != entry.callees)
       mergeNoexceptCallees(existing, entry);
     else
@@ -527,6 +545,60 @@ void GlobalIndex::addNoexceptFact(NoexceptFactEntry entry) {
 }
 
 size_t GlobalIndex::noexceptFactCount() const { return noexceptFacts_.size(); }
+
+void GlobalIndex::addExceptionBoundaries(
+    std::vector<ExceptionBoundaryEntry> &&entries) {
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  for (auto &entry : entries) {
+    std::string key;
+    key.reserve(entry.target.size() + entry.apiSite.size() + 4);
+    key += static_cast<char>('0' + entry.kind);
+    key += entry.target;
+    key += '\n';
+    key += entry.apiSite;
+    normalizeNoexceptCallees(entry);
+    auto [it, inserted] = exceptionBoundaryKeys_.try_emplace(
+        std::move(key), exceptionBoundaries_.size());
+    if (inserted) {
+      exceptionBoundaries_.push_back(std::move(entry));
+      continue;
+    }
+    // The same hand-over seen from another TU, whose view of the code it
+    // folds in place may differ: merged as facts are, so the result does
+    // not depend on which TU finished first.
+    auto &existing = exceptionBoundaries_[it->second];
+    if (std::tie(entry.qualifiedName, entry.filePath, entry.line,
+                 entry.column, entry.api, entry.receiver) <
+        std::tie(existing.qualifiedName, existing.filePath, existing.line,
+                 existing.column, existing.api, existing.receiver)) {
+      existing.qualifiedName = std::move(entry.qualifiedName);
+      existing.filePath = std::move(entry.filePath);
+      existing.line = entry.line;
+      existing.column = entry.column;
+      existing.api = std::move(entry.api);
+      existing.receiver = std::move(entry.receiver);
+    }
+    const unsigned rankNew = NoexceptFactEntry::reasonRank(entry.reasons);
+    const unsigned rankOld = NoexceptFactEntry::reasonRank(existing.reasons);
+    if (rankNew < rankOld ||
+        (rankNew == rankOld &&
+         std::tie(entry.reasonSite, entry.reasonFunction) <
+             std::tie(existing.reasonSite, existing.reasonFunction))) {
+      existing.reasonSite = std::move(entry.reasonSite);
+      existing.reasonFunction = std::move(entry.reasonFunction);
+    }
+    existing.reasons |= entry.reasons;
+    if (existing.callees != entry.callees)
+      mergeNoexceptCallees(existing, entry);
+    else
+      for (size_t i = 0; i < existing.calleeBits.size(); ++i)
+        existing.calleeBits[i] |= entry.calleeBits[i];
+  }
+}
+
+size_t GlobalIndex::exceptionBoundaryCount() const {
+  return exceptionBoundaries_.size();
+}
 
 std::vector<const FunctionOverloadEntry *>
 GlobalIndex::findOverloads(const std::string &qualifiedName) const {

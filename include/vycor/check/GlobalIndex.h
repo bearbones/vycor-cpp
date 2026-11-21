@@ -342,7 +342,40 @@ struct NoexceptFactEntry {
     // instantiation, a replaceable allocation function, a consteval
     // function, a definition in a C translation unit.
     NotReportable = 1u << 7,
+    // exception-boundary-escape: a C++ definition with C language linkage
+    // compiled with exceptions on, so C code can call it and nothing
+    // there expects an exception.
+    ExternC = 1u << 8,
+    // The TU that compiled the definition had exception handling off (a C
+    // TU without -fexceptions, or -fno-exceptions): its frames run no
+    // cleanups and are marked as never unwinding. Both bits on one
+    // function mean its sightings disagree.
+    CompiledWithoutExceptions = 1u << 9,
+    CompiledWithExceptions = 1u << 10,
   };
+  // exception-boundary-escape: what the body itself (and the bodies folded
+  // into it) can raise, without following a call to another fact. "Bare"
+  // means no try encloses it; "typed" that every enclosing try has only
+  // typed handlers. Anything a catch (...) encloses is not recorded.
+  enum Reason : uint8_t {
+    ThrowBare = 1u << 0,      // a throw expression in project code
+    LibraryThrowBare = 1u << 1, // a throw in a system-header body, or a
+                                // call to a standard library throw helper
+    ThrowTyped = 1u << 2,     // either kind of throw, under a typed try
+    DynamicBare = 1u << 3,    // a virtual or indirect call that may throw
+    OtherBare = 1u << 4,      // anything else the walk does not model
+    AllocBare = 1u << 5,      // a throwing operator new (std::bad_alloc)
+    OpaqueTyped = 1u << 6,    // dynamic or other under a typed try
+    AllocTyped = 1u << 7,     // a throwing operator new under a typed try
+  };
+  // The bits are in order of how much they tell: the lowest set one is
+  // the reason a site is reported for. 8 when none is set.
+  static constexpr unsigned reasonRank(uint8_t reasons) {
+    for (unsigned i = 0; i < 8; ++i)
+      if (reasons & (1u << i))
+        return i;
+    return 8;
+  }
   enum CalleeBit : uint8_t {
     // A proof obligation: an unguarded call (direct, or through functions
     // folded into this one) to a function not declared non-throwing.
@@ -354,8 +387,12 @@ struct NoexceptFactEntry {
     // which definition the call reaches is known only if every TU of the
     // build was indexed.
     Elsewhere = 1u << 2,
+    // At least one of the Exit calls is enclosed by no try at all. Exit
+    // without Bare: every such call is in a try whose handlers are all
+    // typed. exception-boundary-escape only.
+    Bare = 1u << 3,
     // What a callee recorded without bits is taken to be.
-    AllCalleeBits = Exit | Call | Elsewhere,
+    AllCalleeBits = Exit | Call | Elsewhere | Bare,
   };
   std::string usr;
   std::string qualifiedName;
@@ -363,7 +400,47 @@ struct NoexceptFactEntry {
   unsigned line = 0;
   unsigned column = 0;
   uint32_t flags = 0;
+  // Reason bits, and where the most telling one is: "file:line", and the
+  // function folded into this one that holds it (empty: its own body).
+  uint8_t reasons = 0;
+  std::string reasonSite;
+  std::string reasonFunction;
   // Sorted by USR, no duplicates; calleeBits is parallel to it.
+  std::vector<std::string> callees;
+  std::vector<uint8_t> calleeBits;
+};
+
+// exception-boundary-escape: a function handed to something that runs it
+// where an exception must not arrive — a new thread, or a C function that
+// takes a function pointer — found where it is handed over. What the
+// function can raise is summarized the way NoexceptFactEntry summarizes a
+// definition, so the search can continue through the facts.
+struct ExceptionBoundaryEntry {
+  enum Kind : uint8_t {
+    ThreadEntry = 0, // std::thread, std::jthread, pthread_create, thrd_create
+    CCallback = 1,   // a C-linkage function's function-pointer parameter,
+                     // or a function-pointer field of a C struct
+  };
+  uint8_t kind = ThreadEntry;
+  // Identity of the boundary function: its fact key when it has one, else
+  // its USR (a lambda's call operator, a template instantiation).
+  std::string target;
+  std::string qualifiedName;
+  std::string filePath; // where the boundary function is defined
+  unsigned line = 0;
+  unsigned column = 0;
+  // What it is handed to ("std::thread", "qsort", "S::callback") and
+  // where ("file:line:col").
+  std::string api;
+  std::string apiSite;
+  // Fact key of the C function a callback is passed to; empty for a
+  // thread or a struct field.
+  std::string receiver;
+  // As in NoexceptFactEntry. A target with a fact of its own has no
+  // reasons and one callee, itself.
+  uint8_t reasons = 0;
+  std::string reasonSite;
+  std::string reasonFunction;
   std::vector<std::string> callees;
   std::vector<uint8_t> calleeBits;
 };
@@ -497,6 +574,9 @@ public:
   // proof. One lock for the whole batch (a TU contributes thousands).
   void addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries);
   void addNoexceptFact(NoexceptFactEntry entry);
+  // exception-boundary-escape hand-over sites; identical sightings (one
+  // header seen by several TUs) dedup at insert.
+  void addExceptionBoundaries(std::vector<ExceptionBoundaryEntry> &&entries);
   // isa-leak facts (check/IsaLeak.h): their own store, own lock.
   IsaLeakFacts &mutableIsaLeakFacts() { return isaLeak_; }
   const IsaLeakFacts &isaLeakFacts() const { return isaLeak_; }
@@ -540,6 +620,7 @@ public:
   size_t odrEntryCount() const;
   size_t abiLayoutCount() const;
   size_t noexceptFactCount() const;
+  size_t exceptionBoundaryCount() const;
   size_t specializationCount() const;
   size_t defaultArgCount() const;
   size_t staticInitCount() const;
@@ -577,6 +658,10 @@ public:
   }
   template <typename Fn> void forEachNoexceptFact(Fn fn) const {
     for (const auto &entry : noexceptFacts_)
+      fn(entry);
+  }
+  template <typename Fn> void forEachExceptionBoundary(Fn fn) const {
+    for (const auto &entry : exceptionBoundaries_)
       fn(entry);
   }
   template <typename Fn> void forEachOdrEntry(Fn fn) const {
@@ -629,6 +714,8 @@ private:
   std::unordered_set<std::string> abiLayoutKeys_;
   std::vector<NoexceptFactEntry> noexceptFacts_;
   std::unordered_map<std::string, size_t> noexceptFactByKey_;
+  std::vector<ExceptionBoundaryEntry> exceptionBoundaries_;
+  std::unordered_map<std::string, size_t> exceptionBoundaryKeys_;
   IsaLeakFacts isaLeak_;
   std::vector<OdrEntry> odrEntries_;
   std::unordered_map<std::string, size_t> odrByKey_; // full-identity dedup keys

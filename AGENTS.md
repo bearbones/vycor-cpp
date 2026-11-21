@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v15 is current).
+and worker shards (since journal/shard format v2; v16 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -184,6 +184,25 @@ SARIF `properties.order`. Enabling it turns the `--checkpoint` journal off
 for the run (stderr says so). Proof
 rules, assumptions and what is withheld: `docs/checks/noexcept-candidate.md`;
 tests in `tests/test_check_noexcept_candidate.cpp`.
+
+`exception-boundary-escape` (off, `noisy`) reports thread entries
+(`std::thread`/`std::jthread`, also emplaced into a standard container,
+`pthread_create`, `thrd_create`), callbacks handed to C (a C-linkage
+callee's function-pointer parameter, a C struct's function-pointer
+field), `extern "C"` definitions, and frames compiled without exceptions
+that an exception can reach, when they are not declared `noexcept`
+(those are `exception-escape`'s). It runs on the noexcept-candidate
+facts, which carry, besides the proof's data, leaf reasons with a site
+(`NoexceptFactEntry::Reason`), a `Bare` callee bit (no `try` at all,
+versus only typed handlers), the C-linkage and exception-mode flags,
+and the hand-over sites (`ExceptionBoundaryEntry`, collected in the same
+body walk). Phase 1.5 (`check/ExceptionBoundary.cpp`) builds the shared
+graph (`check/NoexceptGraph.h`, also noexcept-candidate's) and runs one
+reverse BFS per witness class (`proven`, `library`, `typed-handlers`,
+`unknown`); proven findings are warnings, the rest notes, ranked. A
+clean boundary is only counted, never claimed, and the count is a proof
+only over a clean index. Reference: `docs/checks/exception-boundary-escape.md`;
+tests in `tests/test_check_exception_boundary.cpp`.
 
 `isa-leak` reports vague-linkage functions emitted by TUs whose compile
 commands disagree on code generation (target features, FP semantics,

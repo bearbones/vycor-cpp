@@ -120,9 +120,18 @@ struct AnalysisOptions {
   bool enableNoexceptCandidateDiag = false;        // non-virtual, non-move
   bool enableNoexceptCandidateMoveDiag = false;    // move ctor / assignment
   bool enableNoexceptCandidateVirtualDiag = false; // virtual functions
-  bool collectNoexceptFacts() const {
+  bool enableNoexceptCandidates() const {
     return enableNoexceptCandidateDiag || enableNoexceptCandidateMoveDiag ||
            enableNoexceptCandidateVirtualDiag;
+  }
+
+  // exception-boundary-escape: exceptions that can reach a thread entry,
+  // a callback handed to C, an extern "C" definition, or a frame compiled
+  // without exceptions. Runs over the noexcept-candidate facts, so it
+  // turns their collection on too. Off by default (noisy).
+  bool enableExceptionBoundaryDiag = false;
+  bool collectNoexceptFacts() const {
+    return enableNoexceptCandidates() || enableExceptionBoundaryDiag;
   }
 
   // Emit ADL_SameScore diagnostics when an invisible candidate ties the
@@ -411,6 +420,42 @@ void analyzeNoexceptCandidates(const GlobalIndex &index,
                                const NoexceptCandidateOptions &options,
                                std::vector<Diagnostic> &diagnostics,
                                NoexceptCandidateStats *stats = nullptr);
+
+// exception-boundary-escape (docs/checks/exception-boundary-escape.md).
+struct ExceptionBoundaryOptions {
+  // Every TU of the run was indexed without an error. When false, "no
+  // escape found" for a boundary is not a proof, and a callee with no
+  // indexed definition may be defined in a TU that is missing.
+  bool coverageComplete = true;
+};
+
+// Boundary functions are counted once per (kind, function); each lands in
+// exactly one of the witness classes or in `clean`.
+struct ExceptionBoundaryStats {
+  size_t boundaries = 0;
+  size_t proven = 0;  // a project throw on a path with no try at all
+  size_t library = 0; // only a standard library throw on such a path
+  size_t typed = 0;   // only paths through a try with typed handlers
+  size_t unknown = 0; // only an unresolved call or undefined callee
+  size_t clean = 0;   // no path to anything that can throw
+  // Callbacks handed to a C-linkage function that a C++ TU defines with
+  // exceptions on: not a boundary (that function's own extern "C"
+  // definition is).
+  size_t cppReceivers = 0;
+  size_t reported = 0;
+};
+
+// exception-boundary-escape (index-only, phase 1.5): for every place an
+// exception must not arrive and that is not declared non-throwing (a
+// thread's initial function, a function handed to C as a callback, an
+// extern "C" definition, a frame compiled without exceptions), the
+// shortest call path over the noexcept-candidate facts to what can throw,
+// classed by how sure the witness is. Diagnostics carry a rank (proven
+// witnesses first); only proven ones are warnings, the rest notes.
+void analyzeExceptionBoundaries(const GlobalIndex &index,
+                                const ExceptionBoundaryOptions &options,
+                                std::vector<Diagnostic> &diagnostics,
+                                ExceptionBoundaryStats *stats = nullptr);
 
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are

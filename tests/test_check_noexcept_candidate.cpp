@@ -567,9 +567,25 @@ struct FnTry {
   int v;
   FnTry() try : v((thrower(), 1)) {} catch (...) {}
 };
+// A rethrow raises only what its try block can: nothing here.
+int quiet(int x) { return x; }
+int cleanupRethrow(int x) { try { return quiet(x); } catch (...) { throw; } }
+void typedThenRethrow() {
+  try { thrower(); } catch (int) {} catch (...) { throw; }
+}
+void nestedRethrow() {
+  try { quiet(1); } catch (...) { try { throw; } catch (int) {} }
+}
+// What the typed handler catches leaves through its rethrow.
+void typedRethrowsFirst() {
+  try { thrower(); } catch (int) { throw; } catch (...) {}
+}
 )cpp");
+  // nestedRethrow's `throw;` is in a try of its own, so the outer catch
+  // (...) is not taken to let anything out, and that rethrow is a throw.
   CHECK(names == Names{"catchesAll", "catchesBoth", "nested",
-                       "localThrowCaught", "aboveCatchesAll"});
+                       "localThrowCaught", "aboveCatchesAll", "quiet",
+                       "cleanupRethrow"});
 }
 
 TEST_CASE("noexcept candidate: recursion is proven or refuted as a whole",
