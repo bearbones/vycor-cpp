@@ -303,7 +303,12 @@ Format v11 (package B, `docs/path-analysis.md`) adds one byte per catch
 handler record (`rethrows`, after `isCatchAll`) in the control-flow
 section; the meta section is unchanged. Format v12 (package F,
 `docs/control-flow-access.md`) lays the control-flow section out for
-reading in place; the meta section is again unchanged.
+reading in place; the meta section is again unchanged. Format v15
+(`docs/symbol-references.md`) adds a fifth section, `references`, with
+its own table entry and checksum, and two counts (`symbols`,
+`references`) to the header summary (`kHeaderBytes` 193, was 152); the
+other four sections are unchanged. A warm refresh removes and re-adds a
+dirty TU's reference facts exactly as it does its edges.
 
 ## Write integrity (format v13)
 

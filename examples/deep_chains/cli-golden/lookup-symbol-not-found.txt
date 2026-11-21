@@ -1,0 +1,2 @@
+# megascope lookup-symbol --name does_not_exist -> exit 1
+{"error":"Symbol not found: does_not_exist","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"not_found"}

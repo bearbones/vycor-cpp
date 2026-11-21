@@ -130,6 +130,11 @@ struct ToolContext {
   /// part of a saved index, so null whenever the indexes were loaded from
   /// one: a reader answers `unavailable`, never zero.
   const StaticInitFacts *staticInits = nullptr;
+  /// Symbol reference facts (get_references, lookup_symbol;
+  /// docs/symbol-references.md). Null in a context built without them;
+  /// the handlers answer `unavailable` then. Last, so the positional
+  /// ToolContext{...} call sites keep compiling.
+  const ReferenceIndex *references = nullptr;
 };
 
 /// Signature for a tool handler function.
@@ -167,7 +172,8 @@ struct ToolEntry {
 };
 
 /// Human names for IndexSection bits, in bit order ("graph",
-/// "control_flow", "channels"); for `tools --format json` and -v.
+/// "control_flow", "channels", "references"); for `tools --format json`
+/// and -v.
 std::vector<std::string> sectionNames(unsigned needs);
 
 /// Returns the list of all registered tools, in tools/list order.

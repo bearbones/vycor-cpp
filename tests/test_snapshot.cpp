@@ -209,7 +209,7 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
     CHECK(names == std::vector<std::string>{
                        "meta", "graph_interner", "nodes", "edges",
                        "graph_relations", "cf_interner", "cf_set_tables",
-                       "cf_contexts", "channels"});
+                       "cf_contexts", "channels", "references"});
     // Everything after the fixed header is a section.
     CHECK(bytes + SnapshotIO::kHeaderBytes == loadStats.fileBytes);
     CHECK(loadStats.totalMs >= 0);
@@ -332,8 +332,8 @@ TEST_CASE("a sectioned load decodes only the requested sections",
         CHECK(sec.bytes > 0);
     }
     CHECK(names == std::vector<std::string>{"meta", "graph", "control_flow",
-                                            "channels"});
-    CHECK(skipped == 3);
+                                            "channels", "references"});
+    CHECK(skipped == 4);
   }
 
   SECTION("graph only: queries work, control flow stays empty") {
@@ -361,9 +361,9 @@ TEST_CASE("a sectioned load decodes only the requested sections",
       std::ifstream in(path, std::ios::binary);
       bytes.assign(std::istreambuf_iterator<char>(in), {});
     }
-    // Corrupt the graph entry's length (kind byte at 4+4+32+4, then the
-    // meta entry: 17 bytes; graph entry length lives 9 bytes into it).
-    size_t graphLen = 4 + 4 + 32 + 4 + 17 + 1 + 8;
+    // Corrupt the graph entry's length (the second table entry; the
+    // length lives 9 bytes into it).
+    size_t graphLen = testing::snapshotTableEntryAt(1) + 1 + 8;
     REQUIRE(bytes.size() > graphLen + 8);
     for (int i = 0; i < 8; ++i)
       bytes[graphLen + i] = static_cast<char>(0xff);

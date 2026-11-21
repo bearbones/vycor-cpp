@@ -48,15 +48,26 @@ inline uint64_t snapshotChecksum(const std::string &bytes, size_t at,
       reinterpret_cast<const uint8_t *>(bytes.data() + at), n));
 }
 
+/// Offset of the section table in an index image (format v15): magic(4)
+/// version(4) summary(6 x u64) count(4), then per section {kind u8,
+/// offset u64, length u64, checksum u64} (25 bytes each; meta, graph,
+/// control flow, channels, references), then the header checksum u64.
+constexpr size_t kSnapshotTableAt = 4 + 4 + 48 + 4;
+constexpr size_t kSnapshotTableEntryBytes = 25;
+constexpr size_t kSnapshotSections = 5;
+
+/// Offset of section `i`'s table entry.
+constexpr size_t snapshotTableEntryAt(size_t i) {
+  return kSnapshotTableAt + i * kSnapshotTableEntryBytes;
+}
+
 /// Recompute the section checksums (for every section that still lies
-/// inside `bytes`) and the header checksum of a v13 index image. Layout:
-/// magic(4) version(4) summary(32) count(4), then per section {kind u8,
-/// offset u64, length u64, checksum u64}, then the header checksum u64.
+/// inside `bytes`) and the header checksum of an index image.
 inline void resealSnapshot(std::string &bytes) {
   if (bytes.size() < SnapshotIO::kHeaderBytes)
     return;
-  for (size_t i = 0; i < 4; ++i) {
-    const size_t at = 44 + i * 25;
+  for (size_t i = 0; i < kSnapshotSections; ++i) {
+    const size_t at = snapshotTableEntryAt(i);
     const uint64_t offset = snapshotU64At(bytes, at + 1);
     const uint64_t length = snapshotU64At(bytes, at + 9);
     if (offset <= bytes.size() && length <= bytes.size() - offset)

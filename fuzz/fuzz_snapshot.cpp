@@ -51,9 +51,11 @@ void exerciseMutable(const std::string &path) {
   CallGraph graph;
   ControlFlowIndex cf;
   ChannelIndex channels;
+  ReferenceIndex references;
   graph.absorb(snap->graph);
   cf.absorb(snap->cfIndex);
   channels.absorb(snap->channels);
+  references.absorb(snap->references);
   // A warm refresh: drop the recorded TUs, then save what is left.
   std::vector<std::string> tus;
   for (const auto &f : snap->meta.files)
@@ -61,11 +63,12 @@ void exerciseMutable(const std::string &path) {
   snap->graph.removeTUs(tus);
   snap->cfIndex.removeTUs(tus);
   snap->channels.removeTUs(tus);
+  snap->references.removeTUs(tus);
   (void)SnapshotIO::dirtyTUs(snap->meta, snap->meta.files);
   (void)coverageOf(snap->meta);
   const std::string saved = fuzz::scratchPath("resaved.vycs");
-  if (SnapshotIO::save(saved, graph, cf, snap->meta, channels, nullptr,
-                       /*durable=*/false))
+  if (SnapshotIO::save(saved, graph, cf, snap->meta, channels, references,
+                       nullptr, /*durable=*/false))
     (void)SnapshotIO::load(saved, nullptr, LoadMode::ReadOnly);
 }
 
@@ -81,6 +84,7 @@ void exerciseReadOnly(const std::string &path) {
   ToolContext ctx{snap->graph,  oracle,          snap->cfIndex,
                   entryPoints, &snap->channels, &cache,
                   &snap->summary};
+  ctx.references = &snap->references;
   ctx.facts = IndexFacts::of(snap->meta, IndexFreshness::Unchecked);
   const auto pool =
       fuzz::ArgPool::from(snap->graph, snap->cfIndex, &snap->channels);

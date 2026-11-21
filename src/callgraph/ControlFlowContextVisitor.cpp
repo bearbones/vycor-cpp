@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CrashGuard.h"
+#include "vycor/callgraph/ReferenceVisitor.h"
 #include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/callgraph/StaticInit.h"
 #include "vycor/callgraph/UsrIdent.h"
@@ -1184,12 +1185,13 @@ public:
                              const LockTypeConfig *lockCfg,
                              const ChannelTypeConfig *channelCfg,
                              ChannelIndex *channelIndex,
+                             ReferenceIndex *references,
                              const std::string &tuPath,
                              DependencySink *depSink)
       : indexerVisitor_(graph, sm, tuPath),
         edgeVisitor_(graph, sm, tuPath),
         cfVisitor_(index, graph, sm, tuPath), sm_(sm), tuPath_(tuPath),
-        depSink_(depSink) {
+        references_(references), depSink_(depSink) {
     edgeVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setLockConfig(lockCfg);
@@ -1203,6 +1205,9 @@ public:
     edgeVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
     cfVisitor_.setASTContext(&ctx);
     cfVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
+    // Fourth traversal of the same AST: symbol reference facts.
+    if (references_)
+      ReferenceVisitor(*references_, sm_, tuPath_).run(ctx);
     if (depSink_ && depSink_->deps) {
       auto opened = openedFiles(sm_, tuPath_);
       std::lock_guard<std::mutex> lock(depSink_->mutex);
@@ -1222,6 +1227,7 @@ private:
   ControlFlowContextVisitor cfVisitor_;
   clang::SourceManager &sm_;
   std::string tuPath_;
+  ReferenceIndex *references_; // null: reference facts are not recorded
   DependencySink *depSink_;
 };
 
@@ -1232,17 +1238,18 @@ public:
                            const LockTypeConfig *lockCfg,
                            const ChannelTypeConfig *channelCfg,
                            ChannelIndex *channelIndex,
+                           ReferenceIndex *references,
                            const std::string &tuPath,
                            DependencySink *depSink)
       : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
         channelCfg_(channelCfg), channelIndex_(channelIndex),
-        tuPath_(tuPath), depSink_(depSink) {}
+        references_(references), tuPath_(tuPath), depSink_(depSink) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
     return std::make_unique<BakeEdgeAndContextConsumer>(
         graph_, index_, ci.getSourceManager(), collapse_, lockCfg_,
-        channelCfg_, channelIndex_, tuPath_, depSink_);
+        channelCfg_, channelIndex_, references_, tuPath_, depSink_);
   }
 
 private:
@@ -1252,6 +1259,7 @@ private:
   const LockTypeConfig *lockCfg_;
   const ChannelTypeConfig *channelCfg_;
   ChannelIndex *channelIndex_;
+  ReferenceIndex *references_;
   std::string tuPath_;
   DependencySink *depSink_;
 };
@@ -1263,16 +1271,17 @@ public:
                             const LockTypeConfig *lockCfg,
                             const ChannelTypeConfig *channelCfg,
                             ChannelIndex *channelIndex,
+                            ReferenceIndex *references,
                             const std::string &tuPath,
                             DependencySink *depSink = nullptr)
       : graph_(graph), index_(index), collapse_(collapse), lockCfg_(lockCfg),
         channelCfg_(channelCfg), channelIndex_(channelIndex),
-        tuPath_(tuPath), depSink_(depSink) {}
+        references_(references), tuPath_(tuPath), depSink_(depSink) {}
 
   std::unique_ptr<clang::FrontendAction> create() override {
     return std::make_unique<BakeEdgeAndContextAction>(
         graph_, index_, collapse_, lockCfg_, channelCfg_, channelIndex_,
-        tuPath_, depSink_);
+        references_, tuPath_, depSink_);
   }
 
 private:
@@ -1282,6 +1291,7 @@ private:
   const LockTypeConfig *lockCfg_;
   const ChannelTypeConfig *channelCfg_;
   ChannelIndex *channelIndex_;
+  ReferenceIndex *references_;
   std::string tuPath_;
   DependencySink *depSink_;
 };
@@ -1292,7 +1302,7 @@ private:
 // never merged or destroyed: the TU contributes no partial facts, and no
 // lock the other threads use is ever held by a crashed thread.
 int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
-                  ChannelIndex *channels,
+                  ChannelIndex *channels, ReferenceIndex *references,
                   const clang::tooling::CompilationDatabase &compDb,
                   const std::string &file, const CollapseFilter *collapse,
                   const LockTypeConfig *lockCfg,
@@ -1308,6 +1318,7 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
   BakeEdgeAndContextFactory factory(local->graph, local->cfIndex, collapse,
                                     lockCfg, channelCfg,
                                     channels ? &local->channels : nullptr,
+                                    references ? &local->references : nullptr,
                                     file, depSink ? &localDeps : nullptr);
   int status =
       runCfToolGuarded(compDb, file, factory, pchCache, sysroot, crashSignal);
@@ -1320,11 +1331,15 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
     cfIndex = std::move(local->cfIndex);
     if (channels)
       *channels = std::move(local->channels);
+    if (references)
+      *references = std::move(local->references);
   } else {
     graph.absorb(local->graph);
     cfIndex.absorb(local->cfIndex);
     if (channels)
       channels->absorb(local->channels);
+    if (references)
+      references->absorb(local->references);
   }
   if (depSink && depSink->deps) {
     std::lock_guard<std::mutex> lock(depSink->mutex);
@@ -1349,8 +1364,11 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          const LockTypeConfig &lockCfg,
                          BuildStats *stats,
                          std::function<void(const std::string &)> preTu,
-                         const ChannelTypeConfig &channelCfg) {
+                         const ChannelTypeConfig &channelCfg,
+                         bool recordReferences) {
   BakedIndexes out;
+  ReferenceIndex *const references =
+      recordReferences ? &out.references : nullptr;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
       collapseFilter.empty() ? nullptr : &collapseFilter;
@@ -1382,13 +1400,14 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 
     for (const auto &file : files) {
       pool.async([&compDb, &out, collapsePtr, &lockCfg, channelCfgPtr,
-                  pchCache, &sysroot, stats, &preTu, &depSink, &outcomeSink,
-                  file]() {
+                  references, pchCache, &sysroot, stats, &preTu, &depSink,
+                  &outcomeSink, file]() {
         bakeRun(
             file,
             [&](int *sig) {
               return bakeTuLocally(out.graph, out.cfIndex, &out.channels,
-                                   compDb, file, collapsePtr, &lockCfg,
+                                   references, compDb, file, collapsePtr,
+                                   &lockCfg,
                                    channelCfgPtr, pchCache, sysroot, &depSink,
                                    sig);
             },
@@ -1403,7 +1422,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
           file,
           [&](int *sig) {
             int st = bakeTuLocally(out.graph, out.cfIndex, &out.channels,
-                                   compDb, file, collapsePtr, &lockCfg,
+                                   references, compDb, file, collapsePtr,
+                                   &lockCfg,
                                    channelCfgPtr, pchCache, sysroot, &depSink,
                                    sig, /*moveIntoEmpty=*/firstClean);
             if (st != -1)
@@ -1443,7 +1463,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
                           const std::vector<std::string> &collapsePaths,
                           const LockTypeConfig &lockCfg,
-                          const ChannelTypeConfig &channelCfg) {
+                          const ChannelTypeConfig &channelCfg,
+                          bool recordReferences) {
   BakedIndexes out;
   CollapseFilter collapseFilter(collapsePaths);
   const CollapseFilter *collapsePtr =
@@ -1455,8 +1476,8 @@ BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
 
   BakeEdgeAndContextConsumer consumer(
       out.graph, out.cfIndex, ctx.getSourceManager(), collapsePtr, &lockCfg,
-      channelCfgPtr, channelCfgPtr ? &out.channels : nullptr, tuPath,
-      &depSink);
+      channelCfgPtr, channelCfgPtr ? &out.channels : nullptr,
+      recordReferences ? &out.references : nullptr, tuPath, &depSink);
   consumer.HandleTranslationUnit(ctx);
 
   if (ctx.getDiagnostics().hasErrorOccurred())

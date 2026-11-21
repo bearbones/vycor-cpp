@@ -163,7 +163,7 @@ public:
       if (forceShard || MegascopeBridge::isMegascopeShardJsonPath(targetPath)) {
         ok = MegascopeBridge::saveShardJson(
             targetPath, baked.graph, baked.cfIndex, meta, baked.channels,
-            &saveError, durable_);
+            &saveError, durable_, /*pretty=*/true, &baked.references);
       } else if (forceMgsc ||
                  MegascopeBridge::isMegascopeSnapshotPath(targetPath)) {
         ok = MegascopeBridge::saveSnapshot(targetPath, baked.graph,
@@ -171,7 +171,8 @@ public:
                                            &saveError);
       } else {
         ok = SnapshotIO::save(targetPath, baked.graph, baked.cfIndex, meta,
-                              baked.channels, &saveError, durable_);
+                              baked.channels, baked.references, &saveError,
+                              durable_);
       }
       if (!ok) {
         llvm::errs() << "vycor-megascope plugin: failed to save index to "

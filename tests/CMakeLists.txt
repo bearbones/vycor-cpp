@@ -77,6 +77,8 @@ add_executable(vycor_tests
   test_control_flow.cpp
   test_path_search.cpp
   test_path_oracle.cpp
+  test_reference_index.cpp
+  test_reference_tools.cpp
   test_concurrency_index.cpp
   test_channel_index.cpp
   test_query_tools.cpp

@@ -125,6 +125,11 @@ static Ident lambdaIdent(std::string name) {
   return id;
 }
 
+Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
+                         const std::string &enclosing) {
+  return lambdaIdent(lambdaQualifiedName(sm, loc, enclosing));
+}
+
 // Unwrap implicit/temporary/functional-cast wrappers and ask: does this
 // expression denote a LambdaExpr? Handles the common
 // std::function<…>(lambda) and std::thread(lambda, args…) argument shapes.

@@ -18,6 +18,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/Snapshot.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -48,30 +49,41 @@ public:
   /// Lower `graph`, `cfIndex`, `channels`, and `meta` into a single
   /// `megascope::ModuleShard` JSON object. When `tuFilter` is non-empty,
   /// only facts contributed by that TU are included.
+  ///
+  /// With `references`, the shard also carries the symbol reference facts
+  /// as two arrays outside the ModuleShard model, `symbols` and
+  /// `references` (docs/symbol-references.md): the merged view, each
+  /// record under the TU that owns it (`tu`: a symbol's first defining
+  /// TU, else the first TU of its first listed declaration; a reference's
+  /// first contributing TU). libmegascope ignores members it does not model, so
+  /// a `.mgsc` baked from such a shard does not hold them.
   static llvm::json::Object
   toShardObject(const CallGraph &graph, const ControlFlowIndex &cfIndex,
                 const ChannelIndex &channels, const SnapshotMeta &meta,
-                llvm::StringRef tuFilter = "");
+                llvm::StringRef tuFilter = "",
+                const ReferenceIndex *references = nullptr);
 
   /// Lower `graph`, `cfIndex`, `channels`, and `meta` into a JSON array of
   /// per-TU `megascope::ModuleShard` objects (one per TU in `meta.files`, or
   /// a single combined shard when `meta.files` has <= 1 entry).
   static llvm::json::Array
   toShardsArray(const CallGraph &graph, const ControlFlowIndex &cfIndex,
-                const ChannelIndex &channels, const SnapshotMeta &meta);
+                const ChannelIndex &channels, const SnapshotMeta &meta,
+                const ReferenceIndex *references = nullptr);
 
   /// Serialize a single `megascope::ModuleShard` JSON string.
   static std::string
   toShardJson(const CallGraph &graph, const ControlFlowIndex &cfIndex,
               const ChannelIndex &channels, const SnapshotMeta &meta,
-              bool pretty = false);
+              bool pretty = false, const ReferenceIndex *references = nullptr);
 
   /// Serialize a JSON array of `megascope::ModuleShard`s (or a single shard
   /// object when `meta.files.size() <= 1`).
   static std::string
   toShardsJson(const CallGraph &graph, const ControlFlowIndex &cfIndex,
                const ChannelIndex &channels, const SnapshotMeta &meta,
-               bool pretty = false);
+               bool pretty = false,
+               const ReferenceIndex *references = nullptr);
 
   /// Build the `meta_json` string expected by `megascope_bake_shards_json` and
   /// `megascope_merge_snapshots` (`{"projectRoot":..., "entryPoints":..., "collapsePaths":...}`).
@@ -84,7 +96,8 @@ public:
                             const SnapshotMeta &meta,
                             const ChannelIndex &channels = ChannelIndex(),
                             std::string *error = nullptr, bool durable = true,
-                            bool pretty = true);
+                            bool pretty = true,
+                            const ReferenceIndex *references = nullptr);
 
   /// Bake `graph`, `cfIndex`, `channels`, and `meta` into a binary `.mgsc`
   /// snapshot at `path` via `libmegascope` (`megascope_bake_shards_json`).

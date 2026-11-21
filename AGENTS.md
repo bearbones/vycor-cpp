@@ -168,6 +168,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
+| `ReferenceIndex.h/.cpp` | Symbol reference facts (`docs/symbol-references.md`): one record per (referrer, target, role) with an occurrence count and one witness site, and per symbol its kind, linkage class, attributes, declarations, and defining TUs; content-deduplicated with per-TU contributor lists (`removeTUs`, `absorb`), canonical encoding as the snapshot's references section |
+| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity |
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
@@ -177,9 +179,9 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
 **Single-parse build** (`megascope index` and the ephemeral query mode):
-`bakeIndexes(compDb, files, ...)` runs all three visitor phases —
-declaration/hierarchy index, edge building, CF context — over ONE frontend
-parse per TU. No phase barrier is needed because edge building has no
+`bakeIndexes(compDb, files, ...)` runs all four visitor phases —
+declaration/hierarchy index, edge building, CF context, symbol
+references (`ReferenceVisitor`) — over ONE frontend parse per TU. No phase barrier is needed because edge building has no
 cross-TU reads: the two joins that used to require completed Phase-1 data
 (virtual-dispatch fan-out and the function-pointer-through-return join,
 `EdgeKind::FunctionPointerReturn`) are performed at query time in
@@ -255,6 +257,7 @@ directly.
 | `LockTools.cpp` | locks held, same-lock path search |
 | `DeadCodeTools.cpp` | dead-code analysis (cached liveness) |
 | `ChannelTools.cpp` | channel listing/query, channels-for-function, explain-ordering |
+| `ReferenceTools.cpp` | `lookup_symbol` (linkage, attributes, declarations, defining TUs, referrers per role) and `get_references` (who references a symbol, or what it references, by role); both read the references section alone |
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
 | `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the call edges, run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
 | `MetricsTools.cpp` | the `metrics` tool: metric selection, roll-up level, target map, paging, and the `--list-metrics` listing over the `metrics/` module |
@@ -344,10 +347,12 @@ per-TU dependency tables to the meta, v10 the bake provenance and the
 per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
 place, v13 a checksum per section and for the header, v14 index text
-(`callgraph/Utf8.h`) for every graph, control-flow and channel string:
+(`callgraph/Utf8.h`) for every graph, control-flow and channel string,
+v15 the references section and its two header counts:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
-for meta / graph / control flow / channels), so a graph-only tool never
+for meta / graph / control flow / channels / references), so a
+graph-only tool never
 decodes (or checksums) the
 call-site contexts, `info` reads the meta section alone, and
 `graph_summary` reports the header counts (`ToolContext::summary`).
@@ -441,7 +446,7 @@ appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
 
-**27 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
+**29 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -450,7 +455,8 @@ failure mode.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`.
+`impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`,
+`lookup_symbol`, `get_references`.
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops

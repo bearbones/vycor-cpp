@@ -1552,7 +1552,8 @@ int main(int argc, const char **argv) {
       std::string saveError;
       if (!vycor::SnapshotIO::save(MegascopeWorkerOut, baked.graph,
                                    baked.cfIndex, meta, baked.channels,
-                                   &saveError, /*durable=*/false)) {
+                                   baked.references, &saveError,
+                                   /*durable=*/false)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
                      << MegascopeWorkerOut << ": " << saveError << "\n";
         return 1;
@@ -1563,6 +1564,7 @@ int main(int argc, const char **argv) {
     vycor::CallGraph graph;
     vycor::ControlFlowIndex cfIndex;
     vycor::ChannelIndex channels;
+    vycor::ReferenceIndex references;
     bool needFullBuild = true;
     // Set when a bake parsed nothing it was asked to: its result must not
     // replace the index (SnapshotIO::unpublishableBake).
@@ -1774,6 +1776,7 @@ int main(int argc, const char **argv) {
               graph = std::move(full->graph);
               cfIndex = std::move(full->cfIndex);
               channels = std::move(full->channels);
+              references = std::move(full->references);
               deps = vycor::SnapshotIO::dependenciesOf(snap->meta);
               outcomes = vycor::SnapshotIO::outcomesOf(snap->meta);
               auto refreshStart = StatsClock::now();
@@ -1788,6 +1791,7 @@ int main(int argc, const char **argv) {
               graph.removeTUs(toRemove);
               cfIndex.removeTUs(toRemove);
               channels.removeTUs(toRemove);
+              references.removeTUs(toRemove);
               for (const auto &path : toDrop) {
                 deps.erase(path);
                 outcomes.erase(path);
@@ -1823,6 +1827,7 @@ int main(int argc, const char **argv) {
                 graph.absorb(fresh.graph);
                 cfIndex.absorb(fresh.cfIndex);
                 channels.absorb(fresh.channels);
+                references.absorb(fresh.references);
                 for (auto &kv : fresh.deps)
                   deps[kv.first] = std::move(kv.second);
                 for (auto &kv : fresh.outcomes)
@@ -1867,6 +1872,7 @@ int main(int argc, const char **argv) {
       graph = std::move(baked.graph);
       cfIndex = std::move(baked.cfIndex);
       channels = std::move(baked.channels);
+      references = std::move(baked.references);
       deps = std::move(baked.deps);
       outcomes = std::move(baked.outcomes);
       llvm::errs() << "megascope: indexes built ("
@@ -1885,6 +1891,10 @@ int main(int argc, const char **argv) {
                                           : cfIndex.size();
     uint64_t liveChannelSites = graphSkipped ? snap->summary.channelSites
                                              : channels.size();
+    uint64_t liveSymbols = graphSkipped ? snap->summary.symbols
+                                        : references.symbolCount();
+    uint64_t liveReferences = graphSkipped ? snap->summary.references
+                                           : references.referenceCount();
 
     bool saveFailed = false;
     if (!indexesChanged && MegascopeEmitShard.empty() &&
@@ -1932,13 +1942,15 @@ int main(int argc, const char **argv) {
           bool savedOk = false;
           if (indexIsShardJson) {
             savedOk = vycor::MegascopeBridge::saveShardJson(
-                indexPath, graph, cfIndex, meta, channels, &saveError);
+                indexPath, graph, cfIndex, meta, channels, &saveError,
+                /*durable=*/true, /*pretty=*/true, &references);
           } else if (indexIsMgsc) {
             savedOk = vycor::MegascopeBridge::saveSnapshot(
                 indexPath, graph, cfIndex, meta, channels, &saveError);
           } else {
             savedOk = vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
-                                              channels, &saveError);
+                                              channels, references,
+                                              &saveError);
           }
           if (savedOk) {
             snapSaveMs = msSince(snapSaveStart);
@@ -1955,17 +1967,18 @@ int main(int argc, const char **argv) {
             llvm::outs() << ((files.size() <= 1)
                                  ? vycor::MegascopeBridge::toShardJson(
                                        graph, cfIndex, channels, meta,
-                                       /*pretty=*/true)
+                                       /*pretty=*/true, &references)
                                  : vycor::MegascopeBridge::toShardsJson(
                                        graph, cfIndex, channels, meta,
-                                       /*pretty=*/true));
+                                       /*pretty=*/true, &references));
             if (indexPath.empty() && MegascopeEmitMgsc.empty())
               return saveFailed ? 1 : 0;
           } else {
             std::string shardErr;
             if (!vycor::MegascopeBridge::saveShardJson(
                     MegascopeEmitShard, graph, cfIndex, meta, channels,
-                    &shardErr)) {
+                    &shardErr, /*durable=*/true, /*pretty=*/true,
+                    &references)) {
               saveFailed = true;
               llvm::errs() << "megascope: ERROR: could not write shard JSON to "
                            << MegascopeEmitShard << ": " << shardErr << "\n";
@@ -2032,6 +2045,8 @@ int main(int argc, const char **argv) {
       g["nodes"] = static_cast<int64_t>(liveNodes);
       g["edges"] = static_cast<int64_t>(liveEdges);
       g["call_sites"] = static_cast<int64_t>(liveCallSites);
+      g["symbols"] = static_cast<int64_t>(liveSymbols);
+      g["references"] = static_cast<int64_t>(liveReferences);
       if (!graphSkipped) {
         g["interner_strings"] =
             static_cast<int64_t>(graph.interner().size());
@@ -2128,6 +2143,8 @@ int main(int argc, const char **argv) {
     summary["edges"] = static_cast<int64_t>(liveEdges);
     summary["call_sites"] = static_cast<int64_t>(liveCallSites);
     summary["channel_sites"] = static_cast<int64_t>(liveChannelSites);
+    summary["symbols"] = static_cast<int64_t>(liveSymbols);
+    summary["references"] = static_cast<int64_t>(liveReferences);
     llvm::outs() << llvm::json::Value(std::move(summary)) << "\n";
     return 0;
   }

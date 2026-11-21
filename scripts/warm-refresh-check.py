@@ -54,9 +54,14 @@ void entry() { alpha(); }
 #endif
 int main() { entry(); via_header(); return 0; }
 """
-TARGET_H_V1 = "void gamma();\ninline void via_header() { gamma(); }\n"
-TARGET_H_V2 = "void delta();\ninline void via_header() { delta(); }\n"
-OTHER = "void other() {}\nvoid another() { other(); }\n"
+# `hits` is a global other.cpp defines and the header's inline function
+# uses: written in V1, read in V2, so a header edit must replace the
+# recorded reference (docs/symbol-references.md), not add to it.
+TARGET_H_V1 = ("void gamma();\nextern int hits;\n"
+               "inline void via_header() { hits = 1; gamma(); }\n")
+TARGET_H_V2 = ("void delta();\nextern int hits;\n"
+               "inline int via_header() { delta(); return hits; }\n")
+OTHER = "int hits = 0;\nvoid other() {}\nvoid another() { other(); }\n"
 BROKEN = '#include "missing.h"\nvoid broken_fn() { after_include(); }\n'
 # Untouched ballast: an edit plus the retried TU must stay under half the
 # selection, or the warm start (correctly) prefers a full rebuild.
@@ -82,6 +87,11 @@ RAW_QUERIES = (
     ["list-callback-sites"],
     ["analyze-dead-code"],
     ["graph-summary"],
+    ["lookup-symbol", "--name", "hits"],
+    ["lookup-symbol", "--name", "via_header"],
+    ["get-references", "--name", "hits"],
+    ["get-references", "--name", "main", "--direction", "from"],
+    ["get-references", "--name", "via_header", "--direction", "from"],
 )
 BAKE_RE = re.compile(r'"bake":"[0-9a-f]+@[0-9]+"')
 
@@ -206,6 +216,10 @@ class Check:
         self.expect(scenario, ia["coverage"] == ib["coverage"],
                     f"coverage differs: warm {ia['coverage']} vs clean "
                     f"{ib['coverage']}")
+        for count in ("symbols", "references"):
+            self.expect(scenario, ia.get(count) == ib.get(count),
+                        f"{count} differ: warm {ia.get(count)} vs clean "
+                        f"{ib.get(count)}")
         # The tool answers, raw: every list in its contractual order
         # (docs/deterministic-output.md), not as a sorted multiset.
         for argv in RAW_QUERIES:

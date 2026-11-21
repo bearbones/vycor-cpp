@@ -254,6 +254,11 @@ TEST_CASE("tools declare the index sections they read", "[megascope][cli]") {
         (kSectionGraph | kSectionChannels));
   CHECK(sectionNames(kSectionGraph | kSectionChannels) ==
         std::vector<std::string>{"graph", "channels"});
+  // The symbol tools read the references section and nothing else.
+  CHECK(toolNamed(tools, "lookup_symbol").needs == kSectionReferences);
+  CHECK(toolNamed(tools, "get_references").needs == kSectionReferences);
+  CHECK(sectionNames(kSectionReferences) ==
+        std::vector<std::string>{"references"});
 
   SECTION("the query verbs load only those sections") {
     IndexFile idx("needs");
@@ -282,6 +287,125 @@ TEST_CASE("records keys name real list members", "[megascope][cli]") {
   // Peer lists (producers/consumers) must not make one of them "the" list.
   CHECK(toolNamed(tools, "query_channel").recordsKey.empty());
   CHECK(toolNamed(tools, "lookup_function").recordsKey.empty());
+  CHECK(toolNamed(tools, "get_references").recordsKey == "references");
+  CHECK(toolNamed(tools, "lookup_symbol").recordsKey.empty());
+}
+
+TEST_CASE("the symbol verbs answer from the references section",
+          "[megascope][cli][references]") {
+  // counter (a global defined in a.cpp) is written by bump in a.cpp and
+  // read by peek in b.cpp; two file-local `tmp` share a name.
+  ReferenceIndex refs;
+  auto symbol = [&](const char *usr, const char *name, SymbolKind kind,
+                    LinkageClass linkage, const char *file, uint32_t line) {
+    SymbolFact f;
+    f.usr = usr;
+    f.name = name;
+    f.kind = kind;
+    f.linkage = linkage;
+    f.file = file;
+    f.line = line;
+    f.flags = kSymDefinition;
+    f.size = 4;
+    refs.addSymbol(f, file);
+  };
+  symbol("c:@counter", "counter", SymbolKind::Variable, LinkageClass::External,
+         "/src/a.cpp", 1);
+  symbol("c:@F@bump#", "bump", SymbolKind::Function, LinkageClass::External,
+         "/src/a.cpp", 3);
+  symbol("c:@F@peek#", "peek", SymbolKind::Function, LinkageClass::External,
+         "/src/b.cpp", 3);
+  symbol("c:a.cpp@tmp", "tmp", SymbolKind::Variable, LinkageClass::Internal,
+         "/src/a.cpp", 9);
+  symbol("c:b.cpp@tmp", "tmp", SymbolKind::Variable, LinkageClass::Internal,
+         "/src/b.cpp", 9);
+  auto reference = [&](const char *from, const char *to, RefRole role,
+                       const char *file, uint32_t line) {
+    ReferenceFact r;
+    r.referrerUsr = from;
+    r.targetUsr = to;
+    r.role = role;
+    r.count = 1;
+    r.file = file;
+    r.line = line;
+    r.col = 3;
+    refs.addReference(r, file);
+  };
+  reference("c:@F@bump#", "c:@counter", RefRole::Write, "/src/a.cpp", 4);
+  reference("c:@F@peek#", "c:@counter", RefRole::Read, "/src/b.cpp", 4);
+
+  SnapshotMeta meta;
+  meta.files = {{"/src/a.cpp", 1, 2}, {"/src/b.cpp", 3, 4}};
+  const std::string path = tempIndexPath("symbols");
+  REQUIRE(SnapshotIO::save(path, CallGraph(), ControlFlowIndex(), meta,
+                           ChannelIndex(), refs));
+
+  SECTION("info reports the header counts") {
+    auto obj = parseObject(run({"info", "--index", path}).out);
+    CHECK(obj.getInteger("symbols") == 5);
+    CHECK(obj.getInteger("references") == 2);
+  }
+
+  SECTION("lookup-symbol loads the references section alone") {
+    auto r = run({"lookup-symbol", "--index", path, "--name", "counter", "-v"});
+    CHECK(r.code == kExitResults);
+    CHECK(r.err.find("graph skipped/") != std::string::npos);
+    CHECK(r.err.find("control_flow skipped/") != std::string::npos);
+    CHECK(r.err.find("channels skipped/") != std::string::npos);
+    CHECK(r.err.find("references skipped/") == std::string::npos);
+    auto obj = parseObject(r.out);
+    CHECK(obj.getString("status") == "ok");
+    CHECK(obj.getString("linkage") == "external");
+    CHECK(obj.getString("definingTu") == "/src/a.cpp");
+    CHECK(obj.getBoolean("referencedFromOtherTu") == true);
+    // A graph tool does not decode the references.
+    auto g = run({"graph-summary", "--index", path, "-v"});
+    CHECK(g.err.find("references skipped/") != std::string::npos);
+  }
+
+  SECTION("exit codes follow the typed status") {
+    CHECK(run({"lookup-symbol", "--index", path, "--name", "nope"}).code ==
+          kExitEmpty);
+    auto dup = run({"lookup-symbol", "--index", path, "--name", "tmp"});
+    CHECK(dup.code == kExitAmbiguous);
+    CHECK(parseObject(dup.out).getInteger("total_candidates") == 2);
+    CHECK(run({"lookup-symbol", "--index", path, "--name", "tmp", "--filter",
+               "b.cpp"})
+              .code == kExitResults);
+    CHECK(run({"lookup-symbol", "--index", path, "--usr", "c:a.cpp@tmp"})
+              .code == kExitResults);
+    CHECK(run({"get-references", "--index", path, "--name", "counter",
+               "--direction", "up"})
+              .code == kExitUsage);
+    // No referrer: an empty list, so the empty-result exit code.
+    CHECK(run({"get-references", "--index", path, "--name", "bump"}).code ==
+          kExitEmpty);
+  }
+
+  SECTION("get-references streams one record per line") {
+    auto r = run({"get-references", "--index", path, "--name", "counter",
+                  "--roles", "read", "--roles", "write", "--format", "ndjson"});
+    CHECK(r.code == kExitResults);
+    auto ls = lines(r.out);
+    REQUIRE(ls.size() == 3);
+    auto summary = parseObject(ls[0]);
+    REQUIRE(summary.getObject("_summary") != nullptr);
+    CHECK(summary.getObject("_summary")->getInteger("total") == 2);
+    CHECK(parseObject(ls[1]).getString("referrer") == "bump");
+    CHECK(parseObject(ls[1]).getString("role") == "write");
+    CHECK(parseObject(ls[1]).getBoolean("fromOtherTu") == false);
+    CHECK(parseObject(ls[2]).getString("referrer") == "peek");
+    CHECK(parseObject(ls[2]).getBoolean("fromOtherTu") == true);
+
+    auto one = run({"get-references", "--index", path, "--name", "counter",
+                    "--roles", "read"});
+    CHECK(parseObject(one.out).getInteger("total") == 1);
+    auto from = run({"get-references", "--index", path, "--name", "peek",
+                     "--direction", "from"});
+    CHECK(from.code == kExitResults);
+    CHECK(from.out.find("\"target\":\"counter\"") != std::string::npos);
+  }
+  std::remove(path.c_str());
 }
 
 TEST_CASE("printToolHelp lists every schema property with its description",
@@ -1204,6 +1328,11 @@ TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clan
     CHECK(snap->graph.nodeCount() == ref.graph.nodeCount());
     CHECK(snap->graph.edgeCount() == ref.graph.edgeCount());
     CHECK(snap->cfIndex.size() == ref.cfIndex.size());
+    CHECK(snap->references.symbolCount() == ref.references.symbolCount());
+    CHECK(snap->references.referenceCount() ==
+          ref.references.referenceCount());
+    CHECK(snap->summary.references == ref.references.referenceCount());
+    CHECK(ref.references.referenceCount() > 0);
   }
 
   // Merge the two plugin-emitted per-TU shards and run a cross-TU query.
@@ -1215,6 +1344,11 @@ TEST_CASE("vycor_megascope_plugin emits identical per-TU .vycs shard during clan
   auto chain = run({"find-call-chain", "--index", mergedPath, "--from", "main",
                     "--to", "stage1_ingest"});
   CHECK(chain.code == kExitResults);
+  // The merged shards also answer who references a symbol across TUs.
+  auto hook = run({"lookup-symbol", "--index", mergedPath, "--name",
+                   "Pipeline::run"});
+  CHECK(hook.code == kExitResults);
+  CHECK(parseObject(hook.out).getBoolean("referencedFromOtherTu") == true);
 
   // Explicit `-Xclang -load ... -Xclang -add-plugin -Xclang vycor-megascope`
   // and driver `-fplugin-arg-vycor-megascope-...` / `-fplugin-arg-vycor_megascope-...`
@@ -1417,6 +1551,60 @@ TEST_CASE("MegascopeBridge lowers C++ indexes into ModuleShard JSON and .mgsc sn
   CHECK(ctx0->getArray("with_scopes")->size() == 1);
   REQUIRE(shardObj.getArray("channels") != nullptr);
   CHECK(shardObj.getArray("channels")->size() == 2);
+
+  // Symbol reference facts ride the JSON shard as two additive arrays
+  // (docs/symbol-references.md); a shard lowered without them has neither.
+  CHECK(shardObj.getArray("symbols") == nullptr);
+  CHECK(shardObj.getArray("references") == nullptr);
+  ReferenceIndex refs;
+  {
+    SymbolFact counter;
+    counter.usr = "c:@counter";
+    counter.name = "counter";
+    counter.kind = SymbolKind::Variable;
+    counter.linkage = LinkageClass::External;
+    counter.file = "/src/app.cpp";
+    counter.line = 3;
+    counter.flags = kSymDefinition;
+    counter.size = 4;
+    refs.addSymbol(counter, "/src/app.cpp");
+    ReferenceFact write;
+    write.referrerUsr = "c:@F@worker#I#";
+    write.targetUsr = "c:@counter";
+    write.role = RefRole::Write;
+    write.count = 2;
+    write.file = "/src/app.cpp";
+    write.line = 27;
+    write.col = 5;
+    refs.addReference(write, "/src/app.cpp");
+  }
+  {
+    llvm::json::Object withRefs =
+        MegascopeBridge::toShardObject(g, cf, ch, meta, "", &refs);
+    REQUIRE(withRefs.getArray("symbols") != nullptr);
+    REQUIRE(withRefs.getArray("symbols")->size() == 1);
+    const auto *sym = (*withRefs.getArray("symbols"))[0].getAsObject();
+    REQUIRE(sym != nullptr);
+    CHECK(sym->getString("usr") == "c:@counter");
+    CHECK(sym->getString("kind") == "variable");
+    CHECK(sym->getString("linkage") == "external");
+    CHECK(sym->getInteger("size_bytes") == 4);
+    CHECK(sym->getString("tu") == "/src/app.cpp");
+    REQUIRE(withRefs.getArray("references") != nullptr);
+    REQUIRE(withRefs.getArray("references")->size() == 1);
+    const auto *ref = (*withRefs.getArray("references"))[0].getAsObject();
+    REQUIRE(ref != nullptr);
+    CHECK(ref->getString("referrer_usr") == "c:@F@worker#I#");
+    CHECK(ref->getString("target_usr") == "c:@counter");
+    CHECK(ref->getString("role") == "write");
+    CHECK(ref->getInteger("count") == 2);
+    // Another TU's filter keeps none of them.
+    llvm::json::Object other =
+        MegascopeBridge::toShardObject(g, cf, ch, meta, "/src/other.cpp", &refs);
+    REQUIRE(other.getArray("symbols") != nullptr);
+    CHECK(other.getArray("symbols")->empty());
+    CHECK(other.getArray("references")->empty());
+  }
 
   const std::string shardPath = base + "app.shard.json";
   const std::string mgscPath = base + "app.mgsc";

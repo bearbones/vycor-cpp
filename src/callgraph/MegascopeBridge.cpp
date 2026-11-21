@@ -348,6 +348,64 @@ llvm::json::Object makeEntityNodeJson(
   return ent;
 }
 
+// The symbol reference facts of a shard (MegascopeBridge.h): the merged
+// view in the index's canonical orders, each record under its owning TU.
+// With a non-empty `tuFilter` only that TU's records are kept.
+void appendReferenceFacts(const ReferenceIndex &references,
+                          llvm::StringRef tuFilter, llvm::json::Array &symbols,
+                          llvm::json::Array &refs) {
+  for (const SymbolInfo &sym : references.allSymbols()) {
+    const std::string &owner =
+        sym.definingTuCount != 0
+            ? sym.firstDefiningTu
+            : (sym.declarations.empty() ? sym.firstDefiningTu
+                                        : sym.declarations.front().firstTu);
+    if (!tuFilter.empty() && owner != tuFilter)
+      continue;
+    llvm::json::Object o;
+    o["usr"] = sym.usr;
+    o["name"] = sym.name;
+    o["kind"] = symbolKindName(sym.kind);
+    o["linkage"] = linkageClassName(sym.linkage);
+    llvm::json::Array attrs;
+    for (const char *name : symbolAttributeNames(sym.flags))
+      attrs.push_back(name);
+    o["attributes"] = std::move(attrs);
+    o[sym.kind == SymbolKind::Function ? "body_lines" : "size_bytes"] =
+        static_cast<int64_t>(sym.size);
+    o["tu"] = owner;
+    o["defining_tu_count"] = static_cast<int64_t>(sym.definingTuCount);
+    if (!sym.vtableHomeTu.empty())
+      o["vtable_home_tu"] = sym.vtableHomeTu;
+    llvm::json::Array decls;
+    for (const SymbolDeclInfo &d : sym.declarations) {
+      llvm::json::Object e;
+      e["file"] = d.file;
+      e["line"] = static_cast<int64_t>(d.line);
+      e["definition"] = d.definition;
+      e["in_header"] = d.inHeader;
+      decls.push_back(std::move(e));
+    }
+    o["declarations"] = std::move(decls);
+    symbols.push_back(std::move(o));
+  }
+  for (const ReferenceInfo &r : references.allReferences()) {
+    if (!tuFilter.empty() && r.firstTu != tuFilter)
+      continue;
+    llvm::json::Object o;
+    o["referrer_usr"] = r.referrerUsr;
+    o["target_usr"] = r.targetUsr;
+    o["role"] = refRoleName(r.role);
+    o["count"] = static_cast<int64_t>(r.count);
+    o["file"] = r.file;
+    o["line"] = static_cast<int64_t>(r.line);
+    o["column"] = static_cast<int64_t>(r.col);
+    o["tu"] = r.firstTu;
+    o["tu_count"] = static_cast<int64_t>(r.tuCount);
+    refs.push_back(std::move(o));
+  }
+}
+
 } // namespace
 
 bool MegascopeBridge::isMegascopeSnapshotPath(llvm::StringRef path) {
@@ -368,7 +426,7 @@ bool MegascopeBridge::isMegascopeShardJsonPath(llvm::StringRef path) {
 llvm::json::Object MegascopeBridge::toShardObject(
     const CallGraph &graph, const ControlFlowIndex &cfIndex,
     const ChannelIndex &channels, const SnapshotMeta &meta,
-    llvm::StringRef tuFilter) {
+    llvm::StringRef tuFilter, const ReferenceIndex *references) {
   std::string moduleFile = tuFilter.str();
   uint64_t fingerprint = 0;
   const char *outcomeStr = "indexed";
@@ -926,24 +984,36 @@ llvm::json::Object MegascopeBridge::toShardObject(
   shard["await_under_threading_lock"] = llvm::json::Array();
   shard["channels"] = std::move(channelsArr);
   shard["function_returns"] = std::move(fnReturnsObj);
+  if (references) {
+    llvm::json::Array symbolsArr;
+    llvm::json::Array referencesArr;
+    appendReferenceFacts(*references, tuFilter, symbolsArr, referencesArr);
+    shard["symbols"] = std::move(symbolsArr);
+    shard["references"] = std::move(referencesArr);
+  }
   return shard;
 }
 
 llvm::json::Array MegascopeBridge::toShardsArray(
     const CallGraph &graph, const ControlFlowIndex &cfIndex,
-    const ChannelIndex &channels, const SnapshotMeta &meta) {
+    const ChannelIndex &channels, const SnapshotMeta &meta,
+    const ReferenceIndex *references) {
   llvm::json::Array arr;
   if (meta.files.size() <= 1) {
-    arr.push_back(toShardObject(graph, cfIndex, channels, meta, ""));
+    arr.push_back(
+        toShardObject(graph, cfIndex, channels, meta, "", references));
     return arr;
   }
 
   // Build the deduplicated whole-graph shard once in O(V + E) and partition
   // its entities, calls/contexts, and channels across the per-TU shards so
   // shared header entities and edges are never duplicated N times across N TUs.
-  llvm::json::Object full = toShardObject(graph, cfIndex, channels, meta, "");
+  llvm::json::Object full =
+      toShardObject(graph, cfIndex, channels, meta, "", references);
 
   const size_t nTus = meta.files.size();
+  std::vector<llvm::json::Array> tuSymbols(nTus);
+  std::vector<llvm::json::Array> tuReferences(nTus);
   std::vector<llvm::json::Array> tuEntities(nTus);
   std::vector<llvm::json::Array> tuCalls(nTus);
   std::vector<llvm::json::Array> tuContexts(nTus);
@@ -1041,6 +1111,25 @@ llvm::json::Array MegascopeBridge::toShardsArray(
         tuChannels[owner].push_back(std::move(val));
       }
     }
+
+    // Symbol reference facts go to the TU each record names; one whose TU
+    // is not a healthy member of this index goes to the first healthy one.
+    auto partitionByTu = [&](llvm::StringRef member,
+                             std::vector<llvm::json::Array> &out) {
+      auto *records = full.getArray(member);
+      if (!records)
+        return;
+      for (auto &val : *records) {
+        size_t owner = firstHealthy;
+        if (auto *obj = val.getAsObject())
+          if (auto tu = obj->getString("tu"))
+            if (auto it = tuByPath.find(tu->str()); it != tuByPath.end())
+              owner = it->second;
+        out[owner].push_back(std::move(val));
+      }
+    };
+    partitionByTu("symbols", tuSymbols);
+    partitionByTu("references", tuReferences);
   }
 
   for (size_t i = 0; i < nTus; ++i) {
@@ -1090,6 +1179,10 @@ llvm::json::Array MegascopeBridge::toShardsArray(
     }
     shard["await_under_threading_lock"] = llvm::json::Array();
     shard["channels"] = std::move(tuChannels[i]);
+    if (references) {
+      shard["symbols"] = std::move(tuSymbols[i]);
+      shard["references"] = std::move(tuReferences[i]);
+    }
     arr.push_back(std::move(shard));
   }
   return arr;
@@ -1099,8 +1192,10 @@ std::string MegascopeBridge::toShardJson(const CallGraph &graph,
                                          const ControlFlowIndex &cfIndex,
                                          const ChannelIndex &channels,
                                          const SnapshotMeta &meta,
-                                         bool pretty) {
-  llvm::json::Value val(toShardObject(graph, cfIndex, channels, meta, ""));
+                                         bool pretty,
+                                         const ReferenceIndex *references) {
+  llvm::json::Value val(
+      toShardObject(graph, cfIndex, channels, meta, "", references));
   std::string out;
   llvm::raw_string_ostream os(out);
   if (pretty)
@@ -1114,8 +1209,10 @@ std::string MegascopeBridge::toShardsJson(const CallGraph &graph,
                                           const ControlFlowIndex &cfIndex,
                                           const ChannelIndex &channels,
                                           const SnapshotMeta &meta,
-                                          bool pretty) {
-  llvm::json::Value val(toShardsArray(graph, cfIndex, channels, meta));
+                                          bool pretty,
+                                          const ReferenceIndex *references) {
+  llvm::json::Value val(
+      toShardsArray(graph, cfIndex, channels, meta, references));
   std::string out;
   llvm::raw_string_ostream os(out);
   if (pretty)
@@ -1151,11 +1248,12 @@ bool MegascopeBridge::saveShardJson(const std::string &path,
                                     const SnapshotMeta &meta,
                                     const ChannelIndex &channels,
                                     std::string *error, bool durable,
-                                    bool pretty) {
+                                    bool pretty,
+                                    const ReferenceIndex *references) {
   std::string jsonStr =
       (meta.files.size() <= 1)
-          ? toShardJson(graph, cfIndex, channels, meta, pretty)
-          : toShardsJson(graph, cfIndex, channels, meta, pretty);
+          ? toShardJson(graph, cfIndex, channels, meta, pretty, references)
+          : toShardsJson(graph, cfIndex, channels, meta, pretty, references);
   return writeFileAtomically(
       path, [&](llvm::raw_ostream &os) { os << jsonStr; }, error, durable);
 }

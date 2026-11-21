@@ -1,0 +1,5 @@
+# megascope get-references --name cbs::startupHook --format ndjson -> exit 0
+{"_summary":{"direction":"to","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"kind":"function","qualifiedName":"cbs::startupHook","referencedFromOtherTu":true,"status":"ok","truncated":false,"usr":"c:@N@cbs@F@startupHook#I#"}}
+{"col":23,"count":1,"file":"{fixture}/pipeline.cpp","firstTu":"{fixture}/pipeline.cpp","fromOtherTu":true,"line":19,"referrer":"Pipeline::run","referrerKind":"function","referrerUsr":"c:@S@Pipeline@F@run#I#","role":"address_of","tuCount":1}
+{"col":25,"count":1,"file":"{fixture}/scheduler.cpp","firstTu":"{fixture}/scheduler.cpp","fromOtherTu":true,"line":17,"referrer":"Scheduler::schedule","referrerKind":"function","referrerUsr":"c:@S@Scheduler@F@schedule#I#1","role":"address_of","tuCount":1}
+{"col":27,"count":1,"file":"{fixture}/main.cpp","firstTu":"{fixture}/main.cpp","fromOtherTu":true,"line":79,"referrer":"main","referrerKind":"function","referrerUsr":"c:@F@main#","role":"address_of","tuCount":1}

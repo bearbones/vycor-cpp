@@ -9,7 +9,7 @@ is given (`thread` is refused).
 
 | Target | Parser | What an accepted input is put through |
 |---|---|---|
-| `fuzz_snapshot` | `SnapshotIO::load` (`src/callgraph/Snapshot.cpp`, the mapped control-flow section in `ControlFlowIndex.cpp`) | Mutable: absorbed into fresh indexes (the isolated bake's shard merge), its TUs removed, saved and reloaded (a warm refresh). ReadOnly: every registered tool, and the `dump` walk over every context and channel site |
+| `fuzz_snapshot` | `SnapshotIO::load` (`src/callgraph/Snapshot.cpp`, the mapped control-flow section in `ControlFlowIndex.cpp`, the references section in `ReferenceIndex.cpp`) | Mutable: absorbed into fresh indexes (the isolated bake's shard merge), its TUs removed, saved and reloaded (a warm refresh). ReadOnly: every registered tool, and the `dump` walk over every context and channel site |
 | `fuzz_checkpoint` | `CheckCheckpoint::open` (`src/check/Checkpoint.cpp`) | every TU a record names replayed the way a resumed `runAnalysis` does, the index-only checks over the replayed index, then an append and a reopen |
 | `fuzz_shard` | `readCheckIndexShard`, `readCheckDiagShard`, `readGlobalIndexFile` | payloads applied to a `GlobalIndex` and the index-only checks run; written back out through the shard writers |
 | `fuzz_batch` | `runBatch` (`src/cli/MegascopeCli.cpp`) | answered against an `examples/deep_chains` index loaded ReadOnly; every input is also held to the batch contract (one JSON response with `status` and `exit` per request line) |
