@@ -2669,6 +2669,7 @@ public:
     avail_ = avail;
     epochNow_ = ++epoch_;
     result_ = Result{};
+    partsLoaded_ = false;
     head_ = tail_ = 0;
     const uint32_t targets = static_cast<uint32_t>(lm_.mode.size());
     for (uint32_t t = 0; t < targets; ++t) {
@@ -2757,7 +2758,17 @@ private:
   /// resolves some other way still loads the member).
   void resolve(uint32_t s) noexcept {
     if (split_on_ && kStamp_[s] == kEpoch_) {
-      pullNode(partNode(kPart_[s]));
+      // The split out of a shared library is a shared library too: the
+      // first use loads every part.
+      if (lm_.mode[provider_] == LinkMode::Shared) {
+        if (!partsLoaded_) {
+          partsLoaded_ = true;
+          for (uint32_t i = 0; i <= parts(); ++i)
+            pullNode(partNode(i));
+        }
+      } else {
+        pullNode(partNode(kPart_[s]));
+      }
       return;
     }
     const auto owners = lf_.targetsOf(lf_.symOwner[s]);
@@ -2806,6 +2817,7 @@ private:
   std::vector<uint32_t> outBegin_, out_, starts_;
   // The current run.
   bool split_on_ = false;
+  bool partsLoaded_ = false; // a shared provider's split, loaded whole
   uint32_t e_ = kNoIndex;
   const uint64_t *avail_ = nullptr;
   Result result_;

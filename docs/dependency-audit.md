@@ -360,7 +360,7 @@ symbol or uncertain symbol referenced).
 | `droppableTargets` | of those, the ones the closure would not pull back in: what the consumer stops linking if the closure is split out into a target of its own |
 | `droppableSymbols` | the `defined` symbols in `droppableTargets`, less the closure itself when the provider is among them — the gain |
 | `providerDroppable` | the provider is one of `droppableTargets` |
-| `linkTargetsHelped`, `linkTargetGain`, `linkTargetMembers` | the final link targets (executables, shared and module libraries) that would load less if the closure were split out of the provider, the most emitted symbols one of them would stop loading, and that target's members of which nothing is loaded any more — [Link-target gain](#link-target-gain) |
+| `linkTargetsHelped`, `linkTargetGain`, `linkTargetMembers` | the final link targets (executables, shared and module libraries) that would load less if the closure were split out of the provider, the most emitted symbols one of them would stop loading, and how many fewer members that target loads code from — [Link-target gain](#link-target-gain) |
 | `fanInPct`, `splitGain` | the share of the rest of the provider that references the closure, and `linkTargetGain` discounted by it — [Link-target gain](#link-target-gain) |
 | `closureFanIn`, `closureFanInFiles` | `defined` provider symbols outside the closure that reference into it, and their files — [the closure](#inline-bodies-and-the-closure) |
 | `registrationSeeds` | certain seeds that register a factory — [Registration seeds](#registration-seeds) |
@@ -427,7 +427,8 @@ uses; when a link loads both, they weigh what the member did (an inline
 body both use is one copy). Every final link target that links
 the consumer is simulated again with the row's edge replaced by the
 closure's needs: a reference to a closure symbol loads the part that
-holds it, and a provider member's rest is loaded only if something
+holds it (every part, when the provider is a shared or module library:
+the new target is one too, loaded whole once used), and a provider member's rest is loaded only if something
 still references what is left in it, so members pulled in only through
 the closure — in the provider and transitively in any other target —
 drop out. When the provider is an object library every part is linked,
@@ -438,7 +439,7 @@ shared library no longer reached).
 | Member | Meaning |
 |---|---|
 | `linkTargetGain` | the most emitted symbols one final link target stops loading: `linkInput` before less the weight after, the new target's parts included. Never negative: a target that would load more is not helped |
-| `linkTargetMembers` | that target's members of which no code is loaded after the split: neither the member, nor its rest, nor its part |
+| `linkTargetMembers` | how many fewer members that target loads any code from after the split (a member counts once whether its whole, its rest or its part is loaded): a net count, so a member the split newly loads, such as one an archive that left the line now supplies from elsewhere, offsets one it drops |
 | `linkTargetsHelped` | how many final link targets gain anything |
 | `fanInPct` | `closureFanIn` as a percentage of the provider's `defined` symbols outside the closure, 0–100: how much of what stays behind still calls into what moved |
 | `splitGain` | `linkTargetGain × (rest − fanIn) / rest`, rounded down, where `rest` is the provider's `defined` symbols outside the closure and `fanIn` is `closureFanIn`: the gain, discounted by the share of what stays behind that still calls into what moved (`linkTargetGain` itself when nothing stays behind) |
@@ -477,7 +478,9 @@ What it does not see:
 - **Granularity.** One member per mapped source: a source compiled into
   a target through another target's objects, or objects a build adds
   outside the map (CMake folding an object library into an archive),
-  are not modelled. Link order is ignored: a symbol two archives on the
+  are not modelled. An identity defined by several sources of one
+  target is held by one of them only (the same one on every run): the
+  others' copies weigh nothing and reference nothing. Link order is ignored: a symbol two archives on the
   line define resolves to the one whose name sorts first, not to the
   first on the command line.
 
@@ -554,7 +557,7 @@ observed) answers `ok` with empty `seeds` and exit code 1.
 | Member | Meaning |
 |---|---|
 | `edge` | the row, as in the edge table |
-| `linkTargetsHelped` | each final link target the split would help: `target`, `gain` (emitted symbols it stops loading), `members` (members of which it loads nothing any more), `linkInput` and `linkInputMembers` (what it loads as the map stands) — by gain descending, then name |
+| `linkTargetsHelped` | each final link target the split would help: `target`, `gain` (emitted symbols it stops loading), `members` (how many fewer members it loads code from, net), `linkInput` and `linkInputMembers` (what it loads as the map stands) — by gain descending, then name |
 | `seeds` | every provider symbol the consumer references — certain before uncertain, named by a source before via-inline, then by site. Each: `symbol` (`name`, `usr`, `kind` — `function`, `variable`, `class` — and the declaration's `file`, `line`), `owner` (`defined` / `presumed`), `via` (`direct` / `inline`), `kind` (the reference's role or added kind), `site` (where the reference to the symbol is written), `from` (the symbol that makes it), `registers: true` for a registration, and for `via: "inline"` `through`: the reference in the consumer's own files (`site`, `from`, `to`) the walk started from |
 | `closure` | the closure's symbols by qualified name, then USR: `name`, `usr`, `kind`, `file`, `line` (the declaration), `definedIn` (the file that defines it, when known) |
 | `closureTotal`, `closureTruncated` | the full count, and whether `closure_limit` cut the list |

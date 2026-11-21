@@ -2158,14 +2158,17 @@ namespace {
 
 /// exe → lib → p, where p's three members form a chain: lib's one call
 /// lands in p1, whose other function calls into p2, which calls into p3.
-/// `providerKind` is p's kind; `exe2` adds a program that links p itself.
+/// `providerKind` is p's kind; `exe2` adds a program that links p itself;
+/// `virtualCall` adds a virtual function v in p3 that a calls (a soft
+/// reference: in the closure, but never what makes the linker load p3).
 struct ChainSplit {
   TargetMap map;
   LinkFacts lf;
   DependencyAudit audit;
   enum : uint32_t { tExe = 0, tExe2 = 1, tLib = 2, tP = 3 };
 
-  ChainSplit(const char *providerKind, bool exe2, bool fanIn) {
+  ChainSplit(const char *providerKind, bool exe2, bool fanIn,
+             bool virtualCall = false) {
     std::string error;
     const std::string json =
         std::string(R"({"schema": 1, "root": "/r", "targets": [
@@ -2214,6 +2217,12 @@ struct ChainSplit {
     if (exe2)
       addRef(refs, "c:@F@m2", "c:@F@lib_fn", RefRole::Call, "/r/exe2/m.cpp",
              2, 3, "/r/exe2/m.cpp");
+    if (virtualCall) {
+      addSym(refs, "c:@S@K@F@v#", "K::v", "/r/p/p3.cpp", 2,
+             kD | kSymVirtual | kSymMember, {"/r/p/p3.cpp"});
+      addRef(refs, "c:@F@a", "c:@S@K@F@v#", RefRole::Call, "/r/p/p1.cpp", 4,
+             3, "/r/p/p1.cpp");
+    }
     lf = linkFactsFromReferences(refs, nullptr, map, &meta);
     audit = auditDependencies(lf, map);
   }
@@ -2277,6 +2286,32 @@ TEST_CASE("dependency audit link gain: a shared library is loaded whole",
   ChainSplit s("shared_library", /*exe2=*/false, /*fanIn=*/false);
   CHECK(s.audit.linkInput[ChainSplit::tExe] == 7);
   CHECK(s.audit.linkInputMembers[ChainSplit::tExe] == 5);
+}
+
+TEST_CASE("dependency audit link gain: the split of a shared library is "
+          "loaded whole, the split of an archive member by member",
+          "[dependency-audit]") {
+  // m 1, l 1, p1 a + b + h 3, p2 c 1, p3 d + v 2.
+  ChainSplit archive("static_library", /*exe2=*/false, /*fanIn=*/false,
+                     /*virtualCall=*/true);
+  CHECK(archive.audit.linkInput[ChainSplit::tExe] == 8);
+  const AuditRow &a = rowOf(archive.audit, ChainSplit::tLib, ChainSplit::tP);
+  // The closure is a and v, in two members, so two parts.
+  CHECK(a.closureSymbols == 2);
+  // Nothing hard references v: its part stays in the archive. After: m,
+  // l, p1's part (a and h).
+  CHECK(a.linkTargetGain == 8 - 4);
+  CHECK(a.linkTargetMembers == 2);
+
+  ChainSplit shared("shared_library", /*exe2=*/false, /*fanIn=*/false,
+                    /*virtualCall=*/true);
+  CHECK(shared.audit.linkInput[ChainSplit::tExe] == 8);
+  const AuditRow &s = rowOf(shared.audit, ChainSplit::tLib, ChainSplit::tP);
+  CHECK(s.closureSymbols == 2);
+  // Using a loads the new shared library whole, v's part with it: m, l,
+  // a + h, v. Nothing references the rest of p, which leaves the line.
+  CHECK(s.linkTargetGain == 8 - 5);
+  CHECK(s.linkTargetMembers == 1);
 }
 
 TEST_CASE("dependency audit link gain: one identity defined by several "
