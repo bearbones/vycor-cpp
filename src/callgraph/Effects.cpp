@@ -254,7 +254,8 @@ EffectTable EffectTable::builtin() {
       "std::basic_filebuf::open",
   };
   // The throw expression itself (an edge the call graph builder records)
-  // and the library functions whose whole job is to raise.
+  // and the library functions that raise (std::rethrow_if_nested only
+  // when its argument holds a nested exception).
   static const char *const kThrow[] = {
       kThrowFunction,
       kRethrowFunction,

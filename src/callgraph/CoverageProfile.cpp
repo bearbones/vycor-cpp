@@ -21,6 +21,7 @@
 #include "llvm/Support/Path.h"
 
 #include <algorithm>
+#include <limits>
 #include <tuple>
 
 namespace vycor {
@@ -180,8 +181,8 @@ bool CoverageProfile::parse(llvm::StringRef buffer, CoverageProfile &out,
   }
 
   const uint32_t fileCount = static_cast<uint32_t>(out.fileNames_.size());
-  std::sort(rawSegments.begin(), rawSegments.end(),
-            [](const RawSegment &a, const RawSegment &b) {
+  std::stable_sort(rawSegments.begin(), rawSegments.end(),
+                   [](const RawSegment &a, const RawSegment &b) {
               return std::tie(a.file, a.line, a.col) <
                      std::tie(b.file, b.line, b.col);
             });
@@ -263,36 +264,79 @@ bool CoverageProfile::load(const std::string &path, CoverageProfile &out,
   return true;
 }
 
+uint32_t CoverageProfile::match(const std::string &normal,
+                                unsigned &shared) const {
+  shared = 0;
+  auto exact = fileByName_.find(normal);
+  if (exact != fileByName_.end()) {
+    shared = std::numeric_limits<unsigned>::max();
+    return exact->second;
+  }
+  auto candidates = filesByBase_.find(llvm::sys::path::filename(normal));
+  if (candidates == filesByBase_.end())
+    return kNone;
+  uint32_t best = kNone;
+  bool tied = false;
+  for (uint32_t file : candidates->second) {
+    const unsigned common = commonSuffix(normal, fileNames_[file]);
+    if (common > shared) {
+      shared = common;
+      best = file;
+      tied = false;
+    } else if (common == shared) {
+      tied = true;
+    }
+  }
+  return tied ? kNone : best;
+}
+
 uint32_t CoverageProfile::fileFor(llvm::StringRef path) const {
   auto memo = fileMemo_.find(path);
   if (memo != fileMemo_.end())
     return memo->second;
-  const std::string normal = normalizedPath(path);
-  uint32_t best = kNone;
-  auto exact = fileByName_.find(normal);
-  if (exact != fileByName_.end()) {
-    best = exact->second;
-  } else {
-    auto candidates = filesByBase_.find(llvm::sys::path::filename(normal));
-    if (candidates != filesByBase_.end()) {
-      unsigned bestShared = 0;
-      bool tied = false;
-      for (uint32_t file : candidates->second) {
-        const unsigned shared = commonSuffix(normal, fileNames_[file]);
-        if (shared > bestShared) {
-          bestShared = shared;
-          best = file;
-          tied = false;
-        } else if (shared == bestShared) {
-          tied = true;
-        }
-      }
-      if (tied)
-        best = kNone;
-    }
-  }
+  unsigned shared = 0;
+  const uint32_t best = match(normalizedPath(path), shared);
   fileMemo_.try_emplace(path, best);
   return best;
+}
+
+void CoverageProfile::bindFiles(llvm::ArrayRef<llvm::StringRef> paths) const {
+  struct Claim {
+    std::string normal;
+    uint32_t file;
+    unsigned shared;
+  };
+  std::vector<Claim> claims;
+  claims.reserve(paths.size());
+  for (llvm::StringRef path : paths) {
+    Claim claim{normalizedPath(path), kNone, 0};
+    claim.file = match(claim.normal, claim.shared);
+    claims.push_back(std::move(claim));
+  }
+  // Per profile file: the longest shared suffix among its claimants, and
+  // whether two different paths reach it.
+  const size_t files = fileNames_.size();
+  std::vector<unsigned> top(files, 0);
+  std::vector<const std::string *> topPath(files, nullptr);
+  std::vector<uint8_t> tied(files, 0);
+  for (const Claim &claim : claims) {
+    if (claim.file == kNone)
+      continue;
+    if (!topPath[claim.file] || claim.shared > top[claim.file]) {
+      top[claim.file] = claim.shared;
+      topPath[claim.file] = &claim.normal;
+      tied[claim.file] = 0;
+    } else if (claim.shared == top[claim.file] &&
+               claim.normal != *topPath[claim.file]) {
+      tied[claim.file] = 1;
+    }
+  }
+  for (size_t i = 0; i < claims.size(); ++i) {
+    const Claim &claim = claims[i];
+    const bool wins = claim.file != kNone && claim.shared == top[claim.file] &&
+                      !tied[claim.file];
+    fileMemo_[paths[i]] = wins ? claim.file : kNone;
+  }
 }
 
 int64_t CoverageProfile::countAt(uint32_t file, uint32_t line,

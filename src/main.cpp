@@ -983,6 +983,12 @@ int main(int argc, const char **argv) {
 
     // hot-path-effects: its roots and profile are checked before any parse.
     const bool wantHotPaths = enabledChecks.count("hot-path-effects") > 0;
+    if (!wantHotPaths && (CheckHotRoots.getNumOccurrences() ||
+                          CheckHotProfile.getNumOccurrences() ||
+                          CheckHotMinCount.getNumOccurrences()))
+      llvm::errs() << "check: --hot-root, --hot-profile and --hot-min-count "
+                      "configure hot-path-effects, which is not enabled "
+                      "(--checks=hot-path-effects)\n";
     vycor::HotPathConfig hotConfig =
         vycor::ExtensionRegistry::instance().hotPathConfig();
     std::optional<vycor::CoverageProfile> hotProfile;
@@ -999,10 +1005,14 @@ int main(int argc, const char **argv) {
           llvm::errs() << "check: --hot-profile: " << err << "\n";
           return kUsage;
         }
-      } else if (hotConfig.minCount != 0) {
+      } else if (CheckHotMinCount.getNumOccurrences() &&
+                 hotConfig.minCount != 0) {
         llvm::errs() << "check: hot-path-effects: a minimum count takes "
                         "roots from a profile; pass --hot-profile\n";
         return kUsage;
+      } else {
+        // The org config's minCount applies only with a profile.
+        hotConfig.minCount = 0;
       }
       if (hotConfig.roots.empty() && hotConfig.rootPatterns.empty() &&
           hotConfig.minCount == 0) {
@@ -1393,6 +1403,16 @@ int main(int argc, const char **argv) {
         for (const std::string &root : hotReport.unmatchedRoots)
           llvm::errs() << "check: hot-path-effects: hot root '" << root
                        << "' names no function in the call graph\n";
+        if (hotProfile && hotReport.join.callSitesInProfile == 0)
+          llvm::errs() << "check: hot-path-effects: the profile matched no "
+                          "call site of the call graph (a profile of another "
+                          "program, or paths that share no suffix?)\n";
+        if (hotReport.roots == 0) {
+          llvm::errs() << "check: hot-path-effects: no hot root: the "
+                          "configured roots name no function and the profile "
+                          "gave none\n";
+          return kUsage;
+        }
         if (hotReport.templateLeaves != 0)
           llvm::errs() << "check: hot-path-effects: " << hotReport.templateLeaves
                        << " reached template instantiation(s) have no recorded "

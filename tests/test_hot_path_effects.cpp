@@ -291,6 +291,39 @@ TEST_CASE("CoverageProfile reads counts at locations and the enclosing "
   CHECK(profile.functionAt(file, 15, 1) == CoverageProfile::kNone);
 }
 
+TEST_CASE("CoverageProfile binds index files to profile files two-sidedly",
+          "[hot-path][profile]") {
+  // The profiled binary holds only lib/a/util.cpp; the index also has
+  // tools/b/util.cpp, which must not borrow its counts.
+  const std::string json = R"({"type":"llvm.coverage.json.export",
+    "data":[{"files":[{"filename":"/build/lib/a/util.cpp","segments":[]}],
+             "functions":[{"name":"f","count":1,
+                           "filenames":["/build/lib/a/util.cpp"],
+                           "regions":[[1,1,2,1,1,0,0,0]]}]}]})";
+  {
+    CoverageProfile profile = parseProfile(json);
+    // One-sided, both spellings find the only util.cpp.
+    CHECK(profile.fileFor("/w/tools/b/util.cpp") != CoverageProfile::kNone);
+  }
+  CoverageProfile profile = parseProfile(json);
+  std::vector<llvm::StringRef> paths = {"/w/lib/a/util.cpp",
+                                        "/w/tools/b/util.cpp",
+                                        "/w/lib/a/./util.cpp"};
+  profile.bindFiles(paths);
+  const uint32_t file = profile.fileFor("/w/lib/a/util.cpp");
+  CHECK(file != CoverageProfile::kNone);
+  CHECK(profile.fileFor("/w/tools/b/util.cpp") == CoverageProfile::kNone);
+  // Two spellings of one file are one claimant.
+  CHECK(profile.fileFor("/w/lib/a/./util.cpp") == file);
+
+  // Two distinct index files sharing as much with the profile file: neither.
+  CoverageProfile tied = parseProfile(json);
+  std::vector<llvm::StringRef> twins = {"/p/util.cpp", "/q/util.cpp"};
+  tied.bindFiles(twins);
+  CHECK(tied.fileFor("/p/util.cpp") == CoverageProfile::kNone);
+  CHECK(tied.fileFor("/q/util.cpp") == CoverageProfile::kNone);
+}
+
 TEST_CASE("CoverageProfile refuses an ambiguous file and other documents",
           "[hot-path][profile]") {
   const std::string two = R"({"type":"llvm.coverage.json.export",
@@ -586,7 +619,8 @@ TEST_CASE("Reached template instantiations without calls are counted",
   // The graph holds Box::put's calls under the template, not under
   // Box<int>::put (#106): the lock is not seen, and the report says that
   // two reached functions hide their calls. A function whose parameter is
-  // a specialization, and operator<, are not instantiations.
+  // a specialization, a local class's member inside one, and operator<
+  // are not instantiations.
   CallGraph graph;
   build(graph, R"(std::mutex mu;
 template <class T> struct Box { void put(T) { mu.lock(); } };
@@ -594,7 +628,10 @@ template <class T> T twice(T x) { return x + x; }
 struct A {};
 bool operator<(A, A);
 void takes(Box<int> &) {}
-void hot() { Box<int> b; b.put(1); twice(2); takes(b); A x, y; (void)(x < y); }
+int process(Box<int> &) { struct Local { static int f() { return 3; } };
+  return Local::f(); }
+void hot() { Box<int> b; b.put(1); twice(2); takes(b); A x, y; (void)(x < y);
+  process(b); }
 )");
   HotPathConfig config;
   config.roots = {"hot"};
@@ -734,6 +771,32 @@ TEST_CASE("query_path_effects answers through the tool contract",
   CHECK(call(R"({"roots": ["hot"], "profile": "/no/such/profile.json"})")
             .getString("status")
             .value_or("") == "usage_error");
+  CHECK(call(R"({"roots": ["hot"], "effects": []})")
+            .getString("status")
+            .value_or("") == "usage_error");
+
+  // With coverage stated complete, a root that reaches no effect is clean,
+  // unless another configured root matched nothing.
+  ctx.facts.freshness = IndexFreshness::Baked;
+  ctx.facts.coverage = {1, 1, 0, 0};
+  out = call(R"({"roots": ["std::mutex::unlock"]})");
+  CHECK(out.getString("verdict").value_or("") == "clean");
+  CHECK(out.getBoolean("exhaustive") == std::optional<bool>(true));
+  out = call(R"({"roots": ["std::mutex::unlock", "no_such_function"]})");
+  CHECK(out.getString("verdict").value_or("") == "unknown");
+
+  // The org config's minCount needs a profile only when one is given: the
+  // configured roots still answer without one.
+  HotPathConfig org;
+  org.roots = {"hot"};
+  org.minCount = 50;
+  ExtensionRegistry::instance().addHotPathConfig(org);
+  out = call(R"({})");
+  CHECK(out.getString("verdict").value_or("") == "effects");
+  const llvm::json::Object *roots = out.getObject("roots");
+  REQUIRE(roots);
+  CHECK(roots->getInteger("minCount").value_or(-1) == 0);
+  ExtensionRegistry::instance().clear();
 }
 
 TEST_CASE("The check reports latent findings as notes",

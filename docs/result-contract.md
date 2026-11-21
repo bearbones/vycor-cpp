@@ -206,6 +206,7 @@ whole list, not the page.
 | `metrics` | `records` | 200 | one list for every selected metric (`docs/metrics/README.md`); the per-metric `metrics` summaries are not paged |
 | `query_channels_for_function` | `sites` | 200 | |
 | `get_references` | `references` | 200 | `roles` filters before the window, so `total` counts the records of the chosen roles |
+| `query_path_effects` | `findings` | 200 | `summary`, `roots`, `templateLeaves` and `reachedFunctions` describe the whole run, not the page |
 | `query_channel` | `producers`, `consumers` | 200 | one window pages both lists: `producerTotal` and `consumerTotal` replace `total` and `returned`, and `truncated` is set when either list continues |
 | `analyze_dead_code` | `dead`, `optimisticallyAlive` | 500 | already paged (`totalDead`, `deadCount`, `offset`, `limit`); the same window now pages `optimisticallyAlive` too (`optimisticTotal`, `optimisticTruncated`). `total` and `returned` describe `dead`; `truncated` and `nextOffset` cover both lists, so following `nextOffset` reaches every record of either. Its `limit` keeps its historical range: 0 is counts only, which returns no records and no `nextOffset` (`truncated` still says whether records exist) |
 | `audit_dependencies` | `edges` | 200 | `findingCounts` and `unusedWithheld` count every edge the `consumer` / `provider` filters keep, not the page (`docs/dependency-audit.md`) |

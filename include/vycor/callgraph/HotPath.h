@@ -34,7 +34,8 @@
 // at or above a threshold). An effect is a call of a function the effect
 // table lists: an allocation, a lock acquisition, I/O, or a throw. One
 // finding per effect call reachable from a root, with one witness path
-// from the nearest root to it.
+// to it from a root (the nearest without a profile; with one, the root of
+// the heaviest path). A path never runs through another root.
 //
 // With a profile, every call site on a path has a count, and so has every
 // function entered along it that the profile can be joined to (through
@@ -114,7 +115,7 @@ struct HotPathFinding {
 
 // How much of the index the profile's locations found.
 struct HotPathJoin {
-  size_t callSites = 0;          // stored edges
+  size_t callSites = 0;          // distinct call sites in the graph
   size_t callSitesInProfile = 0; // ... in a file the profile has
   size_t callSitesCounted = 0;   // ... with an execution count
   size_t functions = 0;          // functions with at least one call

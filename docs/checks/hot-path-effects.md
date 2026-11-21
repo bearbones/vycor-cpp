@@ -6,7 +6,7 @@ Finds the heap allocations, lock acquisitions, I/O and throws reachable
 through the cross-TU call graph from the functions you call hot: a
 kernel, a per-frame update, a solver step, a request handler. Each
 finding is one call of an effect function, with one witness path from
-the nearest hot root to it.
+a hot root to it.
 
 Given a coverage profile of a real run, it also says how hot each path
 was: every path is weighted by its rarest call, and a path that never
@@ -65,13 +65,17 @@ A root is where a hot path starts. Three sources, unioned:
 
 A configured name or pattern that matches no function is reported
 (`roots.unmatched` in the tool, a line on stderr from the check), so a
-typo does not silently check nothing. Enabling the check without any
-root is a usage error (exit 2).
+typo does not silently check nothing, and the tool does not answer
+`clean` while one is unmatched. Enabling the check without any root is
+a usage error (exit 2), and so is a run in which no configured root
+matched and the profile gave none.
 
-Every finding attaches to the **nearest** root above it: a path never
-runs through another root. With profile roots, every hot function is a
-root, so the witnesses are short and start at the innermost hot
-function; name the outer roots in the config to see the longer chains
+A path never runs through another root: every finding attaches to a
+root above it with no root in between. Without a profile that is the
+nearest one (the shortest path); with a profile it is the root of the
+heaviest path, which can be a farther one. With profile roots, every hot
+function is a root, so the witnesses are short and start at an innermost
+hot function; name the outer roots in the config to see the longer chains
 (`query_path_effects --roots main --profile run.json` gives each
 finding's path from `main`).
 
@@ -134,11 +138,17 @@ location**:
   compile command did (often relative to the build directory), the
   profile with the absolute path of the machine that ran it. The longest
   run of trailing path components decides, and a tie between two
-  profile files matches neither.
+  profile files matches neither. The match is two-sided: when two index
+  files reach the same profile file, it goes to the one sharing more
+  trailing components, and to neither on a tie. A profile of one binary
+  holding `lib/a/util.cpp` therefore does not lend its counts to an
+  indexed `tools/b/util.cpp`.
 
 The **weight** of a path is the smallest count on it: of every call site
 and of every function entered that has an entry count. The witness of a
-finding is a path of the largest weight (then the fewest calls). The
+finding is a path of the largest weight (then the fewest calls; among
+equal paths, a Proven call is preferred over a Plausible one, then the
+caller's USR and the call site decide). The
 entry counts are what tell the targets of one virtual call apart: the
 call site ran, but only one override was entered.
 
@@ -167,9 +177,12 @@ What a count does not say:
   this run", not "unreachable".
 
 The tool reports the join so its coverage is visible: `profile.join`
-counts the index's call sites, those in a file the profile has, those
-with a count, and the functions with calls and those joined to an entry
-count.
+counts the index's distinct call sites (one per location, however many
+edges leave it), those in a file the profile has, those with a count,
+and the functions with calls and those joined to an entry count. The
+check warns when the profile matched no call site, and stops with a
+usage error (exit 2) when the profile was the only root source and gave
+no root: a wrong profile must not pass the gate silently.
 
 ## Usage
 
@@ -201,8 +214,16 @@ Org config (`--org-config`):
 }
 ```
 
-`minCount` only takes effect with a profile (`--hot-profile`); the
-profile itself is per run, not part of the config.
+`minCount` only takes effect with a profile (`--hot-profile`): without
+one, the configured names and patterns are the roots. An explicit
+`--hot-min-count` (tool: `min_count`) without a profile is a usage
+error. The profile itself is per run, not part of the config. The
+`--hot-*` flags are ignored, with a warning, when the check is not
+enabled.
+
+A finding's identity (its baseline fingerprint) includes its evidence,
+so a finding that moves from latent to observed when a new profile is
+used comes back as new: that change is the news.
 
 Grouped **compute-heavy**: it builds the full cross-TU call graph (shared
 with `dead-code` and `static-init-hazards` when they are enabled, or read
@@ -212,7 +233,7 @@ from the build directory's megascope index when that index is clean).
 
 Arguments: `roots`, `root_patterns` (added to the org config's),
 `profile`, `min_count` (overrides the config's), `effects` (subset of
-`allocation`, `lock`, `io`, `throw`; default all), `allow` (added to the
+`allocation`, `lock`, `io`, `throw`; default all, and an empty list is a usage error), `allow` (added to the
 config's), `limit` / `offset`. Reads only the graph section of an index.
 
 Payload:
@@ -227,11 +248,12 @@ Payload:
 | `reachedFunctions` | Functions visited from the roots, roots included. |
 | `templateLeaves` | Reached template instantiations with no recorded call: functions whose calls the graph does not hold (#106, below). |
 | `exhaustive` | True when `templateLeaves` is 0. The search has no depth or fan-out limit; what it cannot see is inside instantiations. |
-| `verdict` | `effects`; `clean` when there were roots, no finding, no template leaf, and the index states complete coverage of what was requested; otherwise `unknown`. |
+| `verdict` | `effects`; `clean` when there were roots, every configured root matched, no finding, no template leaf, and the index states complete coverage of what was requested; otherwise `unknown`. |
 
 Usage errors (exit 2): no root from any source; `min_count` without a
-profile; an unreadable or malformed profile; an unknown effect; an
-invalid root pattern.
+profile; an unreadable or malformed profile; an unknown effect or an
+empty `effects`; an invalid root pattern. Like the other list tools, a
+run with no finding exits 1.
 
 ## Limitations
 

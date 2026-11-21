@@ -449,7 +449,8 @@ built objects.
 
 `query-path-effects` lists the allocations, lock acquisitions, I/O and
 throws reachable from hot roots, one record per effect call with a
-witness path from the nearest root:
+witness path from a hot root (the nearest one, or with a profile the
+root of the heaviest path):
 
 ```bash
 vycor-cpp megascope query-path-effects --roots 'myorg::Solver::step' \

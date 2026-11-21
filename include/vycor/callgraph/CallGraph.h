@@ -186,6 +186,8 @@ public:
   // All callee-side edges leaving `caller` (stored + synthesized), in id
   // space. Exactly the edge set calleesOf materializes.
   std::vector<EdgeRef> calleeRefsOf(StringInterner::Id caller) const;
+  // The same into `out` (cleared first), so a walk reuses one buffer.
+  void calleeRefsOf(StringInterner::Id caller, std::vector<EdgeRef> &out) const;
 
   // Count of live stored in-edges (cheap: no materialization or virtual
   // expansion). Used as a hub heuristic by path-walking tools. The id

@@ -14,6 +14,7 @@
 // limitations under the License.
 #pragma once
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -64,6 +65,13 @@ public:
   /// matches equally well. Memoized per spelling.
   uint32_t fileFor(llvm::StringRef path) const;
 
+  /// Resolve a whole set of index paths at once, so the match is
+  /// two-sided: a profile file goes to the index paths that share the
+  /// longest path suffix with it, and to none when distinct paths tie.
+  /// (One-sided, a profile holding only lib/a/util.cpp would also match
+  /// tools/b/util.cpp.) Later fileFor calls answer from the result.
+  void bindFiles(llvm::ArrayRef<llvm::StringRef> paths) const;
+
   /// Execution count of the code at a location; kNoCount when the location
   /// is in no counted region (outside every function, or in code the
   /// profiled binary did not contain).
@@ -107,6 +115,10 @@ private:
   // Base name -> files, for the suffix match.
   llvm::StringMap<std::vector<uint32_t>> filesByBase_;
   mutable llvm::StringMap<uint32_t> fileMemo_;
+
+  // The best profile file for a normalized path, and how many trailing
+  // components they share (UINT_MAX for an exact match).
+  uint32_t match(const std::string &normal, unsigned &shared) const;
 
   // Segments of file f: segments_[segmentBegin_[f] .. segmentBegin_[f+1]),
   // sorted by position. Functions likewise, sorted by start.

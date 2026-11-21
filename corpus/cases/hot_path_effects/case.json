@@ -179,9 +179,9 @@
       "functions": 11,
       "executedFunctions": 8,
       "join": {
-       "callSites": 22,
-       "callSitesInProfile": 22,
-       "callSitesCounted": 22,
+       "callSites": 19,
+       "callSitesInProfile": 19,
+       "callSitesCounted": 19,
        "functions": 9,
        "functionsCounted": 9
       }

@@ -15,6 +15,7 @@
 #include "vycor/callgraph/HotPath.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Regex.h"
 
 #include <algorithm>
@@ -288,28 +289,44 @@ private:
     std::vector<uint64_t> votes;
     votes.reserve(graph_.edgeCount());
 
+    // The files the call sites name, resolved against the profile as a
+    // set so a profile file is not matched by two index files.
+    {
+      llvm::StringSet<> seen;
+      std::vector<llvm::StringRef> files;
+      graph_.forEachStoredEdge([&](const CallGraph::EdgeRef &edge) {
+        SiteLoc loc;
+        if (parseSite(str(edge.callSite), loc) && seen.insert(loc.file).second)
+          files.push_back(loc.file);
+      });
+      profile_->bindFiles(files);
+    }
+
+    // Counted once per call site (a site can carry several edges).
     HotPathJoin &join = out_.join;
     graph_.forEachStoredEdge([&](const CallGraph::EdgeRef &edge) {
-      ++join.callSites;
       if (!(flags_[edge.caller] & kHasCalls)) {
         flags_[edge.caller] |= kHasCalls;
         ++join.functions;
       }
+      int64_t &count = siteCount_[edge.callSite];
+      const bool first = count == kUnset;
+      join.callSites += first;
       SiteLoc loc;
       if (!parseSite(str(edge.callSite), loc)) {
-        siteCount_[edge.callSite] = kNoCount;
+        count = kNoCount;
         return;
       }
       const uint32_t file = profile_->fileFor(loc.file);
       if (file == CoverageProfile::kNone) {
-        siteCount_[edge.callSite] = kNoCount;
+        count = kNoCount;
         return;
       }
-      ++join.callSitesInProfile;
-      int64_t &count = siteCount_[edge.callSite];
-      if (count == kUnset)
+      if (first) {
         count = profile_->countAt(file, loc.line, loc.col);
-      join.callSitesCounted += count != kNoCount;
+        ++join.callSitesInProfile;
+        join.callSitesCounted += count != kNoCount;
+      }
       const uint32_t body = profile_->functionAt(file, loc.line, loc.col);
       if (body != CoverageProfile::kNone)
         votes.push_back(static_cast<uint64_t>(edge.caller) << 32 | body);
@@ -402,15 +419,17 @@ private:
   }
 
   // Whether `edge` is the canonical parent among offers that tie: the
-  // smallest (caller USR, call site, kind, confidence). Ids are positions
-  // in the interner and differ between bakes; the strings do not.
+  // strongest confidence, then the smallest (caller USR, call site, kind).
+  // Ids are positions in the interner and differ between bakes; the
+  // strings do not.
   bool canonicalBefore(Id node, const CallGraph::EdgeRef &edge) const {
+    if (parentConfidence_[node] != edge.confidence)
+      return edge.confidence < parentConfidence_[node];
     if (parent_[node] != edge.caller)
       return str(edge.caller) < str(parent_[node]);
     if (parentSite_[node] != edge.callSite)
       return str(edge.callSite) < str(parentSite_[node]);
-    return std::make_pair(edge.kind, edge.confidence) <
-           std::make_pair(parentKind_[node], parentConfidence_[node]);
+    return edge.kind < parentKind_[node];
   }
 
   void setParent(Id node, const CallGraph::EdgeRef &edge) noexcept {
@@ -432,9 +451,8 @@ private:
       ++out_.reachedFunctions;
       const uint64_t nodeCap = cap_[node];
       const uint32_t nodeDepth = depth_[node];
-      bool calls = false;
-      for (const CallGraph::EdgeRef &edge : graph_.calleeRefsOf(node)) {
-        calls = true;
+      graph_.calleeRefsOf(node, refs_);
+      for (const CallGraph::EdgeRef &edge : refs_) {
         const Id callee = edge.callee;
         const uint16_t flags = flagsOf(callee);
         if (flags & kAllowed) {
@@ -468,22 +486,43 @@ private:
           setParent(callee, edge);
         }
       }
-      if (!calls && isInstantiation(str(node)))
+      if (refs_.empty() && isInstantiation(node))
         ++out_.templateLeaves;
     }
   }
 
-  // Whether a Clang USR names a template instantiation: a member of a
-  // class template specialization (`@S@vector>#<args>@F@...`) or a
-  // function template specialization (`@F@name<#<args>>#...`). Only the
-  // scope and the name are read; parameter types after them may be
-  // specializations of anything.
-  static bool isInstantiation(llvm::StringRef usr) noexcept {
+  // Whether a function is a template instantiation: a member of a class
+  // template specialization, read from its display name with parameter
+  // lists dropped (`std::vector<int>::push_back`, but not a local class
+  // in `f(std::vector<int> &)`), or a function template specialization,
+  // read from the name in its USR (`@F@name<#<args>>#<params>`).
+  bool isInstantiation(Id id) const {
+    return scopeHasTemplateArgs(graph_.displayNameOf(id)) ||
+           usrNamesSpecialization(str(id));
+  }
+
+  static bool scopeHasTemplateArgs(llvm::StringRef name) noexcept {
+    unsigned parens = 0;
+    for (size_t i = 0; i < name.size(); ++i) {
+      const char c = name[i];
+      if (c == '(') {
+        ++parens;
+      } else if (c == ')') {
+        parens -= parens != 0;
+      } else if (c == '<' && parens == 0) {
+        // `operator<`, `operator<<`, `operator<=` and `operator<=>`.
+        const llvm::StringRef before = name.take_front(i);
+        if (!before.ends_with("operator") && !before.ends_with("operator<"))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  static bool usrNamesSpecialization(llvm::StringRef usr) noexcept {
     const size_t f = usr.rfind("@F@");
     if (f == llvm::StringRef::npos)
       return false;
-    if (usr.take_front(f).contains(">#"))
-      return true;
     // The name runs to the first '#'; a specialization's ends in '<'.
     llvm::StringRef name = usr.drop_front(f + 3);
     name = name.take_front(name.find('#'));
@@ -644,6 +683,7 @@ private:
   std::vector<int64_t> functionCount_; // with a profile
 
   std::vector<Id> heap_;
+  std::vector<CallGraph::EdgeRef> refs_; // callee buffer reused per node
   std::vector<RawFinding> raw_;
 };
 

@@ -123,8 +123,9 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
     return std::move(*invalid);
   if (auto invalid = appendStrings(args, "allow", config.allow))
     return std::move(*invalid);
-  if (const llvm::json::Value *minCount = args.get("min_count")) {
-    auto n = minCount->getAsInteger();
+  const llvm::json::Value *minCountArg = args.get("min_count");
+  if (minCountArg) {
+    auto n = minCountArg->getAsInteger();
     if (!n || *n < 0)
       return usageError("Invalid 'min_count': expected a nonnegative integer");
     config.minCount = static_cast<uint64_t>(*n);
@@ -134,6 +135,9 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
   std::vector<std::string> effectNames;
   if (auto invalid = appendStrings(args, "effects", effectNames))
     return std::move(*invalid);
+  if (args.get("effects") && effectNames.empty())
+    return usageError("Invalid 'effects': name at least one effect "
+                      "(allocation, lock, io, throw), or omit it for all");
   if (!effectNames.empty()) {
     effectMask = 0;
     for (const std::string &name : effectNames) {
@@ -154,9 +158,14 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
     if (!CoverageProfile::load(profilePath, *profile, error))
       return usageError("Invalid 'profile': " + error);
   }
-  if (!profile && config.minCount != 0)
-    return usageError("Invalid 'min_count': takes roots from a profile, and "
-                      "no 'profile' was given");
+  // The org config's minCount applies only with a profile; an explicit
+  // min_count without one is a mistake.
+  if (!profile) {
+    if (minCountArg && config.minCount != 0)
+      return usageError("Invalid 'min_count': takes roots from a profile, "
+                        "and no 'profile' was given");
+    config.minCount = 0;
+  }
   if (config.roots.empty() && config.rootPatterns.empty() &&
       config.minCount == 0)
     return usageError(
@@ -169,7 +178,7 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
   if (!analyzeHotPaths(ctx.graph, ExtensionRegistry::instance().effectTable(),
                        config, profile ? &*profile : nullptr, effectMask,
                        report, error))
-    return usageError("Invalid 'root_patterns': " + error);
+    return usageError("Invalid root pattern: " + error);
 
   llvm::json::Object out;
   if (profile) {
@@ -236,7 +245,8 @@ llvm::json::Value handlePathEffects(const llvm::json::Object &args,
   const char *verdict = "unknown";
   if (!report.findings.empty())
     verdict = "effects";
-  else if (report.roots != 0 && exhaustive && ctx.facts.coversRequested())
+  else if (report.roots != 0 && exhaustive && report.unmatchedRoots.empty() &&
+           ctx.facts.coversRequested())
     verdict = "clean";
   out["verdict"] = verdict;
 
@@ -283,12 +293,13 @@ void registerEffectTools(std::vector<ToolEntry> &tools) {
       {"query_path_effects",
        "Allocation, lock acquisition, I/O and throws reachable from hot "
        "roots (named, matched by pattern, or taken from a profile). One "
-       "finding per effect call, with a witness path from the nearest "
-       "root; with a profile, `weight` is the smallest call-site count on "
-       "the path and `evidence` says whether the path ran (observed), "
+       "finding per effect call, with a witness path from a root (the "
+       "nearest, or with a profile the root of the heaviest path); with a "
+       "profile, `weight` is the smallest call-site or entry count on the "
+       "path and `evidence` says whether the path ran (observed), "
        "never ran (latent) or is not covered by the profile (unprofiled). "
-       "`verdict` is `clean` only with roots, no finding, complete "
-       "coverage and no `templateLeaves` (reached template instantiations "
+       "`verdict` is `clean` only with roots, every configured root "
+       "matched, no finding, complete coverage and no `templateLeaves` (reached template instantiations "
        "whose calls the graph does not hold). See "
        "docs/checks/hot-path-effects.md.",
        llvm::json::Value(std::move(schema)), handlePathEffects, "findings",
