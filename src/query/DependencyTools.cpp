@@ -294,6 +294,7 @@ llvm::json::Object rowJson(const AuditAnalysis &a, const AuditRow &row,
   obj["registrationSeeds"] = static_cast<int64_t>(row.registrationSeeds);
   obj["providerStaticInits"] =
       static_cast<int64_t>(audit.providerStaticInits[row.provider]);
+  obj["providesMain"] = row.providesMain;
   obj["consumerCovered"] = lf.targetCovered[row.consumer] != 0;
   obj["providerCovered"] = lf.targetCovered[row.provider] != 0;
   if (row.seedBegin != row.seedEnd)

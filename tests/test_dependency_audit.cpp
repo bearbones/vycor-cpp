@@ -2017,13 +2017,25 @@ TEST_CASE("dependency audit from references: a symbol two targets define is "
          {"/q/extra/e.cpp"});
   addRef(a.refs, "c:@F@dup", "c:@F@base_fn", RefRole::Call, "/q/extra/e.cpp",
          10, 3, "/q/extra/e.cpp");
+  // plug's copy calls into core instead; app calls dup.
+  addRef(a.refs, "c:@F@dup", "c:@F@core_fn", RefRole::Call, "/q/plug/p.cpp",
+         10, 3, "/q/plug/p.cpp");
+  addSym(a.refs, "c:@F@dup", "dup", "/q/plug/plug.h", 4, kH,
+         {"/q/app/main.cpp"});
+  addRef(a.refs, "c:@F@main", "c:@F@dup", RefRole::Call, "/q/app/main.cpp",
+         40, 3, "/q/app/main.cpp");
   a.rerun();
   CHECK(ownersOf(a.facts, "c:@F@dup") ==
         std::vector<uint32_t>{rExtra, rPlug});
-  CHECK(a.facts.counts.siteAnchoredRefs == 1);
+  CHECK(a.facts.counts.siteAnchoredRefs == 2);
   CHECK(rowOf(a.audit, rExtra, rBase).symbols == 1);
   const uint32_t plugBase = a.audit.find(rPlug, rBase);
   CHECK((plugBase == kNoIndex || a.audit.rows[plugBase].symbols == 0));
+  // Each copy's closure carries its own references only.
+  CHECK(needNames(a.map, a.audit, rowOf(a.audit, rApp, rExtra)) ==
+        std::vector<std::string>{"base"});
+  CHECK(needNames(a.map, a.audit, rowOf(a.audit, rApp, rPlug)) ==
+        std::vector<std::string>{"core"});
 }
 
 TEST_CASE("dependency audit from references: a weak definition in a header "
@@ -2123,6 +2135,46 @@ TEST_CASE("dependency audit from references: a split helps the executables "
   CHECK(exe2.linkTargetGain == 0);
   // exe1 does not declare big: there is no edge to split.
   CHECK(audit.find(tExe1, tBig) == kNoIndex);
+}
+
+TEST_CASE("dependency audit from references: a library that supplies main "
+          "is not unused",
+          "[dependency-audit]") {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "runner", "kind": "static_library",
+       "sources": ["runner/main.cpp"]},
+      {"name": "tests", "kind": "executable", "sources": ["tests/t.cpp"],
+       "deps": ["runner", "tool"]},
+      {"name": "tool", "kind": "executable", "sources": ["tool/main.cpp"],
+       "deps": ["runner"]}]})",
+                   map, error, "/r"));
+  enum : uint32_t { tRunner = 0, tTests = 1, tTool = 2 };
+  SnapshotMeta meta = metaOf({{"/r/runner/main.cpp", {}},
+                              {"/r/tests/t.cpp", {}},
+                              {"/r/tool/main.cpp", {}}});
+  ReferenceIndex refs;
+  // Clang's USR for main carries its signature.
+  addSym(refs, "c:@F@main#I#**C#", "main", "/r/runner/main.cpp", 1, kD,
+         {"/r/runner/main.cpp"});
+  addSym(refs, "c:@F@main", "main", "/r/tool/main.cpp", 1, kD,
+         {"/r/tool/main.cpp"});
+  addSym(refs, "c:@F@a_test", "a_test", "/r/tests/t.cpp", 1, kD,
+         {"/r/tests/t.cpp"});
+  const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+  const DependencyAudit audit = auditDependencies(lf, map);
+  // No object of tests names the runner, but startup code calls its main.
+  const AuditRow &tests = rowOf(audit, tTests, tRunner);
+  CHECK(tests.symbols == 0);
+  CHECK(tests.providesMain);
+  CHECK(rowFindings(audit, lf, tests, {}, true) == 0);
+  // tool has a main of its own: the runner is unused there.
+  const AuditRow &tool = rowOf(audit, tTool, tRunner);
+  CHECK_FALSE(tool.providesMain);
+  CHECK(rowFindings(audit, lf, tool, {}, true) == kFindingUnused);
+  // An executable's main is not handed to another link.
+  CHECK_FALSE(rowOf(audit, tTests, tTool).providesMain);
 }
 
 TEST_CASE("audit_dependencies from references: payload members",

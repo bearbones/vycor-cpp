@@ -309,6 +309,10 @@ struct AuditRow {
   /// closure does not pull it back in: splitting the closure out removes
   /// the provider from the consumer's link.
   bool providerDroppable = false;
+  /// The consumer is an executable without a `main` of its own and the
+  /// provider, a library, defines one: the C runtime's startup code references it,
+  /// so the provider is needed though no consumer object names it.
+  bool providesMain = false;
 };
 
 struct DependencyAudit {

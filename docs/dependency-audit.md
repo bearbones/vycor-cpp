@@ -176,7 +176,9 @@ What the rules mean for the cases that matter:
   files of one name) is owned by both. Each of its references is charged
   to the target set of the file the reference is written in, or of the
   one TU that recorded it (`references.siteAnchored`), so one tool's
-  `main` does not lend its references to another.
+  `main` does not lend its references to another. A closure walking
+  through such a symbol follows only the references of the provider's
+  own copy.
 - **Presumed** symbols are reported apart everywhere
   (`uncertainSymbols`, `providerPresumedSymbols`, `owner: "presumed"` on
   a seed): the definition may be in a source the index lacks, or may
@@ -325,6 +327,7 @@ symbol or uncertain symbol referenced).
 | `linkTargetsHelped`, `linkTargetGain` | the final link targets (executables, shared and module libraries) that would stop linking at least one of `droppableTargets` — [Link-target gain](#link-target-gain) — and the most `defined` symbols one of them would drop |
 | `closureFanIn`, `closureFanInFiles` | `defined` provider symbols outside the closure that reference into it, and their files — [the closure](#inline-bodies-and-the-closure) |
 | `registrationSeeds` | certain seeds that register a factory — [Registration seeds](#registration-seeds) |
+| `providesMain` | the consumer is an executable that defines no `main` and the provider, a library, defines one (a test runner's main library, for instance): needed although no consumer object names it |
 | `providerStaticInits` | `defined` variables of the provider whose initializer calls a function: code that runs when a program links the provider's object |
 | `consumerCovered`, `providerCovered` | every mapped source of the target was indexed cleanly |
 | `consumerUnplacedUses` | a property of the consumer, repeated on its rows: the symbols its objects reference that are declared under `roots` and that no rule could place in a target. Any of them may belong to this row's provider. Information only: no finding depends on it |
@@ -390,14 +393,16 @@ all (CMake's `add_dependencies`); they look declared here.
 
 | Finding | Condition |
 |---|---|
-| `unused-link-dependency` | `declared: "direct"`; no symbol, no uncertain symbol and no indirect use; consumer and provider both covered; the index's coverage is stated and (for the call-edge fallback) it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
+| `unused-link-dependency` | `declared: "direct"`; no symbol, no uncertain symbol and no indirect use; not `providesMain`; consumer and provider both covered; the index's coverage is stated and (for the call-edge fallback) it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
 | `undeclared-link-dependency` | at least one `defined` symbol referenced, and `declared` is `transitive` or `none` |
 | `thin-dependency` | `declared` is `direct` or `closure`; `1 ≤ symbols + uncertainSymbols ≤ thin_max_symbols`; `closureSymbols + uncertainSymbols` is at most `thin_max_closure_pct` percent of `providerSymbols + providerPresumedSymbols` |
 
 `unused-link-dependency` **fails closed**: a target with a source that
 is missing from the index or did not parse cleanly, an index without
-stated coverage, a provider the index holds no symbol of, or an
-indirect use yields no finding. `unusedWithheld` counts the
+stated coverage, a provider the index holds no symbol of, an
+indirect use, or a provider that supplies an executable's `main`
+(`providesMain`: the C runtime's startup code calls it, so no consumer
+object names it) yields no finding. `unusedWithheld` counts the
 declared-direct rows with no symbol and no uncertain symbol that got no
 finding for one of those reasons, so "no unused findings" is never
 mistaken for "everything is used". When the finding is reported it is

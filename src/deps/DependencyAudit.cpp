@@ -2073,10 +2073,17 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
       if (!anyReachable || ((providerReach[t >> 6] >> (t & 63)) & 1u))
         need(t);
   };
+  // A reference held by targets other than the provider belongs to another
+  // copy of the code (one identity defined in several targets): not the
+  // provider's to carry. Anchor 0 travels with an inline body.
+  auto provided = [&](uint32_t anchor) noexcept {
+    return anchor == 0 || lf.setHas(anchor, provider);
+  };
   while (head < tail) {
     const uint32_t s = ws.queue[head++];
     for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
-      visit(lf.refTo[r]);
+      if (provided(lf.refAnchor[r]))
+        visit(lf.refTo[r]);
     // A soft reference may be needed (an overload candidate, a call
     // through a vtable slot): the closure takes its target when the
     // provider defines it, so that what may move with the seeds is over-
@@ -2084,7 +2091,7 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
     // references are the union of every TU's candidates.
     for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r) {
       const uint32_t to = lf.softTo[r];
-      if (ws.symStamp[to] != epoch &&
+      if (provided(lf.softAnchor[r]) && ws.symStamp[to] != epoch &&
           lf.symClass[to] == SymbolClass::Defined &&
           lf.setHas(lf.symOwner[to], provider))
         admit(to);
@@ -2153,12 +2160,20 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
   audit.presumedSymbols.assign(targetCount, 0);
   audit.providerStaticInits.assign(targetCount, 0);
   audit.unplacedUses.assign(targetCount, 0);
+  // Targets defining the global `main`. Its USR carries the signature
+  // (`c:@F@main#I#**C#`), so programs share it only per signature.
+  std::vector<uint8_t> definesMain(targetCount, 0);
+  auto isMainUsr = [](llvm::StringRef usr) {
+    return usr.consume_front("c:@F@main") && (usr.empty() || usr[0] == '#');
+  };
   {
     std::vector<std::pair<uint32_t, uint32_t>> bodies; // (target, file)
     for (uint32_t s = 0; s < symbolCount; ++s) {
       if (lf.symClass[s] == SymbolClass::Defined) {
         const bool staticInit = (lf.symFlags[s] & kSymFlagStaticInit) != 0;
+        const bool isMain = isMainUsr(usrOf(s));
         for (uint32_t t : lf.targetsOf(lf.symOwner[s])) {
+          definesMain[t] |= isMain;
           ++audit.providerSymbols[t];
           audit.providerStaticInits[t] += staticInit;
           if (lf.symFile[s] != kNoIndex)
@@ -2375,6 +2390,9 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       AuditRow row;
       row.consumer = consumer;
       row.provider = provider;
+      row.providesMain = map.kinds[consumer] == TargetKind::Executable &&
+                         map.kinds[provider] != TargetKind::Executable &&
+                         definesMain[provider] && !definesMain[consumer];
       if (directStamp[provider] == stamp)
         row.declared = DeclaredForm::Direct;
       else if (map.depsAreClosure)
@@ -2631,9 +2649,11 @@ unsigned rowFindings(const DependencyAudit &audit, const LinkFacts &facts,
                                  audit.presumedSymbols[row.provider];
   // Unused: the index knows functions of the provider and the consumer's
   // objects call none of them, not even one whose owner is presumed, and
-  // the consumer's code touches nothing of the provider's indirectly.
+  // the consumer's code touches nothing of the provider's indirectly, nor
+  // does the program's startup code need the provider's `main`.
   if (row.declared == DeclaredForm::Direct && row.symbols == 0 &&
-      row.uncertainSymbols == 0 && row.indirectUses == 0 && coverageStated &&
+      row.uncertainSymbols == 0 && row.indirectUses == 0 &&
+      !row.providesMain && coverageStated &&
       facts.targetCovered[row.consumer] && facts.targetCovered[row.provider] &&
       providerTotal != 0)
     findings |= kFindingUnused;
