@@ -1426,8 +1426,11 @@ struct Two { Res r; Thrower t; Two(); };
 Two::Two() {}
 struct Last { Res r; int x; Last(); };
 Last::Last() : x(1) {}
+void work();
 struct Body { Res r; Body(); };
-Body::Body() { (void)0; }
+Body::Body() { work(); }
+struct TryBody { Res r; TryBody(); };
+TryBody::TryBody() try { work(); } catch (...) { throw; }
 struct Quiet { Res r; Thrower t; Quiet() noexcept; };
 Quiet::Quiet() noexcept {}
 struct Dg { Res r; Dg(int); Dg(); ~Dg(); };
@@ -1445,6 +1448,7 @@ void arr() { auto *p = new Res[2]; (void)p; }
     CHECK(roles(refs, "Last::Last", "Res::~Res").empty());
     // The body can throw after every member is built.
     CHECK(roles(refs, "Body::Body", "Res::~Res") == "call");
+    CHECK(roles(refs, "TryBody::TryBody", "Res::~Res") == "call");
     // A non-throwing constructor has no cleanup.
     CHECK(roles(refs, "Quiet::Quiet", "Res::~Res").empty());
     // A delegating constructor's body destroys the complete object.
@@ -1473,12 +1477,21 @@ template <class T> struct Box { void fill() { hook(T{}); } void spare() { other(
 template void Box<a::A>::fill();
 template <class T> struct Holder { struct Inner { void go() { hook(T{}); } }; };
 template struct Holder<a::A>;
+template <class T> struct Multi {
+  template <class U> void put(U) { hook(T{}); }
+  template <class U> struct In { void f() { other(T{}); } };
+};
+template void Multi<a::A>::put<int>(int);
+template void Multi<a::A>::In<int>::f();
 )cpp");
   const ReferenceIndex &refs = ix.references;
   CHECK(roles(refs, "Box::fill", "a::hook") == "call");
   // Only the member instantiated.
   CHECK(roles(refs, "Box::spare", "a::other").empty());
   CHECK(roles(refs, "Holder::Inner::go", "a::hook") == "call");
+  // Members of member templates.
+  CHECK(roles(refs, "Multi::put", "a::hook") == "call");
+  CHECK(roles(refs, "Multi::In::f", "a::other") == "call");
 }
 
 TEST_CASE("references: what an instantiation's initializer and default "
@@ -1499,6 +1512,46 @@ void useDefarg() { defarg(a::A{}); }
   CHECK(roles(refs, "S::t", "a::hook") == "call");
   CHECK(roles(refs, "readVt", "vt") == "read");
   CHECK(roles(refs, "defarg", "a::hook") == "call");
+}
+
+TEST_CASE("references: a system template's default argument lands on its "
+          "callers",
+          "[references]") {
+  Project p;
+  llvm::sys::fs::create_directory(p.path("sys"));
+  p.header("sys/box.h", R"cpp(#pragma once
+#pragma GCC system_header
+namespace sys {
+template <class T, class A> struct box { explicit box(int n, const A &a = A()) {} };
+}
+)cpp");
+  auto ix = bakeOne(p, R"cpp(#include "sys/box.h"
+void tick();
+template <class T> struct MyAlloc { MyAlloc() { tick(); } };
+void useBox() { sys::box<int, MyAlloc<int>> b(10); (void)b; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "useBox", "MyAlloc::MyAlloc<T>") == "call");
+  CHECK(roles(refs, "MyAlloc::MyAlloc<T>", "tick") == "call");
+}
+
+TEST_CASE("references: a lambda in a default member initializer stays its "
+          "own referrer",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+void g();
+struct Fn { template <class F> Fn(F f) { f(); } };
+struct Holder { Fn f = [] { g(); }; };
+void makeHolder() { Holder h; (void)h; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "makeHolder", "g").empty());
+  bool lambda = false;
+  for (const ReferenceInfo &r : refs.allReferences())
+    lambda = lambda || (r.targetName == "g" &&
+                        r.referrerUsr.rfind("vycor-lambda:", 0) == 0);
+  CHECK(lambda);
 }
 
 TEST_CASE("references: a local class in an instantiation runs only when "

@@ -335,7 +335,9 @@ from it in the same TU ("Code the compiler writes").
   pattern names. An instantiation the TU uses but does not define (the
   template is only declared there) is read in the TU that defines it,
   if any; its default arguments are not read. An explicit instantiation
-  of a static data member is read only where the member is used.
+  of a static data member is read only where the member is used. A
+  default argument of a transparent function (a system template's) is
+  recorded in each of its callers, also one that passed the argument.
 - **One pattern for all instantiations.** A template's references are
   the union over every instantiation the index read: `make<T>()` used
   with `A` in one TU and `B` in another references both constructors.

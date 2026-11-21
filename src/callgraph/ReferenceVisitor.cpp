@@ -464,6 +464,22 @@ void ReferenceVisitor::noteExplicitMembers(const clang::CXXRecordDecl *cls) {
         noteExplicitMembers(nested);
       continue;
     }
+    // Member templates: `template void Box<A>::put<int>(int);`,
+    // `template void Outer<A>::In<int>::f();`.
+    if (const auto *tmpl = llvm::dyn_cast<clang::FunctionTemplateDecl>(member)) {
+      for (const clang::FunctionDecl *spec : tmpl->specializations())
+        if (spec->getTemplateSpecializationKind() ==
+            clang::TSK_ExplicitInstantiationDefinition)
+          functionTarget(spec);
+      continue;
+    }
+    if (const auto *tmpl = llvm::dyn_cast<clang::ClassTemplateDecl>(member)) {
+      for (const clang::ClassTemplateSpecializationDecl *spec :
+           tmpl->specializations())
+        if (const clang::CXXRecordDecl *def = spec->getDefinition())
+          noteExplicitMembers(def);
+      continue;
+    }
     const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(member);
     if (method && !method->isImplicit() &&
         method->getTemplateSpecializationKind() ==
@@ -482,10 +498,19 @@ bool ReferenceVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
     // operator runs (a generic one's, when an instantiation is used). A
     // lambda no traversal as written saw (a system template's) is part of
     // the function being read.
-    const uint32_t slot = lambdaPatternSlot(op);
-    if (slot == kDropped)
+    // A lambda the code as written holds (in a default member initializer
+    // an implicit constructor reads) was read under itself already.
+    const clang::FunctionTemplateDecl *generic =
+        op->getDescribedFunctionTemplate();
+    const bool copy =
+        op->getInstantiatedFromMemberFunction() ||
+        (generic && generic->getInstantiatedFromMemberTemplate());
+    const uint32_t slot = copy ? lambdaPatternSlot(op) : kDropped;
+    if (copy && slot == kDropped)
       return Base::TraverseLambdaExpr(expr);
-    if (!op->getDescribedFunctionTemplate())
+    if (!copy && sm_.isInSystemHeader(op->getLocation()))
+      return Base::TraverseLambdaExpr(expr);
+    if (slot != kDropped && !generic)
       scheduleLambda(op, slot);
     for (unsigned i = 0, n = expr->capture_size(); i < n; ++i)
       if (!TraverseLambdaCapture(expr, expr->capture_begin() + i,
@@ -1380,13 +1405,13 @@ void ReferenceVisitor::traverseWorkFunction(const clang::FunctionDecl *fn,
       noteConstructorCleanup(ctor);
     }
     TraverseStmt(fn->getBody());
-    // Default arguments an instantiation's callers used, instantiated on
-    // this declaration: attributed where they are written, as elsewhere.
-    if (mode_ == Mode::Instantiation)
-      for (const clang::ParmVarDecl *param : fn->parameters())
-        if (param->hasDefaultArg() && !param->hasUninstantiatedDefaultArg() &&
-            !param->hasUnparsedDefaultArg())
-          TraverseStmt(const_cast<clang::Expr *>(param->getDefaultArg()));
+    // Default arguments callers used, instantiated on this declaration:
+    // an instantiation's are attributed to the template (where they are
+    // written), a transparent function's to its callers.
+    for (const clang::ParmVarDecl *param : fn->parameters())
+      if (param->hasDefaultArg() && !param->hasUninstantiatedDefaultArg() &&
+          !param->hasUnparsedDefaultArg())
+        TraverseStmt(const_cast<clang::Expr *>(param->getDefaultArg()));
   }
   if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
     noteImplicitDestruction(dtor);
@@ -1425,9 +1450,10 @@ void ReferenceVisitor::noteConstructorCleanup(
   cls = cls->getDefinition();
   if (cls->isInvalidDecl() || cls->isDependentContext() || cls->isUnion())
     return;
-  const auto *body =
-      llvm::dyn_cast_or_null<clang::CompoundStmt>(ctor->getBody());
-  bool later = body && !body->body_empty();
+  // Any body but an empty block may throw (a function-try-block too).
+  const clang::Stmt *body = ctor->getBody();
+  const auto *block = llvm::dyn_cast_or_null<clang::CompoundStmt>(body);
+  bool later = body && !(block && block->body_empty());
   const clang::SourceLocation site = ctor->getLocation();
   if (ctor->isDelegatingConstructor()) {
     if (later)
