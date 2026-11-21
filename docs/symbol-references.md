@@ -30,11 +30,11 @@ site, so the section is bounded by the number of distinct pairs.
 
 | Role | Recorded for |
 |---|---|
-| `call` | the callee of a call, including constructor calls written in the source |
+| `call` | the callee of a call, including constructor and destructor calls the compiler writes (see "Code the compiler writes") and `operator new`/`operator delete` behind a `new` or `delete` expression |
 | `address_of` | `&x`, function-to-pointer and array-to-pointer decay, binding to a non-const reference (a reference variable, or an argument for a non-const reference parameter), a pointer to member: any use that lets the entity be reached through an alias |
 | `read` | a value read: lvalue-to-rvalue conversion, a const member call on the object, binding to a const reference, naming a static member through the object (`obj.staticMember`) |
 | `write` | assignment, compound assignment, `++`/`--`, a non-const member call or non-const `operator[]` on the object |
-| `vtable_use` | constructing an object of a dynamic class (target: the class), and a user-provided constructor or destructor body of one (it stores the vtable pointer) |
+| `vtable_use` | constructing an object of a dynamic class (target: the class), and a constructor or destructor body of one (it stores the vtable pointer): a user-provided one records it itself, an implicit one in its user, so constructing a derived object also uses each dynamic base's vtable |
 | `typeinfo_use` | `dynamic_cast` to the class, `typeid`, `throw` of the class type, a `catch` handler for it |
 
 On a scalar, `x += 1` and `++x` are one `read` and one `write`. On an
@@ -62,8 +62,8 @@ Syntax the compiler expands is recorded as the calls it stands for: a
 range-based `for` calls the `begin`, `end`, `operator!=`, `operator++`
 and `operator*` it uses; a comparison rewritten from `operator<=>` or a
 reversed `operator==` calls that operator; a structured binding through
-`get` calls it; `delete p` calls a user-provided destructor of the
-class; `__attribute__((cleanup(fn)))` calls `fn`. A constructor
+`get` calls it; `delete p` calls the class's destructor and the
+`operator delete` it uses; `__attribute__((cleanup(fn)))` calls `fn`. A constructor
 inherited by a `using` declaration is a call of the base class's
 constructor. A C function called without a declaration is a symbol like
 any other, declared at the call.
@@ -71,7 +71,52 @@ any other, declared at the call.
 The referrer of a reference inside a lambda body is the lambda, under
 the same synthetic identity the call graph gives it. References outside
 any function or variable initializer (default member initializers, for
-instance) are attributed to the file, a referrer of kind `file`.
+instance) are attributed to the file, a referrer of kind `file`; a
+default member initializer is also read in each constructor or
+aggregate initialization that uses it.
+
+### Code the compiler writes
+
+The visitor reads the code as written first, then what the compiler
+generates from it, and records the second as more references of the
+written code:
+
+- **Template instantiations.** The body of each instantiation a TU
+  uses is read, and what it references is attributed to the template
+  pattern, the same referrer the code as written has. A record the
+  pattern already holds is not repeated, and one that only an
+  instantiation reveals carries the largest count any single
+  instantiation has, so the index does not grow with the number of
+  instantiations. This is how a call resolved by argument-dependent
+  lookup at instantiation time, an explicit specialization that only
+  instantiations select, and the constructor call and `vtable_use`
+  behind `std::make_unique<T>()` or `emplace_back` are recorded. An
+  explicit instantiation definition reads its members' bodies the same
+  way.
+- **Implicit special-member calls.** The constructor and destructor
+  calls of members, bases and temporaries, the destructor at the end of
+  a scope (locals, static locals, globals, a thrown exception object),
+  an implicit destructor behind `delete`, and `operator new`/`operator
+  delete` behind an expression (a `new` also records the `operator
+  delete` that frees the storage if the constructor throws; a virtual
+  destructor records the one its deleting form calls).
+- **Transparent functions.** A function that is not a symbol of its own
+  — an implicitly defined special member, an instantiation of a
+  system-header template (`std::make_unique`, `std::vector::emplace_back`),
+  a generic lambda's instantiated call operator — is read once per TU,
+  and what it references is recorded in each referrer that uses it,
+  transitively. `std::make_unique<Impl>()` in `build()` records
+  `build → Impl::Impl` and `build → vtable_use Impl`, with the site of
+  the `make_unique` call.
+- **Virtual functions held by a vtable.** A class whose vtable is used
+  references what its implicit virtual destructor does (a vtable slot
+  holds it whether or not anything deletes through it), and the
+  virtual member functions of a class template instantiation are read
+  as instantiations.
+
+None of this changes a record's role or confidence: a reference found
+in an instantiation or a transparent function is one the compiled code
+makes, recorded like one written in the referrer.
 
 ### Symbols
 
@@ -259,33 +304,22 @@ lowered into the index.
 
 ## Limits
 
-The visitor reads the code as written, like the other bake visitors.
+The visitor reads the code as written and the code the compiler writes
+from it in the same TU ("Code the compiler writes").
 
-- **Template instantiations.** Bodies of implicit instantiations are not
-  traversed: a reference is recorded once, in the template pattern, and
-  a reference to an instantiation is recorded against its pattern. What
-  only an instantiation reveals is missing — a call resolved by
-  argument-dependent lookup at instantiation time, or the constructor
-  call and `vtable_use` behind `std::make_unique<T>()`. An overload set
-  the pattern cannot resolve yet records an `address_of`/`call` to each
-  candidate when there are at most 16, and nothing beyond that.
-  Consequences for "is it referenced": a function found only by
-  argument-dependent lookup from a template, and an explicit
-  specialization that only instantiations select (the reference is
-  recorded against the primary template), can have no referrer although
-  the program uses them.
-- **Implicit code.** Apart from the expansions listed under
-  "References", compiler-written code leaves no record: implicit
-  constructor and destructor calls of members, bases and temporaries,
-  the destructor call at the end of a scope, an implicitly defined
-  destructor behind `delete`, `operator new`/`delete` behind an
-  expression, implicitly defined special members and deduction guides
-  as targets, compiler builtins (`__builtin_expect`).
+- **Unresolved overload sets.** An overload set a template pattern
+  cannot resolve yet records an `address_of`/`call` to each candidate
+  when there are at most 16, and nothing beyond that; an instantiation
+  the TU uses adds the overload it actually selects.
+- **Instantiations no TU makes.** Only the instantiations a TU uses are
+  read. A template that no indexed TU instantiates holds only what its
+  pattern names.
+- **Compiler builtins and deduction guides** (`__builtin_expect`) are
+  never targets; an implicitly defined special member is not a target
+  either, its references are recorded in its users.
 - **Unevaluated operands.** `sizeof`, `decltype`, `noexcept`, a
   requires-expression, a concept's constraint, and the non-polymorphic
-  `typeid` name an entity without using it; no record. One exception: in
-  a template, an overload set inside `decltype` that the pattern cannot
-  resolve yet is recorded like any other.
+  `typeid` name an entity without using it; no record.
 - **Internal symbols in files of one name.** The identity of a symbol
   with internal linkage includes its file's name without the directory.
   Two `static void init()` in `a/util.cpp` and `b/util.cpp` therefore
@@ -293,7 +327,9 @@ The visitor reads the code as written, like the other bake visitors.
   are merged, and `definingTuCount` is 2.
 - **Type names, enumerators, macros.** Only functions, variables with
   static storage, and classes (through their vtable and typeinfo) are
-  targets. Naming a class as a type is not a reference.
+  targets: they are what a link resolves. Naming a class as a type, an
+  enumerator, or a macro leaves nothing in the object code, so it is not
+  a reference.
 - **Default arguments** are attributed where they are written, not to
   each call that uses them.
 - **Conservative roles.** A non-const member call or non-const
@@ -302,7 +338,9 @@ The visitor reads the code as written, like the other bake visitors.
 - **Declarations** are recorded as seen by the TUs that define or
   reference the symbol; a TU that merely includes a declaration does
   not contribute it, so a declaration's `tuCount` is a lower bound on
-  the TUs that can see it.
+  the TUs that can see it. Recording every included declaration would
+  repeat each header's declarations once per including TU, which is
+  most of the cost of an index.
 - **Classes** are recorded by the TUs that define them in their main
   file, home their vtable, or reference their vtable or typeinfo.
 - **`inHeader`** means "not in the TU's main file"; a textually included
