@@ -21,6 +21,7 @@
 #include "llvm/ADT/ArrayRef.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -33,15 +34,17 @@
 //
 //   LinkFacts      — symbols with an owning target set and a class, and the
 //                    references between them. Flat tables, built once.
-//                    linkFactsFromCallEdges derives them from the call
-//                    graph; a producer over reference facts replaces it
-//                    later and fills the same tables.
+//                    linkFactsFromReferences derives them from the
+//                    symbol reference facts (docs/symbol-references.md);
+//                    linkFactsFromCallEdges from the call graph, for an
+//                    index without them. Both fill the same tables.
 //   auditDependencies — the kernel. Reads LinkFacts and the TargetMap only.
 
 namespace vycor {
 
 class CallGraph;
 struct CallGraphNode;
+class ReferenceIndex;
 struct SnapshotMeta;
 
 constexpr uint32_t kNoIndex = ~0u;
@@ -63,8 +66,21 @@ enum class SymbolClass : uint8_t {
   Inline,
 };
 
+/// LinkFacts::symFlags bits.
+enum : uint8_t {
+  /// The symbol's body, or an inline body it reaches, takes the address of
+  /// a function of a template: a factory instantiated for one type and
+  /// handed to a registry (`RegisterMCAsmParser<T>`). What the factory
+  /// builds is reached through the registry at run time, so a closure
+  /// that starts here stops at the registration.
+  kSymFlagRegisters = 1,
+  /// A defined variable whose initializer calls a function: code that runs
+  /// at load time in whichever program links its object.
+  kSymFlagStaticInit = 2,
+};
+
 struct LinkFacts {
-  /// What the facts were derived from ("call-edges").
+  /// What the facts were derived from ("references", "call-edges").
   const char *edgeSource = "";
   /// Kinds of link dependency this source cannot see, as stable tags.
   std::vector<const char *> invisible;
@@ -72,6 +88,8 @@ struct LinkFacts {
   const char *(*refKindName)(uint8_t kind) = nullptr;
   /// Symbol identities and call-site strings resolve through this.
   const StringInterner *strings = nullptr;
+  /// Set when `strings` is the facts' own table rather than the index's.
+  std::unique_ptr<StringInterner> ownedStrings;
 
   // --- Files -----------------------------------------------------------
   std::vector<std::string> files; // normalized path per file id
@@ -108,9 +126,20 @@ struct LinkFacts {
   std::vector<uint32_t> symFile;  // defining file id (Defined), else kNoIndex
   /// Unattributed, yet declared in a file under the map's roots that is no
   /// unlisted source: the build's own code, owner unknown. It may belong
-  /// to any target, so a consumer that references one is never told a
-  /// dependency is unused.
+  /// to any target; counted per consumer (DependencyAudit::unplacedUses,
+  /// `consumerUnplacedUses`) and reported, never gating a finding.
   std::vector<uint8_t> symUnplaced;
+  /// File of the declaration a reader would look for (a header's
+  /// declaration before a definition), or kNoIndex.
+  std::vector<uint32_t> symDeclFile;
+  std::vector<uint8_t> symFlags; // kSymFlag* bits
+  // Display facts when no call-graph node describes the symbol (symNode
+  // null). Empty for the call-edge producer.
+  std::vector<StringInterner::Id> symName; // qualified name, in `strings`
+  std::vector<uint32_t> symDeclLine;
+  /// SymbolKind (callgraph/ReferenceIndex.h) as a byte; empty for the
+  /// call-edge producer, whose symbols are all functions.
+  std::vector<uint8_t> symKind;
 
   [[nodiscard]] uint32_t symbolCount() const noexcept {
     return static_cast<uint32_t>(symUsr.size());
@@ -158,6 +187,34 @@ struct LinkFacts {
     uint64_t skippedVirtualCalls = 0; // calls through a vtable slot
     uint64_t skippedDeferred = 0;     // function-pointer-through-return
     uint64_t unresolvedSites = 0;     // site file matched nothing known
+    // Reference facts only:
+    /// Declared in a header whose owning targets are all fully indexed,
+    /// and defined by no indexed TU: not those targets' code.
+    uint32_t undefinedInCoveredOwner = 0;
+    /// File-scope references (default member initializers) in a shared
+    /// file several TUs contributed: no one target holds them.
+    uint64_t fileScopeDropped = 0;
+    /// References the producer adds for what a vtable holds: its class's
+    /// own virtual functions, and those it inherits without overriding.
+    uint64_t vtableEntryRefs = 0;
+    uint64_t inheritedVirtualRefs = 0;
+    /// Base classes taken from the call graph's hierarchy.
+    uint64_t baseClassRefs = 0;
+    /// Weak or `used` definitions in headers, emitted by every TU that
+    /// includes them: their references are held by all of those targets.
+    uint32_t emittedDefinitions = 0;
+    /// Base classes the hierarchy names but no TU saw with the derived
+    /// class (a template's or an anonymous namespace's name): not taken.
+    uint64_t baseClassUnseen = 0;
+    /// Calls and address-ofs that share one referrer and witness site with
+    /// a reference of the same role to another symbol of the same
+    /// unqualified name: the candidates of an overload set a template left
+    /// open. Taken as soft references (indirect uses), not seeds.
+    uint64_t overloadCandidateRefs = 0;
+    /// References of a symbol with definitions in several target sets (a
+    /// USR two targets' code share, such as `main`) charged to the target
+    /// set of the site, or of the one TU that recorded them.
+    uint64_t siteAnchoredRefs = 0;
   } counts;
   /// Whether per-TU outcomes and opened-file tables were available.
   bool hasIndexMeta = false;
@@ -172,7 +229,20 @@ struct LinkFacts {
   }
 };
 
-/// Stage-1 producer: link facts from the stored call edges
+/// Link facts from the symbol reference facts (docs/dependency-audit.md,
+/// "Attribution"): a symbol is owned by the targets whose sources hold its
+/// definition, and every role of reference is a link reference except a
+/// call through a vtable slot. `graph`, when given, supplies the class
+/// hierarchy (a vtable references its bases') and tells a virtual call
+/// that is dispatched from one the compiler binds statically; `meta` as
+/// for linkFactsFromCallEdges.
+LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
+                                  const CallGraph *graph,
+                                  const TargetMap &map,
+                                  const SnapshotMeta *meta);
+
+/// Link facts from the stored call edges, for an index without reference
+/// facts
 /// (docs/dependency-audit.md, "Attribution"). `meta` supplies the per-TU
 /// outcomes and opened-file tables; without it no header is recognized as
 /// private to a target and no target counts as covered.
@@ -192,6 +262,7 @@ const char *declaredFormName(DeclaredForm form);
 enum : uint8_t {
   kSeedViaInline = 1, // reached through an inline body, not named by a source
   kSeedUncertain = 2, // the symbol's owner is presumed
+  kSeedRegistration = 4, // the symbol registers a factory (kSymFlagRegisters)
 };
 
 struct AuditRow {
@@ -209,13 +280,39 @@ struct AuditRow {
   uint32_t closureFiles = 0;     // files holding those definitions
   uint32_t onlyViaEdge = 0;      // targets linked only because of this edge
   uint64_t droppableSymbols = 0; // Defined symbols in `droppable`, less K
+  /// Defined provider symbols outside the closure that reference into it,
+  /// directly or through inline bodies, and the files holding them. Zero:
+  /// splitting the closure out leaves the provider without it, and what
+  /// the closure needs (`needs`) leaves the provider's link with it.
+  /// Non-zero: the provider would depend on the split-out part, so those
+  /// needs stay in the provider's link (the edge moves, it is not removed).
+  uint32_t closureFanIn = 0;
+  uint32_t closureFanInFiles = 0;
+  /// Certain seeds that register a factory (kSeedRegistration).
+  uint32_t registrationSeeds = 0;
+  /// An undeclared row whose every certain seed is reached through an inline
+  /// body declared in a target the consumer does declare: the consumer-held
+  /// reference into the first such body. Else kNoIndex.
+  uint32_t throughInlineRef = kNoIndex;
   uint32_t seedBegin = 0, seedEnd = 0; // DependencyAudit::seed*
   uint32_t needBegin = 0, needEnd = 0; // DependencyAudit::needs
   uint32_t dropBegin = 0, dropEnd = 0; // DependencyAudit::droppable
+  /// Final link targets (executables, shared and module libraries) that
+  /// link the consumer and would stop linking at least one of `droppable`
+  /// if the closure were split out — the consumer itself when it is one —
+  /// and the most Defined symbols one of them would drop (less the
+  /// closure when the provider is among them). Direct rows only.
+  uint32_t linkTargetsHelped = 0;
+  uint64_t linkTargetGain = 0;
+  uint32_t helpedBegin = 0, helpedEnd = 0; // DependencyAudit::helped*
   /// The consumer links the provider only because of this edge, and the
   /// closure does not pull it back in: splitting the closure out removes
   /// the provider from the consumer's link.
   bool providerDroppable = false;
+  /// The consumer is an executable without a `main` of its own and the
+  /// provider, a library, defines one: the C runtime's startup code references it,
+  /// so the provider is needed though no consumer object names it.
+  bool providesMain = false;
 };
 
 struct DependencyAudit {
@@ -235,10 +332,16 @@ struct DependencyAudit {
   std::vector<uint32_t> needs;
   /// Targets a row's consumer would stop linking, ascending.
   std::vector<uint32_t> droppable;
+  /// The final link targets a row's split would help and the Defined
+  /// symbols each would drop: by symbols descending, then target.
+  std::vector<uint32_t> helpedTarget;
+  std::vector<uint64_t> helpedSymbols;
 
   std::vector<uint32_t> providerSymbols; // Defined symbols per target
   std::vector<uint32_t> providerFiles;   // files holding them
   std::vector<uint32_t> presumedSymbols; // Presumed symbols per target
+  /// Defined variables with kSymFlagStaticInit, per target.
+  std::vector<uint32_t> providerStaticInits;
   /// Per target: distinct unplaced symbols (LinkFacts::symUnplaced) its
   /// objects reference, directly or through inline bodies.
   std::vector<uint32_t> unplacedUses;
@@ -272,5 +375,9 @@ unsigned rowFindings(const DependencyAudit &audit, const LinkFacts &facts,
 /// they need inside the provider), in no particular order.
 void closureSymbolsOf(const LinkFacts &facts, const DependencyAudit &audit,
                       const AuditRow &row, std::vector<uint32_t> &out);
+
+/// The symbols AuditRow::closureFanIn counts, in no particular order.
+void closureFanInOf(const LinkFacts &facts, const DependencyAudit &audit,
+                    const AuditRow &row, std::vector<uint32_t> &out);
 
 } // namespace vycor

@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "title": "Six link targets with a hand-written target map: which declared dependencies the call edges use, through which symbols (a shared inline body's call is charged to the target that uses it), what those symbols need inside the provider, and what goes unreported \u2014 a library referenced only from a static initializer shows as unused on call-edge evidence, never as a universal verdict, and an uncovered target withholds the finding",
+ "title": "Six link targets with a hand-written target map: which declared dependencies the reference facts use, through which symbols (a shared inline body's call is charged to the target that uses it), what those symbols need inside the provider, which final link targets a split helps, and what goes unreported \u2014 a library that only registers itself from a static initializer shows as unused with its static initializers counted, never as a universal verdict, and an uncovered target withholds the finding",
  "sources": [
   "app/main.cpp",
   "core/core.cpp",
@@ -31,16 +31,14 @@
       "status": "ok",
       "fields": {
        "completeness": {
-        "edgeSource": "call-edges",
+        "edgeSource": "references",
         "unusedIsUniversal": false,
         "invisible": [
-         "variable-references",
-         "vtable-and-typeinfo-references",
-         "static-initializer-calls",
-         "implicit-destructor-calls",
-         "calls-in-template-bodies",
-         "definitions-without-calls",
+         "implicit-special-member-calls",
+         "template-instantiation-bodies",
          "name-based-lookup",
+         "qualified-virtual-calls",
+         "same-basename-internal-symbols",
          "other-build-configurations"
         ],
         "coverageStated": true,
@@ -58,13 +56,17 @@
          "unmappedTus": 0
         },
         "symbols": {
-         "defined": 33,
-         "presumed": 3,
+         "defined": 38,
+         "presumed": 0,
          "inline": 1,
-         "unattributed": 0
+         "unattributed": 0,
+         "undefinedInCoveredOwner": 0
         },
         "references": {
-         "virtualDispatchSkipped": 1
+         "virtualDispatchSkipped": 1,
+         "vtableEntries": 2,
+         "overloadCandidates": 0,
+         "unresolvedSite": 0
         }
        },
        "findingCounts": {
@@ -125,21 +127,23 @@
          "viaInline": 1,
          "indirectUses": 1,
          "closureSymbols": 2,
-         "providerSymbols": 22,
+         "providerSymbols": 26,
          "closureFiles": 1,
          "providerFiles": 2,
          "providerDroppable": false,
+         "closureFanIn": 1,
+         "linkTargetsHelped": 0,
          "findings": [
           {
            "id": "thin-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ],
          "witness": {
           "from": "twice",
           "to": "core_scale",
-          "kind": "DirectCall"
+          "kind": "call"
          }
         }
        },
@@ -155,8 +159,10 @@
          "droppableTargets": [
           "core"
          ],
-         "droppableSymbols": 19,
+         "droppableSymbols": 23,
          "providerDroppable": true,
+         "linkTargetsHelped": 0,
+         "linkTargetGain": 0,
          "findings": []
         }
        },
@@ -181,12 +187,12 @@
          "consumer": "tool",
          "provider": "core",
          "declared": "transitive",
-         "symbols": 1,
-         "uncertainSymbols": 1,
+         "symbols": 2,
+         "uncertainSymbols": 0,
          "findings": [
           {
            "id": "undeclared-link-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ]
@@ -197,13 +203,34 @@
         "match": {
          "consumer": "plugin",
          "provider": "core",
-         "symbols": 0,
-         "uncertainSymbols": 1,
+         "symbols": 2,
+         "uncertainSymbols": 0,
+         "closureSymbols": 2,
+         "closureFanIn": 1,
+         "linkTargetsHelped": 1,
+         "linkTargetGain": 24,
          "findings": [
           {
            "id": "thin-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
+          }
+         ]
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "plugin",
+         "symbols": 0,
+         "providerStaticInits": 1,
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "evidence": "references",
+           "universal": false,
+           "providerStaticInits": 1
           }
          ]
         }
@@ -225,7 +252,7 @@
          "findings": [
           {
            "id": "unused-link-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ]
@@ -239,7 +266,7 @@
          "findings": [
           {
            "id": "unused-link-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ]
@@ -249,7 +276,7 @@
      }
     },
     {
-     "id": "unused-is-call-edge-evidence-only",
+     "id": "unused-is-evidence-only",
      "argv": [
       "audit-dependencies",
       "--target-map",
@@ -263,7 +290,7 @@
       "fields": {
        "completeness": {
         "unusedIsUniversal": false,
-        "edgeSource": "call-edges"
+        "edgeSource": "references"
        },
        "total": 2
       },
@@ -282,10 +309,11 @@
           "droppableTargets": [
            "extra"
           ],
+          "providerStaticInits": 0,
           "findings": [
            {
             "id": "unused-link-dependency",
-            "evidence": "call-edges",
+            "evidence": "references",
             "universal": false
            }
           ]
@@ -298,8 +326,9 @@
           "findings": [
            {
             "id": "unused-link-dependency",
-            "evidence": "call-edges",
-            "universal": false
+            "evidence": "references",
+            "universal": false,
+            "providerStaticInits": 1
            }
           ]
          }
@@ -400,7 +429,7 @@
          "findings": [
           {
            "id": "thin-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ]
@@ -443,12 +472,12 @@
          {
           "consumer": "plugin",
           "provider": "core",
-          "droppableSymbols": 22
+          "droppableSymbols": 24
          },
          {
           "consumer": "util",
           "provider": "core",
-          "droppableSymbols": 19
+          "droppableSymbols": 23
          },
          {
           "consumer": "app",
@@ -458,14 +487,89 @@
          {
           "consumer": "app",
           "provider": "plugin",
-          "droppableSymbols": 1
+          "droppableSymbols": 2
          },
          {
           "consumer": "app",
           "provider": "core",
           "droppableSymbols": 0
+         },
+         {
+          "consumer": "tool",
+          "provider": "util",
+          "droppableSymbols": 0
+         },
+         {
+          "consumer": "tool",
+          "provider": "core",
+          "droppableSymbols": 0
          }
         ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "by-link-gain",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--sort",
+      "link_gain"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "sort": "link_gain"
+      },
+      "count": {
+       "edges": 7
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "plugin",
+          "provider": "core",
+          "linkTargetGain": 24,
+          "linkTargetsHelped": 1
+         },
+         {
+          "consumer": "app",
+          "provider": "extra",
+          "linkTargetGain": 2
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin",
+          "linkTargetGain": 2
+         },
+         {
+          "consumer": "tool",
+          "provider": "util",
+          "linkTargetGain": 0,
+          "linkTargetsHelped": 1
+         },
+         {
+          "consumer": "app",
+          "provider": "core",
+          "linkTargetGain": 0,
+          "linkTargetsHelped": 0
+         }
+        ]
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "util",
+         "provider": "core",
+         "linkTargetsHelped": 1
+        }
        }
       ]
      }
@@ -520,7 +624,7 @@
       "status": "ok",
       "fields": {
        "completeness": {
-        "edgeSource": "call-edges",
+        "edgeSource": "references",
         "unusedIsUniversal": false
        },
        "edge": {
@@ -528,10 +632,11 @@
         "provider": "core",
         "symbols": 1,
         "closureSymbols": 2,
+        "closureFanIn": 1,
         "findings": [
          {
           "id": "thin-dependency",
-          "evidence": "call-edges",
+          "evidence": "references",
           "universal": false
          }
         ]
@@ -542,7 +647,8 @@
       },
       "count": {
        "seeds": 1,
-       "closure": 2
+       "closure": 2,
+       "fanIn": 1
       },
       "witnesses": [
        {
@@ -572,6 +678,12 @@
         "in": "closure",
         "match": {
          "name": "core_scale"
+        }
+       },
+       {
+        "in": "fanIn",
+        "match": {
+         "name": "core_sum"
         }
        }
       ],
@@ -654,7 +766,7 @@
      }
     },
     {
-     "id": "explain-presumed-owner",
+     "id": "explain-static-initializer-reference",
      "argv": [
       "explain-dependency",
       "--target-map",
@@ -669,23 +781,53 @@
       "status": "ok",
       "fields": {
        "edge": {
-        "symbols": 0,
-        "uncertainSymbols": 1
+        "symbols": 2,
+        "uncertainSymbols": 0
        },
-       "closureTotal": 0
+       "closureTotal": 2,
+       "linkTargetsHelped": [
+        {
+         "target": "plugin",
+         "droppableSymbols": 24
+        }
+       ]
       },
       "count": {
-       "seeds": 1
+       "seeds": 2
       },
       "witnesses": [
        {
         "in": "seeds",
         "match": {
          "symbol": {
+          "name": "register_plugin"
+         },
+         "owner": "defined",
+         "via": "direct",
+         "kind": "call",
+         "from": {
+          "name": "registered",
+          "kind": "variable"
+         }
+        }
+       },
+       {
+        "in": "seeds",
+        "match": {
+         "symbol": {
           "name": "core_log"
          },
-         "owner": "presumed",
-         "via": "direct"
+         "owner": "defined",
+         "via": "direct",
+         "from": {
+          "name": "plugin_entry"
+         }
+        }
+       },
+       {
+        "in": "fanIn",
+        "match": {
+         "name": "Shape::~Shape"
         }
        }
       ]
@@ -814,8 +956,9 @@
          "findings": [
           {
            "id": "unused-link-dependency",
-           "evidence": "call-edges",
-           "universal": false
+           "evidence": "references",
+           "universal": false,
+           "providerStaticInits": 1
           }
          ]
         }
@@ -830,7 +973,7 @@
          "findings": [
           {
            "id": "unused-link-dependency",
-           "evidence": "call-edges",
+           "evidence": "references",
            "universal": false
           }
          ]

@@ -276,6 +276,9 @@ def site_file(site: str) -> str:
 # --- Comparison ----------------------------------------------------------
 
 INDEX_HOW = ("defined", "viaInline", "presumed")
+SYMBOL_CLASSES = ("function", "variable", "vtable", "typeinfo")
+CLASS_SYMBOL_PREFIXES = ("construction vtable for ", "vtable for ", "VTT for ",
+                         "typeinfo name for ", "typeinfo for ")
 OBJECT_SAYS = ("noUndefinedReference", "consumerEmitsItsOwn", "noSuchSymbol")
 MISSED_WHY = ("calleeNotPlaced", "headerBodyOnly", "noCallEdge", "notInIndex")
 
@@ -344,9 +347,22 @@ def main() -> int:
                 if provider != consumer:
                     truth[(consumer, provider)][sym] = symbol_class(sym, objects[provider].defined[sym])
 
-    defined_names = {n: {plain[s] for s in t.defined} for n, t in objects.items()}
-    own_names = {n: {plain[s] for s in t.defined} | {plain[s] for s in t.local} for n, t in objects.items()}
-    undefined_names = {n: {plain[s] for s in t.undefined} for n, t in objects.items()}
+    def object_key(sym: str, cls: str) -> str:
+        """What the index calls the symbol: a function or variable by its
+        qualified name, a vtable or typeinfo by its class's."""
+        name = plain[sym]
+        if cls in ("vtable", "typeinfo"):
+            for prefix in CLASS_SYMBOL_PREFIXES:
+                if name.startswith(prefix):
+                    name = name[len(prefix):]
+                    break
+            return "class " + name.split("-in-")[0].strip()
+        return name
+
+    defined_names = {n: {object_key(s, symbol_class(s, k)) for s, k in t.defined.items()}
+                     for n, t in objects.items()}
+    own_names = {n: defined_names[n] | {object_key(s, symbol_class(s, "t")) for s in t.local}
+                 for n, t in objects.items()}
 
     # 2. Index.
     audit = megascope(args.binary, args.index,
@@ -366,10 +382,15 @@ def main() -> int:
                           "closure_limit": 0, "limit": 10000000}} for c, p in seeded]
     # index_names[(consumer, provider)] -> {name: how}
     index_names: dict[tuple[str, str], dict[str, str]] = {}
+    index_kinds: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
     for key, result in zip(seeded, batch(args.binary, args.index, requests)):
         names: dict[str, str] = {}
         for seed in result.get("seeds", []):
             name = normalize(seed["symbol"]["name"])
+            kind = seed["symbol"].get("kind", "function")
+            if kind == "class":
+                name = "class " + name
+            index_kinds[key][name] = kind
             how = "presumed" if seed["owner"] == "presumed" else ("viaInline" if seed["via"] != "direct" else "defined")
             if INDEX_HOW.index(how) < INDEX_HOW.index(names.get(name, "presumed")) or name not in names:
                 names[name] = how
@@ -383,11 +404,17 @@ def main() -> int:
         consumer, provider = key
         need = truth.get(key, {})
         by_class = Counter(need.values())
-        need_functions = {plain[s] for s, c in need.items() if c == "function"}
+        need_keys: dict[str, str] = {}
+        for sym, cls in need.items():
+            k = object_key(sym, cls)
+            if need_keys.get(k) != "function":
+                need_keys[k] = cls
+        need_functions = {k for k, c in need_keys.items() if c == "function"}
         idx = index_names.get(key, {})
-        both = need_functions & idx.keys()
+        both = need_keys.keys() & idx.keys()
+        only_objects_all = need_keys.keys() - idx.keys()
         only_objects = need_functions - idx.keys()
-        only_index = idx.keys() - need_functions
+        only_index = idx.keys() - need_keys.keys()
         matrix = {h: {o: 0 for o in OBJECT_SAYS} for h in INDEX_HOW}
         for name in only_index:
             if name in defined_names[provider]:
@@ -410,7 +437,12 @@ def main() -> int:
             "objects": {"symbols": len(need), "functions": by_class["function"],
                         "functionNames": len(need_functions), "variables": by_class["variable"],
                         "vtables": by_class["vtable"], "typeinfo": by_class["typeinfo"]},
-            "both": len(both), "objectsOnly": len(only_objects), "indexOnly": len(only_index),
+            "both": len(both & need_functions), "objectsOnly": len(only_objects),
+            "indexOnly": sum(1 for k in only_index if index_kinds[key].get(k) == "function"),
+            "names": {"both": {c: sum(1 for k in both if need_keys[k] == c) for c in SYMBOL_CLASSES},
+                      "objectsOnly": {c: sum(1 for k in only_objects_all if need_keys[k] == c)
+                                      for c in SYMBOL_CLASSES},
+                      "indexOnly": len(only_index)},
             "indexOnlyBy": matrix,
         })
 
@@ -473,6 +505,12 @@ def main() -> int:
                 "objectsOnly": sum(e["objectsOnly"] for e in selected),
                 "indexOnly": sum(e["indexOnly"] for e in selected),
             },
+            "names": {
+                "both": {c: sum(e["names"]["both"][c] for e in selected) for c in SYMBOL_CLASSES},
+                "objectsOnly": {c: sum(e["names"]["objectsOnly"][c] for e in selected)
+                                for c in SYMBOL_CLASSES},
+                "indexOnly": sum(e["names"]["indexOnly"] for e in selected),
+            },
             "objectsOnlyBy": {w: sum(e["objectsOnlyBy"][w] for e in selected) for w in MISSED_WHY},
             "indexOnlyBy": {h: {o: sum(e["indexOnlyBy"][h][o] for e in selected) for o in OBJECT_SAYS}
                             for h in INDEX_HOW},
@@ -533,6 +571,10 @@ def main() -> int:
         print(f"  object symbols {o['symbols']}: functions {o['functions']} ({o['functionNames']} names), "
               f"variables {o['variables']}, vtables {o['vtables']}, typeinfo {o['typeinfo']}")
         print(f"  function names: both {f['both']}, objects only {f['objectsOnly']}, index only {f['indexOnly']}")
+        nm = t["names"]
+        print("  all names, both: " + ", ".join(f"{c} {nm['both'][c]}" for c in SYMBOL_CLASSES) +
+              "; objects only: " + ", ".join(f"{c} {nm['objectsOnly'][c]}" for c in SYMBOL_CLASSES) +
+              f"; index only {nm['indexOnly']}")
         print("  objects only, by what the index holds: " +
               ", ".join(f"{w} {t['objectsOnlyBy'][w]}" for w in MISSED_WHY))
         for h in INDEX_HOW:

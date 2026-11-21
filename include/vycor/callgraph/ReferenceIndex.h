@@ -290,6 +290,36 @@ public:
   // Every reference, in the same order.
   [[nodiscard]] std::vector<ReferenceInfo> allReferences() const;
 
+  // ---- bulk access --------------------------------------------------------
+  // For whole-index consumers that build their own flat tables (the
+  // dependency audit, deps/DependencyAudit.h) instead of materializing
+  // every record as strings. Each live record once, with the number of TUs
+  // that contribute it and the smallest of them (an id resolving through
+  // strings(); kNoId when unknown). Storage order, which depends on bake
+  // order: a consumer that emits an order sorts by content. `fn` runs under
+  // the index lock and must not call back into the index.
+  //   fn(const SymbolRecord &, uint32_t tuCount, Id minTu)
+  template <typename Fn> void forEachSymbolRecord(Fn &&fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensureMinTu();
+    for (const StoredSymbol &s : symbols_)
+      if (s.refs != 0)
+        fn(s.rec, s.refs, s.minTu);
+  }
+  //   fn(const ReferenceRecord &, uint32_t tuCount, Id minTu)
+  template <typename Fn> void forEachReferenceRecord(Fn &&fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensureMinTu();
+    for (const StoredReference &r : references_)
+      if (r.refs != 0)
+        fn(r.rec, r.refs, r.minTu);
+  }
+  // The table every record id resolves through. Valid while the index is
+  // not mutated.
+  [[nodiscard]] const StringInterner &strings() const noexcept {
+    return strings_;
+  }
+
   // ---- persistence ------------------------------------------------------
   // The snapshot's references section (Snapshot.h, format v15). The bytes
   // are canonical: strings, records and contributor lists are written in

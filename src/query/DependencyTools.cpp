@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/deps/DependencyAudit.h"
 #include "vycor/query/Tools.h"
 
@@ -96,7 +97,14 @@ analysisFor(const llvm::json::Object &args, const ToolContext &ctx,
     error = usageError(detail);
     return nullptr;
   }
-  analysis->facts = linkFactsFromCallEdges(ctx.graph, analysis->map, ctx.meta);
+  // The reference facts when the index holds them; an index baked before
+  // them (or a .mgsc one) falls back to the call edges.
+  if (ctx.references && !ctx.references->empty())
+    analysis->facts = linkFactsFromReferences(*ctx.references, &ctx.graph,
+                                              analysis->map, ctx.meta);
+  else
+    analysis->facts =
+        linkFactsFromCallEdges(ctx.graph, analysis->map, ctx.meta);
   analysis->audit = auditDependencies(analysis->facts, analysis->map);
   analysis->fileSize = size;
   analysis->fileTime = mtime;
@@ -149,7 +157,6 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
   symbols["presumed"] = static_cast<int64_t>(c.presumed);
   symbols["inline"] = static_cast<int64_t>(c.inlined);
   symbols["unattributed"] = static_cast<int64_t>(c.unattributed);
-  obj["symbols"] = std::move(symbols);
 
   llvm::json::Object refs;
   refs["anchored"] = static_cast<int64_t>(c.anchoredRefs);
@@ -158,6 +165,20 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
   refs["virtualDispatchSkipped"] = static_cast<int64_t>(c.skippedVirtualCalls);
   refs["deferredSkipped"] = static_cast<int64_t>(c.skippedDeferred);
   refs["unresolvedSite"] = static_cast<int64_t>(c.unresolvedSites);
+  if (lf.ownedStrings) { // the reference-facts producer's own counts
+    refs["fileScopeDropped"] = static_cast<int64_t>(c.fileScopeDropped);
+    refs["vtableEntries"] = static_cast<int64_t>(c.vtableEntryRefs);
+    refs["baseClasses"] = static_cast<int64_t>(c.baseClassRefs);
+    refs["inheritedVirtuals"] = static_cast<int64_t>(c.inheritedVirtualRefs);
+    refs["baseClassesUnseen"] = static_cast<int64_t>(c.baseClassUnseen);
+    refs["overloadCandidates"] =
+        static_cast<int64_t>(c.overloadCandidateRefs);
+    refs["siteAnchored"] = static_cast<int64_t>(c.siteAnchoredRefs);
+    symbols["undefinedInCoveredOwner"] =
+        static_cast<int64_t>(c.undefinedInCoveredOwner);
+    symbols["emittedEverywhere"] = static_cast<int64_t>(c.emittedDefinitions);
+  }
+  obj["symbols"] = std::move(symbols);
   obj["references"] = std::move(refs);
   return llvm::json::Value(std::move(obj));
 }
@@ -179,6 +200,8 @@ llvm::json::Value targetMapJson(const AuditAnalysis &a,
 const std::string &symbolName(const LinkFacts &lf, uint32_t sym) {
   if (const CallGraphNode *node = lf.symNode[sym])
     return node->qualifiedName;
+  if (!lf.symName.empty())
+    return lf.strings->resolve(lf.symName[sym]);
   return lf.strings->resolve(lf.symUsr[sym]); // an endpoint without a node
 }
 
@@ -186,9 +209,14 @@ llvm::json::Object symbolJson(const LinkFacts &lf, uint32_t sym) {
   llvm::json::Object obj;
   obj["name"] = symbolName(lf, sym);
   obj["usr"] = lf.strings->resolve(lf.symUsr[sym]);
+  if (!lf.symKind.empty())
+    obj["kind"] = symbolKindName(static_cast<SymbolKind>(lf.symKind[sym]));
   if (const CallGraphNode *node = lf.symNode[sym]) {
     obj["file"] = node->file;
     obj["line"] = static_cast<int64_t>(node->line);
+  } else if (!lf.symDeclLine.empty() && lf.symDeclFile[sym] != kNoIndex) {
+    obj["file"] = lf.files[lf.symDeclFile[sym]];
+    obj["line"] = static_cast<int64_t>(lf.symDeclLine[sym]);
   }
   return obj;
 }
@@ -259,6 +287,14 @@ llvm::json::Object rowJson(const AuditAnalysis &a, const AuditRow &row,
       targetNames(a.map, audit.droppable, row.dropBegin, row.dropEnd);
   obj["droppableSymbols"] = static_cast<int64_t>(row.droppableSymbols);
   obj["providerDroppable"] = row.providerDroppable;
+  obj["linkTargetsHelped"] = static_cast<int64_t>(row.linkTargetsHelped);
+  obj["linkTargetGain"] = static_cast<int64_t>(row.linkTargetGain);
+  obj["closureFanIn"] = static_cast<int64_t>(row.closureFanIn);
+  obj["closureFanInFiles"] = static_cast<int64_t>(row.closureFanInFiles);
+  obj["registrationSeeds"] = static_cast<int64_t>(row.registrationSeeds);
+  obj["providerStaticInits"] =
+      static_cast<int64_t>(audit.providerStaticInits[row.provider]);
+  obj["providesMain"] = row.providesMain;
   obj["consumerCovered"] = lf.targetCovered[row.consumer] != 0;
   obj["providerCovered"] = lf.targetCovered[row.provider] != 0;
   if (row.seedBegin != row.seedEnd)
@@ -268,11 +304,36 @@ llvm::json::Object rowJson(const AuditAnalysis &a, const AuditRow &row,
     if (!(findings & f.bit))
       continue;
     // No finding here is a verdict over every way one target can need
-    // another: the evidence is the call edges alone.
+    // another: `completeness` lists what the evidence cannot see.
     llvm::json::Object finding;
     finding["id"] = f.id;
     finding["evidence"] = lf.edgeSource;
     finding["universal"] = false;
+    if (f.bit == kFindingUndeclared && row.throughInlineRef != kNoIndex) {
+      // The consumer names no provider symbol itself: every one is reached
+      // through an inline body of a target it does declare.
+      const uint32_t inlineSym = lf.refTo[row.throughInlineRef];
+      llvm::json::Object through;
+      through["symbol"] = symbolName(lf, inlineSym);
+      if (lf.symDeclFile[inlineSym] != kNoIndex)
+        through["header"] = lf.files[lf.symDeclFile[inlineSym]];
+      llvm::json::Array owners;
+      for (uint32_t t : lf.targetsOf(lf.symOwner[inlineSym]))
+        owners.push_back(a.map.names[t]);
+      through["owners"] = std::move(owners);
+      through["site"] = lf.strings->resolve(lf.refSite[row.throughInlineRef]);
+      finding["throughInline"] = std::move(through);
+    }
+    if (f.bit == kFindingThin && row.symbols != 0 &&
+        row.registrationSeeds == row.symbols)
+      // Every certain seed hands a factory to a registry: what the
+      // consumer really uses is reached at run time, past the closure.
+      finding["registration"] = true;
+    if (f.bit == kFindingUnused && audit.providerStaticInits[row.provider])
+      // Linking the provider runs these; a consumer may rely on that
+      // without naming any symbol.
+      finding["providerStaticInits"] =
+          static_cast<int64_t>(audit.providerStaticInits[row.provider]);
     list.push_back(std::move(finding));
   }
   obj["findings"] = std::move(list);
@@ -354,13 +415,15 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
                           "any");
     }
   }
-  bool byGain = false;
+  enum class Sort { Name, Gain, LinkGain } sort = Sort::Name;
   if (const llvm::json::Value *v = args.get("sort")) {
     auto name = v->getAsString();
     if (name && *name == "gain")
-      byGain = true;
+      sort = Sort::Gain;
+    else if (name && *name == "link_gain")
+      sort = Sort::LinkGain;
     else if (!name || *name != "name")
-      return usageError("Invalid sort: must be name or gain");
+      return usageError("Invalid sort: must be name, gain or link_gain");
   }
   Page page;
   if (auto bad = parsePage(args, kDefaultListLimit, page))
@@ -392,14 +455,24 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
     if (wanted == 0 || (f & wanted))
       selected.push_back(i);
   }
-  if (byGain)
-    // Rows are already in (consumer, provider) order; a stable sort keeps
-    // that as the tie-break.
+  // Rows are already in (consumer, provider) order; a stable sort keeps
+  // that as the tie-break.
+  if (sort == Sort::Gain)
     std::stable_sort(selected.begin(), selected.end(),
                      [&](uint32_t x, uint32_t y) {
                        const AuditRow &p = rows[x], &q = rows[y];
                        if (p.droppableSymbols != q.droppableSymbols)
                          return p.droppableSymbols > q.droppableSymbols;
+                       return p.closureSymbols < q.closureSymbols;
+                     });
+  else if (sort == Sort::LinkGain)
+    std::stable_sort(selected.begin(), selected.end(),
+                     [&](uint32_t x, uint32_t y) {
+                       const AuditRow &p = rows[x], &q = rows[y];
+                       if (p.linkTargetGain != q.linkTargetGain)
+                         return p.linkTargetGain > q.linkTargetGain;
+                       if (p.linkTargetsHelped != q.linkTargetsHelped)
+                         return p.linkTargetsHelped > q.linkTargetsHelped;
                        return p.closureSymbols < q.closureSymbols;
                      });
 
@@ -420,7 +493,9 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
     findingCounts[kFindingNames[k].id] = counts[k];
   obj["findingCounts"] = std::move(findingCounts);
   obj["unusedWithheld"] = unusedWithheld;
-  obj["sort"] = byGain ? "gain" : "name";
+  obj["sort"] = sort == Sort::Gain       ? "gain"
+                : sort == Sort::LinkGain ? "link_gain"
+                                         : "name";
   attachPage(obj, page, selected.size());
   obj["edges"] = std::move(edges);
   return llvm::json::Value(std::move(obj));
@@ -482,6 +557,8 @@ llvm::json::Value handleExplainDependency(const llvm::json::Object &args,
     seed["symbol"] = symbolJson(lf, a.audit.seedSym[s]);
     seed["owner"] = (flags & kSeedUncertain) ? "presumed" : "defined";
     seed["via"] = (flags & kSeedViaInline) ? "inline" : "direct";
+    if (flags & kSeedRegistration)
+      seed["registers"] = true;
     const uint32_t ref = a.audit.seedRef[s];
     seed["kind"] = lf.refKindName(lf.refKind[ref]);
     seed["site"] = lf.strings->resolve(lf.refSite[ref]);
@@ -512,13 +589,41 @@ llvm::json::Value handleExplainDependency(const llvm::json::Object &args,
     closureList.push_back(std::move(sym));
   }
 
+  // Who else inside the provider uses the closure (AuditRow::closureFanIn).
+  std::vector<uint32_t> fanIn;
+  closureFanInOf(lf, a.audit, row, fanIn);
+  std::sort(fanIn.begin(), fanIn.end(), [&](uint32_t x, uint32_t y) {
+    const std::string &nx = symbolName(lf, x), &ny = symbolName(lf, y);
+    if (nx != ny)
+      return nx < ny;
+    return x != y && lf.strings->resolve(lf.symUsr[x]) <
+                         lf.strings->resolve(lf.symUsr[y]);
+  });
+  llvm::json::Array fanInList;
+  for (size_t i = 0; i < fanIn.size() && i < closureLimit; ++i) {
+    llvm::json::Object sym = symbolJson(lf, fanIn[i]);
+    if (lf.symFile[fanIn[i]] != kNoIndex)
+      sym["definedIn"] = lf.files[lf.symFile[fanIn[i]]];
+    fanInList.push_back(std::move(sym));
+  }
+
   llvm::json::Object obj;
   obj["targetMap"] = targetMapJson(a, *args.getString("target_map"));
   obj["completeness"] = completenessJson(a, ctx);
   obj["edge"] = rowJson(a, row, findings);
+  llvm::json::Array helped;
+  for (uint32_t i = row.helpedBegin; i < row.helpedEnd; ++i) {
+    llvm::json::Object h;
+    h["target"] = a.map.names[a.audit.helpedTarget[i]];
+    h["droppableSymbols"] = static_cast<int64_t>(a.audit.helpedSymbols[i]);
+    helped.push_back(std::move(h));
+  }
+  obj["linkTargetsHelped"] = std::move(helped);
   obj["closure"] = std::move(closureList);
   obj["closureTotal"] = static_cast<int64_t>(closure.size());
   obj["closureTruncated"] = closure.size() > closureLimit;
+  obj["fanIn"] = std::move(fanInList);
+  obj["fanInTruncated"] = fanIn.size() > closureLimit;
   attachPage(obj, page, seedCount);
   obj["seeds"] = std::move(seeds);
   return llvm::json::Value(std::move(obj));
@@ -555,7 +660,10 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
     props["sort"] = stringProp(
         "name (default): by consumer, then provider. gain: by "
         "droppableSymbols, largest first — the symbols the consumer would "
-        "stop linking if the closure were split out of the provider.");
+        "stop linking if the closure were split out of the provider. "
+        "link_gain: by linkTargetGain, largest first — the most symbols one "
+        "executable or shared library linking the consumer would stop "
+        "linking — then linkTargetsHelped.");
     addPagingProps(props, kDefaultListLimit, "edges");
     llvm::json::Object schema;
     schema["type"] = "object";
@@ -571,9 +679,12 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
          "thin-dependency (a few symbols, a small closure), "
          "undeclared-link-dependency (used but only reachable "
          "transitively, or not declared), unused-link-dependency (declared, "
-         "no reference seen). The evidence is the call edges only: "
-         "variable, vtable and typeinfo references are invisible, so no "
-         "finding is a universal verdict — read `completeness`.",
+         "no reference seen). The evidence is the index's symbol reference "
+         "facts (calls, address-taken functions, variables, vtables and "
+         "typeinfo), or its call edges for an index without them; some "
+         "references stay invisible (implicit destructor calls, template "
+         "instantiation bodies), so no finding is a universal verdict — "
+         "read `completeness`.",
          llvm::json::Value(std::move(schema)), handleAuditDependencies});
   }
   {
@@ -582,8 +693,8 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
     props["consumer"] = stringProp("The consuming target (exact name).");
     props["provider"] = stringProp("The providing target (exact name).");
     props["closure_limit"] = intProp(
-        "Maximum closure symbols to list (default: 50). `closureTotal` is "
-        "the full count.");
+        "Maximum closure and fan-in symbols to list (default: 50). "
+        "`closureTotal` and the edge's `closureFanIn` are the full counts.");
     addPagingProps(props, kDefaultListLimit, "seeds");
     llvm::json::Object schema;
     schema["type"] = "object";
@@ -597,7 +708,9 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
          "it (and, when the reference sits in an inline body, the call in "
          "the consumer's own sources that reaches it), plus the closure "
          "those symbols need inside the provider and the other targets "
-         "that closure references. Call edges only; see `completeness`.",
+         "that closure references, and the provider's own symbols that use "
+         "the closure (`fanIn`). See `completeness` for what the evidence "
+         "cannot see.",
          llvm::json::Value(std::move(schema)), handleExplainDependency});
   }
 }
