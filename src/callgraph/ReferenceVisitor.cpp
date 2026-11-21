@@ -1875,6 +1875,48 @@ void ReferenceVisitor::release(uint32_t lock) {
   }
 }
 
+void ReferenceVisitor::noteAcquire(uint32_t lock, RefRole role,
+                                   clang::SourceLocation site,
+                                   uint32_t heldBefore) {
+  // A transparent body is library code or code the compiler writes: its
+  // locks are the library's own (std::lock_guard's constructor locks the
+  // mutex it was given, which the guard's declaration already recorded).
+  if (mode_ == Mode::Transparent || unevaluated_ > 0 || frames_.empty())
+    return;
+  if (llvm::StringRef(lockIdents_[lock].usr).starts_with(kLockOncePrefix))
+    return;
+  const clang::SourceLocation at = sm_.getExpansionLoc(site);
+  if (at.isInvalid() || sm_.isInSystemHeader(at))
+    return;
+  const uint32_t referrer = referrerSlot(site);
+  if (referrer == kDropped)
+    return;
+  const uint64_t key = (static_cast<uint64_t>(referrer) << kReferrerShift) |
+                       (static_cast<uint64_t>(lock) << kTargetShift) |
+                       static_cast<uint64_t>(role);
+  // Instantiation bodies are read after the code as written: an
+  // acquisition the pattern holds keeps the pattern's facts.
+  if (mode_ == Mode::Instantiation && acqs_.count(key) != 0)
+    return;
+  RefAcc &acc = (mode_ == Mode::Instantiation ? instAcqs_ : acqs_)[key];
+  if (acc.count++ == 0)
+    acc.site = site;
+  acc.flags |= lockFlags_[lock];
+  if (lockState_.loopDepth > 0)
+    acc.flags |= kRefInLoop;
+  const uint32_t seq = seq_++;
+  if (heldBefore == 0) {
+    if (!acc.unlocked) {
+      acc.unlocked = true;
+      acc.unlockedSite = site;
+      acc.unlockedSeq = seq;
+    }
+    return;
+  }
+  acc.locked = true;
+  acqOcc_.try_emplace({key, heldBefore}, LockedOcc{seq, site});
+}
+
 uint32_t ReferenceVisitor::internLockset(
     llvm::SmallVectorImpl<uint32_t> &locks) {
   if (locks.empty())
@@ -1927,6 +1969,11 @@ uint32_t ReferenceVisitor::lockIdentity(const clang::NamedDecl *decl,
     if (!prefix.empty())
       display = (llvm::Twine("once(") + display + ")").str();
     lockIdents_.push_back({std::move(usr), std::move(display)});
+    uint8_t flags = 0;
+    if (prefix.empty())
+      if (const auto *value = llvm::dyn_cast<clang::ValueDecl>(decl))
+        flags = lockRecursionFlags(value->getType());
+    lockFlags_.push_back(flags);
   }
   return it->second;
 }
@@ -1935,6 +1982,7 @@ uint32_t ReferenceVisitor::unknownLock() {
   if (unknownLock_ == UINT32_MAX) {
     unknownLock_ = static_cast<uint32_t>(lockIdents_.size());
     lockIdents_.push_back({kLockUnknownIdentity, "<unknown mutex>"});
+    lockFlags_.push_back(0);
     lockIdentOf_[kLockUnknownIdentity] = unknownLock_;
   }
   return unknownLock_;
@@ -2044,6 +2092,36 @@ enum class LockOp : uint8_t { None, Acquire, Release, Disown };
   return LockOp::None;
 }
 
+// How a member function that acquires (lockOpOf) does it: a try or timed
+// lock gives up instead of waiting forever, and a shared acquisition
+// admits other shared holders. By the thread-safety attributes when
+// present, else by the standard and Abseil spellings.
+struct AcquireKind {
+  bool tryLock = false;
+  bool shared = false;
+};
+[[nodiscard]] AcquireKind acquireKindOf(const clang::FunctionDecl *fn) {
+  AcquireKind out;
+  if (fn->hasAttrs()) {
+    if (const auto *attr = fn->getAttr<clang::TryAcquireCapabilityAttr>()) {
+      out.tryLock = true;
+      out.shared = attr->isShared();
+      return out;
+    }
+    if (const auto *attr = fn->getAttr<clang::AcquireCapabilityAttr>()) {
+      out.shared = attr->isShared();
+      return out;
+    }
+  }
+  const clang::IdentifierInfo *id = fn->getIdentifier();
+  if (!id)
+    return out;
+  const llvm::StringRef name = id->getName();
+  out.tryLock = name.starts_with("try_") || name.contains("TryLock");
+  out.shared = name.contains("shared") || name.starts_with("Reader");
+  return out;
+}
+
 [[nodiscard]] const clang::LambdaExpr *lambdaArgument(const clang::Expr *arg) {
   return arg ? llvm::dyn_cast<clang::LambdaExpr>(arg->IgnoreImplicit())
              : nullptr;
@@ -2116,6 +2194,7 @@ void ReferenceVisitor::noteGuard(const clang::VarDecl *var) {
     return;
   }
   bool active = true;
+  bool waits = true; // the construction blocks until it owns the mutexes
   bool sawArgument = false;
   llvm::SmallVector<uint32_t, 2> mutexes;
   for (const clang::Expr *arg : construct->arguments()) {
@@ -2127,6 +2206,7 @@ void ReferenceVisitor::noteGuard(const clang::VarDecl *var) {
       continue;
     case LockTag::TryToLock: // read as taken: a race needs it not to be
     case LockTag::Adopt:
+      waits = false;
       continue;
     case LockTag::None:
       break;
@@ -2140,6 +2220,17 @@ void ReferenceVisitor::noteGuard(const clang::VarDecl *var) {
   // nothing, it owns nothing.)
   if (known && mutexes.empty() && sawArgument)
     mutexes.push_back(unknownLock());
+  if (active && waits && !mutexes.empty()) {
+    // Every mutex of a multi-lock guard (std::scoped_lock) is acquired
+    // under the locks held before it: none orders the others.
+    const uint32_t before = currentLockset();
+    const clang::CXXConstructorDecl *ctor = construct->getConstructor();
+    const auto *attr = ctor->getAttr<clang::AcquireCapabilityAttr>();
+    const bool shared = attr ? attr->isShared() : isSharedGuardType(type);
+    for (uint32_t lock : mutexes)
+      noteAcquire(lock, shared ? RefRole::LockShared : RefRole::Lock,
+                  var->getLocation(), before);
+  }
   for (uint32_t lock : mutexes)
     lockState_.held.push_back({lock, var, active, false, nullptr});
   if (!mutexes.empty())
@@ -2163,13 +2254,21 @@ void ReferenceVisitor::noteLockCall(const clang::CallExpr *expr) {
     // A guard of this block: lock()/unlock() toggle what it owns, and
     // release() hands its mutex over still locked (a later unlock() by
     // hand drops it).
+    const AcquireKind kind = acquireKindOf(fn);
     if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(object)) {
       bool guard = false;
       auto &held = lockState_.held;
+      const uint32_t before = currentLockset();
       for (size_t i = held.size(); i-- > 0;) {
         if (held[i].guard != ref->getDecl())
           continue;
         guard = true;
+        if (op == LockOp::Acquire && !held[i].active && !kind.tryLock)
+          noteAcquire(held[i].lock,
+                      kind.shared || isSharedGuardType(held[i].guard->getType())
+                          ? RefRole::LockShared
+                          : RefRole::Lock,
+                      expr->getExprLoc(), before);
         if (op != LockOp::Disown)
           held[i].active = op == LockOp::Acquire;
         else if (held[i].active)
@@ -2184,9 +2283,13 @@ void ReferenceVisitor::noteLockCall(const clang::CallExpr *expr) {
     }
     if (!isMutexLike(object->getType()))
       return;
-    if (op == LockOp::Acquire)
-      acquire(mutexIdentity(object));
-    else if (op == LockOp::Release)
+    if (op == LockOp::Acquire) {
+      const uint32_t lock = mutexIdentity(object);
+      if (!kind.tryLock)
+        noteAcquire(lock, kind.shared ? RefRole::LockShared : RefRole::Lock,
+                    expr->getExprLoc(), currentLockset());
+      acquire(lock);
+    } else if (op == LockOp::Release)
       release(mutexIdentity(object));
     return;
   }
@@ -2218,20 +2321,34 @@ void ReferenceVisitor::noteLockCall(const clang::CallExpr *expr) {
             onceCallables_[ref] = onceLock(flagDecl);
       }
     } else if (name == "lock" || name == "try_lock") {
-      // std::lock(a, b): mutexes, or guards made with defer_lock.
+      // std::lock(a, b): mutexes, or guards made with defer_lock. Every
+      // one is acquired under the locks held before the call (std::lock
+      // avoids deadlock among them); std::try_lock waits for none.
+      const bool waits = name == "lock";
+      const uint32_t before = currentLockset();
       for (const clang::Expr *arg : expr->arguments()) {
         const clang::Expr *bare = arg->IgnoreParenImpCasts();
         bool guard = false;
         if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(bare))
           for (HeldLock &h : lockState_.held)
             if (h.guard == ref->getDecl()) {
+              if (waits && !h.active)
+                noteAcquire(h.lock,
+                            isSharedGuardType(h.guard->getType())
+                                ? RefRole::LockShared
+                                : RefRole::Lock,
+                            arg->getExprLoc(), before);
               h.active = true;
               guard = true;
             }
-        if (guard)
+        if (guard) {
           heldSetValid_ = false;
-        else if (isMutexLike(arg->getType()))
-          acquire(mutexIdentity(arg));
+        } else if (isMutexLike(arg->getType())) {
+          const uint32_t lock = mutexIdentity(arg);
+          if (waits)
+            noteAcquire(lock, RefRole::Lock, arg->getExprLoc(), before);
+          acquire(lock);
+        }
       }
     }
     return;
@@ -2242,8 +2359,17 @@ void ReferenceVisitor::noteLockCall(const clang::CallExpr *expr) {
       name == "pthread_mutex_timedlock" || name == "pthread_rwlock_rdlock" ||
       name == "pthread_rwlock_wrlock" || name == "pthread_rwlock_tryrdlock" ||
       name == "pthread_rwlock_trywrlock" || name == "pthread_spin_lock" ||
-      name == "pthread_spin_trylock")
-    acquire(mutexIdentity(expr->getArg(0)));
+      name == "pthread_spin_trylock") {
+    const uint32_t lock = mutexIdentity(expr->getArg(0));
+    // A try or timed lock gives up instead of waiting forever.
+    if (name == "pthread_mutex_lock" || name == "pthread_spin_lock" ||
+        name == "pthread_rwlock_wrlock")
+      noteAcquire(lock, RefRole::Lock, expr->getExprLoc(), currentLockset());
+    else if (name == "pthread_rwlock_rdlock")
+      noteAcquire(lock, RefRole::LockShared, expr->getExprLoc(),
+                  currentLockset());
+    acquire(lock);
+  }
   else if (name == "pthread_mutex_unlock" || name == "pthread_rwlock_unlock" ||
            name == "pthread_spin_unlock")
     release(mutexIdentity(expr->getArg(0)));
@@ -3430,6 +3556,16 @@ void ReferenceVisitor::lower() {
     entities_[ref.first >> kReferrerShift].emit = true;
     entities_[static_cast<uint32_t>(ref.first >> kTargetShift)].emit = true;
   }
+  // Lock acquisitions: what only instantiations hold joins the code as
+  // written. The target is a lock identity, not an entity.
+  for (const auto &entry : instAcqs_)
+    acqs_.try_emplace(entry.first, entry.second);
+  std::vector<std::pair<uint64_t, RefAcc>> acqs(acqs_.begin(), acqs_.end());
+  llvm::sort(acqs, [](const auto &a, const auto &b) {
+    return a.first < b.first;
+  });
+  for (const auto &acq : acqs)
+    entities_[acq.first >> kReferrerShift].emit = true;
 
   std::vector<Id> usrOf(entities_.size(), ReferenceIndex::kNoId);
   std::vector<ReferenceIndex::SymbolRecord> symbols;
@@ -3505,6 +3641,42 @@ void ReferenceVisitor::lower() {
     rec.flags = ref.second.flags;
     assert(rec.referrer != ReferenceIndex::kNoId &&
            rec.target != ReferenceIndex::kNoId);
+    records.push_back(rec);
+  }
+
+  // Lock acquisitions, with the sets held before each.
+  std::vector<std::pair<uint64_t, std::pair<uint32_t, LockedOcc>>> acqLocked;
+  acqLocked.reserve(acqOcc_.size());
+  for (const auto &entry : acqOcc_)
+    acqLocked.push_back({entry.first.first, {entry.first.second, entry.second}});
+  llvm::sort(acqLocked, [](const auto &a, const auto &b) {
+    return std::tie(a.first, a.second.second.seq) <
+           std::tie(b.first, b.second.second.seq);
+  });
+  nextLocked = 0;
+  for (const auto &acq : acqs) {
+    lockedOfRef.clear();
+    while (nextLocked < acqLocked.size() &&
+           acqLocked[nextLocked].first < acq.first)
+      ++nextLocked;
+    for (; nextLocked < acqLocked.size() &&
+           acqLocked[nextLocked].first == acq.first;
+         ++nextLocked)
+      lockedOfRef.push_back(acqLocked[nextLocked].second);
+    const std::string locks = lockText(acq.second, lockedOfRef);
+    const Site site = siteOf(acq.second.site);
+    ReferenceIndex::ReferenceRecord rec;
+    rec.referrer = usrOf[acq.first >> kReferrerShift];
+    rec.target = index_.internText(
+        lockIdents_[static_cast<uint32_t>(acq.first >> kTargetShift)].usr);
+    rec.file = site.file;
+    rec.line = site.line;
+    rec.col = site.col;
+    rec.count = acq.second.count;
+    rec.role = static_cast<RefRole>(acq.first & kRoleMask);
+    rec.locks = locks.empty() ? ReferenceIndex::kNoId : index_.internText(locks);
+    rec.flags = acq.second.flags;
+    assert(rec.referrer != ReferenceIndex::kNoId);
     records.push_back(rec);
   }
   index_.addTuFacts(index_.internText(tuPath_), symbols, records);

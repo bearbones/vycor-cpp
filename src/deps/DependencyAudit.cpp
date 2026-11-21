@@ -920,6 +920,10 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   std::vector<RefRec> rrec;
   refs.forEachReferenceRecord([&](const ReferenceIndex::ReferenceRecord &r,
                                   uint32_t tus, SId minTu, SId maxTu) {
+    // A lock acquisition names a lock identity, not a symbol the linker
+    // resolves; the mutex variable's own use is a read or address_of.
+    if (isLockRole(r.role))
+      return;
     rrec.push_back({r, tus, minTu, maxTu});
   });
 

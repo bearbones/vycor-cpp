@@ -36,6 +36,10 @@ const char *refRoleName(RefRole role) noexcept {
     return "vtable_use";
   case RefRole::TypeinfoUse:
     return "typeinfo_use";
+  case RefRole::Lock:
+    return "lock";
+  case RefRole::LockShared:
+    return "lock_shared";
   }
   return "call";
 }
