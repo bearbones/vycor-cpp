@@ -55,7 +55,7 @@ vycor-cpp megascope index --build-path build
 
 # 3. The edge table: thin dependencies, those that help a link target first.
 vycor-cpp megascope audit-dependencies --build-path build \
-    --target-map targets.json --finding thin-dependency --sort link_gain --format tsv
+    --target-map targets.json --finding thin-dependency --format tsv
 
 # 4. One edge: the symbols, the witnesses, the closure.
 vycor-cpp megascope explain-dependency --build-path build \
@@ -340,7 +340,7 @@ symbol or uncertain symbol referenced).
 | `target_map` | required: path of the target map |
 | `consumer`, `provider` | only the rows of that consumer / onto that provider (exact target names; an unknown name is `not_found`) |
 | `finding` | only rows with this finding: `unused-link-dependency`, `undeclared-link-dependency`, `thin-dependency`, or `any` |
-| `sort` | `name` (default): by consumer, then provider. `gain`: `droppableSymbols` descending, then `closureSymbols` ascending, then by name. `link_gain`: `linkTargetGain` descending, then `linkTargetsHelped` descending, then `closureSymbols` ascending, then by name |
+| `sort` | `link_gain` (default): `linkTargetGain` descending, then `linkTargetsHelped` descending, then `closureSymbols` ascending, then by name. `split_gain`: `splitGain` descending, then as `link_gain`. `gain`: `droppableSymbols` descending, then `closureSymbols` ascending, then by name. `name`: by consumer, then provider |
 | `thin_max_symbols`, `thin_max_closure_pct` | the thin thresholds (defaults 5 and 10) |
 | `limit`, `offset` | paging over `edges` (default limit 200) |
 
@@ -360,7 +360,8 @@ symbol or uncertain symbol referenced).
 | `droppableTargets` | of those, the ones the closure would not pull back in: what the consumer stops linking if the closure is split out into a target of its own |
 | `droppableSymbols` | the `defined` symbols in `droppableTargets`, less the closure itself when the provider is among them — the gain |
 | `providerDroppable` | the provider is one of `droppableTargets` |
-| `linkTargetsHelped`, `linkTargetGain` | the final link targets (executables, shared and module libraries) that would stop linking at least one of `droppableTargets` — [Link-target gain](#link-target-gain) — and the most `defined` symbols one of them would drop |
+| `linkTargetsHelped`, `linkTargetGain`, `linkTargetMembers` | the final link targets (executables, shared and module libraries) that would load less if the closure were split out of the provider, the most emitted symbols one of them would stop loading, and the objects that target stops loading — [Link-target gain](#link-target-gain) |
+| `fanInPct`, `splitGain` | the share of the rest of the provider that references the closure, and `linkTargetGain` discounted by it — [Link-target gain](#link-target-gain) |
 | `closureFanIn`, `closureFanInFiles` | `defined` provider symbols outside the closure that reference into it, and their files — [the closure](#inline-bodies-and-the-closure) |
 | `registrationSeeds` | certain seeds that register a factory — [Registration seeds](#registration-seeds) |
 | `providesMain` | the consumer is an executable that defines no `main` and the provider, a library, defines one (a test runner's main library, for instance): needed although no consumer object names it |
@@ -381,28 +382,103 @@ saving.
 
 `droppableSymbols` is what the *consumer* stops linking. When the
 consumer is a static or object library, nothing is linked until a final
-link target links it, and that target may reach the dropped targets
-another way. For each final link target that links the consumer (the
-consumer itself, when it is one), the audit walks what the target links
-with this row's edge replaced by the closure's needs: the
-`droppableTargets` it no longer reaches are what it drops, and their
-`defined` symbols (less the closure, when the provider is among them)
-its gain. `linkTargetsHelped` counts the targets that drop anything,
-`linkTargetGain` is the largest gain, and `explain_dependency` lists
-each target with its own. Computed for `declared: "direct"` rows with
-droppable targets; zero elsewhere.
+link target (an executable, a shared or a module library) links it,
+and the linker does not take a static library whole: it loads an
+archive member only when the member defines a symbol something already
+loaded references. The link-target gain simulates that, per final link
+target, at the granularity of objects.
 
-What a target links is read from the map: the consumer's rows that are
-declared or used, the `interfaceDeps` of what it reaches, and the
-declared `deps` of every other target on the way. A dependency a third
-target uses without declaring is not followed, so the gain can be
-overstated when the build only works because some other path pulls the
-provider in.
+**Members.** Every mapped source of a target with objects is one
+member. A `defined` symbol lives in the member of the translation unit
+that holds its code (the defining source; for a class, the TU that
+emits its vtable; an identity defined in several TUs, such as each
+program's `main`, has one member per owner). What a member references
+is what its definitions' code references, through the inline bodies it
+uses, plus the references of its file-scope code (namespace-scope
+initializers). Only hard references count.
 
-`link_gain` ranks a row that helps a program above one whose library
-gain no program sees. Both columns inherit the closure's error: a
-closure that is too small — the usual cause is code reached by name at
-run time, through a registry — makes every gain column too large.
+**Weight.** A member weighs its *emitted symbols*: its `defined`
+symbols plus the inline bodies its code uses, since each object
+compiles its own copy of those. On the LLVM testbed this tracks the
+members' allocated bytes better than the count of defined symbols does
+(rank correlation 0.85 against 0.81 over 709 archive members); bytes
+themselves need a built tree, which the index does not have.
+
+**One link.** Which targets a final link target links is read from the
+map, as for `onlyViaEdge`: its rows that are declared or used, the
+`interfaceDeps` of what it reaches, and the declared `deps` of every
+other target on the way. The target's own members are loaded, and so is
+every object of an object library on the line; a shared or module
+library on the line is loaded whole once any of its symbols is used. A
+referenced symbol is then resolved, in order of preference, from the
+target itself, an object or shared library on the line, a static
+library on the line, or any static library that defines it (a reference
+the build resolves some other way still loads the member), until
+nothing new is loaded. `linkInput` (in `explain_dependency`) is the
+weight this loads as the map stands, and `linkInputMembers` the
+members.
+
+**The split.** For a `declared: "direct"` row, the row's closure moves
+out of the provider into an object of its own, symbol by symbol: each
+provider member that held part of the closure keeps the rest of its
+code (and its own copies of the inline bodies the rest uses), and the
+new object compiles its own copies of the inline bodies the closure
+uses. Every final link target that links the consumer is simulated
+again with the row's edge replaced by the closure's needs: references
+to the closure load the new object, and a provider member is loaded
+only if something still references what is left in it, so members
+pulled in only through the closure — in the provider and transitively
+in any other target — drop out. When the provider is an object library
+the new object is one too, and nothing of the rest is loaded unless the
+provider is still on the line another way. A row with an empty closure
+gains only what leaves the line (an object or shared library no longer
+reached).
+
+| Member | Meaning |
+|---|---|
+| `linkTargetGain` | the most emitted symbols one final link target stops loading: `linkInput` before less the weight after, the new object included. Never negative: a target that would load more is not helped |
+| `linkTargetMembers` | the objects that target stops loading (the new object not counted) |
+| `linkTargetsHelped` | how many final link targets gain anything |
+| `fanInPct` | `closureFanIn` as a percentage of the provider's `defined` symbols outside the closure, 0–100: how much of what stays behind still calls into what moved |
+| `splitGain` | `linkTargetGain × (100 − fanInPct) / 100`: the gain, discounted by that share |
+
+**Fan-in.** A closure the rest of the provider references heavily is a
+cut through the middle of the provider: after the split the rest depends
+on the new target, every program that links the rest links it too, and
+the refactor is as large as the fan-in. The simulation already charges
+for it where it changes what a link loads (the rest member that calls
+into the closure keeps the new object loaded), but not for the cost of
+making the cut. `splitGain` is the separate rank key that weighs that
+cost (`--sort split_gain`); `linkTargetGain` stays the physical
+quantity.
+
+`link_gain` (the default sort) ranks a row that helps a program above
+one whose library gain no program sees. Measured against the archive
+members GNU ld really loads on the LLVM testbed (13 tools, 34 static
+and 3 object libraries; `-Wl,-Map`), the simulated loads match 95% of
+the archive members both ways, and `linkTargetGain` ranks the 206
+direct rows with rank correlation 0.83 against the bytes a section-level
+split of the true closure saves; 9 of its top 10 rows are among the 12
+largest real gains.
+
+What it does not see:
+
+- **The closure's error.** A closure that is too small — the usual
+  cause is code reached by name at run time, through a registry — makes
+  every gain too large. One that is too large (header inline code the
+  compiler never emitted, followed to a symbol) can move into the new
+  object a symbol the rest of the provider still needs and so free the
+  members that only it kept loaded: the gain is then that of the larger
+  split the closure describes, not of the smallest one.
+- **Undeclared paths.** A dependency a third target uses without
+  declaring is not followed, so the gain can be overstated when the
+  build only works because some other path pulls the provider in.
+- **Granularity.** One member per mapped source: a source compiled into
+  a target through another target's objects, or objects a build adds
+  outside the map (CMake folding an object library into an archive),
+  are not modelled. Link order is ignored: a symbol two archives on the
+  line define resolves to the one whose name sorts first, not to the
+  first on the command line.
 
 The payload also carries `targetMap` (`path`, `generator`, `depsForm`,
 `targets`, `roots`), `completeness`, `thinThresholds`, `findingCounts`
@@ -458,8 +534,8 @@ and the fix belongs to its owner (declare the provider as an interface
 dependency) more than to the consumer.
 
 `thin-dependency` describes the shape of an edge, not its value. Rank
-thin rows by `linkTargetGain` (`--sort link_gain`) or `droppableSymbols`
-(`--sort gain`), then read the closure and its fan-in with
+thin rows by `linkTargetGain` (the default sort), `splitGain`
+(`--sort split_gain`) or `droppableSymbols` (`--sort gain`), then read the closure and its fan-in with
 `explain_dependency`: a thin edge onto a small leaf library is true and
 worthless, a thin edge whose closure needs most of what the provider
 needs saves nothing, a closure with fan-in leaves the provider's own
@@ -477,7 +553,7 @@ observed) answers `ok` with empty `seeds` and exit code 1.
 | Member | Meaning |
 |---|---|
 | `edge` | the row, as in the edge table |
-| `linkTargetsHelped` | each final link target the split would help: `target`, `droppableSymbols` — by symbols descending, then name |
+| `linkTargetsHelped` | each final link target the split would help: `target`, `gain` (emitted symbols it stops loading), `members` (objects it stops loading), `linkInput` and `linkInputMembers` (what it loads as the map stands) — by gain descending, then name |
 | `seeds` | every provider symbol the consumer references — certain before uncertain, named by a source before via-inline, then by site. Each: `symbol` (`name`, `usr`, `kind` — `function`, `variable`, `class` — and the declaration's `file`, `line`), `owner` (`defined` / `presumed`), `via` (`direct` / `inline`), `kind` (the reference's role or added kind), `site` (where the reference to the symbol is written), `from` (the symbol that makes it), `registers: true` for a registration, and for `via: "inline"` `through`: the reference in the consumer's own files (`site`, `from`, `to`) the walk started from |
 | `closure` | the closure's symbols by qualified name, then USR: `name`, `usr`, `kind`, `file`, `line` (the declaration), `definedIn` (the file that defines it, when known) |
 | `closureTotal`, `closureTruncated` | the full count, and whether `closure_limit` cut the list |

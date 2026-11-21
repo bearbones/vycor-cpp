@@ -124,11 +124,16 @@ struct LinkFacts {
   /// whose code it is (indirect uses). Unattributed: 0.
   std::vector<uint32_t> symOwner;
   std::vector<uint32_t> symFile;  // defining file id (Defined), else kNoIndex
-  /// The translation unit whose object holds the definition (Defined): the
-  /// defining source, or the one TU that includes the header defining it
-  /// (an `.inc` body); for a class, the TU that emits its vtable. Else
-  /// kNoIndex. Decides the archive member a reference pulls.
-  std::vector<uint32_t> symTu;
+  /// The translation units whose objects hold the definition (Defined),
+  /// ascending file ids in CSR form: each defining source, or the one TU
+  /// that includes the header defining it (an `.inc` body); for a class,
+  /// the TUs that emit its vtable. One identity can have several (`main`
+  /// of every program). Decides the archive member a reference pulls.
+  std::vector<uint32_t> symTuBegin, symTus;
+  [[nodiscard]] llvm::ArrayRef<uint32_t> tusOf(uint32_t s) const {
+    return llvm::ArrayRef<uint32_t>(symTus).slice(
+        symTuBegin[s], symTuBegin[s + 1] - symTuBegin[s]);
+  }
   /// Unattributed, yet declared in a file under the map's roots that is no
   /// unlisted source: the build's own code, owner unknown. It may belong
   /// to any target; counted per consumer (DependencyAudit::unplacedUses,

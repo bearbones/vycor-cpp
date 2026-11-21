@@ -610,7 +610,8 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
   lf.symOwner.assign(symbolCount, 0);
   lf.symFile.assign(symbolCount, kNoIndex);
-  lf.symTu.assign(symbolCount, kNoIndex);
+  lf.symTuBegin.assign(symbolCount + 1, 0);
+  lf.symTus.clear();
   lf.symUnplaced.assign(symbolCount, 0);
 
   // 1. A reference held by a target's own file: the body is there.
@@ -657,8 +658,17 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = owner;
       lf.symFile[s] = bodyFile;
-      if (bodyFile != kNoIndex && fa.tuSet(bodyFile) != 0)
-        lf.symTu[s] = bodyFile;
+      // Every translation unit a body sits in (an identity defined in
+      // several, such as `main`, has one per program).
+      const size_t first = lf.symTus.size();
+      for (uint32_t i = rawBegin[s]; i < rawBegin[s + 1]; ++i) {
+        const uint32_t f = rawFile[byFrom[i]];
+        if (f != kNoIndex && fa.tuSet(f) != 0)
+          lf.symTus.push_back(f);
+      }
+      std::sort(lf.symTus.begin() + first, lf.symTus.end());
+      lf.symTus.erase(std::unique(lf.symTus.begin() + first, lf.symTus.end()),
+                      lf.symTus.end());
       if (decl != kNoIndex && fileSet[decl] == 0 && headerOwner[decl] == 0 &&
           map.underRoots(files.paths[decl]))
         votes.emplace_back(decl, owner);
@@ -669,8 +679,9 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       lf.symOwner[s] = fileSet[decl];
       lf.symFile[s] = decl;
       if (fa.tuSet(decl) != 0)
-        lf.symTu[s] = decl;
+        lf.symTus.push_back(decl);
     }
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
   }
 
   settleHeaderOwners(votes, sets, files, map, fa);
@@ -1002,7 +1013,8 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
   lf.symOwner.assign(symbolCount, 0);
   lf.symFile.assign(symbolCount, kNoIndex);
-  lf.symTu.assign(symbolCount, kNoIndex);
+  lf.symTuBegin.assign(symbolCount + 1, 0);
+  lf.symTus.clear();
   lf.symUnplaced.assign(symbolCount, 0);
   lf.symDeclFile.assign(symbolCount, kNoIndex);
   lf.symDeclLine.assign(symbolCount, 0);
@@ -1016,8 +1028,16 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   std::vector<uint8_t> pending(symbolCount, kDecided);
   std::vector<uint8_t> unmappedBody(symbolCount, 0);
   std::vector<std::pair<uint32_t, uint32_t>> votes; // (header, owner set)
-  std::vector<uint32_t> scratchSet, homeTargets;
+  std::vector<uint32_t> scratchSet, homeTargets, bodyTus, homeTus;
+  // Sorted, distinct: the translation units holding s's object code.
+  auto pushTus = [&](uint32_t s, std::vector<uint32_t> &tus) {
+    std::sort(tus.begin(), tus.end());
+    tus.erase(std::unique(tus.begin(), tus.end()), tus.end());
+    lf.symTus.insert(lf.symTus.end(), tus.begin(), tus.end());
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
+  };
   for (uint32_t s = 0; s < symbolCount; ++s) {
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
     lf.symUsr[s] = out.intern(rs.resolve(usrs[s]));
     const uint32_t rb = recBegin[s], re = recBegin[s + 1];
     if (rb == re) {
@@ -1035,9 +1055,11 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     // any other declaration, then a definition; by path and line within.
     uint32_t declPref = 3, declRank = 0, declLine = 0, declFile = kNoIndex;
     SId declPath = kNoId;
-    uint32_t bodyFile = kNoIndex, bodyTu = kNoIndex, homeFile = kNoIndex;
+    uint32_t bodyFile = kNoIndex, homeFile = kNoIndex;
     scratchSet.clear();
     homeTargets.clear();
+    bodyTus.clear();
+    homeTus.clear();
     for (uint32_t i = rb; i < re; ++i) {
       const SymRec &r = srec[recOrder[i]];
       const std::string &recName = rs.resolve(r.name);
@@ -1066,6 +1088,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         if (set != 0) {
           for (uint32_t t : sets.of(set))
             homeTargets.push_back(t);
+          homeTus.push_back(tuFile);
           if (homeFile == kNoIndex || rankOf(tuFile) < rankOf(homeFile))
             homeFile = tuFile;
         } else {
@@ -1093,10 +1116,9 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       }
       for (uint32_t t : sets.of(set))
         scratchSet.push_back(t);
-      if (bodyFile == kNoIndex || rankOf(f) < rankOf(bodyFile)) {
+      bodyTus.push_back(tuFile);
+      if (bodyFile == kNoIndex || rankOf(f) < rankOf(bodyFile))
         bodyFile = f;
-        bodyTu = tuFile;
-      }
     }
     lf.symName[s] = out.intern(*name);
     lf.symKind[s] = kind;
@@ -1127,7 +1149,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         lf.symClass[s] = SymbolClass::Defined;
         lf.symOwner[s] = internSet(homeTargets);
         lf.symFile[s] = homeFile;
-        lf.symTu[s] = homeFile;
+        pushTus(s, homeTus);
       } else if (unmappedHome) {
         pending[s] = kUnmapped;
       } else if (link == LinkageClass::External) {
@@ -1148,7 +1170,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = internSet(scratchSet);
       lf.symFile[s] = bodyFile;
-      lf.symTu[s] = bodyTu;
+      pushTus(s, bodyTus);
       if (declFile != kNoIndex && fa.fileSet[declFile] == 0 &&
           fa.headerOwner[declFile] == 0 && !fa.isSource[declFile] &&
           map.underRoots(files.paths[declFile]))
@@ -2488,9 +2510,14 @@ struct LinkModel {
     symMemBegin.assign(symbolCount + 1, 0);
     for (uint32_t s = 0; s < symbolCount; ++s) {
       if (lf.symClass[s] == SymbolClass::Defined)
-        for (uint32_t t : lf.targetsOf(lf.symOwner[s]))
-          symMem.push_back(lf.symTu[s] == kNoIndex ? kNoIndex
-                                                   : member(t, lf.symTu[s]));
+        for (uint32_t t : lf.targetsOf(lf.symOwner[s])) {
+          // The owner's own translation unit among the defining ones.
+          uint32_t m = kNoIndex;
+          for (uint32_t tu : lf.tusOf(s))
+            if ((m = member(t, tu)) != kNoIndex)
+              break;
+          symMem.push_back(m);
+        }
       symMemBegin[s + 1] = static_cast<uint32_t>(symMem.size());
     }
     symBegin.assign(members + 1, 0);

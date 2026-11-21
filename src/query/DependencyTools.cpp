@@ -420,16 +420,18 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
                           "any");
     }
   }
-  enum class Sort { Name, Gain, LinkGain, SplitGain } sort = Sort::Name;
+  enum class Sort { Name, Gain, LinkGain, SplitGain } sort = Sort::LinkGain;
   if (const llvm::json::Value *v = args.get("sort")) {
     auto name = v->getAsString();
-    if (name && *name == "gain")
+    if (name && *name == "name")
+      sort = Sort::Name;
+    else if (name && *name == "gain")
       sort = Sort::Gain;
     else if (name && *name == "link_gain")
       sort = Sort::LinkGain;
     else if (name && *name == "split_gain")
       sort = Sort::SplitGain;
-    else if (!name || *name != "name")
+    else
       return usageError(
           "Invalid sort: must be name, gain, link_gain or split_gain");
   }
@@ -674,13 +676,14 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
         "Only edges with this finding: unused-link-dependency, "
         "undeclared-link-dependency, thin-dependency, or any.");
     props["sort"] = stringProp(
-        "name (default): by consumer, then provider. gain: by "
+        "link_gain (default): by linkTargetGain, largest first — the most "
+        "one executable or shared library linking the consumer would stop "
+        "loading (emitted symbols of the objects and archive members it no "
+        "longer pulls) — then linkTargetsHelped. name: by consumer, then "
+        "provider. gain: by "
         "droppableSymbols, largest first — the symbols the consumer would "
         "stop linking if the closure were split out of the provider. "
-        "link_gain: by linkTargetGain, largest first — the most one "
-        "executable or shared library linking the consumer would stop "
-        "loading (emitted symbols of the objects and archive members it "
-        "no longer pulls) — then linkTargetsHelped. split_gain: by "
+        "split_gain: by "
         "splitGain, largest first — linkTargetGain discounted by the share "
         "of the rest of the provider that references the closure.");
     addPagingProps(props, kDefaultListLimit, "edges");

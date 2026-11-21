@@ -1590,7 +1590,8 @@ TEST_CASE("audit_dependencies: filters and sort and paging",
   CHECK(pairAt(1) == "util>core"); // 2
   CHECK(pairAt(2) == "app>core");  // 0
 
-  auto page = fx.run("audit_dependencies", {{"limit", 2}, {"offset", 1}});
+  auto page = fx.run("audit_dependencies",
+                     {{"sort", "name"}, {"limit", 2}, {"offset", 1}});
   CHECK(page.getInteger("total") == 6);
   CHECK(page.getInteger("returned") == 2);
   CHECK(page.getBoolean("truncated") == true);
@@ -2121,20 +2122,200 @@ TEST_CASE("dependency audit from references: a split helps the executables "
   const AuditRow &row = rowOf(audit, tLib, tBig);
   CHECK(row.closureSymbols == 1);
   CHECK(row.droppableSymbols == 2);
-  // exe1 links big only through lib; exe2 calls big itself.
-  CHECK(row.linkTargetsHelped == 1);
-  CHECK(row.linkTargetGain == 2);
-  REQUIRE(row.helpedEnd - row.helpedBegin == 1);
+  // Split big_a out: b1 keeps big_b, which nothing references, so every
+  // program that loaded b1 for big_a loads the one-symbol split instead.
+  // exe1 loads m, l, b1 (2) = 4 symbols, then m, l, split = 3; exe2
+  // still loads b2 for its own call, and drops b1 just the same.
+  CHECK(row.linkTargetsHelped == 2);
+  CHECK(row.linkTargetGain == 1);
+  CHECK(row.linkTargetMembers == 1);
+  REQUIRE(row.helpedEnd - row.helpedBegin == 2);
   CHECK(audit.helpedTarget[row.helpedBegin] == tExe1);
-  CHECK(audit.helpedSymbols[row.helpedBegin] == 2);
+  CHECK(audit.helpedGain[row.helpedBegin] == 1);
+  CHECK(audit.helpedMembers[row.helpedBegin] == 1);
+  CHECK(audit.helpedTarget[row.helpedBegin + 1] == tExe2);
+  CHECK(audit.linkInput[tExe1] == 4);
+  CHECK(audit.linkInputMembers[tExe1] == 3);
+  CHECK(audit.linkInput[tExe2] == 5);
+  CHECK(audit.linkInputMembers[tExe2] == 4);
+  // Nothing outside the closure calls into it.
+  CHECK(row.closureFanIn == 0);
+  CHECK(row.fanInPct == 0);
+  CHECK(row.splitGain == row.linkTargetGain);
 
-  // A library edge no executable gains from: exe2 → lib's closure needs
-  // big, which exe2 links anyway; exe2 itself still drops lib.
+  // A library edge no program gains from: lib is one function, all of it
+  // the closure, and the closure needs big, which exe2 loads anyway.
   const AuditRow &exe2 = rowOf(audit, tExe2, tLib);
-  CHECK(exe2.linkTargetsHelped == 1);
+  CHECK(exe2.closureSymbols == 1);
+  CHECK(exe2.linkTargetsHelped == 0);
   CHECK(exe2.linkTargetGain == 0);
   // exe1 does not declare big: there is no edge to split.
   CHECK(audit.find(tExe1, tBig) == kNoIndex);
+}
+
+namespace {
+
+/// exe → lib → p, where p's three members form a chain: lib's one call
+/// lands in p1, whose other function calls into p2, which calls into p3.
+/// `providerKind` is p's kind; `exe2` adds a program that links p itself.
+struct ChainSplit {
+  TargetMap map;
+  LinkFacts lf;
+  DependencyAudit audit;
+  enum : uint32_t { tExe = 0, tExe2 = 1, tLib = 2, tP = 3 };
+
+  ChainSplit(const char *providerKind, bool exe2, bool fanIn) {
+    std::string error;
+    const std::string json =
+        std::string(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "exe", "kind": "executable", "sources": ["exe/m.cpp"],
+       "deps": ["lib"]},
+      {"name": "exe2", "kind": "executable", "sources": ["exe2/m.cpp"],
+       "deps": )") +
+        (exe2 ? R"(["lib", "p"])" : R"([])") + R"(},
+      {"name": "lib", "kind": "static_library", "sources": ["lib/l.cpp"],
+       "deps": ["p"]},
+      {"name": "p", "kind": ")" +
+        providerKind + R"(",
+       "sources": ["p/p1.cpp", "p/p2.cpp", "p/p3.cpp"]}]})";
+    REQUIRE(parseMap(json, map, error, "/r"));
+    SnapshotMeta meta = metaOf({{"/r/exe/m.cpp", {}},
+                                {"/r/exe2/m.cpp", {}},
+                                {"/r/lib/l.cpp", {}},
+                                {"/r/p/p1.cpp", {}},
+                                {"/r/p/p2.cpp", {}},
+                                {"/r/p/p3.cpp", {}}});
+    ReferenceIndex refs;
+    addSym(refs, "c:@F@m", "m", "/r/exe/m.cpp", 1, kD, {"/r/exe/m.cpp"});
+    addSym(refs, "c:@F@m2", "m2", "/r/exe2/m.cpp", 1, kD, {"/r/exe2/m.cpp"});
+    addSym(refs, "c:@F@lib_fn", "lib_fn", "/r/lib/l.cpp", 1, kD,
+           {"/r/lib/l.cpp"});
+    addSym(refs, "c:@F@a", "a", "/r/p/p1.cpp", 1, kD, {"/r/p/p1.cpp"});
+    addSym(refs, "c:@F@b", "b", "/r/p/p1.cpp", 2, kD, {"/r/p/p1.cpp"});
+    addSym(refs, "c:@F@c", "c", "/r/p/p2.cpp", 1, kD, {"/r/p/p2.cpp"});
+    addSym(refs, "c:@F@d", "d", "/r/p/p3.cpp", 1, kD, {"/r/p/p3.cpp"});
+    // An inline body p1's a uses: p1 compiles a copy of it.
+    addSym(refs, "c:@F@h", "h", "/r/p/p.h", 1, kD | kH, {"/r/p/p1.cpp"},
+           SymbolKind::Function, kVague);
+    addRef(refs, "c:@F@m", "c:@F@lib_fn", RefRole::Call, "/r/exe/m.cpp", 2, 3,
+           "/r/exe/m.cpp");
+    addRef(refs, "c:@F@lib_fn", "c:@F@a", RefRole::Call, "/r/lib/l.cpp", 2, 3,
+           "/r/lib/l.cpp");
+    addRef(refs, "c:@F@a", "c:@F@h", RefRole::Call, "/r/p/p1.cpp", 2, 3,
+           "/r/p/p1.cpp");
+    addRef(refs, "c:@F@b", "c:@F@c", RefRole::Call, "/r/p/p1.cpp", 3, 3,
+           "/r/p/p1.cpp");
+    addRef(refs, "c:@F@c", "c:@F@d", RefRole::Call, "/r/p/p2.cpp", 2, 3,
+           "/r/p/p2.cpp");
+    if (fanIn)
+      addRef(refs, "c:@F@d", "c:@F@a", RefRole::Call, "/r/p/p3.cpp", 2, 3,
+             "/r/p/p3.cpp");
+    if (exe2)
+      addRef(refs, "c:@F@m2", "c:@F@lib_fn", RefRole::Call, "/r/exe2/m.cpp",
+             2, 3, "/r/exe2/m.cpp");
+    lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+    audit = auditDependencies(lf, map);
+  }
+};
+
+} // namespace
+
+TEST_CASE("dependency audit link gain: an archive member pulled only "
+          "through the closure drops with everything it pulled",
+          "[dependency-audit]") {
+  ChainSplit s("static_library", /*exe2=*/false, /*fanIn=*/false);
+  // m 1, l 1, p1 a + b + its copy of h 3, p2 1, p3 1: each member is
+  // loaded because the one before it references it.
+  CHECK(s.audit.linkInput[ChainSplit::tExe] == 7);
+  CHECK(s.audit.linkInputMembers[ChainSplit::tExe] == 5);
+  const AuditRow &row = rowOf(s.audit, ChainSplit::tLib, ChainSplit::tP);
+  CHECK(row.closureSymbols == 1);
+  // Split a out: p1 keeps b, which nothing references now, so p1, p2 and
+  // p3 all drop. After: m, l, and the split (a and its copy of h).
+  CHECK(row.linkTargetsHelped == 1);
+  CHECK(row.linkTargetGain == 7 - 4);
+  CHECK(row.linkTargetMembers == 3);
+  CHECK(row.fanInPct == 0);
+  CHECK(row.splitGain == row.linkTargetGain);
+}
+
+TEST_CASE("dependency audit link gain: fan-in discounts the split gain",
+          "[dependency-audit]") {
+  ChainSplit s("static_library", /*exe2=*/false, /*fanIn=*/true);
+  const AuditRow &row = rowOf(s.audit, ChainSplit::tLib, ChainSplit::tP);
+  CHECK(row.closureSymbols == 1);
+  // d, in p3, calls a: one of the three symbols left in p (b, c, d)
+  // references the closure. p3 is still unreferenced once p1 keeps only
+  // b, so the link gain stands; the split gain weighs the cut.
+  CHECK(row.closureFanIn == 1);
+  CHECK(row.fanInPct == 33);
+  CHECK(row.linkTargetGain == 3);
+  CHECK(row.splitGain == 3 * 2 / 3);
+}
+
+TEST_CASE("dependency audit link gain: an object library links every "
+          "object wherever it is on the line",
+          "[dependency-audit]") {
+  ChainSplit s("object_library", /*exe2=*/true, /*fanIn=*/false);
+  // Both programs load all of p, used or not.
+  CHECK(s.audit.linkInput[ChainSplit::tExe] == 7);
+  CHECK(s.audit.linkInput[ChainSplit::tExe2] == 7);
+  const AuditRow &row = rowOf(s.audit, ChainSplit::tLib, ChainSplit::tP);
+  // exe reaches p only through lib: after the split only the new object
+  // is linked. exe2 links p itself and keeps every object of it, the rest
+  // of p1 included, so it loads the split's copy of h on top.
+  CHECK(row.linkTargetsHelped == 1);
+  REQUIRE(row.helpedEnd - row.helpedBegin == 1);
+  CHECK(s.audit.helpedTarget[row.helpedBegin] == ChainSplit::tExe);
+  CHECK(row.linkTargetGain == 3);
+  CHECK(row.linkTargetMembers == 3);
+}
+
+TEST_CASE("dependency audit link gain: a shared library is loaded whole",
+          "[dependency-audit]") {
+  ChainSplit s("shared_library", /*exe2=*/false, /*fanIn=*/false);
+  CHECK(s.audit.linkInput[ChainSplit::tExe] == 7);
+  CHECK(s.audit.linkInputMembers[ChainSplit::tExe] == 5);
+}
+
+TEST_CASE("dependency audit link gain: one identity defined by several "
+          "programs is each program's own",
+          "[dependency-audit]") {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "lib", "kind": "static_library",
+       "sources": ["lib/x1.cpp", "lib/x2.cpp"]},
+      {"name": "t1", "kind": "executable", "sources": ["t1/main.cpp"],
+       "deps": ["lib"]},
+      {"name": "t2", "kind": "executable", "sources": ["t2/main.cpp"],
+       "deps": ["lib"]}]})",
+                   map, error, "/r"));
+  enum : uint32_t { tLib = 0, tT1 = 1, tT2 = 2 };
+  SnapshotMeta meta = metaOf({{"/r/lib/x1.cpp", {}},
+                              {"/r/lib/x2.cpp", {}},
+                              {"/r/t1/main.cpp", {}},
+                              {"/r/t2/main.cpp", {}}});
+  ReferenceIndex refs;
+  addSym(refs, "c:@F@fx", "fx", "/r/lib/x1.cpp", 1, kD, {"/r/lib/x1.cpp"});
+  addSym(refs, "c:@F@gx", "gx", "/r/lib/x2.cpp", 1, kD, {"/r/lib/x2.cpp"});
+  addSym(refs, "c:@F@main#I#**C#", "main", "/r/t1/main.cpp", 1, kD,
+         {"/r/t1/main.cpp"});
+  addSym(refs, "c:@F@main#I#**C#", "main", "/r/t2/main.cpp", 1, kD,
+         {"/r/t2/main.cpp"});
+  addRef(refs, "c:@F@main#I#**C#", "c:@F@fx", RefRole::Call, "/r/t1/main.cpp",
+         2, 3, "/r/t1/main.cpp");
+  addRef(refs, "c:@F@main#I#**C#", "c:@F@gx", RefRole::Call, "/r/t2/main.cpp",
+         2, 3, "/r/t2/main.cpp");
+  const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+  const uint32_t mainSym = symbolNamed(lf, "c:@F@main#I#**C#");
+  CHECK(lf.tusOf(mainSym).size() == 2);
+  const DependencyAudit audit = auditDependencies(lf, map);
+  // Each program loads its own main and the member that main calls.
+  CHECK(audit.linkInput[tT1] == 2);
+  CHECK(audit.linkInputMembers[tT1] == 2);
+  CHECK(audit.linkInput[tT2] == 2);
+  CHECK(audit.linkInputMembers[tT2] == 2);
 }
 
 TEST_CASE("dependency audit from references: what one target's "
@@ -2372,20 +2553,55 @@ TEST_CASE("audit_dependencies from references: payload members",
   const auto *core = edgeOf(out, "app", "core");
   REQUIRE(core != nullptr);
   CHECK(core->getInteger("closureFanIn") == 1);
-  // app is an executable: dropping extra helps app itself.
-  CHECK(extra->getInteger("linkTargetsHelped") == 1);
-  CHECK(extra->getInteger("linkTargetGain") == 2);
-  auto byLinkGain = fx.run("audit_dependencies", {{"sort", "link_gain"}});
+  // extra is an archive app references nothing of: no member of it is
+  // loaded (nor its initializer run), so splitting it saves nothing.
+  CHECK(extra->getInteger("linkTargetsHelped") == 0);
+  CHECK(extra->getInteger("linkTargetGain") == 0);
+  auto byLinkGain = fx.run("audit_dependencies", {});
   CHECK(byLinkGain.getString("sort") == "link_gain");
-  CHECK((*byLinkGain.getArray("edges"))[0].getAsObject()->getString(
-            "provider") == "extra");
+  // The default order: plug's closure is plug_init (and the inline
+  // make_plugin it uses); nothing app loads references plug_fn, so the
+  // split replaces p.cpp's 3 emitted symbols with 2.
+  auto edgeAt = [](const llvm::json::Object &o, size_t i) {
+    const auto *e = (*o.getArray("edges"))[i].getAsObject();
+    return e->getString("consumer")->str() + ">" +
+           e->getString("provider")->str();
+  };
+  CHECK(edgeAt(byLinkGain, 0) == "app>plug");
+  CHECK(edgeAt(byLinkGain, 1) == "app>core");
+  const auto *plugEdge = edgeOf(byLinkGain, "app", "plug");
+  CHECK(plugEdge->getInteger("linkTargetGain") == 1);
+  CHECK(plugEdge->getInteger("linkTargetMembers") == 1);
+  CHECK(plugEdge->getInteger("fanInPct") == 0);
+  CHECK(plugEdge->getInteger("splitGain") == 1);
+  // core's closure is all of core but core_other, which calls into it:
+  // the whole rest references the closure, and the split gain is nil.
+  CHECK(core->getInteger("linkTargetGain") == 1);
+  CHECK(core->getInteger("linkTargetMembers") == 2);
+  CHECK(core->getInteger("fanInPct") == 100);
+  CHECK(core->getInteger("splitGain") == 0);
+  auto bySplit = fx.run("audit_dependencies", {{"sort", "split_gain"}});
+  CHECK(bySplit.getString("sort") == "split_gain");
+  CHECK(edgeAt(bySplit, 0) == "app>plug");
+  // Equal split gains fall back to the link gain.
+  CHECK(edgeAt(bySplit, 1) == "app>core");
+  auto byName = fx.run("audit_dependencies", {{"sort", "name"}});
+  CHECK(edgeAt(byName, 0) == "app>base");
   auto bad = fx.run("audit_dependencies", {{"sort", "size"}});
   CHECK(bad.getString("status") == "usage_error");
   auto whyExtra = fx.run("explain_dependency",
                          {{"consumer", "app"}, {"provider", "extra"}});
-  CHECK(render(llvm::json::Value(llvm::json::Array(
-            *whyExtra.getArray("linkTargetsHelped")))) ==
-        R"([{"droppableSymbols":2,"target":"app"}])");
+  CHECK(whyExtra.getArray("linkTargetsHelped")->empty());
+  auto whyPlug = fx.run("explain_dependency",
+                        {{"consumer", "app"}, {"provider", "plug"}});
+  const auto *helped = whyPlug.getArray("linkTargetsHelped");
+  REQUIRE(helped->size() == 1);
+  const auto *h = (*helped)[0].getAsObject();
+  CHECK(h->getString("target") == "app");
+  CHECK(h->getInteger("gain") == 1);
+  CHECK(h->getInteger("members") == 1);
+  CHECK(h->getInteger("linkInput") > 3);
+  CHECK(h->getInteger("linkInputMembers") >= 3);
 
   auto why = fx.run("explain_dependency",
                     {{"consumer", "app"}, {"provider", "core"}});
