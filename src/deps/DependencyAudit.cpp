@@ -1519,6 +1519,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     std::function<const std::vector<uint32_t> &(uint32_t)> vtableOf =
         [&](uint32_t c) -> const std::vector<uint32_t> & {
       const size_t ci = classIndex(c);
+      assert(ci < classes.size() && classes[ci] == c && "class not in links");
       std::vector<uint32_t> &vt = vtables[ci];
       if (state[ci] != 0)
         return vt;
