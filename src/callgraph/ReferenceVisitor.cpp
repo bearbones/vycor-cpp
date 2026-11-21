@@ -571,19 +571,33 @@ bool ReferenceVisitor::TraverseConceptDecl(clang::ConceptDecl *decl) {
 
 // decltype(e) and typeof(e) name what e would call without calling it. In a
 // template an overload set there carries no "unevaluated" mark of its own.
-bool ReferenceVisitor::TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc) {
+// Clang 22 passes whether to walk the type's qualifier as well.
+#if VYCOR_LLVM_AT_LEAST(22)
+#define VYCOR_TYPELOC_PARAMS(T) T loc, bool qualifier
+#define VYCOR_TYPELOC_ARGS loc, qualifier
+#else
+#define VYCOR_TYPELOC_PARAMS(T) T loc
+#define VYCOR_TYPELOC_ARGS loc
+#endif
+
+bool ReferenceVisitor::TraverseDecltypeTypeLoc(
+    VYCOR_TYPELOC_PARAMS(clang::DecltypeTypeLoc)) {
   ++unevaluated_;
-  const bool ok = Base::TraverseDecltypeTypeLoc(loc);
+  const bool ok = Base::TraverseDecltypeTypeLoc(VYCOR_TYPELOC_ARGS);
   --unevaluated_;
   return ok;
 }
 
-bool ReferenceVisitor::TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc) {
+bool ReferenceVisitor::TraverseTypeOfExprTypeLoc(
+    VYCOR_TYPELOC_PARAMS(clang::TypeOfExprTypeLoc)) {
   ++unevaluated_;
-  const bool ok = Base::TraverseTypeOfExprTypeLoc(loc);
+  const bool ok = Base::TraverseTypeOfExprTypeLoc(VYCOR_TYPELOC_ARGS);
   --unevaluated_;
   return ok;
 }
+
+#undef VYCOR_TYPELOC_PARAMS
+#undef VYCOR_TYPELOC_ARGS
 
 // A default member initializer used by a constructor or an aggregate
 // initialization runs there; the traversal visits it only with implicit
@@ -1457,7 +1471,11 @@ void ReferenceVisitor::noteConstructorCleanup(
   const clang::SourceLocation site = ctor->getLocation();
   if (ctor->isDelegatingConstructor()) {
     if (later)
+#if VYCOR_LLVM_AT_LEAST(22)
+      noteDestructorOf(ctx_->getCanonicalTagType(cls), site);
+#else
       noteDestructorOf(ctx_->getRecordType(cls), site);
+#endif
     return;
   }
   // Initializers are in construction order: walk them last to first.

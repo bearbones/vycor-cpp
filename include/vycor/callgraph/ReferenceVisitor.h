@@ -17,6 +17,7 @@
 
 #include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/UsrIdent.h"
+#include "vycor/compat/ClangVersion.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -105,8 +106,13 @@ public:
   bool VisitCXXNewExpr(clang::CXXNewExpr *expr);
   bool VisitCXXInheritedCtorInitExpr(clang::CXXInheritedCtorInitExpr *expr);
   bool TraverseCXXDefaultInitExpr(clang::CXXDefaultInitExpr *expr);
+#if VYCOR_LLVM_AT_LEAST(22)
+  bool TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc, bool qualifier);
+  bool TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc, bool qualifier);
+#else
   bool TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc);
   bool TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc);
+#endif
 
 private:
   using Id = ReferenceIndex::Id;
