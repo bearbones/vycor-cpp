@@ -292,13 +292,17 @@ megascope lookup-symbol --name ns::counter
    {"file": "/src/store.cpp", "line": 3, "definition": true,
     "inHeader": false, "tuCount": 1, "firstTu": "/src/store.cpp"}],
  "referrers": {"call": 0, "address_of": 0, "read": 3, "write": 2,
-               "vtable_use": 0, "typeinfo_use": 0},
+               "vtable_use": 0, "typeinfo_use": 0, "lock": 0,
+               "lock_shared": 0},
  "referencedFromOtherTu": true,
  "status": "ok", "indexScope": {...}}
 ```
 
 `referrers` counts distinct referrers per role (a function that reads
-and writes the symbol counts once under each).
+and writes the symbol counts once under each). `lock` and `lock_shared`
+count the functions acquiring a mutex variable (format v18); a data
+member mutex has no symbol of its own, so its acquisitions show only in
+`get_references`.
 
 ### `get_references`
 

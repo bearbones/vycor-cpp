@@ -1,0 +1,62 @@
+{
+ "schema": 1,
+ "title": "Locks acquired in opposite orders across two TUs (check lock-order-inversion): a registry that logs under its lock and a logger that counts the registry under its own; a scoped_lock of both, a try_lock under another lock, and a re-entered recursive mutex form no cycle; the same answer from a saved index",
+ "sources": [
+  "registry.cpp",
+  "logger.cpp"
+ ],
+ "queries": [
+  {
+   "id": "lock-order-inversion",
+   "argv": [
+    "check",
+    "--checks=-all,lock-order-inversion",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "logger\\.cpp:16:35: \\[lock-order-inversion\\] Locks acquired in opposite orders: 'logMutex' -> 'registryMutex' -> 'logMutex'\\. 'logMutex' then 'registryMutex': flushLog calls registryCount at .*logger\\.cpp:16:35 while holding 'logMutex', and registryCount acquires 'registryMutex' at .*registry\\.cpp:15:31\\. 'registryMutex' then 'logMutex': registerItem calls logLine at .*registry\\.cpp:11:3 while holding 'registryMutex', and logLine acquires 'logMutex' at .*logger\\.cpp:10:31\\. Threads taking these paths at the same time can deadlock\\.$"
+     ],
+     "absent": [
+      "'statsMutex'",
+      "'reentrantMutex'",
+      "already held",
+      "Not proven"
+     ]
+    }
+   }
+  },
+  {
+   "id": "from-the-saved-index",
+   "argv": [
+    "check",
+    "--checks=-all,lock-order-inversion",
+    "--index",
+    "{index}",
+    "--threads",
+    "1",
+    "--verbose"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "'logMutex' -> 'registryMutex' -> 'logMutex'"
+     ],
+     "absent": [
+      "'statsMutex'",
+      "'reentrantMutex'",
+      "Not proven"
+     ],
+     "stderr_present": [
+      "^check: graph-backed checks read the index ",
+      "lock-order-inversion: 8 acquisition\\(s\\) in 7 function\\(s\\), 4 named lock\\(s\\)"
+     ]
+    }
+   }
+  }
+ ]
+}
