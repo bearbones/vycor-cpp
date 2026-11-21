@@ -34,8 +34,6 @@
         "edgeSource": "references",
         "unusedIsUniversal": false,
         "invisible": [
-         "implicit-special-member-calls",
-         "template-instantiation-bodies",
          "name-based-lookup",
          "qualified-virtual-calls",
          "same-basename-internal-symbols",
@@ -59,7 +57,7 @@
          "defined": 38,
          "presumed": 0,
          "inline": 1,
-         "unattributed": 0,
+         "unattributed": 1,
          "undefinedInCoveredOwner": 0
         },
         "references": {

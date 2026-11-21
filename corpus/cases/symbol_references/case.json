@@ -350,7 +350,7 @@
     "exit": 0,
     "status": "ok",
     "count": {
-     "references": 6
+     "references": 7
     },
     "witnesses": [
      {
@@ -394,6 +394,13 @@
        "target": "Shape",
        "targetKind": "class",
        "role": "vtable_use"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "Shape::~Shape",
+       "role": "call"
       }
      }
     ],
