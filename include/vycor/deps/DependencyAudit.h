@@ -124,6 +124,16 @@ struct LinkFacts {
   /// whose code it is (indirect uses). Unattributed: 0.
   std::vector<uint32_t> symOwner;
   std::vector<uint32_t> symFile;  // defining file id (Defined), else kNoIndex
+  /// The translation units whose objects hold the definition (Defined),
+  /// ascending file ids in CSR form: each defining source, or the one TU
+  /// that includes the header defining it (an `.inc` body); for a class,
+  /// the TUs that emit its vtable. One identity can have several (`main`
+  /// of every program). Decides the archive member a reference pulls.
+  std::vector<uint32_t> symTuBegin, symTus;
+  [[nodiscard]] llvm::ArrayRef<uint32_t> tusOf(uint32_t s) const {
+    return llvm::ArrayRef<uint32_t>(symTus).slice(
+        symTuBegin[s], symTuBegin[s + 1] - symTuBegin[s]);
+  }
   /// Unattributed, yet declared in a file under the map's roots that is no
   /// unlisted source: the build's own code, owner unknown. It may belong
   /// to any target; counted per consumer (DependencyAudit::unplacedUses,
@@ -180,6 +190,9 @@ struct LinkFacts {
   /// Order key of the reference site: file rank (by path), line, column.
   std::vector<uint64_t> refKey;
   std::vector<StringInterner::Id> refSite; // "file:line:col"
+  /// File id of the site, or kNoIndex: for a reference held by file-scope
+  /// code, the translation unit whose object holds it.
+  std::vector<uint32_t> refFile;
   std::vector<uint8_t> refKind;
 
   // --- Soft references, CSR by referencing symbol ----------------------
@@ -192,6 +205,10 @@ struct LinkFacts {
   std::vector<uint32_t> softBegin; // size = symbols + 1
   std::vector<uint32_t> softTo;
   std::vector<uint32_t> softAnchor; // as refAnchor
+
+  /// File id of each mapped source, parallel to TargetMap::sources: one
+  /// object (archive member) per entry.
+  std::vector<uint32_t> sourceFile;
 
   // --- Coverage, per target --------------------------------------------
   std::vector<uint32_t> targetSources; // sources the map lists
@@ -328,12 +345,22 @@ struct AuditRow {
   uint32_t needBegin = 0, needEnd = 0; // DependencyAudit::needs
   uint32_t dropBegin = 0, dropEnd = 0; // DependencyAudit::droppable
   /// Final link targets (executables, shared and module libraries) that
-  /// link the consumer and would stop linking at least one of `droppable`
-  /// if the closure were split out — the consumer itself when it is one —
-  /// and the most Defined symbols one of them would drop (less the
-  /// closure when the provider is among them). Direct rows only.
+  /// link the consumer and would load less if the closure were split out
+  /// of the provider into a target of its own — the consumer itself when
+  /// it is one — and the most one of them would stop loading, in emitted
+  /// symbols (LinkModel), with how many fewer members (objects) that
+  /// target loads code from, net. Direct rows only.
   uint32_t linkTargetsHelped = 0;
   uint64_t linkTargetGain = 0;
+  uint32_t linkTargetMembers = 0;
+  /// Of the provider's Defined symbols outside the closure, the share (0 to
+  /// 100, rounded down) that reference into it: closureFanIn over
+  /// providerSymbols - closureSymbols, 0 when nothing is outside.
+  uint32_t fanInPct = 0;
+  /// linkTargetGain scaled by the share of the rest of the provider that
+  /// does not reference the closure: a split the provider stays entangled
+  /// with ranks low however much one link would save.
+  uint64_t splitGain = 0;
   uint32_t helpedBegin = 0, helpedEnd = 0; // DependencyAudit::helped*
   /// The consumer links the provider only because of this edge, and the
   /// closure does not pull it back in: splitting the closure out removes
@@ -362,10 +389,16 @@ struct DependencyAudit {
   std::vector<uint32_t> needs;
   /// Targets a row's consumer would stop linking, ascending.
   std::vector<uint32_t> droppable;
-  /// The final link targets a row's split would help and the Defined
-  /// symbols each would drop: by symbols descending, then target.
+  /// The final link targets a row's split would help, what each would
+  /// stop loading (emitted symbols, and how many fewer members it loads
+  /// code from, net), by gain descending, then target.
   std::vector<uint32_t> helpedTarget;
-  std::vector<uint64_t> helpedSymbols;
+  std::vector<uint64_t> helpedGain;
+  std::vector<uint32_t> helpedMembers;
+  /// Per final link target: what it loads as the map stands (emitted
+  /// symbols, and members); 0 for any other target.
+  std::vector<uint64_t> linkInput;
+  std::vector<uint32_t> linkInputMembers;
 
   std::vector<uint32_t> providerSymbols; // Defined symbols per target
   std::vector<uint32_t> providerFiles;   // files holding them

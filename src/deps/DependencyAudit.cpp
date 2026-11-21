@@ -288,8 +288,11 @@ void attributeFiles(const TargetMap &map, const SnapshotMeta *meta,
     std::vector<std::pair<uint32_t, uint32_t>> listed; // (file, target)
     for (uint32_t t = 0; t < targetCount; ++t)
       for (const std::string &p :
-           sourcesNotHeaders ? map.sourcesOf(t) : map.headersOf(t))
+           sourcesNotHeaders ? map.sourcesOf(t) : map.headersOf(t)) {
         listed.emplace_back(files.add(p), t);
+        if (sourcesNotHeaders)
+          lf.sourceFile.push_back(listed.back().first);
+      }
     fa.grow(files.paths.size());
     std::sort(listed.begin(), listed.end());
     for (size_t i = 0; i < listed.size();) {
@@ -607,6 +610,8 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
   lf.symOwner.assign(symbolCount, 0);
   lf.symFile.assign(symbolCount, kNoIndex);
+  lf.symTuBegin.assign(symbolCount + 1, 0);
+  lf.symTus.clear();
   lf.symUnplaced.assign(symbolCount, 0);
 
   // 1. A reference held by a target's own file: the body is there.
@@ -653,6 +658,17 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = owner;
       lf.symFile[s] = bodyFile;
+      // Every translation unit a body sits in (an identity defined in
+      // several, such as `main`, has one per program).
+      const size_t first = lf.symTus.size();
+      for (uint32_t i = rawBegin[s]; i < rawBegin[s + 1]; ++i) {
+        const uint32_t f = rawFile[byFrom[i]];
+        if (f != kNoIndex && fa.tuSet(f) != 0)
+          lf.symTus.push_back(f);
+      }
+      std::sort(lf.symTus.begin() + first, lf.symTus.end());
+      lf.symTus.erase(std::unique(lf.symTus.begin() + first, lf.symTus.end()),
+                      lf.symTus.end());
       if (decl != kNoIndex && fileSet[decl] == 0 && headerOwner[decl] == 0 &&
           map.underRoots(files.paths[decl]))
         votes.emplace_back(decl, owner);
@@ -662,7 +678,10 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = fileSet[decl];
       lf.symFile[s] = decl;
+      if (fa.tuSet(decl) != 0)
+        lf.symTus.push_back(decl);
     }
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
   }
 
   settleHeaderOwners(votes, sets, files, map, fa);
@@ -714,6 +733,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.refAnchor.reserve(rawCount);
   lf.refKey.reserve(rawCount);
   lf.refSite.reserve(rawCount);
+  lf.refFile.reserve(rawCount);
   lf.refKind.reserve(rawCount);
   lf.softBegin.assign(symbolCount + 1, 0);
   std::vector<uint32_t> range, rangeAnchor;
@@ -784,6 +804,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
       lf.refAnchor.push_back(rangeAnchor[pos]);
       lf.refKey.push_back(rawKey[r]);
       lf.refSite.push_back(rawSite[r]);
+      lf.refFile.push_back(rawFile[r]);
       lf.refKind.push_back(rawKind[r]);
       if (rangeAnchor[pos] != 0)
         ++lf.counts.anchoredRefs;
@@ -992,6 +1013,8 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
   lf.symOwner.assign(symbolCount, 0);
   lf.symFile.assign(symbolCount, kNoIndex);
+  lf.symTuBegin.assign(symbolCount + 1, 0);
+  lf.symTus.clear();
   lf.symUnplaced.assign(symbolCount, 0);
   lf.symDeclFile.assign(symbolCount, kNoIndex);
   lf.symDeclLine.assign(symbolCount, 0);
@@ -1005,8 +1028,16 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   std::vector<uint8_t> pending(symbolCount, kDecided);
   std::vector<uint8_t> unmappedBody(symbolCount, 0);
   std::vector<std::pair<uint32_t, uint32_t>> votes; // (header, owner set)
-  std::vector<uint32_t> scratchSet, homeTargets;
+  std::vector<uint32_t> scratchSet, homeTargets, bodyTus, homeTus;
+  // Sorted, distinct: the translation units holding s's object code.
+  auto pushTus = [&](uint32_t s, std::vector<uint32_t> &tus) {
+    std::sort(tus.begin(), tus.end());
+    tus.erase(std::unique(tus.begin(), tus.end()), tus.end());
+    lf.symTus.insert(lf.symTus.end(), tus.begin(), tus.end());
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
+  };
   for (uint32_t s = 0; s < symbolCount; ++s) {
+    lf.symTuBegin[s + 1] = static_cast<uint32_t>(lf.symTus.size());
     lf.symUsr[s] = out.intern(rs.resolve(usrs[s]));
     const uint32_t rb = recBegin[s], re = recBegin[s + 1];
     if (rb == re) {
@@ -1027,6 +1058,8 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     uint32_t bodyFile = kNoIndex, homeFile = kNoIndex;
     scratchSet.clear();
     homeTargets.clear();
+    bodyTus.clear();
+    homeTus.clear();
     for (uint32_t i = rb; i < re; ++i) {
       const SymRec &r = srec[recOrder[i]];
       const std::string &recName = rs.resolve(r.name);
@@ -1055,6 +1088,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         if (set != 0) {
           for (uint32_t t : sets.of(set))
             homeTargets.push_back(t);
+          homeTus.push_back(tuFile);
           if (homeFile == kNoIndex || rankOf(tuFile) < rankOf(homeFile))
             homeFile = tuFile;
         } else {
@@ -1082,6 +1116,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       }
       for (uint32_t t : sets.of(set))
         scratchSet.push_back(t);
+      bodyTus.push_back(tuFile);
       if (bodyFile == kNoIndex || rankOf(f) < rankOf(bodyFile))
         bodyFile = f;
     }
@@ -1114,6 +1149,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         lf.symClass[s] = SymbolClass::Defined;
         lf.symOwner[s] = internSet(homeTargets);
         lf.symFile[s] = homeFile;
+        pushTus(s, homeTus);
       } else if (unmappedHome) {
         pending[s] = kUnmapped;
       } else if (link == LinkageClass::External) {
@@ -1134,6 +1170,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       lf.symClass[s] = SymbolClass::Defined;
       lf.symOwner[s] = internSet(scratchSet);
       lf.symFile[s] = bodyFile;
+      pushTus(s, bodyTus);
       if (declFile != kNoIndex && fa.fileSet[declFile] == 0 &&
           fa.headerOwner[declFile] == 0 && !fa.isSource[declFile] &&
           map.underRoots(files.paths[declFile]))
@@ -1894,6 +1931,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   lf.refScope.reserve(rawCount);
   lf.refKey.reserve(rawCount);
   lf.refSite.reserve(rawCount);
+  lf.refFile.reserve(rawCount);
   lf.refKind.reserve(rawCount);
   std::string site;
   for (uint32_t s = 0; s < symbolCount; ++s) {
@@ -1983,6 +2021,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         ++lf.counts.tuScopedRefs;
       lf.refKey.push_back(k.key);
       lf.refSite.push_back(out.intern(site));
+      lf.refFile.push_back(r.file);
       lf.refKind.push_back(k.kind);
       if (k.anchor != 0)
         ++lf.counts.anchoredRefs;
@@ -2325,6 +2364,465 @@ struct AnchoredRef {
   uint32_t from;
 };
 
+// ---------------------------------------------------------------------------
+// Link model (docs/dependency-audit.md, "Link-target gain")
+// ---------------------------------------------------------------------------
+
+/// How a target's objects enter a final link.
+enum class LinkMode : uint8_t {
+  None,    // no objects of its own: interface, external, no sources
+  Archive, // static library: a member is loaded when it defines a symbol
+           // something already loaded references
+  Whole,   // object library: every object, wherever it is linked
+  Shared,  // shared or module library: all of it once any symbol is used
+  Program, // executable: linked only as itself
+};
+
+LinkMode linkModeOf(TargetKind kind) noexcept {
+  switch (kind) {
+  case TargetKind::StaticLibrary:
+    return LinkMode::Archive;
+  case TargetKind::ObjectLibrary:
+    return LinkMode::Whole;
+  case TargetKind::SharedLibrary:
+  case TargetKind::ModuleLibrary:
+    return LinkMode::Shared;
+  case TargetKind::Executable:
+    return LinkMode::Program;
+  case TargetKind::InterfaceLibrary:
+  case TargetKind::External:
+    return LinkMode::None;
+  }
+  return LinkMode::None;
+}
+
+/// From `starts` (Defined symbols whose code target `t`'s object holds),
+/// the Defined symbols outside `starts` that code references — directly,
+/// through the inline bodies it uses, and from `extra` (targets of
+/// references the object's file-scope code holds) — each passed once to
+/// `sink`. Returns the number of inline bodies visited: code the object
+/// emits beside its own definitions. Only hard references count; a soft
+/// one names no symbol the linker resolves.
+template <typename Sink>
+uint32_t walkObject(const LinkFacts &lf, uint32_t t,
+                    llvm::ArrayRef<uint32_t> starts,
+                    llvm::ArrayRef<uint32_t> extra, Workspace &ws,
+                    Sink &&sink) noexcept {
+  const uint32_t epoch = ++ws.epoch;
+  uint32_t head = 0, tail = 0, inlines = 0;
+  for (uint32_t s : starts) {
+    ws.symStamp[s] = epoch;
+    ws.queue[tail++] = s;
+  }
+  auto visit = [&](uint32_t to) noexcept {
+    if (ws.symStamp[to] == epoch)
+      return;
+    const SymbolClass cls = lf.symClass[to];
+    if (cls == SymbolClass::Inline) {
+      ws.symStamp[to] = epoch;
+      ws.queue[tail++] = to;
+      ++inlines;
+    } else if (cls == SymbolClass::Defined) {
+      ws.symStamp[to] = epoch;
+      sink(to);
+    }
+  };
+  for (uint32_t to : extra)
+    visit(to);
+  while (head < tail) {
+    const uint32_t s = ws.queue[head++];
+    // A definition's own references are those its owners' objects hold
+    // (another target's copy of a shared identity holds the others); an
+    // inline body's travel with it, as in the consumer's walk.
+    const bool body = lf.symClass[s] == SymbolClass::Inline;
+    for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r) {
+      const uint32_t anchor = lf.refAnchor[r];
+      if (anchor == 0 ? !lf.inlineRefFor(r, t)
+                      : (!body && !lf.setHas(anchor, t)))
+        continue;
+      visit(lf.refTo[r]);
+    }
+  }
+  return inlines;
+}
+
+/// The objects of every target that has them (one member per mapped
+/// source), what each one's code references, and its weight. Built once
+/// per audit.
+struct LinkModel {
+  std::vector<LinkMode> mode;        // per target
+  std::vector<uint32_t> memberBegin; // per target, size targets + 1
+  std::vector<uint32_t> memberFile;  // ascending within a target
+  std::vector<uint32_t> memberTarget;
+  /// Emitted symbols: the member's Defined symbols plus the inline bodies
+  /// its code uses (each object compiles its own copy of those).
+  std::vector<uint64_t> weight;
+  std::vector<uint32_t> symBegin, syms;     // per member: its Defined symbols
+  std::vector<uint32_t> extraBegin, extra;  // per member: file-scope targets
+  std::vector<uint32_t> outBegin, out;      // per member: Defined symbols used
+  /// Per Defined symbol, aligned with targetsOf(symOwner): the member of
+  /// that owner whose object holds it, or kNoIndex.
+  std::vector<uint32_t> symMemBegin, symMem;
+
+  [[nodiscard]] uint32_t memberCount() const noexcept {
+    return static_cast<uint32_t>(memberTarget.size());
+  }
+  [[nodiscard]] uint32_t member(uint32_t t, uint32_t file) const noexcept {
+    const auto first = memberFile.begin() + memberBegin[t];
+    const auto last = memberFile.begin() + memberBegin[t + 1];
+    const auto it = std::lower_bound(first, last, file);
+    return it != last && *it == file
+               ? static_cast<uint32_t>(it - memberFile.begin())
+               : kNoIndex;
+  }
+  /// The member of `t` holding symbol `s` (Defined, owned by `t`).
+  [[nodiscard]] uint32_t memberOf(const LinkFacts &lf, uint32_t s,
+                                  uint32_t t) const noexcept {
+    const auto owners = lf.targetsOf(lf.symOwner[s]);
+    for (size_t i = 0; i < owners.size(); ++i)
+      if (owners[i] == t)
+        return symMem[symMemBegin[s] + i];
+    return kNoIndex;
+  }
+
+  LinkModel(const LinkFacts &lf, const TargetMap &map, Workspace &ws) {
+    const uint32_t targetCount = map.size();
+    const uint32_t symbolCount = lf.symbolCount();
+    mode.resize(targetCount);
+    memberBegin.assign(targetCount + 1, 0);
+    for (uint32_t t = 0; t < targetCount; ++t) {
+      mode[t] = linkModeOf(map.kinds[t]);
+      const size_t first = memberFile.size();
+      if (mode[t] != LinkMode::None)
+        for (uint32_t i = map.sourceBegin[t]; i < map.sourceBegin[t + 1]; ++i)
+          memberFile.push_back(lf.sourceFile[i]);
+      std::sort(memberFile.begin() + first, memberFile.end());
+      memberFile.erase(std::unique(memberFile.begin() + first, memberFile.end()),
+                       memberFile.end());
+      if (memberFile.size() == first)
+        mode[t] = LinkMode::None;
+      memberTarget.resize(memberFile.size(), t);
+      memberBegin[t + 1] = static_cast<uint32_t>(memberFile.size());
+    }
+    const uint32_t members = memberCount();
+
+    // Which member holds each definition.
+    symMemBegin.assign(symbolCount + 1, 0);
+    for (uint32_t s = 0; s < symbolCount; ++s) {
+      if (lf.symClass[s] == SymbolClass::Defined)
+        for (uint32_t t : lf.targetsOf(lf.symOwner[s])) {
+          // The owner's own translation unit among the defining ones.
+          uint32_t m = kNoIndex;
+          for (uint32_t tu : lf.tusOf(s))
+            if ((m = member(t, tu)) != kNoIndex)
+              break;
+          symMem.push_back(m);
+        }
+      symMemBegin[s + 1] = static_cast<uint32_t>(symMem.size());
+    }
+    symBegin.assign(members + 1, 0);
+    for (uint32_t m : symMem)
+      if (m != kNoIndex)
+        ++symBegin[m + 1];
+    for (uint32_t m = 0; m < members; ++m)
+      symBegin[m + 1] += symBegin[m];
+    syms.resize(symBegin[members]);
+    {
+      std::vector<uint32_t> cursor(symBegin.begin(), symBegin.end() - 1);
+      for (uint32_t s = 0; s < symbolCount; ++s)
+        for (uint32_t i = symMemBegin[s]; i < symMemBegin[s + 1]; ++i)
+          if (symMem[i] != kNoIndex)
+            syms[cursor[symMem[i]]++] = s;
+    }
+
+    // File-scope code (a namespace-scope initializer, a default member
+    // initializer) runs from the object of the source it is written in.
+    std::vector<std::pair<uint32_t, uint32_t>> pairs; // (member, target sym)
+    for (uint32_t s = 0; s < symbolCount; ++s) {
+      const SymbolClass cls = lf.symClass[s];
+      if (cls == SymbolClass::Defined || cls == SymbolClass::Inline)
+        continue;
+      for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r) {
+        if (lf.refAnchor[r] == 0 || lf.refFile[r] == kNoIndex)
+          continue;
+        for (uint32_t t : lf.targetsOf(lf.refAnchor[r])) {
+          const uint32_t m = mode[t] == LinkMode::None
+                                 ? kNoIndex
+                                 : member(t, lf.refFile[r]);
+          if (m != kNoIndex)
+            pairs.emplace_back(m, lf.refTo[r]);
+        }
+      }
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    extraBegin.assign(members + 1, 0);
+    extra.reserve(pairs.size());
+    for (const auto &p : pairs) {
+      ++extraBegin[p.first + 1];
+      extra.push_back(p.second);
+    }
+    for (uint32_t m = 0; m < members; ++m)
+      extraBegin[m + 1] += extraBegin[m];
+
+    // What each member's code references, and what it emits.
+    weight.resize(members);
+    outBegin.assign(members + 1, 0);
+    for (uint32_t m = 0; m < members; ++m) {
+      const auto own = llvm::ArrayRef<uint32_t>(syms).slice(
+          symBegin[m], symBegin[m + 1] - symBegin[m]);
+      const auto fileScope = llvm::ArrayRef<uint32_t>(extra).slice(
+          extraBegin[m], extraBegin[m + 1] - extraBegin[m]);
+      const uint32_t inlines =
+          walkObject(lf, memberTarget[m], own, fileScope, ws,
+                     [&](uint32_t to) noexcept { out.push_back(to); });
+      weight[m] = own.size() + inlines;
+      outBegin[m + 1] = static_cast<uint32_t>(out.size());
+    }
+  }
+};
+
+/// Simulates what a final link target loads (docs/dependency-audit.md,
+/// "Link-target gain"), optionally with one row's closure split out of its
+/// provider into a target of its own. Scratch sized once per audit.
+///
+/// Nodes: the members [0, M); with a split, the rest of each member that
+/// held part of the closure [M, M + R) and that part itself
+/// [M + R, M + 2R), plus one part for closure symbols no member holds.
+class LinkSim {
+public:
+  struct Result {
+    uint64_t weight = 0;  // emitted symbols loaded
+    uint32_t members = 0; // members any of whose code is loaded
+  };
+
+  LinkSim(const LinkFacts &lf, const LinkModel &lm)
+      : lf_(lf), lm_(lm), members_(lm.memberCount()),
+        stamp_(3 * static_cast<size_t>(members_) + 1, 0),
+        queue_(stamp_.size()), memberStamp_(members_, 0),
+        targetStamp_(lm.mode.size(), 0), kStamp_(lf.symbolCount(), 0),
+        kPart_(lf.symbolCount(), 0), splitStamp_(members_, 0),
+        splitIdx_(members_, 0) {}
+
+  /// Split `closure` (Defined symbols of `provider`) out into a new target
+  /// of the provider's kind, file by file: each member that held part of
+  /// the closure becomes two objects, the part (a member of the new
+  /// target) and the rest (still the provider's). Each object compiles its
+  /// own copies of the inline bodies its code uses.
+  void setSplit(uint32_t provider, llvm::ArrayRef<uint32_t> closure,
+                Workspace &ws) {
+    ++kEpoch_;
+    provider_ = provider;
+    split_.clear();
+    for (uint32_t s : closure) {
+      kStamp_[s] = kEpoch_;
+      const uint32_t m = lm_.memberOf(lf_, s, provider);
+      if (m != kNoIndex && splitStamp_[m] != kEpoch_) {
+        splitStamp_[m] = kEpoch_;
+        splitIdx_[m] = static_cast<uint32_t>(split_.size());
+        split_.push_back(m);
+      }
+    }
+    const uint32_t parts = static_cast<uint32_t>(split_.size());
+    for (uint32_t s : closure) {
+      const uint32_t m = lm_.memberOf(lf_, s, provider);
+      kPart_[s] = m == kNoIndex ? parts : splitIdx_[m];
+    }
+    // Rest i, then part i, then the part of the closure no member holds.
+    nodeWeight_.clear();
+    outBegin_.assign(1, 0);
+    out_.clear();
+    auto addNode = [&](llvm::ArrayRef<uint32_t> starts,
+                       llvm::ArrayRef<uint32_t> fileScope) {
+      nodeWeight_.push_back(starts.size() +
+                            walkObject(lf_, provider, starts, fileScope, ws,
+                                       [&](uint32_t to) noexcept {
+                                         out_.push_back(to);
+                                       }));
+      outBegin_.push_back(static_cast<uint32_t>(out_.size()));
+    };
+    for (int part = 0; part < 2; ++part)
+      for (uint32_t m : split_) {
+        starts_.clear();
+        for (uint32_t i = lm_.symBegin[m]; i < lm_.symBegin[m + 1]; ++i)
+          if ((kStamp_[lm_.syms[i]] == kEpoch_) == (part == 1))
+            starts_.push_back(lm_.syms[i]);
+        // File-scope code stays where it is written.
+        addNode(starts_, part == 0 ? llvm::ArrayRef<uint32_t>(lm_.extra).slice(
+                                         lm_.extraBegin[m],
+                                         lm_.extraBegin[m + 1] -
+                                             lm_.extraBegin[m])
+                                   : llvm::ArrayRef<uint32_t>());
+      }
+    starts_.clear();
+    for (uint32_t s : closure)
+      if (kPart_[s] == parts)
+        starts_.push_back(s);
+    addNode(starts_, {});
+  }
+
+  /// What final link target `e` loads when the targets in `avail` (bits)
+  /// are on its link line; with the split of setSplit when `split`.
+  Result run(uint32_t e, const uint64_t *avail, bool split) noexcept {
+    split_on_ = split;
+    e_ = e;
+    avail_ = avail;
+    epochNow_ = ++epoch_;
+    result_ = Result{};
+    partsLoaded_ = false;
+    head_ = tail_ = 0;
+    const uint32_t targets = static_cast<uint32_t>(lm_.mode.size());
+    for (uint32_t t = 0; t < targets; ++t) {
+      const bool own = t == e && lm_.mode[t] != LinkMode::None;
+      if (own || (lm_.mode[t] == LinkMode::Whole && has(t)))
+        pullTarget(t);
+    }
+    // The split out of an object library is an object library too.
+    if (split_on_ && lm_.mode[provider_] == LinkMode::Whole)
+      for (uint32_t i = 0; i <= parts(); ++i)
+        pullNode(partNode(i));
+    while (head_ < tail_) {
+      const uint32_t n = queue_[head_++];
+      const uint32_t *first, *last;
+      if (n < members_) {
+        first = lm_.out.data() + lm_.outBegin[n];
+        last = lm_.out.data() + lm_.outBegin[n + 1];
+      } else {
+        const uint32_t i = n - members_;
+        first = out_.data() + outBegin_[i];
+        last = out_.data() + outBegin_[i + 1];
+      }
+      for (; first != last; ++first)
+        resolve(*first);
+    }
+    return result_;
+  }
+
+private:
+  [[nodiscard]] bool has(uint32_t t) const noexcept {
+    return (avail_[t >> 6] >> (t & 63)) & 1u;
+  }
+  [[nodiscard]] uint32_t parts() const noexcept {
+    return static_cast<uint32_t>(split_.size());
+  }
+  [[nodiscard]] uint32_t partNode(uint32_t i) const noexcept {
+    return members_ + parts() + i;
+  }
+  void touch(uint32_t m) noexcept {
+    if (memberStamp_[m] != epochNow_) {
+      memberStamp_[m] = epochNow_;
+      ++result_.members;
+    }
+  }
+  void pullNode(uint32_t n) noexcept {
+    if (stamp_[n] == epochNow_)
+      return;
+    stamp_[n] = epochNow_;
+    queue_[tail_++] = n;
+    if (n < members_) {
+      result_.weight += lm_.weight[n];
+      touch(n);
+      return;
+    }
+    const uint32_t i = n - members_;
+    const uint32_t k = i < parts() ? i : i - parts();
+    if (k == parts()) { // the part no member holds
+      result_.weight += nodeWeight_[i];
+      return;
+    }
+    // A member's part and rest together emit what the member did: an
+    // inline body both use is one copy, as when the linker keeps one.
+    const uint32_t other = i < parts() ? i + parts() : k;
+    if (stamp_[members_ + other] == epochNow_)
+      result_.weight += lm_.weight[split_[k]] - nodeWeight_[other];
+    else
+      result_.weight += nodeWeight_[i];
+    touch(split_[k]);
+  }
+  void pullMember(uint32_t m) noexcept {
+    if (split_on_ && splitStamp_[m] == kEpoch_)
+      pullNode(members_ + splitIdx_[m]); // the rest
+    else
+      pullNode(m);
+  }
+  void pullTarget(uint32_t t) noexcept {
+    if (targetStamp_[t] == epochNow_)
+      return;
+    targetStamp_[t] = epochNow_;
+    for (uint32_t m = lm_.memberBegin[t]; m < lm_.memberBegin[t + 1]; ++m)
+      pullMember(m);
+  }
+  /// Load what defines `s`: its part of the split, else the member of the
+  /// best owner — the program itself, an object or shared library on the
+  /// link line, an archive on it, any archive (a reference the build
+  /// resolves some other way still loads the member).
+  void resolve(uint32_t s) noexcept {
+    if (split_on_ && kStamp_[s] == kEpoch_) {
+      // The split out of a shared library is a shared library too: the
+      // first use loads every part.
+      if (lm_.mode[provider_] == LinkMode::Shared) {
+        if (!partsLoaded_) {
+          partsLoaded_ = true;
+          for (uint32_t i = 0; i <= parts(); ++i)
+            pullNode(partNode(i));
+        }
+      } else {
+        pullNode(partNode(kPart_[s]));
+      }
+      return;
+    }
+    const auto owners = lf_.targetsOf(lf_.symOwner[s]);
+    const uint32_t base = lm_.symMemBegin[s];
+    uint32_t best = kNoIndex, bestRank = 4;
+    for (size_t i = 0; i < owners.size(); ++i) {
+      const uint32_t t = owners[i];
+      const uint32_t m = lm_.symMem[base + i];
+      if (m == kNoIndex)
+        continue;
+      uint32_t rank = 4;
+      if (t == e_) {
+        rank = 0;
+      } else {
+        const LinkMode mode = lm_.mode[t];
+        if (mode == LinkMode::Archive)
+          rank = has(t) ? 2 : 3;
+        else if ((mode == LinkMode::Whole || mode == LinkMode::Shared) &&
+                 has(t))
+          rank = 1;
+      }
+      if (rank < bestRank) {
+        bestRank = rank;
+        best = m;
+      }
+    }
+    if (best == kNoIndex)
+      return;
+    if (lm_.mode[lm_.memberTarget[best]] == LinkMode::Shared &&
+        lm_.memberTarget[best] != e_)
+      pullTarget(lm_.memberTarget[best]);
+    else
+      pullMember(best);
+  }
+
+  const LinkFacts &lf_;
+  const LinkModel &lm_;
+  uint32_t members_;
+  std::vector<uint32_t> stamp_, queue_, memberStamp_, targetStamp_;
+  uint32_t epoch_ = 0, epochNow_ = 0, head_ = 0, tail_ = 0;
+  // The split.
+  std::vector<uint32_t> kStamp_, kPart_, splitStamp_, splitIdx_;
+  uint32_t kEpoch_ = 0, provider_ = kNoIndex;
+  std::vector<uint32_t> split_;                  // members holding a part
+  std::vector<uint64_t> nodeWeight_;             // rests, parts, orphan part
+  std::vector<uint32_t> outBegin_, out_, starts_;
+  // The current run.
+  bool split_on_ = false;
+  bool partsLoaded_ = false; // a shared provider's split, loaded whole
+  uint32_t e_ = kNoIndex;
+  const uint64_t *avail_ = nullptr;
+  Result result_;
+};
+
 } // namespace
 
 const char *declaredFormName(DeclaredForm form) {
@@ -2494,6 +2992,8 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
   std::vector<uint32_t> seedScratch;
   std::vector<uint32_t> reachCount(targetCount, 0);
   std::vector<uint32_t> directStamp(targetCount, 0);
+  // Each row's closure, for the link simulation of Phase D.
+  std::vector<uint32_t> closureAt(1, 0), closureSyms;
   audit.rowBegin.assign(targetCount + 1, 0);
 
   for (uint32_t consumer = 0; consumer < targetCount; ++consumer) {
@@ -2680,9 +3180,13 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
             nullptr);
         row.closureFanIn = f.symbols;
         row.closureFanInFiles = f.files;
+        if (row.declared == DeclaredForm::Direct)
+          closureSyms.insert(closureSyms.end(), ws.collect.begin(),
+                             ws.collect.begin() + c.symbols);
       }
       row.needEnd = static_cast<uint32_t>(audit.needs.size());
       audit.rows.push_back(row);
+      closureAt.push_back(static_cast<uint32_t>(closureSyms.size()));
     }
 
     // --- Phase C: what the consumer links only because of each edge -------
@@ -2745,14 +3249,16 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
     audit.rowBegin[consumer + 1] = static_cast<uint32_t>(audit.rows.size());
   }
 
-  // --- Phase D: which final link targets each split would help -----------
-  // A library's gain is what the library stops linking; what matters is
-  // whether anything that links it stops too. For each final link target
-  // that links the consumer, walk what it links with the edge replaced by
-  // the closure's needs; the consumer's droppable targets it no longer
-  // reaches are what it drops. Only a target whose declared reach holds
-  // the consumer is expanded; any other contributes its reach row whole.
+  // --- Phase D: what each split saves the final link targets --------------
+  // docs/dependency-audit.md, "Link-target gain". A final link target loads
+  // every object of its own and of the object libraries it links, all of a
+  // shared library it uses, and of a static archive only the members that
+  // define a symbol something loaded references (and what those need).
+  // Simulate the load as the map stands and with the row's closure split
+  // out of the provider; the difference is what the split saves.
   {
+    const LinkModel lm(lf, map, ws);
+    LinkSim sim(lf, lm);
     std::vector<uint32_t> finals;
     for (uint32_t t = 0; t < targetCount; ++t) {
       const TargetKind k = map.kinds[t];
@@ -2764,34 +3270,90 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       return r.declared == DeclaredForm::Direct ||
              r.symbols + r.uncertainSymbols != 0;
     };
-    std::vector<uint64_t> seen(reach.words);
+    const uint32_t words = reach.words;
+    std::vector<uint64_t> seen(words);
     std::vector<uint32_t> stack;
-    std::vector<std::pair<uint64_t, uint32_t>> helped; // (symbols, target)
     auto seenHas = [&](uint32_t t) {
       return (seen[t >> 6] >> (t & 63)) & 1u;
     };
-    for (AuditRow &row : audit.rows) {
-      row.helpedBegin = row.helpedEnd =
-          static_cast<uint32_t>(audit.helpedTarget.size());
-      if (row.dropBegin == row.dropEnd)
-        continue;
-      const uint32_t c = row.consumer;
-      // The consumer's reasons to link, with this edge cut and the
-      // closure's needs added.
+    // What final target `e` links: its reasons to link (rows that are
+    // declared or used, interface dependencies), and the declared
+    // dependencies of what they reach. With `cut`, the cut row's edge is
+    // replaced by its closure's needs. Only a target whose declared reach
+    // holds the cut row's consumer is expanded; any other contributes its
+    // reach row whole.
+    auto linkLine = [&](uint32_t e, const AuditRow *cut) {
+      const uint32_t c = cut ? cut->consumer : kNoIndex;
       auto pushReasons = [&](uint32_t t) {
-        const bool cut = t == c;
+        const bool cutHere = t == c;
         for (uint32_t i = audit.rowBegin[t]; i < audit.rowBegin[t + 1]; ++i) {
           const AuditRow &r = audit.rows[i];
-          if (isReason(r) && !(cut && r.provider == row.provider))
+          if (isReason(r) && !(cutHere && r.provider == cut->provider))
             stack.push_back(r.provider);
         }
         for (uint32_t d : map.interfaceDepsOf(t))
-          if (!(cut && d == row.provider))
+          if (!(cutHere && d == cut->provider))
             stack.push_back(d);
-        if (cut)
-          for (uint32_t n = row.needBegin; n < row.needEnd; ++n)
+        if (cutHere)
+          for (uint32_t n = cut->needBegin; n < cut->needEnd; ++n)
             stack.push_back(audit.needs[n]);
       };
+      std::fill(seen.begin(), seen.end(), 0);
+      stack.clear();
+      pushReasons(e);
+      while (!stack.empty()) {
+        const uint32_t s = stack.back();
+        stack.pop_back();
+        if (seenHas(s))
+          continue;
+        seen[s >> 6] |= 1ull << (s & 63);
+        if (s == c) {
+          pushReasons(c);
+        } else if (c != kNoIndex && reach.test(s, c)) {
+          for (uint32_t d : map.depsOf(s))
+            stack.push_back(d);
+          for (uint32_t d : map.interfaceDepsOf(s))
+            stack.push_back(d);
+        } else {
+          const uint64_t *r = reach.row(s);
+          for (uint32_t w = 0; w < words; ++w)
+            seen[w] |= r[w];
+        }
+      }
+    };
+    // The load as the map stands, per final target, and which object and
+    // shared libraries are on its line (a split that takes one off saves
+    // its objects even with an empty closure).
+    audit.linkInput.assign(targetCount, 0);
+    audit.linkInputMembers.assign(targetCount, 0);
+    std::vector<uint64_t> lineBefore(static_cast<size_t>(words) * targetCount, 0);
+    for (uint32_t e : finals) {
+      linkLine(e, nullptr);
+      std::copy(seen.begin(), seen.end(),
+                lineBefore.begin() + static_cast<size_t>(e) * words);
+      const LinkSim::Result r = sim.run(e, seen.data(), false);
+      audit.linkInput[e] = r.weight;
+      audit.linkInputMembers[e] = r.members;
+    }
+    struct Helped {
+      uint64_t gain;
+      uint32_t members;
+      uint32_t target;
+    };
+    std::vector<Helped> helped;
+    for (uint32_t ri = 0, re = static_cast<uint32_t>(audit.rows.size());
+         ri < re; ++ri) {
+      AuditRow &row = audit.rows[ri];
+      row.helpedBegin = row.helpedEnd =
+          static_cast<uint32_t>(audit.helpedTarget.size());
+      if (row.declared != DeclaredForm::Direct)
+        continue;
+      const uint32_t c = row.consumer;
+      const auto closure = llvm::ArrayRef<uint32_t>(closureSyms).slice(
+          closureAt[ri], closureAt[ri + 1] - closureAt[ri]);
+      const bool split = !closure.empty();
+      if (split)
+        sim.setSplit(row.provider, closure, ws);
       helped.clear();
       for (uint32_t e : finals) {
         bool links = e == c || reach.test(e, c);
@@ -2800,55 +3362,59 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
           links = audit.rows[i].provider == c && isReason(audit.rows[i]);
         if (!links)
           continue;
-        std::fill(seen.begin(), seen.end(), 0);
-        stack.clear();
-        pushReasons(e);
-        while (!stack.empty()) {
-          const uint32_t s = stack.back();
-          stack.pop_back();
-          if (seenHas(s))
+        linkLine(e, &row);
+        if (!split) {
+          // Nothing moves; only an object or shared library leaving the
+          // line can change the load.
+          const uint64_t *before = lineBefore.data() +
+                                   static_cast<size_t>(e) * words;
+          bool lost = false;
+          for (uint32_t w = 0; w < words && !lost; ++w)
+            for (uint64_t v = before[w] & ~seen[w]; v != 0 && !lost;
+                 v &= v - 1) {
+              const uint32_t t =
+                  w * 64 + static_cast<uint32_t>(llvm::countr_zero(v));
+              lost = lm.mode[t] == LinkMode::Whole ||
+                     lm.mode[t] == LinkMode::Shared;
+            }
+          if (!lost)
             continue;
-          seen[s >> 6] |= 1ull << (s & 63);
-          if (s == c) {
-            pushReasons(c);
-          } else if (reach.test(s, c)) {
-            for (uint32_t d : map.depsOf(s))
-              stack.push_back(d);
-            for (uint32_t d : map.interfaceDepsOf(s))
-              stack.push_back(d);
-          } else {
-            const uint64_t *r = reach.row(s);
-            for (uint32_t w = 0; w < reach.words; ++w)
-              seen[w] |= r[w];
-          }
         }
-        uint64_t symbols = 0;
-        bool any = false;
-        for (uint32_t i = row.dropBegin; i < row.dropEnd; ++i) {
-          const uint32_t x = audit.droppable[i];
-          if (seenHas(x))
-            continue;
-          any = true;
-          symbols += audit.providerSymbols[x];
-          if (x == row.provider)
-            symbols -= row.closureSymbols;
-        }
-        if (any)
-          helped.emplace_back(symbols, e);
+        const LinkSim::Result r = sim.run(e, seen.data(), split);
+        if (r.weight >= audit.linkInput[e])
+          continue;
+        const uint32_t was = audit.linkInputMembers[e];
+        helped.push_back({audit.linkInput[e] - r.weight,
+                          r.members < was ? was - r.members : 0u, e});
       }
       std::sort(helped.begin(), helped.end(),
-                [](const auto &a, const auto &b) {
-                  return a.first != b.first ? a.first > b.first
-                                            : a.second < b.second;
+                [](const Helped &a, const Helped &b) {
+                  return a.gain != b.gain ? a.gain > b.gain
+                                          : a.target < b.target;
                 });
-      for (const auto &h : helped) {
-        audit.helpedTarget.push_back(h.second);
-        audit.helpedSymbols.push_back(h.first);
+      for (const Helped &h : helped) {
+        audit.helpedTarget.push_back(h.target);
+        audit.helpedGain.push_back(h.gain);
+        audit.helpedMembers.push_back(h.members);
       }
       row.helpedEnd = static_cast<uint32_t>(audit.helpedTarget.size());
       row.linkTargetsHelped = static_cast<uint32_t>(helped.size());
-      row.linkTargetGain = helped.empty() ? 0 : helped.front().first;
+      if (!helped.empty()) {
+        row.linkTargetGain = helped.front().gain;
+        row.linkTargetMembers = helped.front().members;
+      }
     }
+  }
+
+  // --- Fan-in share and the split gain ---------------------------------------
+  for (AuditRow &row : audit.rows) {
+    const uint32_t provider = audit.providerSymbols[row.provider];
+    const uint64_t rest =
+        provider > row.closureSymbols ? provider - row.closureSymbols : 0;
+    const uint64_t fanIn = std::min<uint64_t>(row.closureFanIn, rest);
+    row.fanInPct = rest == 0 ? 0 : static_cast<uint32_t>(fanIn * 100 / rest);
+    row.splitGain = rest == 0 ? row.linkTargetGain
+                              : row.linkTargetGain * (rest - fanIn) / rest;
   }
   return audit;
 }

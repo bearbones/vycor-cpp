@@ -291,8 +291,11 @@ llvm::json::Object rowJson(const AuditAnalysis &a, const AuditRow &row,
   obj["providerDroppable"] = row.providerDroppable;
   obj["linkTargetsHelped"] = static_cast<int64_t>(row.linkTargetsHelped);
   obj["linkTargetGain"] = static_cast<int64_t>(row.linkTargetGain);
+  obj["linkTargetMembers"] = static_cast<int64_t>(row.linkTargetMembers);
+  obj["splitGain"] = static_cast<int64_t>(row.splitGain);
   obj["closureFanIn"] = static_cast<int64_t>(row.closureFanIn);
   obj["closureFanInFiles"] = static_cast<int64_t>(row.closureFanInFiles);
+  obj["fanInPct"] = static_cast<int64_t>(row.fanInPct);
   obj["registrationSeeds"] = static_cast<int64_t>(row.registrationSeeds);
   obj["providerStaticInits"] =
       static_cast<int64_t>(audit.providerStaticInits[row.provider]);
@@ -417,15 +420,20 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
                           "any");
     }
   }
-  enum class Sort { Name, Gain, LinkGain } sort = Sort::Name;
+  enum class Sort { Name, Gain, LinkGain, SplitGain } sort = Sort::LinkGain;
   if (const llvm::json::Value *v = args.get("sort")) {
     auto name = v->getAsString();
-    if (name && *name == "gain")
+    if (name && *name == "name")
+      sort = Sort::Name;
+    else if (name && *name == "gain")
       sort = Sort::Gain;
     else if (name && *name == "link_gain")
       sort = Sort::LinkGain;
-    else if (!name || *name != "name")
-      return usageError("Invalid sort: must be name, gain or link_gain");
+    else if (name && *name == "split_gain")
+      sort = Sort::SplitGain;
+    else
+      return usageError(
+          "Invalid sort: must be name, gain, link_gain or split_gain");
   }
   Page page;
   if (auto bad = parsePage(args, kDefaultListLimit, page))
@@ -467,10 +475,13 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
                          return p.droppableSymbols > q.droppableSymbols;
                        return p.closureSymbols < q.closureSymbols;
                      });
-  else if (sort == Sort::LinkGain)
+  else if (sort == Sort::LinkGain || sort == Sort::SplitGain)
     std::stable_sort(selected.begin(), selected.end(),
                      [&](uint32_t x, uint32_t y) {
                        const AuditRow &p = rows[x], &q = rows[y];
+                       if (sort == Sort::SplitGain &&
+                           p.splitGain != q.splitGain)
+                         return p.splitGain > q.splitGain;
                        if (p.linkTargetGain != q.linkTargetGain)
                          return p.linkTargetGain > q.linkTargetGain;
                        if (p.linkTargetsHelped != q.linkTargetsHelped)
@@ -495,9 +506,10 @@ llvm::json::Value handleAuditDependencies(const llvm::json::Object &args,
     findingCounts[kFindingNames[k].id] = counts[k];
   obj["findingCounts"] = std::move(findingCounts);
   obj["unusedWithheld"] = unusedWithheld;
-  obj["sort"] = sort == Sort::Gain       ? "gain"
-                : sort == Sort::LinkGain ? "link_gain"
-                                         : "name";
+  obj["sort"] = sort == Sort::Gain        ? "gain"
+                : sort == Sort::LinkGain  ? "link_gain"
+                : sort == Sort::SplitGain ? "split_gain"
+                                          : "name";
   attachPage(obj, page, selected.size());
   obj["edges"] = std::move(edges);
   return llvm::json::Value(std::move(obj));
@@ -616,8 +628,12 @@ llvm::json::Value handleExplainDependency(const llvm::json::Object &args,
   llvm::json::Array helped;
   for (uint32_t i = row.helpedBegin; i < row.helpedEnd; ++i) {
     llvm::json::Object h;
-    h["target"] = a.map.names[a.audit.helpedTarget[i]];
-    h["droppableSymbols"] = static_cast<int64_t>(a.audit.helpedSymbols[i]);
+    const uint32_t t = a.audit.helpedTarget[i];
+    h["target"] = a.map.names[t];
+    h["gain"] = static_cast<int64_t>(a.audit.helpedGain[i]);
+    h["members"] = static_cast<int64_t>(a.audit.helpedMembers[i]);
+    h["linkInput"] = static_cast<int64_t>(a.audit.linkInput[t]);
+    h["linkInputMembers"] = static_cast<int64_t>(a.audit.linkInputMembers[t]);
     helped.push_back(std::move(h));
   }
   obj["linkTargetsHelped"] = std::move(helped);
@@ -660,12 +676,16 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
         "Only edges with this finding: unused-link-dependency, "
         "undeclared-link-dependency, thin-dependency, or any.");
     props["sort"] = stringProp(
-        "name (default): by consumer, then provider. gain: by "
+        "link_gain (default): by linkTargetGain, largest first — the most "
+        "one executable or shared library linking the consumer would stop "
+        "loading (emitted symbols of the objects and archive members it no "
+        "longer pulls) — then linkTargetsHelped. name: by consumer, then "
+        "provider. gain: by "
         "droppableSymbols, largest first — the symbols the consumer would "
         "stop linking if the closure were split out of the provider. "
-        "link_gain: by linkTargetGain, largest first — the most symbols one "
-        "executable or shared library linking the consumer would stop "
-        "linking — then linkTargetsHelped.");
+        "split_gain: by "
+        "splitGain, largest first — linkTargetGain discounted by the share "
+        "of the rest of the provider that references the closure.");
     addPagingProps(props, kDefaultListLimit, "edges");
     llvm::json::Object schema;
     schema["type"] = "object";
