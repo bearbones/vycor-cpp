@@ -36,6 +36,8 @@ site, so the section is bounded by the number of distinct pairs.
 | `write` | assignment, compound assignment, `++`/`--`, a non-const member call or non-const `operator[]` on the object |
 | `vtable_use` | constructing an object of a dynamic class (target: the class), and a constructor or destructor body of one (it stores the vtable pointer): a user-provided one records it itself, an implicit one in its user, so constructing a derived object also uses each dynamic base's vtable |
 | `typeinfo_use` | `dynamic_cast` to the class, `typeid`, `throw` of the class type, a `catch` handler for it |
+| `lock` | an exclusive lock acquisition that waits (target: the lock identity, see "Lock facts") |
+| `lock_shared` | a shared lock acquisition that waits: `lock_shared`, a `std::shared_lock`, a reader lock |
 
 On a scalar, `x += 1` and `++x` are one `read` and one `write`. On an
 object of class type they are calls of an operator function and follow
@@ -221,6 +223,36 @@ locks held there; a copy into another variable, a capture or a return
 is not. Lock state never crosses a function
 boundary: the joins along call paths are the consumer's.
 
+#### Lock acquisitions
+
+A `lock` or `lock_shared` record is one lock acquisition by its
+referrer: its target is the lock's identity (the text above, so a
+member mutex's target is the member's USR and has no symbol of its own;
+`?` for a mutex the bake cannot name), its lock text the locks held
+*before* the acquisition, one line per distinct set as for any record.
+An acquisition is recorded where the code waits for the lock: a scoped
+guard's declaration (each mutex of a `std::scoped_lock` under the locks
+held before it, so none of them orders another), a deferred guard's
+`lock()`, a mutex's `lock` / `lock_shared`, the capability attribute
+functions, each argument of `std::lock` (under the set before the
+call), and `pthread_mutex_lock`, `pthread_spin_lock`,
+`pthread_rwlock_wrlock` (`lock`) and `pthread_rwlock_rdlock`
+(`lock_shared`). A try or timed acquisition (`try_lock`, `try_lock_for`,
+`std::try_to_lock`, `std::adopt_lock`, `std::try_lock`, the pthread
+`try` and `timed` calls) gives up instead of waiting and is no record.
+Shared is read from the thread-safety attribute when there is one, else
+from the spelling (`shared` in a member's name, a `Reader` prefix,
+`std::shared_lock` and guard types named like a reader lock). Once
+guards are not recorded, and neither is anything library code or code
+the compiler writes acquires. Two more flags apply: `recursive` when
+the mutex type is recursive (`std::recursive_mutex`,
+`std::recursive_timed_mutex`, a class named like one or holding one),
+`non_recursive` when it is known not to be (`std::mutex`,
+`std::timed_mutex`, `std::shared_mutex`, `std::shared_timed_mutex`,
+`absl::Mutex`); neither when it is not known (a pthread mutex takes its
+kind at run time). The records are read by
+[lock-order-inversion](checks/lock-order-inversion.md).
+
 An instantiation's body (read after the code as written, see "Code the
 compiler writes") starts with no lock held; a reference only
 instantiations hold carries the lock sets and flags of all of them, and
@@ -260,13 +292,17 @@ megascope lookup-symbol --name ns::counter
    {"file": "/src/store.cpp", "line": 3, "definition": true,
     "inHeader": false, "tuCount": 1, "firstTu": "/src/store.cpp"}],
  "referrers": {"call": 0, "address_of": 0, "read": 3, "write": 2,
-               "vtable_use": 0, "typeinfo_use": 0},
+               "vtable_use": 0, "typeinfo_use": 0, "lock": 0,
+               "lock_shared": 0},
  "referencedFromOtherTu": true,
  "status": "ok", "indexScope": {...}}
 ```
 
 `referrers` counts distinct referrers per role (a function that reads
-and writes the symbol counts once under each).
+and writes the symbol counts once under each). `lock` and `lock_shared`
+count the functions acquiring a mutex variable (format v18); a data
+member mutex has no symbol of its own, so its acquisitions show only in
+`get_references`.
 
 ### `get_references`
 
@@ -327,7 +363,8 @@ from shards (`tests/test_determinism.cpp`,
 
 The facts are the fifth section of the index (`references`, format
 v15; v16 adds each record's largest contributing TU; v17 adds the lock
-facts and the flag byte to each reference record), with its own
+facts and the flag byte to each reference record; v18 the lock
+acquisition records and their recursion flags), with its own
 checksum, decoded only by a load that asks for it.
 The header's summary carries the symbol and reference counts, which
 `megascope info` and the `index` summary line report as `symbols` and

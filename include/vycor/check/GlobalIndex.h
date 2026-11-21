@@ -514,6 +514,13 @@ struct Diagnostic {
                                   // a std::packaged_task
     SharedGlobal_InitThenPublish, // one side on the main thread: ordering
                                   // before the thread start not proven
+    // lock-order-inversion (check/LockOrderInversion.h)
+    LockOrder_Inversion,          // locks acquired in opposite orders (or
+                                  // one again while held), edges proven
+    LockOrder_Unproven,           // the same, from facts or a search that
+                                  // do not cover the program
+    LockOrder_Plausible,          // the same, through a plausible edge
+    LockOrder_Shared,             // the same, an acquisition shared
     Custom,                       // named built-in or org check (see
                                   // checkName). Stays last: records carry
                                   // the raw value and reject anything past it

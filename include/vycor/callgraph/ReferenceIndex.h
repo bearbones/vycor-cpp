@@ -62,8 +62,21 @@ enum class RefRole : uint8_t {
   Write = 3,       // assignment, ++/--, non-const member call
   VtableUse = 4,   // constructing or destroying a polymorphic class
   TypeinfoUse = 5, // dynamic_cast, typeid, throw, catch
+  // A lock acquired: the target is the lock's identity (the USR of the
+  // mutex variable or data member, kLockUnknownIdentity for one the bake
+  // cannot name), not necessarily a symbol. The record's lock text holds
+  // the locks held just before each acquisition, without the acquired one
+  // (see "Lock facts" in docs/symbol-references.md). A try-lock waits for
+  // nothing and is no record.
+  Lock = 6,       // exclusive: lock(), a lock_guard, std::lock, ...
+  LockShared = 7, // shared: lock_shared(), a shared_lock, a read lock
 };
-constexpr unsigned kRefRoleCount = 6;
+constexpr unsigned kRefRoleCount = 8;
+
+// The two lock acquisition roles.
+[[nodiscard]] constexpr bool isLockRole(RefRole role) noexcept {
+  return role == RefRole::Lock || role == RefRole::LockShared;
+}
 
 // ReferenceRecord::flags: facts OR-ed over the occurrences a record counts.
 enum RefFlag : uint8_t {
@@ -74,8 +87,15 @@ enum RefFlag : uint8_t {
   // object may be changed later through what they return, but the call
   // itself does not change it.
   kRefMutates = 1u << 1,
+  // On a lock or lock_shared record: the mutex type is recursive
+  // (std::recursive_mutex, a class named or built like one), or one known
+  // not to be (std::mutex, std::timed_mutex, std::shared_mutex,
+  // std::shared_timed_mutex, absl::Mutex). Neither: not known (a pthread
+  // mutex takes its kind at run time).
+  kRefRecursive = 1u << 2,
+  kRefNonRecursive = 1u << 3,
 };
-constexpr uint8_t kRefFlagMask = (1u << 2) - 1;
+constexpr uint8_t kRefFlagMask = (1u << 4) - 1;
 
 // The lock facts of a reference (ReferenceRecord::locks), as index text:
 // one line per distinct set of locks its occurrences were made under, in
@@ -361,7 +381,7 @@ public:
   [[nodiscard]] const std::string &textOf(Id id) const { return text(id); }
 
   // ---- persistence ------------------------------------------------------
-  // The snapshot's references section (Snapshot.h, format v17). The bytes
+  // The snapshot's references section (Snapshot.h, format v18). The bytes
   // are canonical: strings, records and contributor lists are written in
   // sorted order, so two indexes holding the same facts encode alike
   // whatever order their TUs were baked or absorbed in.

@@ -18,6 +18,8 @@
     "failed": 0,
     "freshness": "unchecked",
     "indexed": 14,
+    "lock": 0,
+    "lock_shared": 0,
     "partial": 0,
     "read": 0,
     "requested": 14

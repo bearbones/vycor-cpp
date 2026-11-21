@@ -304,6 +304,11 @@ private:
   [[nodiscard]] uint32_t onceLock(const clang::NamedDecl *decl);
   void acquire(uint32_t lock);
   void release(uint32_t lock);
+  // Record that `lock` is acquired here (a lock or lock_shared record)
+  // while `heldBefore` (a locksets_ index) is held. Not in a transparent
+  // body, an unevaluated operand or code in a system header.
+  void noteAcquire(uint32_t lock, RefRole role, clang::SourceLocation site,
+                   uint32_t heldBefore);
   // Replace the held locks, invalidating the cached set only on a change.
   void assignHeld(const HeldLocks &held);
   // Must-hold meet of `b` into `a`; a different lock on each side leaves
@@ -442,6 +447,14 @@ private:
   llvm::DenseMap<const clang::Expr *, uint32_t> onceCallables_;
   // (refs_ key, lock set) -> first occurrence, for occurrences under a lock.
   llvm::DenseMap<std::pair<uint64_t, uint32_t>, LockedOcc> lockedOcc_;
+  // Lock acquisitions, keyed like refs_ with a lockIdents_ index as the
+  // target: as written, and what only instantiations hold. Occurrences
+  // under a lock (the set held before) are in acqOcc_.
+  llvm::DenseMap<uint64_t, RefAcc> acqs_;
+  llvm::DenseMap<uint64_t, RefAcc> instAcqs_;
+  llvm::DenseMap<std::pair<uint64_t, uint32_t>, LockedOcc> acqOcc_;
+  // RefFlag recursion bits per lockIdents_ index, from the declared type.
+  std::vector<uint8_t> lockFlags_;
 };
 
 } // namespace vycor

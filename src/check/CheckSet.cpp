@@ -130,6 +130,11 @@ const std::vector<CheckInfo> &builtinChecks() {
        "common lock",
        /*defaultOn=*/false,
        {"noisy", "compute-heavy"}},
+      {"lock-order-inversion",
+       "Locks acquired in opposite orders on different paths, across TUs "
+       "(a potential deadlock)",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
   };
   return checks;
 }

@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v17 is current).
+and worker shards (since journal/shard format v2; v18 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -173,7 +173,31 @@ needs exhaustive searches and complete coverage; `_Unproven`,
 (`callgraph/LockFacts.h` classifies mutex, guard and sync-primitive
 types) and ride the reference records (format v17). See
 `docs/checks/unsynchronized-shared-global.md` and
-`tests/test_shared_global.cpp`.
+`tests/test_shared_global.cpp`. The lock-set reading and the per-call
+join (`LockSets`, `CallLockFacts`: interned lock identities and sets,
+canonical callees, the sets each call adds) live in `check/LockJoin.h`,
+shared with lock-order-inversion so the two agree on what the same
+lock is.
+
+`lock-order-inversion` (`check/LockOrderInversion.h/.cpp`, off, group
+`compute-heavy`) builds the held-while-acquiring graph from the
+reference facts' `lock` / `lock_shared` records (each a waiting
+acquisition with the locks held before it; try and timed locks are none,
+each mutex of a `std::scoped_lock` / `std::lock` is acquired under the
+set before it; recursion flags `kRefRecursive` / `kRefNonRecursive`;
+snapshot format v18): an edge `A -> B` for each acquisition under `A`,
+and for each call under `A` to every lock in the callee's acquisition
+closure (Tarjan components of the call graph, one hash-consed bitset of
+two bits per lock per component, all edges and proven edges only).
+Cycles: Tarjan components of the lock graph, then a bounded DFS
+enumeration from each cycle's lowest-ranked lock (8 locks, 64 cycles
+per component, 4096 total). A cycle all of whose edges are witnessed
+only under one more global lock is gated and dropped; a non-member
+mutex acquired again while held is a self-deadlock unless recursive.
+`LockOrder_Inversion` (warning) needs proven, exclusive witnesses and
+complete coverage; `_Unproven`, `_Plausible` and `_Shared` are notes
+(journal/shard v18 renumbers `Custom` for them). See
+`docs/checks/lock-order-inversion.md` and `tests/test_lock_order.cpp`.
 
 `callback-under-lock` is an opt-in TU-local AST check in
 `check/CallbackUnderLock.cpp`: lexical standard mutex guard ownership plus
@@ -468,7 +492,7 @@ place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
 v15 the references section and its two header counts, v16 each
 reference record's largest contributing TU, v17 lock facts and a flag
-byte on each reference record:
+byte on each reference record, v18 the lock acquisition records:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels / references), so a

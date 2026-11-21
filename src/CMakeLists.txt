@@ -7,6 +7,8 @@ add_library(vycor_lib
   check/IsaLeak.cpp
   check/CallbackUnderLock.cpp
   check/CouldBeInternal.cpp
+  check/LockJoin.cpp
+  check/LockOrderInversion.cpp
   check/UnsynchronizedSharedGlobal.cpp
   check/Checkpoint.cpp
   check/CheckSet.cpp

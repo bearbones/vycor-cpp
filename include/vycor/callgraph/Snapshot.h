@@ -250,7 +250,13 @@ public:
   ///     byte (kRefInLoop, kRefMutates); symbol flags gain kSymSyncPrimitive and
   ///     kSymInLoop. Read by the unsynchronized-shared-global check. The
   ///     other sections are unchanged from v16.
-  static constexpr uint32_t kFormatVersion = 17;
+  /// v18: lock acquisitions — reference records with the roles `lock`
+  ///     and `lock_shared` (target: a lock identity; lock text: the locks
+  ///     held before) and the record flags kRefRecursive and
+  ///     kRefNonRecursive. Read by the lock-order-inversion check. A v17
+  ///     index has none and would answer that no lock is ever acquired:
+  ///     it is rebuilt. The other sections are unchanged from v17.
+  static constexpr uint32_t kFormatVersion = 18;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
   /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).

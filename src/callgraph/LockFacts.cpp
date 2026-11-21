@@ -223,6 +223,54 @@ bool isSyncPrimitiveType(const clang::ASTContext &ctx, clang::QualType type) {
                      "stop_source"});
 }
 
+uint8_t lockRecursionFlags(clang::QualType type) {
+  if (type.isNull())
+    return 0;
+  type = type.getNonReferenceType();
+  if (const auto *pointer = type->getAs<clang::PointerType>())
+    type = pointer->getPointeeType();
+  const clang::CXXRecordDecl *cls = recordOf(type);
+  if (!cls || !cls->getIdentifier())
+    return 0;
+  if (isStdNamed(cls, {"recursive_mutex", "recursive_timed_mutex"}))
+    return kRefRecursive;
+  if (isStdNamed(cls, {"mutex", "timed_mutex", "shared_mutex",
+                       "shared_timed_mutex"}))
+    return kRefNonRecursive;
+  if (inStdNamespace(cls->getDeclContext()))
+    return 0;
+  const llvm::StringRef name = cls->getName();
+  if (name.contains_insensitive("recursive"))
+    return kRefRecursive;
+  if (name == "Mutex") {
+    for (const clang::DeclContext *dc = cls->getDeclContext(); dc;
+         dc = dc->getParent())
+      if (const auto *ns = llvm::dyn_cast<clang::NamespaceDecl>(dc);
+          ns && ns->getIdentifier() && ns->getName() == "absl")
+        return kRefNonRecursive;
+  }
+  // A class built on a recursive standard mutex (llvm::sys::SmartMutex).
+  if (const clang::CXXRecordDecl *def = cls->getDefinition();
+      def && !def->isDependentContext())
+    for (const clang::FieldDecl *field : def->fields())
+      if (isStdNamed(recordOf(field->getType()),
+                     {"recursive_mutex", "recursive_timed_mutex"}))
+        return kRefRecursive;
+  return 0;
+}
+
+bool isSharedGuardType(clang::QualType type) {
+  const clang::CXXRecordDecl *cls = recordOf(type);
+  if (!cls || !cls->getIdentifier())
+    return false;
+  if (inStdNamespace(cls->getDeclContext()))
+    return cls->getName() == "shared_lock";
+  const llvm::StringRef name = cls->getName();
+  return name.contains("Reader") || name.contains("ReadLock") ||
+         name.contains("ReadScope") || name.contains("SharedLock") ||
+         name.contains("ReadGuard");
+}
+
 LockTag lockTagOf(clang::QualType argType) {
   const clang::CXXRecordDecl *cls = recordOf(argType);
   if (!cls || !inStdNamespace(cls->getDeclContext()) || !cls->getIdentifier())

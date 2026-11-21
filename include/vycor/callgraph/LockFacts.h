@@ -74,6 +74,20 @@ classifyRaiiType(clang::QualType type, const LockTypeConfig &cfg);
 [[nodiscard]] bool isSyncPrimitiveType(const clang::ASTContext &ctx,
                                        clang::QualType type);
 
+// Whether a mutex type is recursive, as lock records carry it (RefFlag):
+// kRefRecursive for std::recursive_mutex / std::recursive_timed_mutex, a
+// class whose name says recursive, or one holding a recursive standard
+// mutex (llvm::sys::SmartMutex); kRefNonRecursive for std::mutex,
+// std::timed_mutex, std::shared_mutex, std::shared_timed_mutex and
+// absl::Mutex; 0 when not known (a pthread mutex takes its kind at run
+// time). Pointers and references are looked through.
+[[nodiscard]] uint8_t lockRecursionFlags(clang::QualType type);
+
+// A guard that takes its mutex shared: std::shared_lock, or a guard named
+// as a reader (absl::ReaderMutexLock, llvm::sys::ScopedReader,
+// ...ReadLock, ...ReadScope, ...SharedLock, ...ReadGuard).
+[[nodiscard]] bool isSharedGuardType(clang::QualType type);
+
 // The ownership tag a guard constructor names, if any.
 enum class LockTag : uint8_t { None, Defer, TryToLock, Adopt };
 [[nodiscard]] LockTag lockTagOf(clang::QualType argType);

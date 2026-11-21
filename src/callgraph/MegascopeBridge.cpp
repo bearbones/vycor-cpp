@@ -408,6 +408,10 @@ void appendReferenceFacts(const ReferenceIndex &references,
       o["in_loop"] = true;
     if ((r.flags & kRefMutates) != 0)
       o["mutates"] = true;
+    if ((r.flags & kRefRecursive) != 0)
+      o["recursive"] = true;
+    if ((r.flags & kRefNonRecursive) != 0)
+      o["non_recursive"] = true;
     refs.push_back(std::move(o));
   }
 }
