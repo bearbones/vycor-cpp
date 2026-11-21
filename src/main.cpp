@@ -1407,10 +1407,23 @@ int main(int argc, const char **argv) {
           llvm::errs() << "check: hot-path-effects: the profile matched no "
                           "call site of the call graph (a profile of another "
                           "program, or paths that share no suffix?)\n";
-        if (hotReport.roots == 0) {
-          llvm::errs() << "check: hot-path-effects: no hot root: the "
-                          "configured roots name no function and the profile "
-                          "gave none\n";
+        const bool configuredRoots =
+            !hotConfig.roots.empty() || !hotConfig.rootPatterns.empty();
+        if (hotReport.roots == 0 && !configuredRoots && hotProfile &&
+            hotReport.join.callSitesInProfile != 0) {
+          // A profile that joins but where nothing ran often enough is a
+          // quiet run, not a misconfiguration.
+          llvm::errs() << "check: hot-path-effects: no function in the "
+                          "profile was entered " << hotConfig.minCount
+                       << " times or more; nothing to check\n";
+        } else if (hotReport.roots == 0) {
+          llvm::errs() << "check: hot-path-effects: no hot root: "
+                       << (configuredRoots
+                               ? "no configured root names a function"
+                               : "no root is configured")
+                       << (hotProfile ? " and the profile matched no call "
+                                        "site\n"
+                                      : "\n");
           return kUsage;
         }
         if (hotReport.templateLeaves != 0)

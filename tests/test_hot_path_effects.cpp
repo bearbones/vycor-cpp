@@ -494,6 +494,24 @@ TEST_CASE("A profile weights each path and keeps latent apart from observed",
   CHECK(report.join.functionsCounted == 7);
 }
 
+TEST_CASE("The join binds each profile file to one indexed file",
+          "[hot-path][profile]") {
+  // Two indexed util.cpp files; the profile holds only lib/a's. The
+  // tools/b file shares just the base name and must not borrow its counts.
+  CallGraph graph;
+  build(graph, kProgram, "/w/lib/a/util.cpp");
+  build(graph, "void b_leaf() {}\nvoid b_root() { b_leaf(); }\n",
+        "/w/tools/b/util.cpp");
+  CoverageProfile profile =
+      parseProfile(programProfile(graph).json("/ci/lib/a/util.cpp"));
+  HotPathConfig config;
+  config.roots = {"hot", "b_root"};
+  HotPathReport report = analyze(graph, config, &profile);
+  CHECK(report.join.callSites == report.join.callSitesInProfile + 1);
+  CHECK(report.join.callSitesCounted == report.join.callSitesInProfile);
+  CHECK(report.join.functions == report.join.functionsCounted + 1);
+}
+
 TEST_CASE("Profile roots are the functions entered at least min_count times",
           "[hot-path][profile][roots]") {
   CallGraph graph;
@@ -779,10 +797,11 @@ TEST_CASE("query_path_effects answers through the tool contract",
   // unless another configured root matched nothing.
   ctx.facts.freshness = IndexFreshness::Baked;
   ctx.facts.coverage = {1, 1, 0, 0};
-  out = call(R"({"roots": ["std::mutex::unlock"]})");
+  out = call(R"({"roots": ["cold"], "effects": ["lock"]})");
   CHECK(out.getString("verdict").value_or("") == "clean");
   CHECK(out.getBoolean("exhaustive") == std::optional<bool>(true));
-  out = call(R"({"roots": ["std::mutex::unlock", "no_such_function"]})");
+  CHECK(out.getInteger("reachedFunctions").value_or(0) >= 2);
+  out = call(R"({"roots": ["cold", "no_such_function"], "effects": ["lock"]})");
   CHECK(out.getString("verdict").value_or("") == "unknown");
 
   // The org config's minCount needs a profile only when one is given: the

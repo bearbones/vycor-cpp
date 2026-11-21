@@ -67,8 +67,11 @@ A configured name or pattern that matches no function is reported
 (`roots.unmatched` in the tool, a line on stderr from the check), so a
 typo does not silently check nothing, and the tool does not answer
 `clean` while one is unmatched. Enabling the check without any root is
-a usage error (exit 2), and so is a run in which no configured root
-matched and the profile gave none.
+a usage error (exit 2), and so is a check run that ends with no root:
+the configured roots all unmatched, or, with only a profile, a profile
+that matched no call site. A profile that joins but in which no
+function reached the minimum count is a quiet run: the check says so
+on stderr and reports nothing.
 
 A path never runs through another root: every finding attaches to a
 root above it with no root in between. Without a profile that is the
@@ -181,8 +184,16 @@ counts the index's distinct call sites (one per location, however many
 edges leave it), those in a file the profile has, those with a count,
 and the functions with calls and those joined to an entry count. The
 check warns when the profile matched no call site, and stops with a
-usage error (exit 2) when the profile was the only root source and gave
-no root: a wrong profile must not pass the gate silently.
+usage error (exit 2) when that leaves it with no root: a wrong profile
+must not pass the gate silently.
+
+A profile file with a unique base name binds to an indexed file of
+that name even when no directory matches (a repository-root file
+checked out under different directory names). If the indexed file is
+not the profiled one, for example when only part of the program was
+indexed and a file of another directory shares the name, the join
+borrows the wrong file's counts. Compare `profile.join` against what
+you expect when the index covers only part of the profiled program.
 
 ## Usage
 

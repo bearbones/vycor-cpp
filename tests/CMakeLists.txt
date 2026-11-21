@@ -224,6 +224,12 @@ if(Python3_Interpreter_FOUND)
             --binary $<TARGET_FILE:vycor-cpp>)
   set_tests_properties(callback_lock_gate PROPERTIES LABELS "cli;check" TIMEOUT 300)
 
+  add_test(NAME hot_path_cli
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/scripts/hot-path-check.py"
+            --binary $<TARGET_FILE:vycor-cpp>)
+  set_tests_properties(hot_path_cli PROPERTIES LABELS "cli;check" TIMEOUT 300)
+
   add_test(NAME check_gate
            COMMAND ${Python3_EXECUTABLE}
                    ${CMAKE_SOURCE_DIR}/scripts/check-gate-check.py
