@@ -174,9 +174,11 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
     refs["overloadCandidates"] =
         static_cast<int64_t>(c.overloadCandidateRefs);
     refs["siteAnchored"] = static_cast<int64_t>(c.siteAnchoredRefs);
+    refs["tuScoped"] = static_cast<int64_t>(c.tuScopedRefs);
     symbols["undefinedInCoveredOwner"] =
         static_cast<int64_t>(c.undefinedInCoveredOwner);
     symbols["emittedEverywhere"] = static_cast<int64_t>(c.emittedDefinitions);
+    symbols["seenBy"] = static_cast<int64_t>(c.seenBySymbols);
   }
   obj["symbols"] = std::move(symbols);
   obj["references"] = std::move(refs);
@@ -681,9 +683,10 @@ void registerDependencyTools(std::vector<ToolEntry> &tools) {
          "transitively, or not declared), unused-link-dependency (declared, "
          "no reference seen). The evidence is the index's symbol reference "
          "facts (calls, address-taken functions, variables, vtables and "
-         "typeinfo), or its call edges for an index without them; some "
-         "references stay invisible (implicit destructor calls, template "
-         "instantiation bodies), so no finding is a universal verdict — "
+         "typeinfo, template instantiations and compiler-written code "
+         "included), or its call edges for an index without them; some "
+         "references stay invisible (names looked up at run time, other "
+         "build configurations), so no finding is a universal verdict — "
          "read `completeness`.",
          llvm::json::Value(std::move(schema)), handleAuditDependencies});
   }

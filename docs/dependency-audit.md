@@ -30,9 +30,10 @@ library.
 **Every answer is evidence, not a verdict.** The audit reads the
 symbol reference facts of the index (`completeness.edgeSource:
 "references"`, `docs/symbol-references.md`): calls, address-ofs, reads
-and writes of variables, vtable and typeinfo uses. What those facts
-cannot see — the bodies of implicit template instantiations, implicit
-special members — is listed in `completeness.invisible`. An index baked
+and writes of variables, vtable and typeinfo uses, including those made
+by template instantiations and by code the compiler writes. What those
+facts cannot see — lookups by name at run time, code another build
+configuration compiles — is listed in `completeness.invisible`. An index baked
 before the reference facts existed (format v14 and older) is audited
 from its call edges instead (`edgeSource: "call-edges"`, [Call-edge
 fallback](#call-edge-fallback)), which misses every reference that is
@@ -204,7 +205,9 @@ the closure, but name no symbol of a row.
   site. Two or more calls (or address-ofs) from one referrer, at one
   witness site, to different symbols of one unqualified name are such
   candidates (`references.overloadCandidates`): any one instantiation
-  uses one of them, or none. Differently named targets at one site — a
+  uses one of them, or none. An instantiation that selects one leaves
+  the same record (same referrer, target and site), so nothing marks
+  the selected candidate. Differently named targets at one site — a
   macro expanding to several calls — are ordinary references.
 
 The audit adds the references the compiler writes for a class:
@@ -278,8 +281,40 @@ The walk treats an inline body as present in full wherever it is used.
 The compiler may have inlined it and dropped the references a constant
 condition removes, or never emitted a body nobody called; the audit
 does not know. That over-counts the references an inline body carries.
-What an implicit instantiation of a template adds is not in the facts at
-all and is undercounted (`template-instantiation-bodies`).
+A template's references are those of its pattern, which holds what
+every instantiation the index read references
+(`docs/symbol-references.md`, "Code the compiler writes"). The walk
+narrows them two ways, both for a reference that travels with an inline
+body, and takes it for a consumer (in a closure, for the provider) only
+when both allow:
+
+- **Who recorded it.** A reference that only TUs of one target set
+  recorded is *scoped* to that set (`references.tuScoped`). The index
+  keeps, per reference, the number of TUs that recorded it and the first
+  and last of them by path; the contributors are all of one set when
+  every TU the index meta lists between those two is, which is how the
+  sources of one target sort. A reference recorded by TUs of several
+  sets, or with a TU of another set between its first and last, is not
+  scoped; without index meta only a reference one TU recorded is.
+- **Who can see its target.** A TU references a symbol only through a
+  declaration it sees, and records a declaration it sees (for a class,
+  its definition when it has one). The targets that can reference a
+  symbol are those with a TU whose opened-file table (index meta) names
+  a file holding one of its recorded declarations (`symbols.seenBy`
+  counts the symbols that narrows); a target whose TUs never open that
+  file takes no reference to it from a shared body. A TU no target lists
+  counts for the targets of the mapped sources it includes (a unity
+  build). A TU with reference facts but an empty table (one recorded
+  without it) counts as seeing every symbol. Without index meta nothing is narrowed.
+
+So a consumer that uses `make<A>()` does not walk through what another
+target's `make<B>()` builds when `B` is declared where the consumer
+never looks, or when only the other target's TUs instantiate it. What
+neither tells apart stays a union: a consumer walks through what its own
+TUs' other instantiations build, and through what any target that sees
+the same declarations builds. Fan-in climbs through an inline body
+under the same rule; registration marks (below) do not narrow, so they
+can over-mark.
 
 ### Registration seeds
 
@@ -287,8 +322,9 @@ A symbol whose body (or an inline body it reaches) takes the address of
 a function of a template is a *registration*: a factory instantiated for
 one type and handed to a registry (`RegisterMCAsmParser<T>`,
 `TargetRegistry::RegisterX`). What the factory builds is reached through
-the registry at run time, not through the closure, and the
-instantiation's body is invisible besides. Such seeds are flagged
+the registry at run time, not through the closure, and the factory's
+body is its pattern's, which holds what every registered type's
+instantiation builds. Such seeds are flagged
 (`registers: true` on a seed, `registrationSeeds` on the row), and a
 thin finding whose every certain seed is one carries
 `"registration": true`: the small closure is an artifact, not a lead.
@@ -365,8 +401,8 @@ provider in.
 
 `link_gain` ranks a row that helps a program above one whose library
 gain no program sees. Both columns inherit the closure's error: a
-closure that is too small — the usual cause is a template instantiation
-whose body the facts do not hold — makes every gain column too large.
+closure that is too small — the usual cause is code reached by name at
+run time, through a registry — makes every gain column too large.
 
 The payload also carries `targetMap` (`path`, `generator`, `depsForm`,
 `targets`, `roots`), `completeness`, `thinThresholds`, `findingCounts`
@@ -408,7 +444,7 @@ finding for one of those reasons, so "no unused findings" is never
 mistaken for "everything is used". When the finding is reported it is
 still not a verdict: the program may rely on the provider's static
 initializers (the finding then carries `providerStaticInits`, their
-count), on a symbol only an instantiation names, or on a symbol the
+count), or on a symbol the
 audit could not attribute (`consumerUnplacedUses` says how many of the
 consumer's references that is). `consumerUnplacedUses` and
 `references.unresolvedSite` are reported, never gating.
@@ -461,15 +497,13 @@ Every payload of both tools carries `completeness`:
 | `edgesCollapsed` | call-edge fallback only: the index was baked with `--collapse-paths`; the `collapsed-call-edges` tag is then present and no unused finding is raised. Reference facts are recorded whatever `--collapse-paths` says |
 | `targets` | `total`, `withSources`, `covered` |
 | `sources` | `mapped` (distinct sources in the map), `indexed` (parsed cleanly), `failed`, `notIndexed`, `unmappedTus` |
-| `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU) and `emittedEverywhere` (weak or `used` header definitions held by every includer) |
-| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
+| `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU), `emittedEverywhere` (weak or `used` header definitions held by every includer) and `seenBy` (attributed symbols whose declarations only some targets' TUs open; an inline body's reference to one is taken only for those) |
+| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `tuScoped` (inline-body references only TUs of one target set recorded, taken only for that set), `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
 
 `invisible` with reference facts:
 
 | Tag | What is missed |
 |---|---|
-| `template-instantiation-bodies` | the body of an implicit instantiation is not traversed: a reference only the instantiation makes — the constructor and vtable behind `std::make_unique<T>()`, a call resolved by argument-dependent lookup, what a registry's `callDefaultCtor<T>` builds — is recorded nowhere, and a closure through template code stops at the pattern |
-| `implicit-special-member-calls` | constructors, destructors and assignment the compiler writes or calls implicitly (members, bases, temporaries, end of scope), and implicitly defined special members as targets |
 | `qualified-virtual-calls` | without the call graph, a call of a virtual function bound statically (`Base::run()` from an override) cannot be told from a dispatched one and is soft |
 | `same-basename-internal-symbols` | two internal symbols of one name in files of one basename share an identity (`docs/symbol-references.md`, "Limits") and their facts merge |
 | `name-based-lookup` | `dlsym`, plugin registries, linker sections, `--whole-archive` |
@@ -477,12 +511,21 @@ Every payload of both tools carries `completeness`:
 
 Known ways an answer is wrong, beyond what the tags say:
 
-- **The closure is too small where templates do the work.** The
-  dominant error on a large tree: a seed that constructs a class through
-  `std::make_unique`, or hands a factory to a registry, has a closure of
-  itself or little more, because what the instantiation calls is not in
-  the facts. Every gain column of such a row is too large; `fanIn`,
+- **The closure is too small where a registry does the work.** A seed
+  that hands a factory to a registry has a closure of itself and the
+  factory: what the registry later builds through it is reached at run
+  time. Every gain column of such a row is too large;
   `registrationSeeds` and reading the closure are the checks.
+- **The closure is too large through a template.** A template's
+  references are the union of every instantiation the index read,
+  narrowed only to the target set of the TUs that recorded them ("Inline
+  bodies and the closure"), so a closure through `make<T>()` includes
+  what the other `T`s' constructors need when TUs of the same target, or
+  of several, instantiate them.
+- **Compiler-written code is read, with the approximations
+  `docs/symbol-references.md` lists under "Limits"** (an exception path
+  judged from the form of the code, instantiations a TU names but does
+  not define).
 - **Seeds can be compile-time only.** A call the optimizer folded or an
   inline body the compiler never emitted is still a reference here; the
   objects do not need the symbol.

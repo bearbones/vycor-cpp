@@ -259,7 +259,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
 | `ReferenceIndex.h/.cpp` | Symbol reference facts (`docs/symbol-references.md`): one record per (referrer, target, role) with an occurrence count and one witness site, and per symbol its kind, linkage class, attributes, declarations, and defining TUs; content-deduplicated with per-TU contributor lists (`removeTUs`, `absorb`), canonical encoding as the snapshot's references section |
-| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity |
+| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity. After the code as written it drains a worklist of the instantiation bodies the TU uses (attributed to the pattern, adding only keys the pattern lacks, at the largest single-instantiation count) and of transparent functions (implicit special members, system-template instantiations, generic-lambda call operators), whose references are spliced into their users at lowering (Tarjan SCC summaries); implicit constructor/destructor calls, `operator new`/`delete`, and a vtable's implicit virtual destructor are recorded on the way |
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
@@ -446,7 +446,8 @@ per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
 place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
-v15 the references section and its two header counts:
+v15 the references section and its two header counts, v16 each
+reference record's largest contributing TU:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels / references), so a

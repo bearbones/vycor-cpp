@@ -910,6 +910,32 @@ struct Config {
   CHECK(to[0].referrerUsr == "vycor-file:" + tu);
 }
 
+TEST_CASE("references: a default member initializer also runs in each "
+          "constructor that uses it",
+          "[references]") {
+  Project p;
+  std::string tu = p.tu("tu.cpp", R"cpp(
+int fallback();
+struct Config { int level = fallback(); Config(); Config(int); };
+Config::Config() {}
+Config::Config(int l) : level(l) {}
+struct Plain { int level = fallback(); };
+void make() { Plain p; (void)p; }
+Plain agg() { return Plain{}; }
+)cpp");
+  auto ix = p.bake();
+  const ReferenceIndex &refs = ix.references;
+  std::vector<std::string> referrers;
+  for (const auto &r : refs.referencesTo(symbolNamed(refs, "fallback").usr)) {
+    CHECK(r.role == RefRole::Call);
+    referrers.push_back(r.referrerName);
+  }
+  // Config(int) initializes the member itself; Plain's implicit constructor
+  // is read in make().
+  CHECK(referrers ==
+        std::vector<std::string>{tu, "Config::Config", "agg", "make"});
+}
+
 TEST_CASE("references: unevaluated operands reference nothing",
           "[references]") {
   Project p;
@@ -1096,6 +1122,506 @@ int plain() { return pick(1) + int(zero<long>); }
       symbolAttributeNames(kSymLambda | kSymSpecialization);
   REQUIRE(names.size() == 2);
   CHECK(std::string(names[1]) == "explicit_specialization");
+}
+
+// ============================================================================
+// Instantiations and implicit code
+// ============================================================================
+
+TEST_CASE("references: a call argument-dependent lookup resolves in an "
+          "instantiation belongs to the template",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+int g;
+template <class T> void visit(T t) { g = 1; g = 2; hook(t); hook(t); }
+namespace a { struct A {}; void hook(A); }
+namespace b { struct B {}; void hook(B); }
+namespace c { struct C {}; void hook(C); }
+void run() { visit(a::A{}); visit(b::B{}); }
+void spare(c::C x) { (void)x; }
+namespace d { struct D {}; struct E : D {}; void touch(D); }
+template <class T> void twice(T t) { touch(t); touch(t); }
+void run2() { twice(d::D{}); twice(d::E{}); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Found only at instantiation: recorded against the pattern, once per
+  // target, with the count one instantiation has.
+  CHECK(roles(refs, "visit", "a::hook") == "call");
+  CHECK(roles(refs, "visit", "b::hook") == "call");
+  CHECK(reference(refs, "visit", "a::hook", RefRole::Call).count == 2);
+  // An overload no instantiation selects stays unreferenced.
+  CHECK(roles(refs, "visit", "c::hook").empty());
+  // The pattern's own references are not counted again per instantiation.
+  CHECK(reference(refs, "visit", "g", RefRole::Write).count == 2);
+  CHECK(roles(refs, "run", "visit") == "call");
+  // Two instantiations reaching the same target: the larger count of one,
+  // not the sum.
+  CHECK(reference(refs, "twice", "d::touch", RefRole::Call).count == 2);
+}
+
+TEST_CASE("references: an explicit specialization an instantiation selects "
+          "is referenced",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+template <class T> struct Traits { static int hash(T) { return 0; } };
+struct Key {};
+template <> struct Traits<Key> { static int hash(Key); };
+template <class T> int lookup(T k) { return Traits<T>::hash(k); }
+int use() { return lookup(Key{}); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "lookup", "Traits<Key>::hash") == "call");
+  CHECK(roles(refs, "use", "lookup") == "call");
+}
+
+TEST_CASE("references: what a system template's instantiation does lands on "
+          "the code that uses it",
+          "[references]") {
+  Project p;
+  llvm::sys::fs::create_directory(p.path("sys"));
+  p.header("sys/mem.h", R"cpp(#pragma once
+#pragma GCC system_header
+inline void *operator new(decltype(sizeof 0), void *at) noexcept { return at; }
+namespace sys {
+template <class T> struct owner {
+  T *p;
+  ~owner() { delete p; }
+};
+template <class T, class... A> owner<T> make(A... a) { return owner<T>{new T(a...)}; }
+template <class T> struct vec {
+  T *slot;
+  template <class... A> void emplace(A... a) { new (slot) T(a...); }
+};
+}
+)cpp");
+  auto ix = bakeOne(p, R"cpp(#include "sys/mem.h"
+struct Base { virtual ~Base(); };
+struct Impl : Base { int v = 0; };
+struct Plain { Plain(int); ~Plain(); };
+void build() { auto b = sys::make<Impl>(); (void)b; }
+void grow(sys::vec<Plain> &v) { v.emplace(2); }
+template <class T> void later() { auto b = sys::make<T>(); (void)b; }
+void instantiate() { later<Impl>(); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // make<Impl> runs Impl's implicit constructor (which stores Impl's and
+  // Base's vtable pointers) and allocates; owner<Impl>'s destructor deletes
+  // through the virtual destructor, which Impl's vtable holds: the class
+  // references what it does (Base's destructor, the deallocation).
+  CHECK(roles(refs, "build", "Impl") == "vtable_use");
+  CHECK(roles(refs, "build", "Base") == "vtable_use");
+  CHECK(roles(refs, "build", "operator new") == "call");
+  CHECK(roles(refs, "build", "Base::~Base").empty());
+  CHECK(roles(refs, "Impl", "Base::~Base") == "call");
+  CHECK(roles(refs, "Impl", "operator delete") == "call");
+  // The constructor call behind emplace.
+  CHECK(roles(refs, "grow", "Plain::Plain") == "call");
+  // A recorded template's instantiation reaches the same code.
+  CHECK(roles(refs, "later", "Impl") == "vtable_use");
+  // The system templates themselves are still not symbols.
+  CHECK_FALSE(hasSymbol(refs, "sys::make"));
+  CHECK_FALSE(hasSymbol(refs, "sys::owner::~owner"));
+  CHECK_FALSE(hasSymbol(refs, "sys::vec::emplace"));
+}
+
+TEST_CASE("references: implicit special members, destructors and allocation "
+          "functions",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { Res(); Res(const Res &); ~Res(); };
+struct Base { ~Base(); };
+struct Owner : Base { Res r; };
+Res make();
+void scope() { Owner o; (void)o; }
+void temporary() { make(); }
+void copy(const Owner &o) { Owner c = o; (void)c; }
+Owner *alloc() { return new Owner; }
+void drop(Owner *o) { delete o; }
+struct User { Res r; User(); ~User(); };
+User::User() {}
+User::~User() {}
+struct Defaulted { Res r; Defaulted() = default; ~Defaulted() = default; };
+void useDefaulted() { Defaulted d; (void)d; }
+Res global;
+Res &instance() { static Res one; return one; }
+void arrays() { Res many[2]; (void)many; }
+void fail() { throw Res(); }
+template <class T> struct Box { void fill() { T t; (void)t; } };
+template struct Box<Res>;
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Owner's implicit constructor and destructor run Res's and Base's.
+  CHECK(roles(refs, "scope", "Res::Res") == "call");
+  CHECK(roles(refs, "scope", "Res::~Res") == "call");
+  CHECK(roles(refs, "scope", "Base::~Base") == "call");
+  // A temporary is destroyed.
+  CHECK(roles(refs, "temporary", "Res::~Res") == "call");
+  // The implicit copy constructor copies the member.
+  CHECK(roles(refs, "copy", "Res::Res") == "call");
+  // new and delete: the allocation functions and what the implicit members
+  // do.
+  CHECK(roles(refs, "alloc", "operator new") == "call");
+  CHECK(roles(refs, "alloc", "Res::Res") == "call");
+  CHECK(roles(refs, "drop", "Res::~Res") == "call");
+  CHECK(roles(refs, "drop", "Base::~Base") == "call");
+  CHECK(roles(refs, "drop", "operator delete") == "call");
+  // A user-provided constructor initializes the members it does not name; a
+  // destructor destroys them after its body.
+  CHECK(roles(refs, "User::User", "Res::Res") == "call");
+  CHECK(roles(refs, "User::~User", "Res::~Res") == "call");
+  // So do defaulted ones, which are symbols of their own (defined where
+  // they are used).
+  CHECK(roles(refs, "Defaulted::Defaulted", "Res::Res") == "call");
+  CHECK(roles(refs, "Defaulted::~Defaulted", "Res::~Res") == "call");
+  // Statics are destroyed at exit; arrays element by element.
+  CHECK(roles(refs, "global", "Res::~Res") == "call");
+  CHECK(roles(refs, "instance", "Res::~Res") == "call");
+  CHECK(roles(refs, "arrays", "Res::~Res") == "call");
+  // The runtime destroys a thrown object.
+  CHECK(roles(refs, "fail", "Res::~Res") == "call");
+  // An explicit instantiation definition emits its members' bodies.
+  CHECK(roles(refs, "Box::fill", "Res::Res") == "call");
+  // Implicit members are not symbols.
+  CHECK_FALSE(hasSymbol(refs, "Owner::Owner"));
+  CHECK_FALSE(hasSymbol(refs, "Owner::~Owner"));
+}
+
+TEST_CASE("references: what a vtable holds that no reference shows",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { ~Res(); };
+struct Iface { virtual ~Iface(); virtual void f(); };
+struct Impl : Iface { Res r; void f() override; };
+Impl *make() { return new Impl; }
+namespace a { struct A {}; void hook(A); }
+template <class T> struct Node : Iface { void f() override { hook(T{}); } };
+Iface *node() { return new Node<a::A>; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Impl's implicit destructor is virtual: Impl's vtable holds it, so the
+  // class references what it does.
+  CHECK(roles(refs, "Impl", "Res::~Res") == "call");
+  CHECK(roles(refs, "Impl", "Iface::~Iface") == "call");
+  CHECK(roles(refs, "make", "Impl") == "vtable_use");
+  // A class template's virtual member is instantiated for the vtable, not
+  // called: its body is read all the same.
+  CHECK(roles(refs, "Node::f", "a::hook") == "call");
+}
+
+TEST_CASE("references: a lambda's instantiation lands on the lambda",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; void hook(A); }
+template <class F> void apply(F f) { f(a::A{}); }
+void run() {
+  auto each = [](auto x) { hook(x); };
+  each(a::A{});
+}
+void passed() { apply([](auto x) { hook(x); }); }
+template <class T> void inTemplate() { auto l = [](T x) { hook(x); }; l(T{}); }
+void useInTemplate() { inTemplate<a::A>(); }
+template <class T> void unused() { auto l = [](T x) { hook(x); }; (void)l; }
+void useUnused() { unused<a::A>(); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Each lambda as written is the referrer: not the function that calls it,
+  // nor the template it is passed to, nor the template it is written in. A
+  // lambda is a referrer whether or not it is called, as written or copied.
+  std::vector<std::string> hosts;
+  for (const ReferenceInfo &r : refs.allReferences()) {
+    if (r.targetName != "a::hook")
+      continue;
+    INFO(r.referrerUsr);
+    CHECK(r.referrerUsr.rfind("vycor-lambda:", 0) == 0);
+    hosts.push_back(r.referrerUsr.substr(r.referrerUsr.rfind('#') + 1));
+  }
+  std::sort(hosts.begin(), hosts.end());
+  CHECK(hosts ==
+        std::vector<std::string>{"inTemplate", "passed", "run", "unused"});
+  for (const char *fn : {"run", "apply", "passed", "inTemplate", "unused"})
+    CHECK(roles(refs, fn, "a::hook").empty());
+}
+
+TEST_CASE("references: what a template reached through a call references "
+          "may lead back to the caller",
+          "[references]") {
+  Project p;
+  llvm::sys::fs::create_directory(p.path("sys"));
+  p.header("sys/ping.h", R"cpp(#pragma once
+#pragma GCC system_header
+namespace sys {
+template <class T> void pong(T t, int n);
+template <class T> void ping(T t, int n) { if (n) pong(t, n - 1); else finish(t); }
+template <class T> void pong(T t, int n) { if (n) ping(t, n - 1); else touch(t); }
+template <class T> void visit(T t) { revisit(t); }
+}
+)cpp");
+  auto ix = bakeOne(p, R"cpp(#include "sys/ping.h"
+namespace a { struct A {}; void finish(A); void touch(A); }
+void viaPing() { sys::ping(a::A{}, 3); }
+namespace u { struct U {}; void revisit(U u) { sys::visit(u); } }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Two system templates calling each other: one component, both reached.
+  CHECK(roles(refs, "viaPing", "a::finish") == "call");
+  CHECK(roles(refs, "viaPing", "a::touch") == "call");
+  // Recursion through a system template is a reference like direct
+  // recursion is.
+  CHECK(roles(refs, "u::revisit", "u::revisit") == "call");
+}
+
+TEST_CASE("references: inheriting constructors build the derived class",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { Res(); ~Res(); };
+struct B { B(int); };
+struct D : B { using B::B; Res r; };
+void makeD() { D d(1); (void)d; }
+namespace a { struct A {}; void hook(A); }
+template <class T> struct TB { TB(int) { hook(T{}); } };
+struct TD : TB<a::A> { using TB::TB; };
+void makeTD() { TD d(1); (void)d; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "makeD", "B::B") == "call");
+  CHECK(roles(refs, "makeD", "Res::Res") == "call");
+  CHECK(roles(refs, "makeD", "Res::~Res") == "call");
+  // The inherited constructor of a class template's specialization is
+  // read as an instantiation.
+  CHECK(roles(refs, "makeTD", "TB::TB<T>") == "call");
+  CHECK(roles(refs, "TB::TB<T>", "a::hook") == "call");
+}
+
+TEST_CASE("references: the operator== a defaulted operator<=> declares",
+          "[references]") {
+  Project p;
+  p.flags = {"-std=c++20", "-Wno-defaulted-function-deleted"};
+  auto ix = bakeOne(p, R"cpp(
+struct M { bool operator==(const M &) const; };
+struct P { M m; auto operator<=>(const P &) const = default; };
+bool eqP(const P &a, const P &b) { return a == b; }
+struct F { M m; friend auto operator<=>(const F &, const F &) = default; };
+bool eqF(const F &a, const F &b) { return a == b; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "eqP", "M::operator==") == "call");
+  CHECK(roles(refs, "eqF", "M::operator==") == "call");
+  // Compiler-written, member or friend: no symbol of its own.
+  CHECK_FALSE(hasSymbol(refs, "P::operator=="));
+  CHECK_FALSE(hasSymbol(refs, "operator=="));
+}
+
+TEST_CASE("references: a constructor that throws destroys what it built",
+          "[references]") {
+  const char *code = R"cpp(
+struct Res { Res(); ~Res(); };
+struct Thrower { Thrower(); ~Thrower(); };
+struct Two { Res r; Thrower t; Two(); };
+Two::Two() {}
+struct Last { Res r; int x; Last(); };
+Last::Last() : x(1) {}
+void work();
+struct Body { Res r; Body(); };
+Body::Body() { work(); }
+struct TryBody { Res r; TryBody(); };
+TryBody::TryBody() try { work(); } catch (...) { throw; }
+struct Quiet { Res r; Thrower t; Quiet() noexcept; };
+Quiet::Quiet() noexcept {}
+struct Dg { Res r; Dg(int); Dg(); ~Dg(); };
+Dg::Dg() : Dg(1) { (void)0; }
+void arr() { auto *p = new Res[2]; (void)p; }
+)cpp";
+  SECTION("with exceptions") {
+    Project p;
+    auto ix = bakeOne(p, code);
+    const ReferenceIndex &refs = ix.references;
+    // A later member can throw: the earlier one is destroyed.
+    CHECK(roles(refs, "Two::Two", "Res::~Res") == "call");
+    // Nothing can throw after the last one is built.
+    CHECK(roles(refs, "Two::Two", "Thrower::~Thrower").empty());
+    CHECK(roles(refs, "Last::Last", "Res::~Res").empty());
+    // The body can throw after every member is built.
+    CHECK(roles(refs, "Body::Body", "Res::~Res") == "call");
+    CHECK(roles(refs, "TryBody::TryBody", "Res::~Res") == "call");
+    // A non-throwing constructor has no cleanup.
+    CHECK(roles(refs, "Quiet::Quiet", "Res::~Res").empty());
+    // A delegating constructor's body destroys the complete object.
+    CHECK(roles(refs, "Dg::Dg", "Dg::~Dg") == "call");
+    // An array new destroys the elements built when a later one throws.
+    CHECK(roles(refs, "arr", "Res::~Res") == "call");
+  }
+  SECTION("without exceptions") {
+    Project p;
+    p.flags = {"-std=c++17", "-fno-exceptions"};
+    auto ix = bakeOne(p, code);
+    const ReferenceIndex &refs = ix.references;
+    CHECK(roles(refs, "Two::Two", "Res::~Res").empty());
+    CHECK(roles(refs, "Body::Body", "Res::~Res").empty());
+    CHECK(roles(refs, "arr", "Res::~Res").empty());
+    CHECK(roles(refs, "arr", "Res::Res") == "call");
+  }
+}
+
+TEST_CASE("references: explicit instantiations of members and nested classes",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; void hook(A); void other(A); }
+template <class T> struct Box { void fill() { hook(T{}); } void spare() { other(T{}); } };
+template void Box<a::A>::fill();
+template <class T> struct Holder { struct Inner { void go() { hook(T{}); } }; };
+template struct Holder<a::A>;
+template <class T> struct Multi {
+  template <class U> void put(U) { hook(T{}); }
+  template <class U> struct In { void f() { other(T{}); } };
+};
+template void Multi<a::A>::put<int>(int);
+template void Multi<a::A>::In<int>::f();
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "Box::fill", "a::hook") == "call");
+  // Only the member instantiated.
+  CHECK(roles(refs, "Box::spare", "a::other").empty());
+  CHECK(roles(refs, "Holder::Inner::go", "a::hook") == "call");
+  // Members of member templates.
+  CHECK(roles(refs, "Multi::put", "a::hook") == "call");
+  CHECK(roles(refs, "Multi::In::f", "a::other") == "call");
+}
+
+TEST_CASE("references: what an instantiation's initializer and default "
+          "arguments reference belongs to the template",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; int hook(A); }
+template <class T> int vt = hook(T{});
+template <class T> struct S { static inline int t = hook(T{}); };
+int readVt() { return vt<a::A>; }
+int readT() { return S<a::A>::t; }
+template <class T> void defarg(T, int = hook(T{})) {}
+void useDefarg() { defarg(a::A{}); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "vt", "a::hook") == "call");
+  CHECK(roles(refs, "S::t", "a::hook") == "call");
+  CHECK(roles(refs, "readVt", "vt") == "read");
+  CHECK(roles(refs, "defarg", "a::hook") == "call");
+}
+
+TEST_CASE("references: a system template's default argument lands on its "
+          "callers",
+          "[references]") {
+  Project p;
+  llvm::sys::fs::create_directory(p.path("sys"));
+  p.header("sys/box.h", R"cpp(#pragma once
+#pragma GCC system_header
+namespace sys {
+template <class T, class A> struct box { explicit box(int n, const A &a = A()) {} };
+}
+)cpp");
+  auto ix = bakeOne(p, R"cpp(#include "sys/box.h"
+void tick();
+template <class T> struct MyAlloc { MyAlloc() { tick(); } };
+void useBox() { sys::box<int, MyAlloc<int>> b(10); (void)b; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "useBox", "MyAlloc::MyAlloc<T>") == "call");
+  CHECK(roles(refs, "MyAlloc::MyAlloc<T>", "tick") == "call");
+}
+
+TEST_CASE("references: a lambda in a default member initializer stays its "
+          "own referrer",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+void g();
+struct Fn { template <class F> Fn(F f) { f(); } };
+struct Holder { Fn f = [] { g(); }; };
+void makeHolder() { Holder h; (void)h; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "makeHolder", "g").empty());
+  bool lambda = false;
+  for (const ReferenceInfo &r : refs.allReferences())
+    lambda = lambda || (r.targetName == "g" &&
+                        r.referrerUsr.rfind("vycor-lambda:", 0) == 0);
+  CHECK(lambda);
+}
+
+TEST_CASE("references: a local class in an instantiation runs only when "
+          "called",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; void hook(A); void other(A); void third(A); }
+template <class T> void local() {
+  struct L { void m() { other(T{}); } };
+  struct K { void n() { third(T{}); } };
+  K{}.n();
+  hook(T{});
+}
+void useLocal() { local<a::A>(); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "local", "a::hook") == "call");
+  CHECK(roles(refs, "local", "a::other").empty());
+  CHECK(roles(refs, "local", "a::third").empty());
+  bool other = false;
+  for (const ReferenceInfo &r : refs.allReferences())
+    other = other || r.targetName == "a::other";
+  CHECK_FALSE(other);
+  CHECK(roles(refs, "local()::K::n", "a::third") == "call");
+}
+
+TEST_CASE("references: delete through a virtual or trivial destructor",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { ~Res(); };
+struct VB { virtual ~VB(); };
+struct VD : VB { Res r; };
+void dropVirtual(VD *d) { delete d; }
+struct Fin final : VB { Res r; };
+void dropFinal(Fin *f) { delete f; }
+void dropGlobal(VD *d) { ::delete d; }
+struct Triv { ~Triv() = default; };
+void dropTriv(Triv *t) { delete t; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // One virtual call: the destructor and the deallocation are the dynamic
+  // type's.
+  CHECK(roles(refs, "dropVirtual", "Res::~Res").empty());
+  CHECK(roles(refs, "dropVirtual", "VB::~VB").empty());
+  CHECK(roles(refs, "dropVirtual", "operator delete").empty());
+  // A final class's destructor is called directly.
+  CHECK(roles(refs, "dropFinal", "Res::~Res") == "call");
+  CHECK(roles(refs, "dropFinal", "VB::~VB") == "call");
+  CHECK(roles(refs, "dropFinal", "operator delete") == "call");
+  // ::delete calls the global deallocation function itself.
+  CHECK(roles(refs, "dropGlobal", "operator delete") == "call");
+  CHECK(roles(refs, "dropGlobal", "Res::~Res").empty());
+  // A trivial destructor is no call.
+  CHECK(roles(refs, "dropTriv", "Triv::~Triv").empty());
+  CHECK(roles(refs, "dropTriv", "operator delete") == "call");
+}
+
+TEST_CASE("references: decltype in a template references nothing",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+int probe(int);
+int probe(long);
+template <class T> auto sized(T t) -> decltype(probe(t)) { return 0; }
+template <class T> using Result = decltype(probe(T()));
+)cpp");
+  CHECK(roles(ix.references, "sized", "probe").empty());
+  CHECK(ix.references.referenceCount() == 0);
 }
 
 TEST_CASE("references: system header code is not recorded but its strong "
@@ -1423,6 +1949,56 @@ TEST_CASE("references: damaged encodings are refused", "[references][snapshot]")
     }
   }
   CHECK(rejected > bytes.size());
+}
+
+TEST_CASE("references: a reference's largest contributor is checked",
+          "[references][snapshot]") {
+  // One reference two TUs record; its record is the last before the
+  // contributor lists, and every id fits one varint byte.
+  ReferenceIndex ix;
+  ReferenceFact r;
+  r.referrerUsr = "c:@F@user";
+  r.targetUsr = "c:@F@used";
+  r.role = RefRole::Call;
+  r.file = "/t/h.h";
+  r.line = 3;
+  r.col = 5;
+  ix.addReference(r, "/t/a.cpp");
+  ix.addReference(r, "/t/b.cpp");
+  const std::string bytes = encoded(ix);
+  REQUIRE(decodes(bytes));
+  size_t lists = std::string::npos;
+  for (size_t p = 0; p + 8 <= bytes.size(); ++p) {
+    uint64_t v = 0;
+    for (unsigned i = 0; i < 8; ++i)
+      v |= static_cast<uint64_t>(static_cast<unsigned char>(bytes[p + i]))
+           << (8 * i);
+    if (v == bytes.size() - p - 8) {
+      lists = p;
+      break;
+    }
+  }
+  REQUIRE(lists != std::string::npos);
+  const size_t maxAt = lists - 1, minAt = lists - 2, refsAt = lists - 3;
+  REQUIRE(bytes[refsAt] == 2);
+  REQUIRE(bytes[maxAt] > bytes[minAt]);
+  auto with = [&](size_t at, char v) {
+    std::string out = bytes;
+    out[at] = v;
+    return out;
+  };
+  // Two contributors cannot share one TU as smallest and largest.
+  CHECK_FALSE(decodes(with(maxAt, bytes[minAt])));
+  CHECK_FALSE(decodes(with(maxAt, bytes[minAt]), /*readOnly=*/true));
+  // The largest cannot sort before the smallest.
+  std::string swapped = bytes;
+  std::swap(swapped[minAt], swapped[maxAt]);
+  CHECK_FALSE(decodes(swapped));
+  CHECK_FALSE(decodes(swapped, /*readOnly=*/true));
+  // A larger id that is not the last contributor: only the lists tell.
+  const std::string later = with(maxAt, static_cast<char>(bytes[maxAt] + 1));
+  CHECK_FALSE(decodes(later));
+  CHECK(decodes(later, /*readOnly=*/true));
 }
 
 // ---- limits on what a load may allocate -------------------------------------

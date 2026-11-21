@@ -153,6 +153,30 @@ struct LinkFacts {
   /// The target set whose objects hold this reference, or 0 when it sits
   /// in an inline body and so belongs to whichever target uses that body.
   std::vector<uint32_t> refAnchor;
+  /// For a reference an inline body holds that only TUs of one target set
+  /// recorded (what those TUs' instantiations of a template reference,
+  /// usually): that set. A walk through the body takes the reference only
+  /// for a target in it. 0 for every other reference; empty without
+  /// reference facts.
+  std::vector<uint32_t> refScope;
+  /// Per symbol: the targets one of whose TUs opened a file holding a
+  /// recorded declaration of it, so could reference it; 0 when unknown
+  /// (no index meta, a TU without its opened-file table, a declaration in
+  /// a file no TU's table names). Empty without reference facts.
+  std::vector<uint32_t> symSeenBy;
+  /// Whether a walk for `target` through an inline body takes reference
+  /// `r`: unless it is scoped to other targets (refScope) or names a
+  /// symbol the target's TUs cannot see (symSeenBy). What the TUs of one
+  /// target never declare, its instantiation of the body cannot reference.
+  [[nodiscard]] bool inlineRefFor(uint32_t r, uint32_t target) const noexcept {
+    if (!refScope.empty() && refScope[r] != 0 && !setHas(refScope[r], target))
+      return false;
+    return seenBy(refTo[r], target);
+  }
+  [[nodiscard]] bool seenBy(uint32_t sym, uint32_t target) const noexcept {
+    return symSeenBy.empty() || symSeenBy[sym] == 0 ||
+           setHas(symSeenBy[sym], target);
+  }
   /// Order key of the reference site: file rank (by path), line, column.
   std::vector<uint64_t> refKey;
   std::vector<StringInterner::Id> refSite; // "file:line:col"
@@ -215,6 +239,12 @@ struct LinkFacts {
     /// USR two targets' code share, such as `main`) charged to the target
     /// set of the site, or of the one TU that recorded them.
     uint64_t siteAnchoredRefs = 0;
+    /// References of an inline body scoped to the target set of the TUs
+    /// that recorded them (refScope).
+    uint64_t tuScopedRefs = 0;
+    /// Attributed symbols whose declarations only some targets' TUs open (symSeenBy
+    /// not 0).
+    uint64_t seenBySymbols = 0;
   } counts;
   /// Whether per-TU outcomes and opened-file tables were available.
   bool hasIndexMeta = false;

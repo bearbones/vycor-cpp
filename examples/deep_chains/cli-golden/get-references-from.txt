@@ -1,4 +1,5 @@
 # megascope get-references --name Pipeline::runAsync --direction from --roles address_of --roles vtable_use --format ndjson -> exit 0
 {"_summary":{"direction":"from","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"kind":"function","qualifiedName":"Pipeline::runAsync","status":"ok","truncated":false,"usr":"c:@S@Pipeline@F@runAsync#I#"}}
 {"col":17,"count":1,"file":"{fixture}/pipeline.cpp","firstTu":"{fixture}/pipeline.cpp","line":34,"role":"vtable_use","target":"NetworkWorker","targetKind":"class","targetUsr":"c:@S@NetworkWorker","tuCount":1}
+{"col":17,"count":1,"file":"{fixture}/pipeline.cpp","firstTu":"{fixture}/pipeline.cpp","line":34,"role":"vtable_use","target":"Worker","targetKind":"class","targetUsr":"c:@S@Worker","tuCount":1}
 {"col":25,"count":1,"file":"{fixture}/pipeline.cpp","firstTu":"{fixture}/pipeline.cpp","line":27,"role":"address_of","target":"cbs::asyncCompleted","targetKind":"function","targetUsr":"c:@N@cbs@F@asyncCompleted#I#","tuCount":1}
