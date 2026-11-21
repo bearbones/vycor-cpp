@@ -92,6 +92,10 @@ struct CheckIndexPayload {
   std::vector<CoveragePropertyEntry> coverage;
   std::vector<OdrEntry> odrEntries; // populated when enableOdrDiag
   std::vector<AbiLayoutEntry> abiLayouts; // populated when enableAbiLayoutDiag
+  // Populated when a noexcept-candidate check is enabled. Left out of the
+  // parent->worker handoff file (writeGlobalIndexFile): phase 2 never
+  // reads it.
+  std::vector<NoexceptFactEntry> noexceptFacts;
   std::vector<SpecializationEntry> specializations;
   std::vector<DefaultArgEntry> defaultArgs;
   std::vector<StaticInitEntry> staticInits;

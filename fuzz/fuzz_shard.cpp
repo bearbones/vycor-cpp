@@ -81,6 +81,12 @@ void runIndexChecks(const GlobalIndex &index, std::vector<Diagnostic> &diags) {
   analyzeExceptionEscape(index, diags);
   analyzeExceptionSpecDivergence(index, diags);
   analyzeHeaderStaticDuplication(index, diags);
+  // Every sub-kind, with and without the cross-TU withholding pass.
+  NoexceptCandidateOptions candidates;
+  candidates.moves = candidates.virtuals = true;
+  analyzeNoexceptCandidates(index, candidates, diags);
+  candidates.coverageComplete = false;
+  analyzeNoexceptCandidates(index, candidates, diags);
 }
 
 } // namespace

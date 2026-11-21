@@ -124,9 +124,12 @@ std::string fileUri(llvm::StringRef absPath) {
   return "file://" + uriEncodePath(p);
 }
 
+// Location order, except that findings a check ranked (rank != 0) follow
+// the unranked ones in the order the check gave them.
 bool lessFinding(const Finding &a, const Finding &b) {
-  return std::tie(a.file, a.line, a.column, a.check, a.kind, a.message) <
-         std::tie(b.file, b.line, b.column, b.check, b.kind, b.message);
+  return std::tie(a.rank, a.file, a.line, a.column, a.check, a.kind,
+                  a.message) < std::tie(b.rank, b.file, b.line, b.column,
+                                        b.check, b.kind, b.message);
 }
 
 } // namespace
@@ -217,6 +220,12 @@ const char *diagnosticKindName(Diagnostic::Kind kind) {
     return "Internal_TestOnly";
   case Diagnostic::Internal_Unproven:
     return "Internal_Unproven";
+  case Diagnostic::Noexcept_Candidate:
+    return "Noexcept_Candidate";
+  case Diagnostic::Noexcept_CandidateMove:
+    return "Noexcept_CandidateMove";
+  case Diagnostic::Noexcept_CandidateVirtual:
+    return "Noexcept_CandidateVirtual";
   case Diagnostic::Custom:
     return "Custom";
   }
@@ -264,6 +273,12 @@ std::string checkNameOf(const Diagnostic &diag) {
   case Diagnostic::Internal_TestOnly:
   case Diagnostic::Internal_Unproven:
     return "could-be-internal";
+  case Diagnostic::Noexcept_Candidate:
+    return "noexcept-candidate";
+  case Diagnostic::Noexcept_CandidateMove:
+    return "noexcept-candidate-move";
+  case Diagnostic::Noexcept_CandidateVirtual:
+    return "noexcept-candidate-virtual";
   case Diagnostic::Custom:
     return diag.checkName.empty() ? "custom" : diag.checkName;
   }
@@ -289,6 +304,9 @@ Severity checkSeverity(const std::string &check) {
       {"dead-code", Severity::Note},
       {"callback-under-lock", Severity::Warning},
       {"could-be-internal", Severity::Warning},
+      {"noexcept-candidate", Severity::Note},
+      {"noexcept-candidate-move", Severity::Note},
+      {"noexcept-candidate-virtual", Severity::Note},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;
@@ -549,6 +567,7 @@ std::vector<Finding> buildFindings(const std::vector<Diagnostic> &diags,
     f.severity = diagnosticSeverity(diag);
     std::string spelled;
     splitLocation(diag.callLocation, spelled, f.line, f.column);
+    f.rank = diag.rank;
     if (spelled.empty())
       spelled = diag.file;
     f.path = absolutePath(spelled, projectRoot);
@@ -1044,6 +1063,8 @@ void renderJson(const CheckRun &run, llvm::raw_ostream &os) {
           j.attribute("column", static_cast<int64_t>(f.column));
           j.attribute("message", f.message);
           j.attribute("fingerprint", f.fingerprint);
+          if (f.rank)
+            j.attribute("rank", static_cast<int64_t>(f.rank));
         });
     });
     if (run.baselineUsed)
@@ -1201,8 +1222,11 @@ void renderSarif(const CheckRun &run, llvm::raw_ostream &os) {
               j.attributeObject("partialFingerprints", [&] {
                 j.attribute(kFingerprintKey, f.fingerprint);
               });
-              j.attributeObject("properties",
-                                [&] { j.attribute("kind", f.kind); });
+              j.attributeObject("properties", [&] {
+                j.attribute("kind", f.kind);
+                if (f.rank)
+                  j.attribute("order", static_cast<int64_t>(f.rank));
+              });
             });
         });
       });
