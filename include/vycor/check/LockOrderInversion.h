@@ -89,6 +89,8 @@ struct LockOrderStats {
   size_t gatedCycles = 0;         // of those, every edge under a common
                                   // third lock: not reported
   size_t boundedGroups = 0;       // groups whose enumeration hit a bound
+  bool cyclesCapped = false;      // maxCycles was reached (every group is
+                                  // bounded)
   size_t memberSelfEdges = 0;     // a member mutex acquired while one is
                                   // held: two objects, not reported
   size_t selfDeadlocks = 0;       // self-cycles reported

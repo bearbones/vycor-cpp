@@ -828,6 +828,10 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
     info.referrerKind = referrer.kind;
     info.targetName = *target.name;
     info.targetKind = target.kind;
+    // A lock target with no symbol (a data member mutex, an unnamed lock,
+    // a once guard) is a variable, not a function.
+    if (isLockRole(first.role) && target.name == &text(first.target))
+      info.targetKind = SymbolKind::Variable;
     const std::string *file = nullptr;
     const std::string *firstTu = nullptr;
     Id locks = kNoId;

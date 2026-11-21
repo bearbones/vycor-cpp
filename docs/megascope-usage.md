@@ -143,7 +143,8 @@ printf '%s\n' \
 
 Beyond calls, the index records which function references which
 function, global variable, or class, and how (`call`, `address_of`,
-`read`, `write`, `vtable_use`, `typeinfo_use`), with each symbol's
+`read`, `write`, `vtable_use`, `typeinfo_use`, and `lock` /
+`lock_shared` for a mutex acquisition), with each symbol's
 linkage and defining TU:
 
 ```bash

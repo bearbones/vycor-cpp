@@ -267,8 +267,8 @@ llvm::json::Value handleGetReferences(const llvm::json::Object &args,
       if (!role)
         return usageError(
             "Invalid role" + (name ? " '" + name->str() + "'" : std::string()) +
-            ": expected call, address_of, read, write, vtable_use or "
-            "typeinfo_use");
+            ": expected call, address_of, read, write, vtable_use, "
+            "typeinfo_use, lock or lock_shared");
       roleMask |= 1u << static_cast<unsigned>(*role);
     }
     if (roleMask == 0)
@@ -383,7 +383,7 @@ void registerReferenceTools(std::vector<ToolEntry> &tools) {
         "symbol (a function body, a variable's initializer) references.");
     props["roles"] = stringArrayProp(
         "Keep only these roles: call, address_of, read, write, "
-        "vtable_use, typeinfo_use (default: all).");
+        "vtable_use, typeinfo_use, lock, lock_shared (default: all).");
     addPagingProps(props, kDefaultListLimit, "references");
     llvm::json::Object schema;
     schema["type"] = "object";
@@ -396,7 +396,9 @@ void registerReferenceTools(std::vector<ToolEntry> &tools) {
          "address_of (address taken or bound to a non-const reference), "
          "read, write, vtable_use (construction/destruction of a "
          "polymorphic class), typeinfo_use (dynamic_cast, typeid, throw, "
-         "catch). Use it to find every reader/writer of a global, or "
+         "catch), lock and lock_shared (a waiting acquisition of a mutex, "
+         "with the locks held before it). Use it to find every "
+         "reader/writer of a global, or "
          "whether a function is only used inside its own TU.",
          llvm::json::Value(std::move(schema)), handleGetReferences});
   }

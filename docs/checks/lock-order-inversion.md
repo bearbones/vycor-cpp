@@ -47,14 +47,20 @@ paths at the same time can deadlock.
 - An acquisition through calls names the call made while the lock is
   held (its site), the shortest call path down to a function that
   acquires the second lock (a long path keeps its first two and last two
-  functions), and that acquisition's site.
+  functions), and that acquisition's site. The path ends at an
+  exclusive acquisition when the edge's witness is exclusive, never at
+  a nearer shared one.
 
 The witness shown for an edge is the strongest one: proven before
 plausible, exclusive before shared, direct before through calls, then
 the holder's USR and the site. The cycle starts at its lock with the
 smallest identity, and the finding sits at its first edge's witness
-site. Its identity (the fingerprint input) is the cycle's lock
-identities in that order, so it does not move when a witness changes.
+site. Its entities (`Diagnostic::entities`) are the cycle's lock
+identities in that order. The fingerprint hashes them with the check,
+the kind and the finding's file, so it holds while the witnesses
+change within one file, and moves when the first edge's witness moves
+to another file or the kind changes (a plausible witness replaced by
+a proven one, say).
 
 A self-deadlock reads `'m' is acquired while already held: ...` with
 the one witness.
@@ -109,9 +115,10 @@ what the same lock is:
   whose name contains `recursive` or that holds a standard recursive
   mutex are recursive; the standard non-recursive mutexes and
   `absl::Mutex` are known not to be; anything else is not known.
-- **A lock re-acquired through a call while held**, for every other lock
-  held there: the inner acquisition does not wait on the others (it
-  self-deadlocks first, or does not block at all if recursive).
+- **A lock re-acquired while held**, directly or through a call, for
+  every other lock held there: the inner acquisition does not wait on
+  the others (it self-deadlocks first, or does not block at all if
+  recursive).
 - **A data member re-acquired while one is held** (`Node::visit` locking
   its child's `mu` while holding its own): a member names every object's
   mutex, so the check cannot tell two objects (a hierarchy locked parent
@@ -154,7 +161,8 @@ deadlock them against a waiting writer.
    done twice, over every call edge and over proven edges only, so an
    edge knows whether a proven witness exists. Bound: 2²³ 64-bit words
    of distinct sets per pass; past it, the remaining components get no
-   set (their edges are missed) and every finding is unproven.
+   set (their edges are missed), every finding is unproven, and the run
+   says so on stderr with or without `--verbose`.
 3. **Order edges.** Each acquisition under a lock set adds `A -> B` for
    every named `A` in the set; each call under a set adds `A -> B` for
    every lock `B` in the callee's closure. Each edge keeps its best
@@ -163,9 +171,12 @@ deadlock them against a waiting writer.
    more locks, every elementary cycle of at most 8 locks, each
    enumerated once by a depth-first search from its lowest-ranked lock
    through higher-ranked ones. Bounds: 64 cycles per component, 4096 in
-   all, 2²² search steps per component. A component that hits one says
-   so in each of its findings ("other cycles ... were not enumerated");
-   the cycles it found are still real.
+   all (which stops every component), 2²² search steps per component,
+   and the length (a component with a path longer than 8 locks counts
+   as bounded). A component that hits one says so in each of its
+   findings ("the cycle search among these locks stopped at a bound"),
+   and the run says so on stderr, also when the component has no
+   finding; the cycles it found are still real.
 5. **Witness paths.** For an edge through calls, a breadth-first search
    from the callee to a function that acquires the lock, through
    functions whose closure holds it (proven edges only for a proven

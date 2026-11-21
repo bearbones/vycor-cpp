@@ -195,7 +195,8 @@ static llvm::cl::opt<std::string>
     CheckIndexPath("index",
         llvm::cl::desc("megascope index the graph-backed checks (dead-code, "
                        "static-init-hazards, could-be-internal, "
-                       "unsynchronized-shared-global) read when it "
+                       "unsynchronized-shared-global, "
+                       "lock-order-inversion) read when it "
                        "is fresh for the selected sources (default: "
                        "<build-path>/.vycor/megascope.vycs); otherwise they "
                        "bake the sources in memory"),
@@ -1575,6 +1576,22 @@ int main(int argc, const char **argv) {
                             " group(s) hit the enumeration bound"
                       : std::string())
               << "\n";
+        // A bound can hide a cycle outright, so it is said with or
+        // without --verbose.
+        if (lockStats.closureBounded)
+          llvm::errs() << "check: lock-order-inversion: WARNING: the "
+                          "acquisition closures stopped at their bound; "
+                          "cycles through the remaining functions are not "
+                          "reported\n";
+        if (lockStats.boundedGroups)
+          llvm::errs() << "check: lock-order-inversion: WARNING: the cycle "
+                          "search stopped at a bound in "
+                       << lockStats.boundedGroups
+                       << " lock group(s)"
+                       << (lockStats.cyclesCapped
+                               ? " (the total number of cycles)"
+                               : "")
+                       << "; other cycles may exist\n";
       }
     }
 

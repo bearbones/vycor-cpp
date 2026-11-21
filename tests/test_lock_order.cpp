@@ -518,6 +518,16 @@ void Logger::flushTo(Registry &r) {
   CHECK(contains(diags[0], "'Logger::mu' -> 'Registry::mu' -> 'Logger::mu'"));
   CHECK(stats.memberSelfEdges >= 1); // Node::visit
   CHECK(stats.selfDeadlocks == 0);
+  // A member mutex's acquisitions name it by the member's USR, which has
+  // no symbol: the record's target is a variable, not a function.
+  size_t memberLocks = 0;
+  for (const ReferenceInfo &r : baked.references.allReferences()) {
+    if (!isLockRole(r.role))
+      continue;
+    ++memberLocks;
+    CHECK(r.targetKind == SymbolKind::Variable);
+  }
+  CHECK(memberLocks > 0);
 }
 
 TEST_CASE("lock-order: a mutex the bake cannot name forms no cycle",
@@ -658,15 +668,33 @@ void backward() { std::lock_guard<std::mutex> b(y); std::lock_guard<std::mutex> 
   CHECK(contains(diags[0], "Not proven: the facts cover 1 of the 2"));
 
   // A closure budget too small for one set: the call edge is not seen,
-  // and what is seen is unproven.
+  // so the cycle through it is lost, and the stats say the bound was
+  // reached (main.cpp warns on stderr from them).
   LockOrderOptions tight;
   tight.maxClosureWords = 1;
   LockOrderStats stats;
   auto bounded = runCheck(baked, tight, &stats);
   INFO(allMessages(bounded));
   CHECK(stats.closureBounded);
-  for (const Diagnostic &d : bounded)
-    CHECK(d.kind == Diagnostic::LockOrder_Unproven);
+  CHECK(bounded.empty());
+
+  // What the bound leaves is unproven: a direct cycle beside it.
+  Project q;
+  q.tu("tu.cpp", R"cpp(
+#include <mutex>
+std::mutex x, y;
+void takeY() { std::lock_guard<std::mutex> b(y); }
+void forward() { std::lock_guard<std::mutex> a(x); takeY(); std::lock_guard<std::mutex> b(y); }
+void backward() { std::lock_guard<std::mutex> b(y); std::lock_guard<std::mutex> a(x); }
+)cpp");
+  auto bakedQ = q.bake();
+  LockOrderStats statsQ;
+  auto left = runCheck(bakedQ, tight, &statsQ);
+  INFO(allMessages(left));
+  CHECK(statsQ.closureBounded);
+  REQUIRE(left.size() == 1);
+  CHECK(left[0].kind == Diagnostic::LockOrder_Unproven);
+  CHECK(contains(left[0], "the acquisition closure stopped at its bound"));
 }
 
 TEST_CASE("lock-order: the enumeration stops at its per-group bound",
@@ -694,7 +722,80 @@ PAIR(cd, c, d) PAIR(dc, d, c)
   CHECK(some.size() == 3);
   CHECK(stats.boundedGroups == 1);
   for (const Diagnostic &d : some)
-    CHECK(contains(d, "were not enumerated"));
+    CHECK(contains(d, "stopped at a bound"));
+}
+
+TEST_CASE("lock-order: the total cycle bound marks every group",
+          "[lock-order]") {
+  Project p;
+  p.tu("tu.cpp", R"cpp(
+#include <mutex>
+std::mutex a, b, c, d;
+#define PAIR(n, x, y) void n() { std::lock_guard<std::mutex> g1(x); std::lock_guard<std::mutex> g2(y); }
+PAIR(ab, a, b) PAIR(ba, b, a) PAIR(cd, c, d) PAIR(dc, d, c)
+)cpp");
+  auto baked = p.bake();
+  LockOrderStats all;
+  CHECK(runCheck(baked, {}, &all).size() == 2);
+  CHECK(all.lockGroups == 2);
+  CHECK_FALSE(all.cyclesCapped);
+  LockOrderOptions capped;
+  capped.maxCycles = 1;
+  LockOrderStats stats;
+  auto one = runCheck(baked, capped, &stats);
+  INFO(allMessages(one));
+  REQUIRE(one.size() == 1);
+  CHECK(contains(one[0], "stopped at a bound"));
+  CHECK(stats.cyclesCapped);
+  CHECK(stats.lockGroups == 2);   // the group never reached is counted
+  CHECK(stats.boundedGroups == 2);
+}
+
+TEST_CASE("lock-order: a cycle longer than the length bound marks its group",
+          "[lock-order]") {
+  Project p;
+  p.tu("tu.cpp", R"cpp(
+#include <mutex>
+std::mutex a, b, c;
+#define PAIR(n, x, y) void n() { std::lock_guard<std::mutex> g1(x); std::lock_guard<std::mutex> g2(y); }
+PAIR(ab, a, b) PAIR(bc, b, c) PAIR(ca, c, a)
+)cpp");
+  auto baked = p.bake();
+  CHECK(runCheck(baked).size() == 1);
+  LockOrderOptions shortOnly;
+  shortOnly.maxCycleLength = 2;
+  LockOrderStats stats;
+  auto none = runCheck(baked, shortOnly, &stats);
+  INFO(allMessages(none));
+  CHECK(none.empty());
+  CHECK(stats.lockGroups == 1);
+  CHECK(stats.boundedGroups == 1);
+}
+
+TEST_CASE("lock-order: an exclusive witness path skips a nearer shared "
+          "acquisition",
+          "[lock-order]") {
+  Project p;
+  p.tu("tu.cpp", R"cpp(
+#include <mutex>
+#include <shared_mutex>
+std::mutex x;
+std::shared_mutex y;
+void aNear() { std::shared_lock<std::shared_mutex> r(y); }
+void zDeep() { std::unique_lock<std::shared_mutex> w(y); }
+void zMid() { zDeep(); }
+void mid() { aNear(); zMid(); }
+void forward() { std::lock_guard<std::mutex> a(x); mid(); }
+void backward() { std::unique_lock<std::shared_mutex> w(y); std::lock_guard<std::mutex> a(x); }
+)cpp");
+  auto baked = p.bake();
+  auto diags = runCheck(baked);
+  INFO(allMessages(diags));
+  REQUIRE(diags.size() == 1);
+  CHECK(diags[0].kind == Diagnostic::LockOrder_Inversion);
+  CHECK(contains(diags[0], "mid -> zMid -> zDeep at"));
+  CHECK(contains(diags[0], "zDeep acquires 'y'"));
+  CHECK_FALSE(contains(diags[0], "(shared)"));
 }
 
 TEST_CASE("lock-order: findings are the same in any bake order",

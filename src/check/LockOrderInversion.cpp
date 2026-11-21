@@ -157,6 +157,7 @@ private:
     return "'" + sets_.display(lockOfNode_[node]) + "'";
   }
   bool witnessPath(uint32_t start, uint32_t node, bool provenOnly,
+                   bool exclusive,
                    std::vector<uint32_t> &chain, const Acq *&acq);
   void finish(Diagnostic &diag, std::string msg, const Witness &first,
               llvm::ArrayRef<std::string> reasons, bool plausible,
@@ -603,13 +604,17 @@ void Analysis::callEdges() {
 
 // A path from `start` down to a function that acquires `node`, through
 // functions whose closure holds it: breadth first, so the shortest, in
-// the canonical callee order.
+// the canonical callee order. `exclusive` asks for an exclusive
+// acquisition (the edge's witness is one), so the path never ends at a
+// nearer shared one.
 bool Analysis::witnessPath(uint32_t start, uint32_t node, bool provenOnly,
-                           std::vector<uint32_t> &chain, const Acq *&acq) {
+                           bool exclusive, std::vector<uint32_t> &chain,
+                           const Acq *&acq) {
   const Closures &cs = provenOnly ? proven_ : all_;
   const auto reaches = [&](uint32_t fn) {
     const uint32_t c = cs.of(fn);
-    return c != 0 && (cs.has(c, node * 2) || cs.has(c, node * 2 + 1));
+    return c != 0 && (cs.has(c, node * 2) ||
+                      (!exclusive && cs.has(c, node * 2 + 1)));
   };
   chain.clear();
   acq = nullptr;
@@ -625,7 +630,8 @@ bool Analysis::witnessPath(uint32_t start, uint32_t node, bool provenOnly,
   for (size_t qi = 0; qi < queue.size(); ++qi) {
     const uint32_t fn = queue[qi];
     for (const Acq &a : acqsOf(fn))
-      if (a.node == node && (acq == nullptr || (acq->shared && !a.shared)))
+      if (a.node == node && !(exclusive && a.shared) &&
+          (acq == nullptr || (acq->shared && !a.shared)))
         acq = &a;
     if (acq) {
       for (uint32_t at = fn; at != kNone; at = parent_[at])
@@ -668,7 +674,7 @@ std::string Analysis::edgeText(uint32_t from, uint32_t to, const Witness &w) {
   std::vector<uint32_t> chain;
   const Acq *acq = nullptr;
   std::string out = holder + " calls ";
-  if (witnessPath(w.callee, to, !w.plausible, chain, acq)) {
+  if (witnessPath(w.callee, to, !w.plausible, !w.shared, chain, acq)) {
     constexpr size_t kHead = 2, kTail = 2;
     for (size_t i = 0; i < chain.size(); ++i) {
       if (chain.size() > kHead + kTail + 1 && i == kHead) {
@@ -749,7 +755,8 @@ void Analysis::reportCycle(llvm::ArrayRef<uint32_t> cycle, bool groupBounded,
   }
   msg += " Threads taking these paths at the same time can deadlock.";
   if (groupBounded)
-    msg += " (Other cycles among these locks were not enumerated: bound.)";
+    msg += " (The cycle search among these locks stopped at a bound: other "
+           "cycles may exist.)";
   std::vector<std::string> reasons;
   if (!opts_.coverageGap.empty())
     reasons.push_back(opts_.coverageGap);
@@ -926,13 +933,31 @@ void Analysis::findCycles(LockOrderStats &stats,
           groupBounded[g] = 1;
         continue;
       }
-      if (onPath[w] || path.size() >= opts_.maxCycleLength)
+      if (onPath[w])
         continue;
+      if (path.size() >= opts_.maxCycleLength) {
+        groupBounded[g] = 1; // longer cycles are not searched
+        continue;
+      }
       onPath[w] = 1;
       path.push_back({w, begin[w]});
     }
     if (total >= opts_.maxCycles)
       break;
+  }
+  if (total >= opts_.maxCycles) {
+    // The total bound stops the whole search: every group's findings say
+    // so, and the groups never reached are counted.
+    stats.cyclesCapped = true;
+    for (uint32_t g = 0; g < comps; ++g) {
+      if (compSize[g] < 2)
+        continue;
+      groupBounded[g] = 1;
+      if (!groupSeen[g]) {
+        groupSeen[g] = 1;
+        ++stats.lockGroups;
+      }
+    }
   }
   for (uint32_t g = 0; g < comps; ++g)
     stats.boundedGroups += groupBounded[g];
