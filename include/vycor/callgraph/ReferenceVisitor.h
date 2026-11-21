@@ -103,6 +103,7 @@ public:
   bool VisitCXXCatchStmt(clang::CXXCatchStmt *stmt);
   bool VisitCXXBindTemporaryExpr(clang::CXXBindTemporaryExpr *expr);
   bool VisitCXXNewExpr(clang::CXXNewExpr *expr);
+  bool VisitCXXInheritedCtorInitExpr(clang::CXXInheritedCtorInitExpr *expr);
   bool TraverseCXXDefaultInitExpr(clang::CXXDefaultInitExpr *expr);
   bool TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc);
   bool TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc);
@@ -159,7 +160,9 @@ private:
   // slot and are spliced at lowering.
   enum class Mode : uint8_t { AsWritten, Instantiation, Transparent };
   struct Work {
-    const clang::FunctionDecl *fn; // the definition (a destructor: the decl)
+    // A function's definition (a destructor: the decl), or the definition
+    // of a variable template's or static data member's instantiation.
+    const clang::Decl *decl;
     uint32_t slot;
     Mode mode;
   };
@@ -183,6 +186,8 @@ private:
   void noteVariableDefinition(const clang::VarDecl *var);
   void noteClass(const clang::CXXRecordDecl *cls);
   void noteExplicitInstantiations(clang::FunctionTemplateDecl *tmpl);
+  void noteExplicitInstantiations(clang::ClassTemplateDecl *tmpl);
+  void noteExplicitMembers(const clang::CXXRecordDecl *cls);
 
   void mark(const clang::Expr *expr, uint8_t bits);
   [[nodiscard]] uint8_t marksOf(const clang::Expr *expr) const;
@@ -210,10 +215,15 @@ private:
   uint32_t functionTarget(const clang::FunctionDecl *fn);
   uint32_t transparentSlot(const clang::FunctionDecl *fn);
   void scheduleInstantiation(const clang::FunctionDecl *fn, uint32_t slot);
+  void scheduleVariable(const clang::VarDecl *var, uint32_t slot);
+  uint32_t lambdaPatternSlot(const clang::FunctionDecl *op) const;
+  void scheduleLambda(const clang::FunctionDecl *op, uint32_t slot);
   void drainWork();
   void traverseWork(const Work &work);
+  void traverseWorkFunction(const clang::FunctionDecl *fn, uint32_t slot);
   void traverseImplicitInits(const clang::CXXConstructorDecl *ctor);
   void noteImplicitDestruction(const clang::CXXDestructorDecl *dtor);
+  void noteConstructorCleanup(const clang::CXXConstructorDecl *ctor);
   void noteDestructorOf(clang::QualType type, clang::SourceLocation site);
   void noteVariableDestruction(const clang::VarDecl *var);
   void noteVtableUse(const clang::CXXRecordDecl *cls,

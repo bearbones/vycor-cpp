@@ -63,8 +63,12 @@ range-based `for` calls the `begin`, `end`, `operator!=`, `operator++`
 and `operator*` it uses; a comparison rewritten from `operator<=>` or a
 reversed `operator==` calls that operator; a structured binding through
 `get` calls it; `delete p` calls the class's destructor and the
-`operator delete` it uses; `__attribute__((cleanup(fn)))` calls `fn`. A constructor
-inherited by a `using` declaration is a call of the base class's
+`operator delete` it uses (through a virtual destructor of a class that
+is not final, one virtual call: the destructor, and no `operator
+delete` unless it is `::delete`, since the deleting destructor the
+vtable holds calls it); `__attribute__((cleanup(fn)))` calls `fn`. A
+constructor inherited by a `using` declaration builds the derived
+class's other bases and members and calls the base class's
 constructor. A C function called without a declaration is a symbol like
 any other, declared at the call.
 
@@ -90,20 +94,34 @@ written code:
   instantiations. This is how a call resolved by argument-dependent
   lookup at instantiation time, an explicit specialization that only
   instantiations select, and the constructor call and `vtable_use`
-  behind `std::make_unique<T>()` or `emplace_back` are recorded. An
-  explicit instantiation definition reads its members' bodies the same
-  way.
+  behind `std::make_unique<T>()` or `emplace_back` are recorded. The
+  same holds for the initializer of a variable template's or a class
+  template's static data member's instantiation, and for the default
+  arguments an instantiation's callers use. An explicit instantiation
+  definition — of a class (the members of its nested classes too) or
+  of one member — reads those bodies the same way.
+- **Lambdas an instantiation copies.** The call operator of a generic
+  lambda, and a lambda in the body of a template's instantiation, are
+  read under the lambda as written: it stays the referrer, not the
+  function that calls it or the template it is passed to. A local
+  class's member in an instantiation is read when it is called, as an
+  instantiation of its own pattern.
 - **Implicit special-member calls.** The constructor and destructor
   calls of members, bases and temporaries, the destructor at the end of
   a scope (locals, static locals, globals, a thrown exception object),
-  an implicit destructor behind `delete`, and `operator new`/`operator
-  delete` behind an expression (a `new` also records the `operator
-  delete` that frees the storage if the constructor throws; a virtual
-  destructor records the one its deleting form calls).
+  an implicit destructor behind `delete` (a trivial one is no call),
+  and `operator new`/`operator delete` behind an expression (a virtual
+  destructor records the one its deleting form calls). With exceptions
+  enabled, the cleanup an exception runs: a constructor that can throw
+  destroys each base and member built before an initializer or a body
+  that can throw (a delegating constructor's body, the whole object); a
+  `new` whose initializer can throw records the `operator delete` that
+  frees the storage, and an array `new` the element destructor.
 - **Transparent functions.** A function that is not a symbol of its own
-  — an implicitly defined special member, an instantiation of a
-  system-header template (`std::make_unique`, `std::vector::emplace_back`),
-  a generic lambda's instantiated call operator — is read once per TU,
+  — an implicitly defined special member, an inheriting constructor,
+  the `operator==` a defaulted `operator<=>` declares, an instantiation
+  of a system-header template (`std::make_unique`,
+  `std::vector::emplace_back`) — is read once per TU,
   and what it references is recorded in each referrer that uses it,
   transitively. `std::make_unique<Impl>()` in `build()` records
   `build → Impl::Impl` and `build → vtable_use Impl`, with the site of
@@ -309,11 +327,27 @@ from it in the same TU ("Code the compiler writes").
 
 - **Unresolved overload sets.** An overload set a template pattern
   cannot resolve yet records an `address_of`/`call` to each candidate
-  when there are at most 16, and nothing beyond that; an instantiation
-  the TU uses adds the overload it actually selects.
+  when there are at most 16, and nothing beyond that. An instantiation
+  that selects one of them leaves the same record (same referrer, target
+  and site), so nothing marks which candidate was selected.
 - **Instantiations no TU makes.** Only the instantiations a TU uses are
   read. A template that no indexed TU instantiates holds only what its
-  pattern names.
+  pattern names. An instantiation the TU uses but does not define (the
+  template is only declared there) is read in the TU that defines it,
+  if any; its default arguments are not read. An explicit instantiation
+  of a static data member is read only where the member is used.
+- **One pattern for all instantiations.** A template's references are
+  the union over every instantiation the index read: `make<T>()` used
+  with `A` in one TU and `B` in another references both constructors.
+  A lambda in a template's body is a referrer whether or not anything
+  calls it.
+- **Exception paths, judged from the form of the code.** An initializer
+  cannot throw when it is a literal, a name, value-initialization, or a
+  trivial or non-throwing construction from such operands; anything
+  else, a call to a `noexcept` function included, is taken to throw, and
+  so is any non-empty constructor body. A cleanup the compiler proves
+  unnecessary may therefore be recorded. A TU compiled with
+  `-fno-exceptions` records none.
 - **Compiler builtins and deduction guides** (`__builtin_expect`) are
   never targets; an implicitly defined special member is not a target
   either, its references are recorded in its users.
@@ -330,8 +364,8 @@ from it in the same TU ("Code the compiler writes").
   targets: they are what a link resolves. Naming a class as a type, an
   enumerator, or a macro leaves nothing in the object code, so it is not
   a reference.
-- **Default arguments** are attributed where they are written, not to
-  each call that uses them.
+- **Default arguments** are attributed where they are written (an
+  instantiation's, to the template), not to each call that uses them.
 - **Conservative roles.** A non-const member call or non-const
   `operator[]` on a global is a `write` whether or not it mutates;
   binding to a non-const reference is `address_of`.

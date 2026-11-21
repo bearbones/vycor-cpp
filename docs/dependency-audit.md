@@ -205,10 +205,10 @@ the closure, but name no symbol of a row.
   site. Two or more calls (or address-ofs) from one referrer, at one
   witness site, to different symbols of one unqualified name are such
   candidates (`references.overloadCandidates`): any one instantiation
-  uses one of them, or none. The candidate an instantiation the index
-  read actually selects is also an ordinary reference. Differently
-  named targets at one site — a macro expanding to several calls — are
-  ordinary references.
+  uses one of them, or none. An instantiation that selects one leaves
+  the same record (same referrer, target and site), so nothing marks
+  the selected candidate. Differently named targets at one site — a
+  macro expanding to several calls — are ordinary references.
 
 The audit adds the references the compiler writes for a class:
 
@@ -491,6 +491,10 @@ Known ways an answer is wrong, beyond what the tags say:
   references are the union of every instantiation the index read, so a
   closure through `make<T>()` includes what the other `T`s' constructors
   need.
+- **Compiler-written code is read, with the approximations
+  `docs/symbol-references.md` lists under "Limits"** (an exception path
+  judged from the form of the code, instantiations a TU names but does
+  not define).
 - **Seeds can be compile-time only.** A call the optimizer folded or an
   inline body the compiler never emitted is still a reference here; the
   objects do not need the symbol.

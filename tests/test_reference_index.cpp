@@ -1140,6 +1140,9 @@ namespace b { struct B {}; void hook(B); }
 namespace c { struct C {}; void hook(C); }
 void run() { visit(a::A{}); visit(b::B{}); }
 void spare(c::C x) { (void)x; }
+namespace d { struct D {}; struct E : D {}; void touch(D); }
+template <class T> void twice(T t) { touch(t); touch(t); }
+void run2() { twice(d::D{}); twice(d::E{}); }
 )cpp");
   const ReferenceIndex &refs = ix.references;
   // Found only at instantiation: recorded against the pattern, once per
@@ -1152,6 +1155,9 @@ void spare(c::C x) { (void)x; }
   // The pattern's own references are not counted again per instantiation.
   CHECK(reference(refs, "visit", "g", RefRole::Write).count == 2);
   CHECK(roles(refs, "run", "visit") == "call");
+  // Two instantiations reaching the same target: the larger count of one,
+  // not the sum.
+  CHECK(reference(refs, "twice", "d::touch", RefRole::Call).count == 2);
 }
 
 TEST_CASE("references: an explicit specialization an instantiation selects "
@@ -1202,12 +1208,14 @@ void instantiate() { later<Impl>(); }
   const ReferenceIndex &refs = ix.references;
   // make<Impl> runs Impl's implicit constructor (which stores Impl's and
   // Base's vtable pointers) and allocates; owner<Impl>'s destructor deletes
-  // through Impl's implicit destructor, which calls Base's.
+  // through the virtual destructor, which Impl's vtable holds: the class
+  // references what it does (Base's destructor, the deallocation).
   CHECK(roles(refs, "build", "Impl") == "vtable_use");
   CHECK(roles(refs, "build", "Base") == "vtable_use");
-  CHECK(roles(refs, "build", "Base::~Base") == "call");
   CHECK(roles(refs, "build", "operator new") == "call");
-  CHECK(roles(refs, "build", "operator delete") == "call");
+  CHECK(roles(refs, "build", "Base::~Base").empty());
+  CHECK(roles(refs, "Impl", "Base::~Base") == "call");
+  CHECK(roles(refs, "Impl", "operator delete") == "call");
   // The constructor call behind emplace.
   CHECK(roles(refs, "grow", "Plain::Plain") == "call");
   // A recorded template's instantiation reaches the same code.
@@ -1304,17 +1312,250 @@ Iface *node() { return new Node<a::A>; }
   CHECK(roles(refs, "Node::f", "a::hook") == "call");
 }
 
-TEST_CASE("references: a generic lambda's instantiation lands on its caller",
+TEST_CASE("references: a lambda's instantiation lands on the lambda",
           "[references]") {
   Project p;
   auto ix = bakeOne(p, R"cpp(
 namespace a { struct A {}; void hook(A); }
+template <class F> void apply(F f) { f(a::A{}); }
 void run() {
   auto each = [](auto x) { hook(x); };
   each(a::A{});
 }
+void passed() { apply([](auto x) { hook(x); }); }
+template <class T> void inTemplate() { auto l = [](T x) { hook(x); }; l(T{}); }
+void useInTemplate() { inTemplate<a::A>(); }
+template <class T> void unused() { auto l = [](T x) { hook(x); }; (void)l; }
+void useUnused() { unused<a::A>(); }
 )cpp");
-  CHECK(roles(ix.references, "run", "a::hook") == "call");
+  const ReferenceIndex &refs = ix.references;
+  // Each lambda as written is the referrer: not the function that calls it,
+  // nor the template it is passed to, nor the template it is written in. A
+  // lambda is a referrer whether or not it is called, as written or copied.
+  std::vector<std::string> hosts;
+  for (const ReferenceInfo &r : refs.allReferences()) {
+    if (r.targetName != "a::hook")
+      continue;
+    INFO(r.referrerUsr);
+    CHECK(r.referrerUsr.rfind("vycor-lambda:", 0) == 0);
+    hosts.push_back(r.referrerUsr.substr(r.referrerUsr.rfind('#') + 1));
+  }
+  std::sort(hosts.begin(), hosts.end());
+  CHECK(hosts ==
+        std::vector<std::string>{"inTemplate", "passed", "run", "unused"});
+  for (const char *fn : {"run", "apply", "passed", "inTemplate", "unused"})
+    CHECK(roles(refs, fn, "a::hook").empty());
+}
+
+TEST_CASE("references: what a template reached through a call references "
+          "may lead back to the caller",
+          "[references]") {
+  Project p;
+  llvm::sys::fs::create_directory(p.path("sys"));
+  p.header("sys/ping.h", R"cpp(#pragma once
+#pragma GCC system_header
+namespace sys {
+template <class T> void pong(T t, int n);
+template <class T> void ping(T t, int n) { if (n) pong(t, n - 1); else finish(t); }
+template <class T> void pong(T t, int n) { if (n) ping(t, n - 1); else touch(t); }
+template <class T> void visit(T t) { revisit(t); }
+}
+)cpp");
+  auto ix = bakeOne(p, R"cpp(#include "sys/ping.h"
+namespace a { struct A {}; void finish(A); void touch(A); }
+void viaPing() { sys::ping(a::A{}, 3); }
+namespace u { struct U {}; void revisit(U u) { sys::visit(u); } }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // Two system templates calling each other: one component, both reached.
+  CHECK(roles(refs, "viaPing", "a::finish") == "call");
+  CHECK(roles(refs, "viaPing", "a::touch") == "call");
+  // Recursion through a system template is a reference like direct
+  // recursion is.
+  CHECK(roles(refs, "u::revisit", "u::revisit") == "call");
+}
+
+TEST_CASE("references: inheriting constructors build the derived class",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { Res(); ~Res(); };
+struct B { B(int); };
+struct D : B { using B::B; Res r; };
+void makeD() { D d(1); (void)d; }
+namespace a { struct A {}; void hook(A); }
+template <class T> struct TB { TB(int) { hook(T{}); } };
+struct TD : TB<a::A> { using TB::TB; };
+void makeTD() { TD d(1); (void)d; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "makeD", "B::B") == "call");
+  CHECK(roles(refs, "makeD", "Res::Res") == "call");
+  CHECK(roles(refs, "makeD", "Res::~Res") == "call");
+  // The inherited constructor of a class template's specialization is
+  // read as an instantiation.
+  CHECK(roles(refs, "makeTD", "TB::TB<T>") == "call");
+  CHECK(roles(refs, "TB::TB<T>", "a::hook") == "call");
+}
+
+TEST_CASE("references: the operator== a defaulted operator<=> declares",
+          "[references]") {
+  Project p;
+  p.flags = {"-std=c++20", "-Wno-defaulted-function-deleted"};
+  auto ix = bakeOne(p, R"cpp(
+struct M { bool operator==(const M &) const; };
+struct P { M m; auto operator<=>(const P &) const = default; };
+bool eqP(const P &a, const P &b) { return a == b; }
+struct F { M m; friend auto operator<=>(const F &, const F &) = default; };
+bool eqF(const F &a, const F &b) { return a == b; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "eqP", "M::operator==") == "call");
+  CHECK(roles(refs, "eqF", "M::operator==") == "call");
+  // Compiler-written, member or friend: no symbol of its own.
+  CHECK_FALSE(hasSymbol(refs, "P::operator=="));
+  CHECK_FALSE(hasSymbol(refs, "operator=="));
+}
+
+TEST_CASE("references: a constructor that throws destroys what it built",
+          "[references]") {
+  const char *code = R"cpp(
+struct Res { Res(); ~Res(); };
+struct Thrower { Thrower(); ~Thrower(); };
+struct Two { Res r; Thrower t; Two(); };
+Two::Two() {}
+struct Last { Res r; int x; Last(); };
+Last::Last() : x(1) {}
+struct Body { Res r; Body(); };
+Body::Body() { (void)0; }
+struct Quiet { Res r; Thrower t; Quiet() noexcept; };
+Quiet::Quiet() noexcept {}
+struct Dg { Res r; Dg(int); Dg(); ~Dg(); };
+Dg::Dg() : Dg(1) { (void)0; }
+void arr() { auto *p = new Res[2]; (void)p; }
+)cpp";
+  SECTION("with exceptions") {
+    Project p;
+    auto ix = bakeOne(p, code);
+    const ReferenceIndex &refs = ix.references;
+    // A later member can throw: the earlier one is destroyed.
+    CHECK(roles(refs, "Two::Two", "Res::~Res") == "call");
+    // Nothing can throw after the last one is built.
+    CHECK(roles(refs, "Two::Two", "Thrower::~Thrower").empty());
+    CHECK(roles(refs, "Last::Last", "Res::~Res").empty());
+    // The body can throw after every member is built.
+    CHECK(roles(refs, "Body::Body", "Res::~Res") == "call");
+    // A non-throwing constructor has no cleanup.
+    CHECK(roles(refs, "Quiet::Quiet", "Res::~Res").empty());
+    // A delegating constructor's body destroys the complete object.
+    CHECK(roles(refs, "Dg::Dg", "Dg::~Dg") == "call");
+    // An array new destroys the elements built when a later one throws.
+    CHECK(roles(refs, "arr", "Res::~Res") == "call");
+  }
+  SECTION("without exceptions") {
+    Project p;
+    p.flags = {"-std=c++17", "-fno-exceptions"};
+    auto ix = bakeOne(p, code);
+    const ReferenceIndex &refs = ix.references;
+    CHECK(roles(refs, "Two::Two", "Res::~Res").empty());
+    CHECK(roles(refs, "Body::Body", "Res::~Res").empty());
+    CHECK(roles(refs, "arr", "Res::~Res").empty());
+    CHECK(roles(refs, "arr", "Res::Res") == "call");
+  }
+}
+
+TEST_CASE("references: explicit instantiations of members and nested classes",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; void hook(A); void other(A); }
+template <class T> struct Box { void fill() { hook(T{}); } void spare() { other(T{}); } };
+template void Box<a::A>::fill();
+template <class T> struct Holder { struct Inner { void go() { hook(T{}); } }; };
+template struct Holder<a::A>;
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "Box::fill", "a::hook") == "call");
+  // Only the member instantiated.
+  CHECK(roles(refs, "Box::spare", "a::other").empty());
+  CHECK(roles(refs, "Holder::Inner::go", "a::hook") == "call");
+}
+
+TEST_CASE("references: what an instantiation's initializer and default "
+          "arguments reference belongs to the template",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; int hook(A); }
+template <class T> int vt = hook(T{});
+template <class T> struct S { static inline int t = hook(T{}); };
+int readVt() { return vt<a::A>; }
+int readT() { return S<a::A>::t; }
+template <class T> void defarg(T, int = hook(T{})) {}
+void useDefarg() { defarg(a::A{}); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "vt", "a::hook") == "call");
+  CHECK(roles(refs, "S::t", "a::hook") == "call");
+  CHECK(roles(refs, "readVt", "vt") == "read");
+  CHECK(roles(refs, "defarg", "a::hook") == "call");
+}
+
+TEST_CASE("references: a local class in an instantiation runs only when "
+          "called",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+namespace a { struct A {}; void hook(A); void other(A); void third(A); }
+template <class T> void local() {
+  struct L { void m() { other(T{}); } };
+  struct K { void n() { third(T{}); } };
+  K{}.n();
+  hook(T{});
+}
+void useLocal() { local<a::A>(); }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  CHECK(roles(refs, "local", "a::hook") == "call");
+  CHECK(roles(refs, "local", "a::other").empty());
+  CHECK(roles(refs, "local", "a::third").empty());
+  bool other = false;
+  for (const ReferenceInfo &r : refs.allReferences())
+    other = other || r.targetName == "a::other";
+  CHECK_FALSE(other);
+  CHECK(roles(refs, "local()::K::n", "a::third") == "call");
+}
+
+TEST_CASE("references: delete through a virtual or trivial destructor",
+          "[references]") {
+  Project p;
+  auto ix = bakeOne(p, R"cpp(
+struct Res { ~Res(); };
+struct VB { virtual ~VB(); };
+struct VD : VB { Res r; };
+void dropVirtual(VD *d) { delete d; }
+struct Fin final : VB { Res r; };
+void dropFinal(Fin *f) { delete f; }
+void dropGlobal(VD *d) { ::delete d; }
+struct Triv { ~Triv() = default; };
+void dropTriv(Triv *t) { delete t; }
+)cpp");
+  const ReferenceIndex &refs = ix.references;
+  // One virtual call: the destructor and the deallocation are the dynamic
+  // type's.
+  CHECK(roles(refs, "dropVirtual", "Res::~Res").empty());
+  CHECK(roles(refs, "dropVirtual", "VB::~VB").empty());
+  CHECK(roles(refs, "dropVirtual", "operator delete").empty());
+  // A final class's destructor is called directly.
+  CHECK(roles(refs, "dropFinal", "Res::~Res") == "call");
+  CHECK(roles(refs, "dropFinal", "VB::~VB") == "call");
+  CHECK(roles(refs, "dropFinal", "operator delete") == "call");
+  // ::delete calls the global deallocation function itself.
+  CHECK(roles(refs, "dropGlobal", "operator delete") == "call");
+  CHECK(roles(refs, "dropGlobal", "Res::~Res").empty());
+  // A trivial destructor is no call.
+  CHECK(roles(refs, "dropTriv", "Triv::~Triv").empty());
+  CHECK(roles(refs, "dropTriv", "operator delete") == "call");
 }
 
 TEST_CASE("references: decltype in a template references nothing",

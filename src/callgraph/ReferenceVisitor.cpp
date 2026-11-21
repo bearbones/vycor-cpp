@@ -176,6 +176,54 @@ attributeFlags(const clang::NamedDecl *decl,
   return true;
 }
 
+// Whether a function's exception specification lets it throw. One Sema has
+// not computed yet counts as throwing.
+[[nodiscard]] bool canThrow(const clang::FunctionDecl *fn) {
+  const auto *proto = fn->getType()->getAs<clang::FunctionProtoType>();
+  if (!proto || clang::isUnresolvedExceptionSpec(proto->getExceptionSpecType()))
+    return true;
+  return proto->canThrow() != clang::CT_Cannot;
+}
+
+// Whether evaluating an initializer can throw, conservatively: a literal, a
+// name, value-initialization and a trivial or non-throwing construction from
+// such operands cannot; anything else (a call, an allocation) may.
+[[nodiscard]] bool mayThrow(const clang::Expr *expr) {
+  if (!expr)
+    return false;
+  expr = expr->IgnoreImplicit();
+  if (const auto *init = llvm::dyn_cast<clang::CXXDefaultInitExpr>(expr))
+    return mayThrow(init->getExpr());
+  if (const auto *arg = llvm::dyn_cast<clang::CXXDefaultArgExpr>(expr))
+    return mayThrow(arg->getExpr());
+  if (llvm::isa<clang::IntegerLiteral, clang::FloatingLiteral,
+                clang::CharacterLiteral, clang::StringLiteral,
+                clang::CXXBoolLiteralExpr, clang::CXXNullPtrLiteralExpr,
+                clang::ImplicitValueInitExpr, clang::CXXScalarValueInitExpr,
+                clang::DeclRefExpr>(expr))
+    return false;
+  if (const auto *construct = llvm::dyn_cast<clang::CXXConstructExpr>(expr)) {
+    const clang::CXXConstructorDecl *ctor = construct->getConstructor();
+    if (!ctor || (!ctor->isTrivial() && canThrow(ctor)))
+      return true;
+    for (const clang::Expr *arg : construct->arguments())
+      if (mayThrow(arg))
+        return true;
+    return false;
+  }
+  if (const auto *list = llvm::dyn_cast<clang::InitListExpr>(expr)) {
+    for (const clang::Expr *init : list->inits())
+      if (mayThrow(init))
+        return true;
+    return false;
+  }
+  if (const auto *cast = llvm::dyn_cast<clang::CastExpr>(expr))
+    if (cast->getCastKind() != clang::CK_ConstructorConversion &&
+        cast->getCastKind() != clang::CK_UserDefinedConversion)
+      return mayThrow(cast->getSubExpr());
+  return true;
+}
+
 } // namespace
 
 ReferenceVisitor::ReferenceVisitor(ReferenceIndex &index,
@@ -215,6 +263,8 @@ bool ReferenceVisitor::TraverseDecl(clang::Decl *decl) {
     noteClass(cls);
   else if (auto *tmpl = llvm::dyn_cast<clang::FunctionTemplateDecl>(decl))
     noteExplicitInstantiations(tmpl);
+  else if (auto *cls = llvm::dyn_cast<clang::ClassTemplateDecl>(decl))
+    noteExplicitInstantiations(cls);
   return Base::TraverseDecl(decl);
 }
 
@@ -229,10 +279,10 @@ void ReferenceVisitor::popFrame() {
 }
 
 bool ReferenceVisitor::traverseFunction(clang::FunctionDecl *fn) {
-  // A member of a local class inside an instantiation's body: what it
-  // references belongs to the instantiation being read.
+  // A member of a local class inside an instantiation's body runs only when
+  // called: a call schedules it as an instantiation of its own pattern.
   if (mode_ != Mode::AsWritten)
-    return Base::TraverseDecl(fn);
+    return true;
   frames_.push_back({fn, kUnresolved, FrameKind::Function, fn->isTemplated()});
   const bool definition =
       fn->isThisDeclarationADefinition() && !fn->isDeleted();
@@ -243,8 +293,11 @@ bool ReferenceVisitor::traverseFunction(clang::FunctionDecl *fn) {
     // What the compiler writes into this function: member and base
     // initializers not written, the body of a defaulted function (the
     // traversal skips both), the destruction of members and bases.
-    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
+    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn)) {
       traverseImplicitInits(ctor);
+      if (!ctor->isDependentContext())
+        noteConstructorCleanup(ctor);
+    }
     if (fn->isDefaulted() && !fn->isDependentContext())
       TraverseStmt(fn->getBody());
     if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
@@ -354,10 +407,7 @@ void ReferenceVisitor::noteClass(const clang::CXXRecordDecl *cls) {
       }
       // The TU emits every member: read their bodies.
       if (spec->hasDefinition())
-        for (const clang::CXXMethodDecl *method :
-             spec->getDefinition()->methods())
-          if (!method->isImplicit())
-            functionTarget(method);
+        noteExplicitMembers(spec->getDefinition());
       return;
     }
   }
@@ -388,14 +438,66 @@ void ReferenceVisitor::noteExplicitInstantiations(
   }
 }
 
+// An explicit instantiation of a member (`template void Box<A>::fill();`)
+// leaves no declaration in the enclosing context either; nor do members of
+// a nested class of an explicitly instantiated class. Both show as the
+// member's specialization kind in the template's specializations.
+void ReferenceVisitor::noteExplicitInstantiations(
+    clang::ClassTemplateDecl *tmpl) {
+  if (tmpl != tmpl->getCanonicalDecl())
+    return;
+  for (const clang::ClassTemplateSpecializationDecl *spec :
+       tmpl->specializations())
+    if (const clang::CXXRecordDecl *def = spec->getDefinition())
+      noteExplicitMembers(def);
+}
+
+// The members of `cls` and of its nested classes the TU emits as explicit
+// instantiation definitions: their bodies are read.
+void ReferenceVisitor::noteExplicitMembers(const clang::CXXRecordDecl *cls) {
+  if (cls->isInvalidDecl() || cls->isDependentContext())
+    return;
+  for (const clang::Decl *member : cls->decls()) {
+    if (const auto *nested = llvm::dyn_cast<clang::CXXRecordDecl>(member)) {
+      if (!nested->isInjectedClassName() &&
+          nested->isThisDeclarationADefinition())
+        noteExplicitMembers(nested);
+      continue;
+    }
+    const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(member);
+    if (method && !method->isImplicit() &&
+        method->getTemplateSpecializationKind() ==
+            clang::TSK_ExplicitInstantiationDefinition)
+      functionTarget(method);
+  }
+}
+
 bool ReferenceVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
   const clang::CXXMethodDecl *op = expr->getCallOperator();
-  // In an instantiation's body a lambda's references belong to the
-  // instantiation: its closure type there is no identity the code as
-  // written has.
-  if (!op || mode_ != Mode::AsWritten)
+  if (!op)
     return Base::TraverseLambdaExpr(expr);
+  if (mode_ != Mode::AsWritten) {
+    // In an instantiation's body the closure is a copy of a lambda the code
+    // as written has: its body is read under that lambda, when its call
+    // operator runs (a generic one's, when an instantiation is used). A
+    // lambda no traversal as written saw (a system template's) is part of
+    // the function being read.
+    const uint32_t slot = lambdaPatternSlot(op);
+    if (slot == kDropped)
+      return Base::TraverseLambdaExpr(expr);
+    if (!op->getDescribedFunctionTemplate())
+      scheduleLambda(op, slot);
+    for (unsigned i = 0, n = expr->capture_size(); i < n; ++i)
+      if (!TraverseLambdaCapture(expr, expr->capture_begin() + i,
+                                 expr->capture_init_begin()[i]))
+        return false;
+    return true;
+  }
   frames_.push_back({op, kUnresolved, FrameKind::Lambda, op->isTemplated()});
+  // A lambda an instantiation copies needs its identity when that copy is
+  // read, whether or not the code as written references anything.
+  if (op->isTemplated())
+    resolveFrame(frames_.size() - 1);
   const bool ok = Base::TraverseLambdaExpr(expr);
   popFrame();
   return ok;
@@ -734,22 +836,34 @@ bool ReferenceVisitor::VisitBindingDecl(clang::BindingDecl *decl) {
 
 // `delete p` runs the destructor of what p points at, then the
 // deallocation function.
+// Through a virtual destructor both are one virtual call: the deleting
+// destructor the vtable holds calls the deallocation function (`::delete p`
+// still calls the global one itself). What that destructor does is the
+// dynamic type's, not read here.
 bool ReferenceVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   if (unevaluated_ > 0)
     return true;
-  if (const clang::FunctionDecl *dealloc = expr->getOperatorDelete())
-    addRef(functionTarget(dealloc), RefRole::Call, expr->getBeginLoc());
+  const clang::SourceLocation site = expr->getBeginLoc();
+  const clang::CXXDestructorDecl *dtor = nullptr;
+  bool dispatched = false;
   clang::QualType type = expr->getDestroyedType();
-  if (type.isNull())
+  const clang::CXXRecordDecl *cls =
+      type.isNull() ? nullptr : type->getAsCXXRecordDecl();
+  if (cls && cls->hasDefinition()) {
+    cls = cls->getDefinition();
+    if (!cls->isInvalidDecl() && !cls->isDependentContext() &&
+        !cls->hasTrivialDestructor())
+      dtor = cls->getDestructor();
+    dispatched = dtor && dtor->isVirtual() && !expr->isArrayForm() &&
+                 !cls->isEffectivelyFinal() && !dtor->hasAttr<clang::FinalAttr>();
+  }
+  if (const clang::FunctionDecl *dealloc = expr->getOperatorDelete())
+    if (!dispatched || expr->isGlobalDelete())
+      addRef(functionTarget(dealloc), RefRole::Call, site);
+  if (!dtor)
     return true;
-  const clang::CXXRecordDecl *cls = type->getAsCXXRecordDecl();
-  if (!cls || !cls->hasDefinition())
-    return true;
-  cls = cls->getDefinition();
-  if (cls->isInvalidDecl() || cls->isDependentContext())
-    return true;
-  if (const clang::CXXDestructorDecl *dtor = cls->getDestructor())
-    addRef(functionTarget(dtor), RefRole::Call, expr->getBeginLoc());
+  addRef(dispatched ? targetSlot(dtor) : functionTarget(dtor), RefRole::Call,
+         site);
   return true;
 }
 
@@ -759,10 +873,27 @@ bool ReferenceVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
 bool ReferenceVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
   if (unevaluated_ > 0)
     return true;
+  const clang::SourceLocation site = expr->getBeginLoc();
   if (const clang::FunctionDecl *alloc = expr->getOperatorNew())
-    addRef(functionTarget(alloc), RefRole::Call, expr->getBeginLoc());
+    addRef(functionTarget(alloc), RefRole::Call, site);
+  // Only an initializer that can throw needs the cleanup: the deallocation
+  // function, and for an array the destruction of the elements built.
+  if (!ctx_->getLangOpts().CXXExceptions ||
+      !mayThrow(expr->getInitializer()))
+    return true;
   if (const clang::FunctionDecl *dealloc = expr->getOperatorDelete())
-    addRef(functionTarget(dealloc), RefRole::Call, expr->getBeginLoc());
+    addRef(functionTarget(dealloc), RefRole::Call, site);
+  if (expr->isArray())
+    noteDestructorOf(expr->getAllocatedType(), site);
+  return true;
+}
+
+// The base-class constructor an inheriting constructor runs.
+bool ReferenceVisitor::VisitCXXInheritedCtorInitExpr(
+    clang::CXXInheritedCtorInitExpr *expr) {
+  if (unevaluated_ == 0 && expr->getConstructor())
+    addRef(functionTarget(expr->getConstructor()), RefRole::Call,
+           expr->getLocation());
   return true;
 }
 
@@ -937,6 +1068,7 @@ void ReferenceVisitor::noteVariableUse(const clang::VarDecl *var,
   const uint32_t target = targetSlot(var);
   if (target == kDropped)
     return;
+  scheduleVariable(var, target);
   const uint8_t marks = marksOf(expr);
   bool accessed = false;
   // Calling through a function pointer or functor reads it.
@@ -1044,6 +1176,13 @@ namespace {
 // A special member the compiler defines: implicit, or defaulted on its
 // first declaration.
 [[nodiscard]] bool isCompilerWrittenSpecialMember(const clang::FunctionDecl *fn) {
+  // The operator== a defaulted operator<=> declares, member or friend.
+  if (fn->isImplicit() && fn->isDefaulted())
+    return true;
+  // `using Base::Base;` declares derived constructors the compiler writes.
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
+    if (ctor->isImplicit() && ctor->isInheritingConstructor())
+      return true;
   const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
   if (!method || method->isUserProvided())
     return false;
@@ -1071,13 +1210,82 @@ uint32_t ReferenceVisitor::functionTarget(const clang::FunctionDecl *fn) {
   auto found = funcSlot_.find(fn);
   if (found != funcSlot_.end())
     return found->second;
-  uint32_t slot = targetSlot(fn);
-  if (slot != kDropped)
-    scheduleInstantiation(fn, slot);
-  else
+  uint32_t slot = kDropped;
+  const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn);
+  const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
+  if (ctor && ctor->isImplicit() && ctor->isInheritingConstructor()) {
+    // `using Base::Base;`: the derived constructor builds the other bases
+    // and the members, then runs the base constructor. Not defined (only
+    // named): the base constructor.
     slot = transparentSlot(fn);
+    if (slot == kDropped)
+      slot = functionTarget(ctor->getInheritedConstructor().getConstructor());
+  } else if (method && method->getParent()->isLambda()) {
+    // A copy of a lambda the code as written has (an instantiation of a
+    // generic lambda, a lambda in an instantiation's body): read under that
+    // lambda. A call to a lambda is no reference of its own.
+    const uint32_t lambda = lambdaPatternSlot(fn);
+    if (lambda != kDropped)
+      scheduleLambda(fn, lambda);
+    else
+      slot = transparentSlot(fn);
+  } else {
+    slot = targetSlot(fn);
+    if (slot != kDropped)
+      scheduleInstantiation(fn, slot);
+    else
+      slot = transparentSlot(fn);
+  }
   funcSlot_[fn] = slot;
   return slot;
+}
+
+// The slot of the lambda as written that `op` (a closure's call operator) is
+// a copy of, or kDropped. Follows the instantiation chain: a specialization
+// of a generic call operator, the call operator of a closure in an
+// instantiated body, a member template instantiated from one.
+uint32_t
+ReferenceVisitor::lambdaPatternSlot(const clang::FunctionDecl *op) const {
+  const clang::FunctionDecl *step = op;
+  for (unsigned depth = 0; step && depth < 8; ++depth) {
+    auto found = lambdaSlot_.find(step);
+    if (found != lambdaSlot_.end())
+      return step == op ? kDropped : found->second; // as written: read already
+    const clang::FunctionDecl *next = nullptr;
+    if (const clang::FunctionTemplateDecl *primary = step->getPrimaryTemplate())
+      next = primary->getTemplatedDecl();
+    else if (const clang::FunctionDecl *member =
+                 step->getInstantiatedFromMemberFunction())
+      next = member;
+    else if (const clang::FunctionTemplateDecl *described =
+                 step->getDescribedFunctionTemplate())
+      if (const clang::FunctionTemplateDecl *from =
+              described->getInstantiatedFromMemberTemplate())
+        next = from->getTemplatedDecl();
+    step = next;
+  }
+  return kDropped;
+}
+
+void ReferenceVisitor::scheduleLambda(const clang::FunctionDecl *op,
+                                      uint32_t slot) {
+  const clang::FunctionDecl *def = readableDefinition(op);
+  if (!def || !scheduled_.insert(def).second)
+    return;
+  work_.push_back({def, slot, Mode::Instantiation});
+}
+
+// The initializer of a variable template's or a class template's static
+// data member's instantiation, read under the pattern's slot.
+void ReferenceVisitor::scheduleVariable(const clang::VarDecl *var,
+                                        uint32_t slot) {
+  if (!var->getTemplateInstantiationPattern())
+    return;
+  const clang::VarDecl *def = var->getDefinition();
+  if (!def || !def->hasInit() || def->isInvalidDecl() ||
+      def->getDeclContext()->isDependentContext() || !scheduled_.insert(def).second)
+    return;
+  work_.push_back({def, slot, Mode::Instantiation});
 }
 
 // An instantiation of a recorded template: its body is read once, under the
@@ -1135,31 +1343,17 @@ void ReferenceVisitor::drainWork() {
 
 void ReferenceVisitor::traverseWork(const Work &work) {
   assert(frames_.empty() && unevaluated_ == 0);
-  const clang::FunctionDecl *fn = work.fn;
   mode_ = work.mode;
   if (mode_ == Mode::Instantiation)
     instAcc_.clear();
-  frames_.push_back({fn, work.slot, FrameKind::Function, false});
-  const bool defined = fn->doesThisDeclarationHaveABody() ||
-                       fn->isThisDeclarationADefinition();
-  if (defined && !fn->isInvalidDecl() && !fn->isDependentContext()) {
-    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
-      for (const clang::CXXCtorInitializer *init : ctor->inits())
-        if (init->getInit())
-          TraverseStmt(init->getInit());
-    TraverseStmt(fn->getBody());
+  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(work.decl)) {
+    frames_.push_back({var, work.slot, FrameKind::Variable, false});
+    TraverseStmt(const_cast<clang::Expr *>(var->getInit()));
+    noteDestructorOf(var->getType(), var->getLocation());
+  } else {
+    traverseWorkFunction(llvm::cast<clang::FunctionDecl>(work.decl),
+                         work.slot);
   }
-  if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
-    noteImplicitDestruction(dtor);
-  // A constructor or destructor stores the vtable pointer.
-  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
-    if (llvm::isa<clang::CXXConstructorDecl>(method) ||
-        llvm::isa<clang::CXXDestructorDecl>(method)) {
-      const clang::CXXRecordDecl *cls = method->getParent();
-      if (cls->hasDefinition() && !cls->isDependentContext() &&
-          cls->isDynamicClass())
-        noteVtableUse(cls, fn->getLocation());
-    }
   frames_.pop_back();
   marks_.clear();
   if (mode_ == Mode::Instantiation) {
@@ -1173,6 +1367,40 @@ void ReferenceVisitor::traverseWork(const Work &work) {
   mode_ = Mode::AsWritten;
 }
 
+void ReferenceVisitor::traverseWorkFunction(const clang::FunctionDecl *fn,
+                                            uint32_t slot) {
+  frames_.push_back({fn, slot, FrameKind::Function, false});
+  const bool defined = fn->doesThisDeclarationHaveABody() ||
+                       fn->isThisDeclarationADefinition();
+  if (defined && !fn->isInvalidDecl() && !fn->isDependentContext()) {
+    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn)) {
+      for (const clang::CXXCtorInitializer *init : ctor->inits())
+        if (init->getInit())
+          TraverseStmt(init->getInit());
+      noteConstructorCleanup(ctor);
+    }
+    TraverseStmt(fn->getBody());
+    // Default arguments an instantiation's callers used, instantiated on
+    // this declaration: attributed where they are written, as elsewhere.
+    if (mode_ == Mode::Instantiation)
+      for (const clang::ParmVarDecl *param : fn->parameters())
+        if (param->hasDefaultArg() && !param->hasUninstantiatedDefaultArg() &&
+            !param->hasUnparsedDefaultArg())
+          TraverseStmt(const_cast<clang::Expr *>(param->getDefaultArg()));
+  }
+  if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
+    noteImplicitDestruction(dtor);
+  // A constructor or destructor stores the vtable pointer.
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
+    if (llvm::isa<clang::CXXConstructorDecl>(method) ||
+        llvm::isa<clang::CXXDestructorDecl>(method)) {
+      const clang::CXXRecordDecl *cls = method->getParent();
+      if (cls->hasDefinition() && !cls->isDependentContext() &&
+          cls->isDynamicClass())
+        noteVtableUse(cls, fn->getLocation());
+    }
+}
+
 // Member and base initializers a constructor does not write (default
 // construction, a default member initializer).
 void ReferenceVisitor::traverseImplicitInits(
@@ -1180,6 +1408,45 @@ void ReferenceVisitor::traverseImplicitInits(
   for (const clang::CXXCtorInitializer *init : ctor->inits())
     if (!init->isWritten() && init->getInit())
       TraverseStmt(init->getInit());
+}
+
+// If a constructor throws, the bases and members already built are
+// destroyed: each one a later initializer or the body can throw after. A
+// delegating constructor's object is complete once the target returns, so
+// its body throwing runs the class's destructor.
+void ReferenceVisitor::noteConstructorCleanup(
+    const clang::CXXConstructorDecl *ctor) {
+  if (!ctx_->getLangOpts().CXXExceptions || ctor->isInvalidDecl() ||
+      !canThrow(ctor))
+    return;
+  const clang::CXXRecordDecl *cls = ctor->getParent();
+  if (!cls->hasDefinition())
+    return;
+  cls = cls->getDefinition();
+  if (cls->isInvalidDecl() || cls->isDependentContext() || cls->isUnion())
+    return;
+  const auto *body =
+      llvm::dyn_cast_or_null<clang::CompoundStmt>(ctor->getBody());
+  bool later = body && !body->body_empty();
+  const clang::SourceLocation site = ctor->getLocation();
+  if (ctor->isDelegatingConstructor()) {
+    if (later)
+      noteDestructorOf(ctx_->getRecordType(cls), site);
+    return;
+  }
+  // Initializers are in construction order: walk them last to first.
+  clang::CXXConstructorDecl::init_const_iterator inits = ctor->init_begin();
+  for (unsigned i = ctor->getNumCtorInitializers(); i-- > 0;) {
+    const clang::CXXCtorInitializer *init = inits[i];
+    if (later) {
+      if (init->isBaseInitializer())
+        noteDestructorOf(clang::QualType(init->getBaseClass(), 0), site);
+      else if (const clang::FieldDecl *field = init->getAnyMember())
+        noteDestructorOf(field->getType(), site);
+    }
+    if (!later && mayThrow(init->getInit()))
+      later = true;
+  }
 }
 
 // After its body a destructor destroys the members, then the bases (the
@@ -1306,7 +1573,7 @@ uint32_t ReferenceVisitor::resolveTarget(const clang::NamedDecl *decl) {
         // What is left: implicit special members and compiler builtins are
         // dropped. A C function called without a declaration, and a library
         // function the compiler declares itself, are real symbols.
-        if (llvm::isa<clang::CXXMethodDecl>(fn))
+        if (llvm::isa<clang::CXXMethodDecl>(fn) || fn->isDefaulted())
           return kDropped;
         const unsigned builtin = fn->getBuiltinID();
         if (builtin != 0 &&
@@ -1843,7 +2110,10 @@ void ReferenceVisitor::spliceTransparent(
     uint32_t edge;
   };
   std::vector<Step> calls;
-  std::vector<std::vector<uint64_t>> summaries;
+  // Component summaries, flat: component c's keys (referrer bits clear) are
+  // sumData[sumBegin[c], sumBegin[c + 1]).
+  std::vector<uint64_t> sumData;
+  std::vector<uint32_t> sumBegin{0};
   std::vector<uint64_t> acc;
   uint32_t counter = 0;
   const auto open = [&](uint32_t v) {
@@ -1877,7 +2147,7 @@ void ReferenceVisitor::spliceTransparent(
       if (low[v] != order[v])
         continue;
       // v roots a component: everything it reaches is summarized already.
-      const auto scc = static_cast<uint32_t>(summaries.size());
+      const auto scc = static_cast<uint32_t>(sumBegin.size() - 1);
       size_t first = stack.size();
       do {
         --first;
@@ -1896,14 +2166,15 @@ void ReferenceVisitor::spliceTransparent(
           }
           const uint32_t other = sccOf[entities_[target].aux];
           if (other != scc)
-            acc.insert(acc.end(), summaries[other].begin(),
-                       summaries[other].end());
+            acc.insert(acc.end(), sumData.begin() + sumBegin[other],
+                       sumData.begin() + sumBegin[other + 1]);
         }
       }
       stack.resize(first);
       llvm::sort(acc);
       acc.erase(std::unique(acc.begin(), acc.end()), acc.end());
-      summaries.emplace_back(acc.begin(), acc.end());
+      sumData.insert(sumData.end(), acc.begin(), acc.end());
+      sumBegin.push_back(static_cast<uint32_t>(sumData.size()));
     }
   }
 
@@ -1921,13 +2192,16 @@ void ReferenceVisitor::spliceTransparent(
     }
     const RefAcc &via = refs[i].second;
     const uint64_t from = static_cast<uint64_t>(referrer) << kReferrerShift;
-    for (const uint64_t reached : summaries[sccOf[entities_[target].aux]]) {
+    const uint32_t scc = sccOf[entities_[target].aux];
+    for (uint32_t k = sumBegin[scc]; k < sumBegin[scc + 1]; ++k) {
+      const uint64_t reached = sumData[k];
       const uint64_t joined = from | reached;
-      // A path back to the referrer itself (a class whose implicit
-      // destructor stores its vtable pointer) says nothing new.
-      if (static_cast<uint32_t>(reached >> kTargetShift) == referrer ||
+      // A class whose implicit destructor stores its own vtable pointer
+      // says nothing new; one the code as written holds is not added again.
+      if ((static_cast<uint32_t>(reached >> kTargetShift) == referrer &&
+           static_cast<RefRole>(reached & kRoleMask) == RefRole::VtableUse) ||
           refs_.count(joined) != 0)
-        continue; // or the code as written holds it
+        continue;
       auto [it, inserted] = spliced.try_emplace(joined, via);
       if (!inserted)
         it->second.count = std::max(it->second.count, via.count);
