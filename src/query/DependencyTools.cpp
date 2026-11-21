@@ -178,6 +178,7 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
     symbols["undefinedInCoveredOwner"] =
         static_cast<int64_t>(c.undefinedInCoveredOwner);
     symbols["emittedEverywhere"] = static_cast<int64_t>(c.emittedDefinitions);
+    symbols["seenBy"] = static_cast<int64_t>(c.seenBySymbols);
   }
   obj["symbols"] = std::move(symbols);
   obj["references"] = std::move(refs);

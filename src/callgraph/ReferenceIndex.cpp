@@ -1325,7 +1325,7 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
   }
 
   const uint32_t referenceCount = r.varint();
-  if (!r.ok || referenceCount > r.remaining() / 9)
+  if (!r.ok || referenceCount > r.remaining() / 10)
     return false;
   std::vector<StoredReference> references;
   references.reserve(referenceCount);

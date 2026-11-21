@@ -1951,6 +1951,56 @@ TEST_CASE("references: damaged encodings are refused", "[references][snapshot]")
   CHECK(rejected > bytes.size());
 }
 
+TEST_CASE("references: a reference's largest contributor is checked",
+          "[references][snapshot]") {
+  // One reference two TUs record; its record is the last before the
+  // contributor lists, and every id fits one varint byte.
+  ReferenceIndex ix;
+  ReferenceFact r;
+  r.referrerUsr = "c:@F@user";
+  r.targetUsr = "c:@F@used";
+  r.role = RefRole::Call;
+  r.file = "/t/h.h";
+  r.line = 3;
+  r.col = 5;
+  ix.addReference(r, "/t/a.cpp");
+  ix.addReference(r, "/t/b.cpp");
+  const std::string bytes = encoded(ix);
+  REQUIRE(decodes(bytes));
+  size_t lists = std::string::npos;
+  for (size_t p = 0; p + 8 <= bytes.size(); ++p) {
+    uint64_t v = 0;
+    for (unsigned i = 0; i < 8; ++i)
+      v |= static_cast<uint64_t>(static_cast<unsigned char>(bytes[p + i]))
+           << (8 * i);
+    if (v == bytes.size() - p - 8) {
+      lists = p;
+      break;
+    }
+  }
+  REQUIRE(lists != std::string::npos);
+  const size_t maxAt = lists - 1, minAt = lists - 2, refsAt = lists - 3;
+  REQUIRE(bytes[refsAt] == 2);
+  REQUIRE(bytes[maxAt] > bytes[minAt]);
+  auto with = [&](size_t at, char v) {
+    std::string out = bytes;
+    out[at] = v;
+    return out;
+  };
+  // Two contributors cannot share one TU as smallest and largest.
+  CHECK_FALSE(decodes(with(maxAt, bytes[minAt])));
+  CHECK_FALSE(decodes(with(maxAt, bytes[minAt]), /*readOnly=*/true));
+  // The largest cannot sort before the smallest.
+  std::string swapped = bytes;
+  std::swap(swapped[minAt], swapped[maxAt]);
+  CHECK_FALSE(decodes(swapped));
+  CHECK_FALSE(decodes(swapped, /*readOnly=*/true));
+  // A larger id that is not the last contributor: only the lists tell.
+  const std::string later = with(maxAt, static_cast<char>(bytes[maxAt] + 1));
+  CHECK_FALSE(decodes(later));
+  CHECK(decodes(later, /*readOnly=*/true));
+}
+
 // ---- limits on what a load may allocate -------------------------------------
 
 namespace {

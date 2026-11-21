@@ -284,20 +284,34 @@ does not know. That over-counts the references an inline body carries.
 A template's references are those of its pattern, which holds what
 every instantiation the index read references
 (`docs/symbol-references.md`, "Code the compiler writes"). The walk
-narrows them by who recorded them: an inline body's reference that only
-TUs of one target set recorded is *scoped* to that set
-(`references.tuScoped`), and a consumer's walk, or a closure's for a
-provider, takes it only when the consumer (the provider) is in the set.
+narrows them two ways, both for a reference that travels with an inline
+body, and takes it for a consumer (in a closure, for the provider) only
+when both allow:
+
+- **Who recorded it.** A reference that only TUs of one target set
+  recorded is *scoped* to that set (`references.tuScoped`). The index
+  keeps, per reference, the number of TUs that recorded it and the first
+  and last of them by path; the contributors are all of one set when
+  every TU the index meta lists between those two is, which is how the
+  sources of one target sort. A reference recorded by TUs of several
+  sets, or with a TU of another set between its first and last, is not
+  scoped; without index meta only a reference one TU recorded is.
+- **Who can see its target.** A TU references a symbol only through a
+  declaration it sees, and records that declaration. The targets that
+  can reference a symbol are those with a TU whose opened-file table
+  (index meta) names a file holding one of its recorded declarations
+  (`symbols.seenBy` counts the symbols that narrows); a target whose TUs
+  never open that file takes no reference to it from a shared body.
+  Without index meta, or when a TU has no opened-file table, nothing is
+  narrowed.
+
 So a consumer that uses `make<A>()` does not walk through what another
-target's `make<B>()` builds. The index keeps, per reference, the number
-of TUs that recorded it and the first and last of them by path; the
-contributors are all of one set when every TU the index meta lists
-between those two is, which is how sources of one target sort. A
-reference recorded by TUs of several sets, or with TUs of another set
-between its first and last, travels with the body unscoped; so does
-every reference when the index has no meta. Within one target set the
-union stays: a consumer that uses `make<A>()` walks through what its
-own `make<B>()` builds, and through what TUs of two targets both build.
+target's `make<B>()` builds when `B` is declared where the consumer
+never looks, or when only the other target's TUs instantiate it. What
+neither tells apart stays a union: a consumer walks through what its own
+TUs' other instantiations build, and through what any target that sees
+the same declarations builds. Fan-in climbs through an inline body
+under the same rule.
 
 ### Registration seeds
 
@@ -480,7 +494,7 @@ Every payload of both tools carries `completeness`:
 | `edgesCollapsed` | call-edge fallback only: the index was baked with `--collapse-paths`; the `collapsed-call-edges` tag is then present and no unused finding is raised. Reference facts are recorded whatever `--collapse-paths` says |
 | `targets` | `total`, `withSources`, `covered` |
 | `sources` | `mapped` (distinct sources in the map), `indexed` (parsed cleanly), `failed`, `notIndexed`, `unmappedTus` |
-| `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU) and `emittedEverywhere` (weak or `used` header definitions held by every includer) |
+| `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU), `emittedEverywhere` (weak or `used` header definitions held by every includer) and `seenBy` (symbols whose declarations only some targets' TUs open; an inline body's reference to one is taken only for those) |
 | `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `tuScoped` (inline-body references only TUs of one target set recorded, taken only for that set), `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
 
 `invisible` with reference facts:

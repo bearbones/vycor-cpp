@@ -1750,7 +1750,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
     std::vector<std::pair<SId, uint32_t>> tus; // (TU path id, its set)
     tus.reserve(meta->files.size());
     for (size_t i = 0; i < meta->files.size(); ++i)
-      if (auto id = rs.find(meta->files[i].path))
+      if (auto id = rs.find(toIndexText(meta->files[i].path)))
         tus.emplace_back(*id, i < fa.metaTuFile.size()
                                   ? fa.tuSet(fa.metaTuFile[i])
                                   : 0);
@@ -1772,6 +1772,71 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         break;
       }
   }
+  // --- Who can see a symbol ------------------------------------------------
+  // A TU references a symbol only through a declaration it sees, and a TU
+  // that references a symbol records that declaration. So the targets that
+  // can reference it are those with a TU that opened a file holding one of
+  // its recorded declarations. Unknown (0) when a mapped TU has no opened-
+  // file table or a declaration's file is one no TU's table names.
+  lf.symSeenBy.assign(symbolCount, 0);
+  if (meta && !meta->files.empty()) {
+    const size_t tuCount = meta->files.size();
+    bool tablesKnown = meta->tuDeps.size() >= tuCount;
+    std::vector<std::pair<uint32_t, uint32_t>> opened; // (file, target)
+    std::vector<uint8_t> openedAny(fileCount, 0);
+    for (size_t i = 0; i < tuCount && tablesKnown; ++i) {
+      const uint32_t tuFile = fa.metaTuFile[i];
+      const auto targets = sets.of(fa.tuSet(tuFile));
+      openedAny[tuFile] = 1;
+      for (uint32_t t : targets)
+        opened.emplace_back(tuFile, t);
+      for (uint32_t j : meta->tuDeps[i]) {
+        if (j >= fa.metaDepFile.size())
+          continue;
+        const uint32_t f = fa.metaDepFile[j];
+        openedAny[f] = 1;
+        for (uint32_t t : targets)
+          opened.emplace_back(f, t);
+      }
+    }
+    if (tablesKnown) {
+      std::sort(opened.begin(), opened.end());
+      opened.erase(std::unique(opened.begin(), opened.end()), opened.end());
+      std::vector<uint32_t> openedBegin(fileCount + 1, 0);
+      for (const auto &o : opened)
+        ++openedBegin[o.first + 1];
+      for (uint32_t f = 0; f < fileCount; ++f)
+        openedBegin[f + 1] += openedBegin[f];
+      std::vector<uint32_t> seen;
+      for (uint32_t s = 0; s < symbolCount; ++s) {
+        const uint32_t rb = recBegin[s], re = recBegin[s + 1];
+        bool known = rb != re;
+        seen.clear();
+        for (uint32_t i = rb; i < re && known; ++i) {
+          const uint32_t f = fileOf(srec[recOrder[i]].file);
+          if (f == kNoIndex || f >= fileCount || !openedAny[f]) {
+            known = false;
+            break;
+          }
+          for (uint32_t k = openedBegin[f]; k < openedBegin[f + 1]; ++k)
+            seen.push_back(opened[k].second);
+        }
+        if (!known)
+          continue;
+        std::sort(seen.begin(), seen.end());
+        seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+        // Seen by every target: no narrowing, so leave it unknown.
+        if (seen.size() == targetCount)
+          continue;
+        // Seen by none: declared only in files TUs no target lists open.
+        if (seen.empty())
+          continue;
+        lf.symSeenBy[s] = sets.intern(seen);
+        ++lf.counts.seenBySymbols;
+      }
+    }
+  }
+
   auto scopeOf = [&](const RawRef &r, uint32_t anchor) -> uint32_t {
     if (anchor != 0 || lf.symClass[r.from] != SymbolClass::Inline ||
         r.tus == 0 || r.minTu == kNoId)
@@ -1830,7 +1895,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       lf.softAnchor.push_back(p.second);
     }
     lf.softBegin[s + 1] = static_cast<uint32_t>(lf.softTo.size());
-    // One reference per (to, anchor): the first site, in site order.
+    // Grouped by (to, anchor), each group in site order, for the dedup.
     std::sort(hard.begin(), hard.end(), [](const Kept &a, const Kept &b) {
       if (a.to != b.to)
         return a.to < b.to;
@@ -2035,14 +2100,17 @@ struct Workspace {
 
 /// Who references each symbol: the transpose of LinkFacts' references.
 struct Referrers {
+  static constexpr uint32_t kSoft = 1u << 31; // `ref` indexes softTo
   std::vector<uint32_t> begin; // per symbol, size = symbols + 1
   std::vector<uint32_t> from;
+  std::vector<uint32_t> ref; // the reference: refTo index, or kSoft | softTo
 
   explicit Referrers(const LinkFacts &lf) {
     const uint32_t n = lf.symbolCount();
     // Hard and soft references alike: the closure walks both.
     begin.assign(n + 1, 0);
     from.resize(lf.refTo.size() + lf.softTo.size());
+    ref.resize(from.size());
     for (uint32_t to : lf.refTo)
       ++begin[to + 1];
     for (uint32_t to : lf.softTo)
@@ -2051,10 +2119,14 @@ struct Referrers {
       begin[s + 1] += begin[s];
     std::vector<uint32_t> cursor(begin.begin(), begin.end() - 1);
     for (uint32_t s = 0; s < n; ++s) {
-      for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
+      for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r) {
+        ref[cursor[lf.refTo[r]]] = r;
         from[cursor[lf.refTo[r]]++] = s;
-      for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r)
+      }
+      for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r) {
+        ref[cursor[lf.softTo[r]]] = kSoft | r;
         from[cursor[lf.softTo[r]]++] = s;
+      }
     }
   }
 };
@@ -2084,8 +2156,19 @@ FanInCounts fanInOf(const LinkFacts &lf, const Referrers &rev,
       const uint32_t f = rev.from[i];
       if (ws.symStamp[f] == epoch)
         continue;
-      ws.symStamp[f] = epoch;
       const SymbolClass cls = lf.symClass[f];
+      // An inline body's reference the provider's TUs could not have made
+      // (LinkFacts::inlineRefFor) leads to none of its users.
+      if (cls == SymbolClass::Inline) {
+        const uint32_t r = rev.ref[i];
+        const bool soft = (r & Referrers::kSoft) != 0;
+        const uint32_t idx = r & ~Referrers::kSoft;
+        const uint32_t anchor = soft ? lf.softAnchor[idx] : lf.refAnchor[idx];
+        if (anchor == 0 && !(soft ? lf.seenBy(s, provider)
+                                  : lf.inlineRefFor(idx, provider)))
+          continue;
+      }
+      ws.symStamp[f] = epoch;
       if (cls == SymbolClass::Inline) {
         ws.queue[tail++] = f;
       } else if (cls == SymbolClass::Defined &&
@@ -2178,13 +2261,13 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
   auto provided = [&](uint32_t anchor) noexcept {
     return anchor == 0 || lf.setHas(anchor, provider);
   };
-  const bool scoped = !lf.refScope.empty();
+  // A reference that travels with an inline body is the provider's only
+  // when its TUs could have made it (LinkFacts::inlineRefFor).
   while (head < tail) {
     const uint32_t s = ws.queue[head++];
     for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
       if (provided(lf.refAnchor[r]) &&
-          (!scoped || lf.refScope[r] == 0 ||
-           lf.setHas(lf.refScope[r], provider)))
+          (lf.refAnchor[r] != 0 || lf.inlineRefFor(r, provider)))
         visit(lf.refTo[r]);
     // A soft reference may be needed (an overload candidate, a call
     // through a vtable slot): the closure takes its target when the
@@ -2193,7 +2276,9 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
     // references are the union of every TU's candidates.
     for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r) {
       const uint32_t to = lf.softTo[r];
-      if (provided(lf.softAnchor[r]) && ws.symStamp[to] != epoch &&
+      if (provided(lf.softAnchor[r]) &&
+          (lf.softAnchor[r] != 0 || lf.seenBy(to, provider)) &&
+          ws.symStamp[to] != epoch &&
           lf.symClass[to] == SymbolClass::Defined &&
           lf.setHas(lf.symOwner[to], provider))
         admit(to);
@@ -2427,13 +2512,11 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
     };
     for (uint32_t i = heldBegin[consumer]; i < heldBegin[consumer + 1]; ++i)
       visit(lf.refTo[held[i].ref], held[i].ref, held[i].ref, false);
-    const bool scoped = !lf.refScope.empty();
     while (head < tail) {
       const uint32_t s = ws.queue[head];
       const uint32_t root = ws.queueRoot[head++];
       for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
-        if (!scoped || lf.refScope[r] == 0 ||
-            lf.setHas(lf.refScope[r], consumer))
+        if (lf.refAnchor[r] != 0 || lf.inlineRefFor(r, consumer))
           visit(lf.refTo[r], r, root, true);
     }
     // Indirect uses: symbols of another target the consumer's code touches
@@ -2458,7 +2541,8 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       const uint32_t s = ws.queue[q];
       touch(s);
       for (uint32_t r = lf.softBegin[s], e = lf.softBegin[s + 1]; r < e; ++r)
-        touch(lf.softTo[r]);
+        if (lf.softAnchor[r] != 0 || lf.seenBy(lf.softTo[r], consumer))
+          touch(lf.softTo[r]);
     }
     std::sort(softUses.begin(), softUses.end());
 

@@ -2142,74 +2142,104 @@ TEST_CASE("dependency audit from references: what one target's "
           "[dependency-audit]") {
   TargetMap map;
   std::string error;
+  // In path order the TUs are a1 (a), a2 (b), a3 (a), b1 (b), b2 (b).
   REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
       {"name": "a", "kind": "static_library",
-       "sources": ["a/a1.cpp", "a/a2.cpp"], "deps": ["c", "e"]},
+       "sources": ["a/a1.cpp", "a/a3.cpp"], "deps": ["c", "e"]},
       {"name": "b", "kind": "static_library",
-       "sources": ["b/b1.cpp", "b/b2.cpp"], "deps": ["d", "e"]},
+       "sources": ["a/a2.cpp", "b/b1.cpp", "b/b2.cpp"], "deps": ["d", "e"]},
       {"name": "c", "kind": "static_library", "sources": ["c/c.cpp"]},
       {"name": "d", "kind": "static_library", "sources": ["d/d.cpp"]},
       {"name": "e", "kind": "static_library", "sources": ["e/e.cpp"]}]})",
                    map, error, "/r"));
   enum : uint32_t { tA = 0, tB = 1, tC = 2, tD = 3, tE = 4 };
+  const char *const make = "c:@FT@>1#Tmake#v#";
   ReferenceIndex refs;
   // make<T> in a shared header: its pattern holds what every
-  // instantiation references. a's TUs instantiate it on c's type, b's on
-  // d's; e's function is referenced by an a TU and a b TU alike.
-  addSym(refs, "c:@FT@>1#Tmake#v#", "make", "/r/u/u.h", 1, kD | kH,
-         {"/r/a/a1.cpp", "/r/a/a2.cpp", "/r/b/b1.cpp", "/r/b/b2.cpp"}, kFn,
-         kVague);
+  // instantiation references.
+  addSym(refs, make, "make", "/r/u/u.h", 1, kD | kH,
+         {"/r/a/a1.cpp", "/r/a/a2.cpp", "/r/a/a3.cpp", "/r/b/b1.cpp",
+          "/r/b/b2.cpp"},
+         kFn, kVague);
   addSym(refs, "c:@F@a_fn", "a_fn", "/r/a/a1.cpp", 1, kD, {"/r/a/a1.cpp"});
   addSym(refs, "c:@F@b_fn", "b_fn", "/r/b/b1.cpp", 1, kD, {"/r/b/b1.cpp"});
-  addSym(refs, "c:@F@c_fn", "c_fn", "/r/c/c.cpp", 1, kD, {"/r/c/c.cpp"});
-  addSym(refs, "c:@F@d_fn", "d_fn", "/r/d/d.cpp", 1, kD, {"/r/d/d.cpp"});
-  addSym(refs, "c:@F@e_fn", "e_fn", "/r/e/e.cpp", 1, kD, {"/r/e/e.cpp"});
-  addRef(refs, "c:@F@a_fn", "c:@FT@>1#Tmake#v#", RefRole::Call,
-         "/r/a/a1.cpp", 2, 3, "/r/a/a1.cpp");
-  addRef(refs, "c:@F@b_fn", "c:@FT@>1#Tmake#v#", RefRole::Call,
-         "/r/b/b1.cpp", 2, 3, "/r/b/b1.cpp");
-  for (const char *tu : {"/r/a/a1.cpp", "/r/a/a2.cpp"})
-    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@c_fn", RefRole::Call, "/r/u/u.h",
-           2, 3, tu);
-  for (const char *tu : {"/r/b/b1.cpp", "/r/b/b2.cpp"})
-    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@d_fn", RefRole::Call, "/r/u/u.h",
-           2, 3, tu);
-  for (const char *tu : {"/r/a/a2.cpp", "/r/b/b1.cpp"})
-    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@e_fn", RefRole::Call, "/r/u/u.h",
-           3, 3, tu);
-  SnapshotMeta meta = metaOf({{"/r/a/a1.cpp", {"/r/u/u.h"}},
-                              {"/r/a/a2.cpp", {"/r/u/u.h"}},
-                              {"/r/b/b1.cpp", {"/r/u/u.h"}},
-                              {"/r/b/b2.cpp", {"/r/u/u.h"}},
-                              {"/r/c/c.cpp", {}},
-                              {"/r/d/d.cpp", {}},
-                              {"/r/e/e.cpp", {}}});
+  addRef(refs, "c:@F@a_fn", make, RefRole::Call, "/r/a/a1.cpp", 2, 3,
+         "/r/a/a1.cpp");
+  addRef(refs, "c:@F@b_fn", make, RefRole::Call, "/r/b/b1.cpp", 2, 3,
+         "/r/b/b1.cpp");
+  // Each function: declared in its header as the TUs that reference it
+  // saw it, defined in its target's source; make references it from the
+  // TUs listed.
+  auto fn = [&](const char *usr, const char *name, const char *header,
+                const char *source, std::initializer_list<const char *> by,
+                uint32_t line) {
+    addSym(refs, usr, name, header, 1, kH, by);
+    addSym(refs, usr, name, source, 1, kD, {source});
+    for (const char *tu : by)
+      addRef(refs, make, usr, RefRole::Call, "/r/u/u.h", line, 3, tu);
+  };
+  // c.h only a's TUs open: b never sees c_fn, though its a2 sorts between
+  // the two TUs that reference it.
+  fn("c:@F@c_fn", "c_fn", "/r/c/c.h", "/r/c/c.cpp",
+     {"/r/a/a1.cpp", "/r/a/a3.cpp"}, 2);
+  // e.h everyone opens; a TU of each target references e_fn.
+  fn("c:@F@e_fn", "e_fn", "/r/e/e.h", "/r/e/e.cpp",
+     {"/r/a/a1.cpp", "/r/b/b1.cpp"}, 3);
+  // g.h a and b both open, but only b's b1 and b2 (adjacent) reference
+  // g_fn: scoped to b.
+  fn("c:@F@g_fn", "g_fn", "/r/d/g.h", "/r/d/d.cpp",
+     {"/r/b/b1.cpp", "/r/b/b2.cpp"}, 4);
+  // h.h both open; a's a1 and a3 reference h_fn, with b's a2 between them:
+  // not scoped, so b takes it too.
+  fn("c:@F@h_fn", "h_fn", "/r/e/h.h", "/r/e/e.cpp",
+     {"/r/a/a1.cpp", "/r/a/a3.cpp"}, 5);
+  const std::vector<const char *> shared = {"/r/u/u.h", "/r/e/e.h",
+                                            "/r/d/g.h", "/r/e/h.h"};
+  auto opens = [&](std::initializer_list<const char *> extra) {
+    std::vector<const char *> out = shared;
+    out.insert(out.end(), extra.begin(), extra.end());
+    return out;
+  };
+  SnapshotMeta meta = metaOf({{"/r/a/a1.cpp", opens({"/r/c/c.h"})},
+                              {"/r/a/a2.cpp", opens({})},
+                              {"/r/a/a3.cpp", opens({"/r/c/c.h"})},
+                              {"/r/b/b1.cpp", opens({})},
+                              {"/r/b/b2.cpp", opens({})},
+                              {"/r/c/c.cpp", {"/r/c/c.h"}},
+                              {"/r/d/d.cpp", {"/r/d/g.h"}},
+                              {"/r/e/e.cpp", {"/r/e/e.h", "/r/e/h.h"}}});
   auto symbolsOf = [](const DependencyAudit &audit, uint32_t consumer,
                       uint32_t provider) -> uint32_t {
     const uint32_t row = audit.find(consumer, provider);
     return row == kNoIndex ? 0 : audit.rows[row].symbols;
   };
+  auto check = [&](const ReferenceIndex &index) {
+    const LinkFacts lf = linkFactsFromReferences(index, nullptr, map, &meta);
+    const DependencyAudit audit = auditDependencies(lf, map);
+    CHECK(lf.counts.tuScopedRefs == 1);
+    CHECK(symbolsOf(audit, tA, tC) == 1);
+    CHECK(symbolsOf(audit, tB, tC) == 0); // b cannot see c_fn
+    CHECK(symbolsOf(audit, tA, tD) == 0); // only b instantiates on g_fn
+    CHECK(symbolsOf(audit, tB, tD) == 1);
+    CHECK(symbolsOf(audit, tA, tE) == 2);
+    CHECK(symbolsOf(audit, tB, tE) == 2); // e_fn, and h_fn unscoped
+  };
+  check(refs);
+  // A read-only load keeps each record's smallest and largest contributor.
+  std::string bytes;
+  refs.encode(bytes);
+  ReferenceIndex readOnly;
+  REQUIRE(readOnly.decode(bytes.data(), bytes.data() + bytes.size(), true));
+  check(readOnly);
 
-  const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
-  const DependencyAudit audit = auditDependencies(lf, map);
-  // c_fn's and d_fn's references are each scoped to one target's TUs;
-  // e_fn's contributors span two targets and travel with the body.
-  CHECK(lf.counts.tuScopedRefs == 2);
-  CHECK(symbolsOf(audit, tA, tC) == 1);
-  CHECK(symbolsOf(audit, tA, tD) == 0);
-  CHECK(symbolsOf(audit, tB, tD) == 1);
-  CHECK(symbolsOf(audit, tB, tC) == 0);
-  CHECK(symbolsOf(audit, tA, tE) == 1);
-  CHECK(symbolsOf(audit, tB, tE) == 1);
-
-  // Without the index meta the TUs between two contributors are unknown:
-  // only a one-TU record could scope, and every consumer of the body takes
-  // all three.
+  // Without the index meta neither the TUs between two contributors nor
+  // what a target opens is known: every consumer of the body takes all.
   const LinkFacts bare = linkFactsFromReferences(refs, nullptr, map, nullptr);
   const DependencyAudit bareAudit = auditDependencies(bare, map);
   CHECK(bare.counts.tuScopedRefs == 0);
-  CHECK(symbolsOf(bareAudit, tA, tD) == 1);
+  CHECK(bare.counts.seenBySymbols == 0);
   CHECK(symbolsOf(bareAudit, tB, tC) == 1);
+  CHECK(symbolsOf(bareAudit, tA, tD) == 1);
 }
 
 TEST_CASE("dependency audit from references: a library that supplies main "

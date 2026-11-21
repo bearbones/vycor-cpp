@@ -321,7 +321,9 @@ with, without), it adds no cost the host's noise lets one see: wall
 1190 s without, 1137 s and 1138 s with; peak RSS 2.727 GB against
 2.735 GB (+0.3%); index 573.5 MB against 575.2 MB (+0.3%). One TU
 (`lib/Analysis/ScalarEvolution.cpp`), interleaved, best of five: 3.83 s
-without, 3.70 s with. It adds 22% references and 4% symbols.
+without, 3.70 s with. It adds 22% references and 4% symbols. Storing
+each reference's largest contributor ("Storage") costs about one byte
+per reference, 0.1% of an 892-TU index of LLVM's libraries and tools.
 
 The section holds about 56,700 symbols and 291,000 references. A one-shot
 `lookup-symbol` or `get-references` over that index takes about 60 ms and
