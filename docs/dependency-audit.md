@@ -297,13 +297,15 @@ when both allow:
   sets, or with a TU of another set between its first and last, is not
   scoped; without index meta only a reference one TU recorded is.
 - **Who can see its target.** A TU references a symbol only through a
-  declaration it sees, and records that declaration. The targets that
-  can reference a symbol are those with a TU whose opened-file table
-  (index meta) names a file holding one of its recorded declarations
-  (`symbols.seenBy` counts the symbols that narrows); a target whose TUs
-  never open that file takes no reference to it from a shared body.
-  Without index meta, or when a TU has no opened-file table, nothing is
-  narrowed.
+  declaration it sees, and records a declaration it sees (for a class,
+  its definition when it has one). The targets that can reference a
+  symbol are those with a TU whose opened-file table (index meta) names
+  a file holding one of its recorded declarations (`symbols.seenBy`
+  counts the symbols that narrows); a target whose TUs never open that
+  file takes no reference to it from a shared body. A TU no target lists
+  counts for the targets of the mapped sources it includes (a unity
+  build). A TU with reference facts but an empty table (one recorded
+  without it) counts as seeing every symbol. Without index meta nothing is narrowed.
 
 So a consumer that uses `make<A>()` does not walk through what another
 target's `make<B>()` builds when `B` is declared where the consumer
@@ -311,7 +313,8 @@ never looks, or when only the other target's TUs instantiate it. What
 neither tells apart stays a union: a consumer walks through what its own
 TUs' other instantiations build, and through what any target that sees
 the same declarations builds. Fan-in climbs through an inline body
-under the same rule.
+under the same rule; registration marks (below) do not narrow, so they
+can over-mark.
 
 ### Registration seeds
 

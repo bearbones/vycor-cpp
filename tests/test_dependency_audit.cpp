@@ -2242,6 +2242,58 @@ TEST_CASE("dependency audit from references: what one target's "
   CHECK(symbolsOf(bareAudit, tA, tD) == 1);
 }
 
+TEST_CASE("dependency audit from references: a unity TU sees for the "
+          "targets of its sources and a TU without a table sees everything",
+          "[dependency-audit]") {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "t", "kind": "static_library", "sources": ["t/x.cpp"]},
+      {"name": "o", "kind": "static_library", "sources": ["o/o.cpp"]},
+      {"name": "c", "kind": "static_library", "sources": ["c/c.cpp"]}]})",
+                   map, error, "/r"));
+  enum : uint32_t { tC = 0, tO = 1, tT = 2 }; // targets sort by name
+  const char *const make = "c:@FT@>1#Tmake#v#";
+  const char *const unity = "/r/build/unity.cpp"; // no target lists it
+  ReferenceIndex refs;
+  addSym(refs, make, "make", "/r/u/u.h", 1, kD | kH, {unity, "/r/o/o.cpp"},
+         kFn, kVague);
+  addSym(refs, "c:@F@x_fn", "x_fn", "/r/t/x.cpp", 1, kD, {unity});
+  addSym(refs, "c:@F@o_fn", "o_fn", "/r/o/o.cpp", 1, kD, {"/r/o/o.cpp"});
+  addSym(refs, "c:@F@c_fn", "c_fn", "/r/c/c.h", 1, kH, {unity});
+  addSym(refs, "c:@F@c_fn", "c_fn", "/r/c/c.cpp", 1, kD, {"/r/c/c.cpp"});
+  addRef(refs, "c:@F@x_fn", make, RefRole::Call, "/r/t/x.cpp", 2, 3, unity);
+  addRef(refs, "c:@F@o_fn", make, RefRole::Call, "/r/o/o.cpp", 2, 3,
+         "/r/o/o.cpp");
+  addRef(refs, make, "c:@F@c_fn", RefRole::Call, "/r/u/u.h", 2, 3, unity);
+  auto symbolsOf = [](const DependencyAudit &audit, uint32_t consumer,
+                      uint32_t provider) -> uint32_t {
+    const uint32_t row = audit.find(consumer, provider);
+    return row == kNoIndex ? 0 : audit.rows[row].symbols;
+  };
+  // The unity TU includes t's x.cpp: it sees c.h for t. o never opens c.h.
+  SnapshotMeta meta =
+      metaOf({{unity, {"/r/t/x.cpp", "/r/u/u.h", "/r/c/c.h"}},
+              {"/r/o/o.cpp", {"/r/u/u.h"}},
+              {"/r/c/c.cpp", {"/r/c/c.h"}}});
+  {
+    const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+    const DependencyAudit audit = auditDependencies(lf, map);
+    CHECK(symbolsOf(audit, tT, tC) == 1);
+    CHECK(symbolsOf(audit, tO, tC) == 0);
+  }
+  // o's TU recorded without its table: o may see anything.
+  SnapshotMeta noTable = metaOf({{unity, {"/r/t/x.cpp", "/r/u/u.h", "/r/c/c.h"}},
+                                 {"/r/o/o.cpp", {}},
+                                 {"/r/c/c.cpp", {"/r/c/c.h"}}});
+  {
+    const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &noTable);
+    const DependencyAudit audit = auditDependencies(lf, map);
+    CHECK(symbolsOf(audit, tT, tC) == 1);
+    CHECK(symbolsOf(audit, tO, tC) == 1);
+  }
+}
+
 TEST_CASE("dependency audit from references: a library that supplies main "
           "is not unused",
           "[dependency-audit]") {

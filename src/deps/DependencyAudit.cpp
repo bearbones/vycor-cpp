@@ -1774,19 +1774,39 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   }
   // --- Who can see a symbol ------------------------------------------------
   // A TU references a symbol only through a declaration it sees, and a TU
-  // that references a symbol records that declaration. So the targets that
-  // can reference it are those with a TU that opened a file holding one of
-  // its recorded declarations. Unknown (0) when a mapped TU has no opened-
-  // file table or a declaration's file is one no TU's table names.
+  // that references a symbol records a declaration it sees (a class, its
+  // definition when it has one). So the targets that can reference it are
+  // those with a TU that opened a file holding one of its recorded
+  // declarations. A TU no target lists belongs to the targets of the mapped
+  // sources it includes (a unity build), else to none. A TU with reference
+  // facts but an empty opened-file table (recorded without one) sees
+  // everything: its targets are added to every narrowed symbol. Unknown (0)
+  // when the meta has no tables or a declaration's file is one no TU's
+  // table names.
   lf.symSeenBy.assign(symbolCount, 0);
   if (meta && !meta->files.empty()) {
     const size_t tuCount = meta->files.size();
     bool tablesKnown = meta->tuDeps.size() >= tuCount;
     std::vector<std::pair<uint32_t, uint32_t>> opened; // (file, target)
     std::vector<uint8_t> openedAny(fileCount, 0);
+    std::vector<uint32_t> blind, targets;
     for (size_t i = 0; i < tuCount && tablesKnown; ++i) {
       const uint32_t tuFile = fa.metaTuFile[i];
-      const auto targets = sets.of(fa.tuSet(tuFile));
+      targets.clear();
+      for (uint32_t t : sets.of(fa.tuSet(tuFile)))
+        targets.push_back(t);
+      if (targets.empty())
+        for (uint32_t j : meta->tuDeps[i])
+          if (j < fa.metaDepFile.size() && fa.isSource[fa.metaDepFile[j]])
+            for (uint32_t t : sets.of(fa.fileSet[fa.metaDepFile[j]]))
+              targets.push_back(t);
+      if (meta->tuDeps[i].empty()) {
+        // A TU that preprocesses to nothing opens no file either; it adds
+        // no reference facts, so its path is not in their string table.
+        if (rs.find(toIndexText(meta->files[i].path)))
+          blind.insert(blind.end(), targets.begin(), targets.end());
+        continue;
+      }
       openedAny[tuFile] = 1;
       for (uint32_t t : targets)
         opened.emplace_back(tuFile, t);
@@ -1812,6 +1832,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         const uint32_t rb = recBegin[s], re = recBegin[s + 1];
         bool known = rb != re;
         seen.clear();
+        seen.insert(seen.end(), blind.begin(), blind.end());
         for (uint32_t i = rb; i < re && known; ++i) {
           const uint32_t f = fileOf(srec[recOrder[i]].file);
           if (f == kNoIndex || f >= fileCount || !openedAny[f]) {
