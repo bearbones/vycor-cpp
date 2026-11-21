@@ -91,6 +91,10 @@ const std::vector<CheckInfo> &builtinChecks() {
        "Functions unreachable from the entry points via the call graph",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"could-be-internal",
+       "External functions and variables no other TU references",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
   };
   return checks;
 }

@@ -4,6 +4,7 @@ add_library(vycor_lib
   check/Analyzer.cpp
   check/AbiLayout.cpp
   check/CallbackUnderLock.cpp
+  check/CouldBeInternal.cpp
   check/Checkpoint.cpp
   check/CheckSet.cpp
   check/DeadCodeAnalyzer.cpp

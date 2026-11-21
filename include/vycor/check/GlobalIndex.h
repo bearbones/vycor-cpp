@@ -354,6 +354,14 @@ struct Diagnostic {
                                   // function can throw — callers compile
                                   // contradictory unwind assumptions
     AbiLayout_Divergent,
+    Internal_Unreferenced,        // external linkage, no header declaration,
+                                  // no reference from another TU
+    Internal_DeclaredInHeader,    // declared in a header, but no other TU
+                                  // references it
+    Internal_TestOnly,            // only test sources in other TUs
+                                  // reference it
+    Internal_Unproven,            // Internal_Unreferenced from facts that do
+                                  // not cover the whole program
     Custom,                       // named built-in or org check (see checkName)
   };
   Kind kind;

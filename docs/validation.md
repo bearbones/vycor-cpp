@@ -121,7 +121,9 @@ that is absent never matches — missing output is a failure, not a
 pass. `sequence` demands the matches appear in that relative order,
 not necessarily adjacent. Text queries take `"lines": {"present":
 [regex...], "absent": [regex...]}`; give every text query at least one
-`present` line, or empty output passes it.
+`present` line, or empty output passes it. `"stderr_present"` adds
+regexes over the tail of stderr (the run's account of itself, such as
+which index a check read).
 
 ## Cases
 
@@ -137,6 +139,7 @@ not necessarily adjacent. Text queries take `"lines": {"present":
 | `dependency_audit` | six link targets and a hand-written target map (`docs/dependency-audit.md`): an executable that reaches a library only through a shared inline body, a source compiled into two executables, a library referenced only from a static initializer, a dependency used but declared only transitively; then the map again over an index missing one target's source | the edge table in canonical order with its counts; the inline-body call charged to the target that uses it (`viaInline`, `through`); closures and what they need; `thin-dependency`, `undeclared-link-dependency` and `unused-link-dependency` each on the edge that earns it and on no other; every finding `universal: false`; the static-initializer dependency reported unused on call-edge evidence with the `invisible` tags saying why; with the uncovered target the unused finding is withheld and counted (`unusedWithheld`) |
 | `allocation_edges` | a `new`, a `new[]`, a placement `new`, a `delete`, and a class with its own `operator new`, with no standard header | each expression is a `Proven` `DirectCall` to the function it selects, and to no other; the name `operator new` is `ambiguous` between the allocating and the placement form, whose usrs keep their callers apart; `main` reaches the allocating `operator new` two calls down, on 2 paths, and never through the placement caller |
 | `symbol_references` | a global `counter`, a `static` variable, a function only its own TU calls, a callback registered by address from another TU, and a class with a key function, across two TUs and a header | `lookup-symbol` reports linkage (`external`, `internal`), the defining TU, `referencedFromOtherTu` true and false, and the vtable home; `get-references` lists readers and writers in name order with `fromOtherTu`, the `address_of` from the registering TU, `--roles` cuts, and `--direction from`; an unknown symbol is `not_found` |
+| `could_be_internal` | `check --checks=-all,could-be-internal` over three TUs: a library with a function and a variable no other TU uses, one declared in a header and unused elsewhere, one only a `tests/` source calls, and one symbol per exclusion (`static`, anonymous namespace, `extern "C"`, `used`, a member, a template and its explicit specialization, `inline`, an `--entry-point`, `main`) | the two tiers and the test-only note at their definitions, the user and test TUs' own unreferenced functions, and no exclusion; the same findings read from the saved index (`--index`); with `--test-path-re=` the test reference counts and the test-only note goes |
 
 Every case carries expected negatives; `header_change` is the
 regression for the stale-name bug the raw warm-refresh comparison found

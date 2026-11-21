@@ -77,7 +77,8 @@ std::string checkNameOf(const Diagnostic &diag);
 Severity checkSeverity(const std::string &check);
 
 /// The severity of one diagnostic: its check's, except ADL_SameScore (a
-/// tie, opt-in) and DeadCode_Optimistic (plausible paths only), which are
+/// tie, opt-in), DeadCode_Optimistic (plausible paths only), and the
+/// could-be-internal kinds other than Internal_Unreferenced, which are
 /// notes.
 Severity diagnosticSeverity(const Diagnostic &diag);
 

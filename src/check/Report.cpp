@@ -209,6 +209,14 @@ const char *diagnosticKindName(Diagnostic::Kind kind) {
     return "ExceptionSpec_Divergent";
   case Diagnostic::AbiLayout_Divergent:
     return "AbiLayout_Divergent";
+  case Diagnostic::Internal_Unreferenced:
+    return "Internal_Unreferenced";
+  case Diagnostic::Internal_DeclaredInHeader:
+    return "Internal_DeclaredInHeader";
+  case Diagnostic::Internal_TestOnly:
+    return "Internal_TestOnly";
+  case Diagnostic::Internal_Unproven:
+    return "Internal_Unproven";
   case Diagnostic::Custom:
     return "Custom";
   }
@@ -251,6 +259,11 @@ std::string checkNameOf(const Diagnostic &diag) {
     return "exception-spec-divergence";
   case Diagnostic::AbiLayout_Divergent:
     return "abi-layout-divergence";
+  case Diagnostic::Internal_Unreferenced:
+  case Diagnostic::Internal_DeclaredInHeader:
+  case Diagnostic::Internal_TestOnly:
+  case Diagnostic::Internal_Unproven:
+    return "could-be-internal";
   case Diagnostic::Custom:
     return diag.checkName.empty() ? "custom" : diag.checkName;
   }
@@ -275,6 +288,7 @@ Severity checkSeverity(const std::string &check) {
       {"coverage-properties", Severity::Note},
       {"dead-code", Severity::Note},
       {"callback-under-lock", Severity::Warning},
+      {"could-be-internal", Severity::Warning},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;
@@ -282,7 +296,10 @@ Severity checkSeverity(const std::string &check) {
 
 Severity diagnosticSeverity(const Diagnostic &diag) {
   if (diag.kind == Diagnostic::ADL_SameScore ||
-      diag.kind == Diagnostic::DeadCode_Optimistic)
+      diag.kind == Diagnostic::DeadCode_Optimistic ||
+      diag.kind == Diagnostic::Internal_DeclaredInHeader ||
+      diag.kind == Diagnostic::Internal_TestOnly ||
+      diag.kind == Diagnostic::Internal_Unproven)
     return Severity::Note;
   return checkSeverity(checkNameOf(diag));
 }

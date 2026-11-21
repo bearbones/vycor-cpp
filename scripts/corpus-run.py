@@ -129,6 +129,11 @@ def check_query(expect: dict, obs: dict) -> list[dict]:
         for pat in expect["lines"].get("absent", []):
             add("line-absent", not re.search(pat, out, re.M),
                 f"expected no line matching {pat!r}")
+        # The run's own account on stderr (its tail), e.g. which index a
+        # check read; never a substitute for a stdout witness.
+        for pat in expect["lines"].get("stderr_present", []):
+            add("line-present", re.search(pat, obs.get("stderr", ""), re.M),
+                f"expected a stderr line matching {pat!r}")
         return checks
 
     payload = obs.get("payload")

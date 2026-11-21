@@ -224,6 +224,13 @@ ABI. It can find packing-flag mismatches even when declaration text is identical
 The check is opt-in, produces one witness per record/target, and uses fresh parses;
 see [the check reference](docs/checks/abi-layout-divergence.md).
 
+**Could be internal** (`--checks=could-be-internal`) lists functions and
+variables with external linkage that no other TU references, from the
+megascope reference facts: no header declares them (a warning), a header
+does (a note), or only tests use them from elsewhere (a note). The
+verdict needs every TU of the compilation database; with fewer it is a
+note that says why. See [the check reference](docs/checks/could-be-internal.md).
+
 Other optional flags: `--warn-same-score`, `--model-convertibility`, the
 legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
 `--entry-point`), and `--org-config` (organization checks/config — see

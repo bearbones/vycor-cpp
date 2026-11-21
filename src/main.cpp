@@ -16,6 +16,7 @@
 #include "vycor/check/Analyzer.h"
 #include "vycor/check/CheckSet.h"
 #include "vycor/check/Checkpoint.h"
+#include "vycor/check/CouldBeInternal.h"
 #include "vycor/check/DeadCodeAnalyzer.h"
 #include "vycor/check/Indexer.h"
 #include "vycor/check/Report.h"
@@ -58,6 +59,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Regex.h"
 #include "llvm/Support/raw_ostream.h"
 #include "vycor/compat/ToolAdjusters.h"
 
@@ -185,6 +187,25 @@ static llvm::cl::list<std::string>
                       llvm::cl::desc("Entry point function names (default: main)"),
                       llvm::cl::value_desc("name"),
                       llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<std::string>
+    CheckIndexPath("index",
+        llvm::cl::desc("megascope index the graph-backed checks (dead-code, "
+                       "static-init-hazards, could-be-internal) read when it "
+                       "is fresh for the selected sources (default: "
+                       "<build-path>/.vycor/megascope.vycs); otherwise they "
+                       "bake the sources in memory"),
+        llvm::cl::value_desc("file"),
+        llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<std::string>
+    CheckTestPathRe("test-path-re",
+        llvm::cl::desc("could-be-internal: POSIX extended regex over a file "
+                       "path that marks test sources (empty: no test "
+                       "detection)"),
+        llvm::cl::value_desc("regex"),
+        llvm::cl::init(vycor::kDefaultTestPathPattern),
+        llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
     CheckWarnSameScore("warn-same-score",
@@ -379,7 +400,8 @@ static llvm::cl::opt<bool>
 static llvm::cl::opt<bool>
     CheckVerbose("verbose",
         llvm::cl::desc("Also report inline suppressions that suppressed "
-                       "nothing"),
+                       "nothing, and the index the graph-backed checks "
+                       "read"),
         llvm::cl::sub(CheckCmd));
 static llvm::cl::alias CheckVerboseShort("v",
                                           llvm::cl::desc("Alias for --verbose"),
@@ -1148,17 +1170,28 @@ int main(int argc, const char **argv) {
       }
     }
 
+    // Validated before any parse: a typo should not cost a full run.
+    if (enabledChecks.count("could-be-internal") && !CheckTestPathRe.empty()) {
+      std::string why;
+      if (!llvm::Regex(CheckTestPathRe).isValid(why)) {
+        llvm::errs() << "check: --test-path-re: invalid regex '"
+                     << CheckTestPathRe << "': " << why << "\n";
+        return kUsage;
+      }
+    }
+
     // Keep the merged index alive for graph-backed post passes.
     vycor::GlobalIndex mergedIndex;
     vycor::AnalysisReport analysisReport;
     auto diagnostics = vycor::runAnalysis(*compDb, files, opts, &mergedIndex,
                                           &analysisReport);
 
-    // Graph-backed checks (dead-code, static-init-hazards) share one call
-    // graph build.
+    // Graph-backed checks (dead-code, static-init-hazards) and the
+    // reference-backed could-be-internal share one load or one bake.
     const bool wantDeadCode = enabledChecks.count("dead-code") > 0;
     const bool wantInitHazards =
         enabledChecks.count("static-init-hazards") > 0;
+    const bool wantInternal = enabledChecks.count("could-be-internal") > 0;
     bool hasInitHazardRoots = false;
     if (wantInitHazards) {
       mergedIndex.forEachStaticInit([&](const vycor::StaticInitEntry &e) {
@@ -1166,27 +1199,58 @@ int main(int argc, const char **argv) {
           hasInitHazardRoots = true;
       });
     }
-    if (wantDeadCode || hasInitHazardRoots) {
+    const bool wantGraph = wantDeadCode || hasInitHazardRoots;
+    if (wantGraph || wantInternal) {
       vycor::CallGraph graph;
+      vycor::ReferenceIndex references;
+      vycor::TuOutcomes factOutcomes;
       bool loadedFromSnap = false;
-      if (!CheckBuildPath.empty()) {
-        std::string snapPath = vycor::defaultIndexPath(CheckBuildPath);
+      const std::string snapPath =
+          !CheckIndexPath.empty()
+              ? std::string(CheckIndexPath)
+              : (CheckBuildPath.empty()
+                     ? std::string()
+                     : vycor::defaultIndexPath(CheckBuildPath));
+      const unsigned needs = (wantGraph ? vycor::kSectionGraph : 0u) |
+                             (wantInternal ? vycor::kSectionReferences : 0u);
+      if (!snapPath.empty()) {
         if (auto snap = vycor::SnapshotIO::load(
-                snapPath, nullptr, vycor::LoadMode::ReadOnly,
-                vycor::kSectionGraph)) {
-          if (!wantDeadCode || snap->meta.files.size() == files.size()) {
+                snapPath, nullptr, vycor::LoadMode::ReadOnly, needs)) {
+          // dead-code and could-be-internal answer for the whole index, so
+          // it must hold exactly the selected sources.
+          if (!(wantDeadCode || wantInternal) ||
+              snap->meta.files.size() == files.size()) {
+            // A TU dirty only because its unchanged inputs parsed with
+            // errors (Partial) is not a reason to bake again: the bake
+            // would record the same partial facts, and could-be-internal
+            // counts it in the coverage gap. Any other reason is, a TU
+            // that crashed or timed out included (it may parse in-process).
             auto stamps = vycor::SnapshotIO::stampFiles(files);
-            auto dirty = vycor::SnapshotIO::dirtyTUs(snap->meta, stamps);
+            vycor::SnapshotIO::DirtyReport report;
+            auto dirty = vycor::SnapshotIO::dirtyTUs(snap->meta, stamps,
+                                                     nullptr, &report);
+            vycor::TuOutcomes recorded =
+                vycor::SnapshotIO::outcomesOf(snap->meta);
             bool allClean = !dirty.empty();
-            for (bool d : dirty) {
-              if (d) {
+            for (size_t i = 0; i < dirty.size(); ++i) {
+              if (!dirty[i])
+                continue;
+              const auto it = recorded.find(stamps[i].path);
+              if (report.reasons[i] != vycor::SnapshotIO::DirtyReason::Retry ||
+                  it == recorded.end() ||
+                  it->second.status != vycor::TuStatus::Partial) {
                 allClean = false;
                 break;
               }
             }
             if (allClean) {
               graph = std::move(snap->graph);
+              references = std::move(snap->references);
+              factOutcomes = std::move(recorded);
               loadedFromSnap = true;
+              if (CheckVerbose)
+                llvm::errs() << "check: graph-backed checks read the index "
+                             << snapPath << "\n";
             }
           }
         }
@@ -1194,7 +1258,14 @@ int main(int argc, const char **argv) {
       if (!loadedFromSnap) {
         const unsigned cgThreads =
             CheckIsolateWorkers ? opts.workerCount : opts.threadCount;
-        graph = vycor::buildCallGraph(*compDb, files, {}, cgThreads);
+        if (wantInternal) {
+          auto baked = vycor::bakeIndexes(*compDb, files, {}, cgThreads);
+          graph = std::move(baked.graph);
+          references = std::move(baked.references);
+          factOutcomes = std::move(baked.outcomes);
+        } else {
+          graph = vycor::buildCallGraph(*compDb, files, {}, cgThreads);
+        }
       }
 
       if (wantDeadCode) {
@@ -1214,6 +1285,39 @@ int main(int argc, const char **argv) {
       }
       if (hasInitHazardRoots)
         vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
+
+      if (wantInternal) {
+        // The program is every C/C++ entry of the compilation database; a
+        // claim that no other TU references a symbol needs all of them.
+        size_t programTus = 0, coveredTus = 0;
+        auto everything =
+            vycor::selectSources(*compDb, vycor::SourceSelection{}, std::cin);
+        if (everything) {
+          programTus = everything->size();
+          const std::unordered_set<std::string> selected(files.begin(),
+                                                         files.end());
+          for (const auto &file : *everything)
+            coveredTus += selected.count(file);
+        } else {
+          llvm::consumeError(everything.takeError());
+        }
+        vycor::CouldBeInternalOptions internalOpts;
+        internalOpts.entryPoints.assign(CheckEntryPoints.begin(),
+                                        CheckEntryPoints.end());
+        internalOpts.testPathPattern = CheckTestPathRe;
+        internalOpts.projectRoot = projectRoot;
+        internalOpts.coverageGap =
+            vycor::describeCoverageGap(programTus, coveredTus, factOutcomes);
+        std::string error;
+        auto internalDiags =
+            vycor::findCouldBeInternal(references, internalOpts, error);
+        if (!error.empty()) {
+          llvm::errs() << "check: --test-path-re: " << error << "\n";
+          return kUsage;
+        }
+        for (auto &diag : internalDiags)
+          diagnostics.push_back(std::move(diag));
+      }
     }
 
     // Never report on a run an interrupt cut short (callgraph/Interrupt.h).
