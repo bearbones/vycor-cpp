@@ -13,8 +13,8 @@ how much of B the reason is. For every pair of link targets the audit
 reports:
 
 - **Which symbols of the provider do the consumer's objects need?** The
-  count, and through `explain_dependency` each symbol with the call site
-  that needs it.
+  count, and through `explain_dependency` each symbol with the reference
+  site that needs it.
 - **What do those symbols drag along?** Their closure inside the
   provider — the provider code they transitively need — and the other
   targets that closure references.
@@ -27,13 +27,19 @@ use, one that is in use but not declared, and a *thin* dependency — a
 few symbols with a small closure, the lead for splitting a large
 library.
 
-**Every answer here is evidence from call edges only**
-(`completeness.edgeSource: "call-edges"`). A reference to a variable, a
-vtable, or a typeinfo object makes a real link dependency that no call
-edge records. No finding is a universal verdict; in particular an
-`unused-link-dependency` finding means "no call was seen", never "safe
-to remove". [Completeness](#completeness) lists what is invisible and
-how the answer can mislead; [Checking against the
+**Every answer is evidence, not a verdict.** The audit reads the
+symbol reference facts of the index (`completeness.edgeSource:
+"references"`, `docs/symbol-references.md`): calls, address-ofs, reads
+and writes of variables, vtable and typeinfo uses. What those facts
+cannot see — the bodies of implicit template instantiations, implicit
+special members — is listed in `completeness.invisible`. An index baked
+before the reference facts existed (format v14 and older) is audited
+from its call edges instead (`edgeSource: "call-edges"`, [Call-edge
+fallback](#call-edge-fallback)), which misses every reference that is
+not a call. No finding is universal; in particular an
+`unused-link-dependency` finding means "no reference was seen", never
+"safe to remove". [Completeness](#completeness) lists what is invisible
+and how the answer can mislead; [Checking against the
 objects](#checking-against-the-objects) is how to measure it on a built
 tree.
 
@@ -46,9 +52,9 @@ scripts/cmake-target-map.py --build-dir build --configure --output targets.json
 # 2. Index the sources those targets compile.
 vycor-cpp megascope index --build-path build
 
-# 3. The edge table: thin dependencies, largest gain first.
+# 3. The edge table: thin dependencies, those that help a link target first.
 vycor-cpp megascope audit-dependencies --build-path build \
-    --target-map targets.json --finding thin-dependency --sort gain --format tsv
+    --target-map targets.json --finding thin-dependency --sort link_gain --format tsv
 
 # 4. One edge: the symbols, the witnesses, the closure.
 vycor-cpp megascope explain-dependency --build-path build \
@@ -114,133 +120,176 @@ is in that order.
 
 ## Attribution
 
-The index knows functions and the call edges between them; it does not
-record which function has a body or where. The audit works that out
-from where a function's calls are written, in six rules applied in
-order. A **target's files** are its mapped sources plus every header
-under `roots` that only translation units of one target set opened
-(a *private header*; the per-TU opened-file tables of the index decide
+The reference facts record, per symbol (function, variable, class), its
+linkage, its attributes, its declarations and the TUs that define it,
+and per reference the referring symbol, the target, the role, and one
+witness site (`docs/symbol-references.md`). The audit turns them into a
+**class** and an **owning target set** per symbol, and decides which
+target's objects **hold** each reference.
+
+A **target's files** are its mapped sources plus every header under
+`roots` that only translation units of one target set opened (a
+*private header*; the per-TU opened-file tables of the index decide
 this). A file compiled into several targets — a source two targets
 list, a header private to both — belongs to that **set** of targets,
 and so does the code in it.
 
-| # | The function | Class | Owner |
-|---|---|---|---|
-| 1 | makes a call written in a target's file | `defined` | the targets of every such file |
-| 2 | makes no such call, but is declared in a target's file | `defined` | the targets of that file |
-| 3 | makes calls, all written in shared headers | `inline` | none: it is emitted into whichever object uses it |
-| 4 | makes no call and is template code (its USR names an instantiation or a member of a class template) | `inline` | none |
-| 5 | makes no call and is declared in a shared header that has an owner | `presumed` | the header's owner |
-| 6 | anything else | unattributed | none: ignored |
+### Symbol classes
 
-"A call" in rules 1 to 3 is any call the index recorded in the body,
-whatever its kind: a call that creates no reference (below) still shows
-where the body is written. One case comes before rule 2: a function
-whose calls are written in an indexed source that no target lists, and
-in no target's file, is unattributed — its body is in a file the map
-leaves out, so it is neither a provider's symbol nor an inline body
-that carries references (`completeness.references.unmappedBody` counts
-the references dropped with it).
+| The symbol | Class | Owner |
+|---|---|---|
+| a function or variable with a strong definition — external linkage, or internal linkage or an explicit instantiation defined in a TU's main file — in a target's source, or in a header only one TU includes (an `.inc` body) | `defined` | the targets of every TU that defines it |
+| a class whose vtable a target's TU emits (it defines the key function) | `defined` | the targets of those TUs |
+| an inline function, a template, a lambda, a symbol internal to a header, a strong definition written in a header several TUs include, a class without a key function | `inline` | none: it is emitted into whichever object uses it |
+| an external symbol no indexed TU defines, declared in a header whose owner is not fully indexed | `presumed` | the header's owner |
+| anything else: system-header code, file-scope pseudo-symbols, an external symbol no indexed TU defines whose owner is fully indexed (`symbols.undefinedInCoveredOwner`), code defined only in an indexed source no target lists | unattributed | none: ignored |
 
 The owner of a shared header is the first that applies:
 
 1. the target that lists it under `headers`;
-2. the target sets that own the most `defined` functions declared in
+2. the target sets that own the most `defined` symbols declared in
    that header, when the header is under `roots`. Several sets tied for
-   the most are all presumed: the header's leaves could be any of
+   the most are all presumed: the header's declarations could be any of
    theirs, so each counts as an uncertain use;
 3. the one target set with a source of the same file stem that opens
    it (`tokenizer.hpp` and `tokenizer.cpp`).
 
-Rule 5 takes a `presumed` symbol's owner from it. An `inline` function
-keeps the owner of its declaring header as its *home*: not a link
-owner — nothing links against an inline body — but enough to say the
-consumer uses that target's code ([indirect uses](#indirect-uses)).
+A private header is owned by its target set. An `inline` symbol keeps
+the owner of its declaring header as its *home*: not a link owner —
+nothing links against an inline body — but enough to say the consumer
+uses that target's code ([indirect uses](#indirect-uses)).
 
 What the rules mean for the cases that matter:
 
-- **Defining TU → target.** A function with calls in `render.cpp` is
-  owned by every target that lists `render.cpp`. A function without a
-  single call in it (a leaf: a getter, a function that only touches
-  data) has nothing that pins its body, so it is `defined` only when
-  its declaration sits in a target's file, and `presumed` otherwise.
+- **Defining TU → target.** A function defined in `render.cpp` is owned
+  by every target that lists `render.cpp`, whether or not its body makes
+  a call.
 - **Header-defined inline and template code** is `inline`: owned by no
-  target, charged to whoever calls it, and walked through by the
-  closure (next section). An inline leaf — no calls in its body —
-  declared in a header with an owner cannot be told apart from a
-  declaration whose body lives in a source file, and is `presumed`.
-- **A TU compiled into several targets** makes its functions owned by
-  all of them. A reference to such a function is a use of each owner; a
+  target, charged to whoever references it, and walked through by the
+  closure ([Inline bodies and the closure](#inline-bodies-and-the-closure)).
+- **A TU compiled into several targets** makes its symbols owned by all
+  of them. A reference to such a symbol is a use of each owner; a
   consumer that is itself one of the owners references its own copy and
   uses no one.
-- **Nodes outside every target** — system and third-party headers
-  outside `roots`, functions in indexed sources no target lists — are
-  unattributed. They are neither symbols of a provider nor carriers of
-  a reference. `completeness.sources.unmappedTus` counts indexed
-  translation units the map does not place.
+- **One identity for distinct code.** A USR two targets' sources both
+  define (every tool's `main`, an anonymous namespace's members in two
+  files of one name) is owned by both. Each of its references is charged
+  to the target set of the file the reference is written in, or of the
+  one TU that recorded it (`references.siteAnchored`), so one tool's
+  `main` does not lend its references to another.
+- **Presumed** symbols are reported apart everywhere
+  (`uncertainSymbols`, `providerPresumedSymbols`, `owner: "presumed"` on
+  a seed): the definition may be in a source the index lacks, or may
+  not exist.
+- `completeness.sources.unmappedTus` counts indexed translation units
+  the map does not place; `references.unmappedBody` counts the
+  references their code made, which nobody holds.
 
-`presumed` symbols are reported apart everywhere
-(`uncertainSymbols`, `providerPresumedSymbols`, `owner: "presumed"` on a
-seed): the owner is a guess, and the symbol may be an inline function
-that links nothing.
+### References
 
-A call through a vtable slot whose target is not proven
-(`VirtualDispatch`, `Plausible`) and a call through a function pointer
-joined at query time (`FunctionPointerReturn`) create no reference:
-a dispatched call names a vtable slot, not a function symbol. They are
-counted in `completeness.references` (`virtualDispatchSkipped`,
-`deferredSkipped`) and kept as [indirect uses](#indirect-uses). A
-virtual call the index proved (`Proven`) is a direct reference.
+Every role is a link reference — `call`, `address_of`, `read`,
+`write`, `vtable_use`, `typeinfo_use` — with two exceptions, which are
+*soft*: they are kept as [indirect uses](#indirect-uses) and walked by
+the closure, but name no symbol of a row.
 
-The index also records a *qualified* call to a virtual function
-(`Base::run()` from an override) as an unproven `VirtualDispatch`,
-although it is bound statically and the object does name the symbol.
-The audit cannot tell the two apart, so such a call is an indirect use
-and not a symbol of the row.
+- **A dispatched virtual call.** A call of a virtual function the
+  compiler dispatches through the vtable names a slot, not a symbol.
+  The call graph tells a dispatched call from one bound statically (an
+  object of known type, a proven target); the bound call is a link
+  reference (`references.virtualDispatchSkipped` counts the others).
+- **Overload candidates.** A template whose overload set stays open
+  until instantiation records a reference to every candidate, at one
+  site. Two or more calls (or address-ofs) from one referrer, at one
+  witness site, to different symbols of one unqualified name are such
+  candidates (`references.overloadCandidates`): any one instantiation
+  uses one of them, or none. Differently named targets at one site — a
+  macro expanding to several calls — are ordinary references.
+
+The audit adds the references the compiler writes for a class:
+
+| Kind | From → to | Held by |
+|---|---|---|
+| `vtable_entry` | a class → each virtual function it declares | wherever the class's vtable is emitted |
+| `base_class` | a dynamic class → each dynamic base class (from the call graph's hierarchy, where some TU saw both definitions) | the derived class's vtable homes that saw the base |
+| `inherited_virtual` | a dynamic class → each virtual function of a base it does not override (destructors aside) | as `base_class` |
+| `enclosed_lambda` | a function → a lambda it calls | the function |
+
+A base the hierarchy names but no TU saw beside the derived class (a
+name shared by every specialization of a template, or by classes of two
+anonymous namespaces) is not taken (`references.baseClassesUnseen`).
+
+### Who holds a reference
+
+| The referring symbol | Held by |
+|---|---|
+| `defined` | its owners (one of them for a shared identity, above) |
+| `inline` | nobody, until something uses it: the reference travels with the body |
+| `inline`, with a weak or `used` definition in a header | every target whose TUs open that header: such a body is emitted whether used or not (`symbols.emittedEverywhere`) |
+| a lambda | the targets of the file it is written in |
+| file scope (a default member initializer, a namespace-scope initializer the visitor gives no function) | the targets of the file it is written in, or of the one TU that recorded it; else nobody (`references.fileScopeDropped`) |
+| unattributed | nobody |
 
 ### Indirect uses
 
 A row's `indirectUses` counts the provider's code the consumer touches
 without a reference the linker is known to need:
 
-- a `defined` or `presumed` symbol of the provider reached only by an
-  unproven virtual call or a function-pointer return, from the
-  consumer's objects or from an inline body they use;
-- an `inline` function the consumer uses whose home is the provider.
+- a `defined` or `presumed` symbol of the provider reached only by a
+  soft reference (a dispatched virtual call, an overload candidate),
+  from the consumer's objects or from an inline body they use;
+- an `inline` symbol the consumer uses whose home is the provider.
 
-They are disjoint from the row's symbols, enter no closure and no thin
-finding, and do one thing: a row with an indirect use is never reported
-as unused.
+They are disjoint from the row's symbols, enter no thin finding, and do
+one thing: a row with an indirect use is never reported as unused.
 
 ## Inline bodies and the closure
 
-A reference is **held by a target's objects** when its call site is
-written in one of the target's files, or in a shared header but inside
-a `defined` function (a macro or an `.inc` body expanded there). A
-reference written in an `inline` function's body is held by nobody
-until something uses that function.
-
 - **Seeds.** The consumer's seeds onto a provider are the provider's
   symbols reached from references the consumer's objects hold, walking
-  *through* `inline` functions: `main.cpp` calls the header's
-  `clamp()`, `clamp()` calls the provider's `fail()`, so `fail` is a
-  seed with `via: "inline"` and `clamp` named under `through`.
-  `viaInline` counts the seeds no source of the consumer names
-  directly.
+  *through* `inline` bodies: `main.cpp` calls the header's `clamp()`,
+  `clamp()` calls the provider's `fail()`, so `fail` is a seed with
+  `via: "inline"` and `clamp` named under `through`. `viaInline` counts
+  the seeds no source of the consumer names directly.
 - **Closure.** From the seeds, every `defined` symbol of the provider
   they transitively reference, again walking through `inline` bodies.
+  The walk also takes the `defined` provider symbols a soft reference
+  names (an overload candidate, a virtual function called through its
+  slot): one of them may be what an instantiation uses, so the closure
+  over- rather than undercounts what would move with the seeds.
   `closureSymbols` and `closureFiles` size it; `explain_dependency`
   lists it.
-- **Needs.** A reference that leaves the provider from inside the
-  closure names another target the closure needs (`closureNeeds`).
-  When the referenced symbol has several owners, the ones the provider
-  already depends on are charged; with none of those, all of them.
+- **Needs.** A hard reference that leaves the provider from inside the
+  closure names another target the closure needs (`closureNeeds`). When
+  the referenced symbol has several owners, the ones the provider
+  already depends on are charged; with none of those, all of them. A
+  soft reference adds no need: an inline body's soft references are the
+  union of every instantiation's candidates.
+- **Fan-in.** `closureFanIn` counts the `defined` provider symbols
+  outside the closure that reference into it (directly, softly, or
+  through inline bodies), and `closureFanInFiles` the files holding
+  them. Zero: the closure is a leaf of the provider and can be split out
+  whole. Non-zero: the rest of the provider would depend on the split
+  part, so the provider keeps linking it and what it needs — the
+  consumer's edge moves, the provider's link does not shrink.
 
 The walk treats an inline body as present in full wherever it is used.
-The compiler may have inlined it and dropped the calls a constant
+The compiler may have inlined it and dropped the references a constant
 condition removes, or never emitted a body nobody called; the audit
-does not know. That over-counts, never under-counts, the references an
-inline body carries.
+does not know. That over-counts the references an inline body carries.
+What an implicit instantiation of a template adds is not in the facts at
+all and is undercounted (`template-instantiation-bodies`).
+
+### Registration seeds
+
+A symbol whose body (or an inline body it reaches) takes the address of
+a function of a template is a *registration*: a factory instantiated for
+one type and handed to a registry (`RegisterMCAsmParser<T>`,
+`TargetRegistry::RegisterX`). What the factory builds is reached through
+the registry at run time, not through the closure, and the
+instantiation's body is invisible besides. Such seeds are flagged
+(`registers: true` on a seed, `registrationSeeds` on the row), and a
+thin finding whose every certain seed is one carries
+`"registration": true`: the small closure is an artifact, not a lead.
 
 ## The edge table
 
@@ -253,7 +302,7 @@ symbol or uncertain symbol referenced).
 | `target_map` | required: path of the target map |
 | `consumer`, `provider` | only the rows of that consumer / onto that provider (exact target names; an unknown name is `not_found`) |
 | `finding` | only rows with this finding: `unused-link-dependency`, `undeclared-link-dependency`, `thin-dependency`, or `any` |
-| `sort` | `name` (default): by consumer, then provider. `gain`: `droppableSymbols` descending, then `closureSymbols` ascending, then by name |
+| `sort` | `name` (default): by consumer, then provider. `gain`: `droppableSymbols` descending, then `closureSymbols` ascending, then by name. `link_gain`: `linkTargetGain` descending, then `linkTargetsHelped` descending, then `closureSymbols` ascending, then by name |
 | `thin_max_symbols`, `thin_max_closure_pct` | the thin thresholds (defaults 5 and 10) |
 | `limit`, `offset` | paging over `edges` (default limit 200) |
 
@@ -267,16 +316,20 @@ symbol or uncertain symbol referenced).
 | `indirectUses` | the provider's symbols the consumer touches without a reference the linker is known to need — [Indirect uses](#indirect-uses) |
 | `closureSymbols`, `closureFiles` | the closure of `symbols` inside the provider, and the files holding it |
 | `providerSymbols`, `providerFiles`, `providerPresumedSymbols` | the provider's size: `defined` symbols, the files holding them, `presumed` symbols |
-| `separabilityPct` | the share of the provider's `defined` symbols *outside* the closure, 0–100: how much of the provider the consumer would not need |
+| `separabilityPct` | the share of the provider's `defined` symbols *outside* the closure, 0–100: how much of the provider the consumer would not need. A thin row's closure is at most `thin_max_closure_pct` of the provider, so on thin rows this is at least 90 by construction and does not rank them |
 | `closureNeeds` | other targets the closure references |
 | `onlyViaEdge` | targets (the provider included) the consumer reaches through this dependency and through no other dependency it declares or uses |
 | `droppableTargets` | of those, the ones the closure would not pull back in: what the consumer stops linking if the closure is split out into a target of its own |
 | `droppableSymbols` | the `defined` symbols in `droppableTargets`, less the closure itself when the provider is among them — the gain |
 | `providerDroppable` | the provider is one of `droppableTargets` |
+| `linkTargetsHelped`, `linkTargetGain` | the final link targets (executables, shared and module libraries) that would stop linking at least one of `droppableTargets` — [Link-target gain](#link-target-gain) — and the most `defined` symbols one of them would drop |
+| `closureFanIn`, `closureFanInFiles` | `defined` provider symbols outside the closure that reference into it, and their files — [the closure](#inline-bodies-and-the-closure) |
+| `registrationSeeds` | certain seeds that register a factory — [Registration seeds](#registration-seeds) |
+| `providerStaticInits` | `defined` variables of the provider whose initializer calls a function: code that runs when a program links the provider's object |
 | `consumerCovered`, `providerCovered` | every mapped source of the target was indexed cleanly |
-| `consumerUnplacedUses` | a property of the consumer, repeated on its rows: the functions its objects reference that are declared under `roots` and that no rule could place in a target. Any of them may belong to this row's provider. Information only: no finding depends on it |
+| `consumerUnplacedUses` | a property of the consumer, repeated on its rows: the symbols its objects reference that are declared under `roots` and that no rule could place in a target. Any of them may belong to this row's provider. Information only: no finding depends on it |
 | `witness` | the first seed in canonical order: `site`, `from`, `to`, `kind` (absent without one) |
-| `findings` | the row's findings, each `{"id", "evidence": "call-edges", "universal": false}` |
+| `findings` | the row's findings, each `{"id", "evidence", "universal": false}` (`evidence` is `completeness.edgeSource`), with the extra members under [Findings](#findings) |
 
 `onlyViaEdge`, `droppableTargets` and `droppableSymbols` are computed
 for `declared: "direct"` rows only (elsewhere 0 and empty): they
@@ -284,6 +337,33 @@ describe removing a line from the consumer's build file. They count
 symbols the index attributed, not bytes and not link time; a row with a
 large `droppableSymbols` is where to look, not a measurement of the
 saving.
+
+### Link-target gain
+
+`droppableSymbols` is what the *consumer* stops linking. When the
+consumer is a static or object library, nothing is linked until a final
+link target links it, and that target may reach the dropped targets
+another way. For each final link target that links the consumer (the
+consumer itself, when it is one), the audit walks what the target links
+with this row's edge replaced by the closure's needs: the
+`droppableTargets` it no longer reaches are what it drops, and their
+`defined` symbols (less the closure, when the provider is among them)
+its gain. `linkTargetsHelped` counts the targets that drop anything,
+`linkTargetGain` is the largest gain, and `explain_dependency` lists
+each target with its own. Computed for `declared: "direct"` rows with
+droppable targets; zero elsewhere.
+
+What a target links is read from the map: the consumer's rows that are
+declared or used, the `interfaceDeps` of what it reaches, and the
+declared `deps` of every other target on the way. A dependency a third
+target uses without declaring is not followed, so the gain can be
+overstated when the build only works because some other path pulls the
+provider in.
+
+`link_gain` ranks a row that helps a program above one whose library
+gain no program sees. Both columns inherit the closure's error: a
+closure that is too small — the usual cause is a template instantiation
+whose body the facts do not hold — makes every gain column too large.
 
 The payload also carries `targetMap` (`path`, `generator`, `depsForm`,
 `targets`, `roots`), `completeness`, `thinThresholds`, `findingCounts`
@@ -310,27 +390,40 @@ all (CMake's `add_dependencies`); they look declared here.
 
 | Finding | Condition |
 |---|---|
-| `unused-link-dependency` | `declared: "direct"`; no symbol, no uncertain symbol and no indirect use; consumer and provider both covered; the index's coverage is stated and it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
+| `unused-link-dependency` | `declared: "direct"`; no symbol, no uncertain symbol and no indirect use; consumer and provider both covered; the index's coverage is stated and (for the call-edge fallback) it was baked without `--collapse-paths`; the index attributes at least one symbol (`defined` or `presumed`) to the provider |
 | `undeclared-link-dependency` | at least one `defined` symbol referenced, and `declared` is `transitive` or `none` |
 | `thin-dependency` | `declared` is `direct` or `closure`; `1 ≤ symbols + uncertainSymbols ≤ thin_max_symbols`; `closureSymbols + uncertainSymbols` is at most `thin_max_closure_pct` percent of `providerSymbols + providerPresumedSymbols` |
 
 `unused-link-dependency` **fails closed**: a target with a source that
 is missing from the index or did not parse cleanly, an index without
-stated coverage, an index baked with collapsed paths, a provider the
-index holds no symbol of, or an indirect use yields no finding.
-`unusedWithheld` counts the declared-direct rows with no symbol and no
-uncertain symbol that got no finding for one of those reasons, so "no
-unused findings" is never mistaken for "everything is used". When the
-finding is reported it is still not a verdict: the objects may need the
-provider for a variable, a vtable, a static initializer, or a function
-the audit could not attribute (below; `consumerUnplacedUses` says how
-many of the consumer's callees that is).
+stated coverage, a provider the index holds no symbol of, or an
+indirect use yields no finding. `unusedWithheld` counts the
+declared-direct rows with no symbol and no uncertain symbol that got no
+finding for one of those reasons, so "no unused findings" is never
+mistaken for "everything is used". When the finding is reported it is
+still not a verdict: the program may rely on the provider's static
+initializers (the finding then carries `providerStaticInits`, their
+count), on a symbol only an instantiation names, or on a symbol the
+audit could not attribute (`consumerUnplacedUses` says how many of the
+consumer's references that is). `consumerUnplacedUses` and
+`references.unresolvedSite` are reported, never gating.
+
+An `undeclared-link-dependency` whose every certain seed is reached
+through an inline body declared in a target the consumer *does* declare
+carries `throughInline`: the inline `symbol`, its `header`, the header's
+`owners`, and the consumer's `site` that reaches it. The consumer's own
+code names nothing of the provider; the dependency is that header's,
+and the fix belongs to its owner (declare the provider as an interface
+dependency) more than to the consumer.
 
 `thin-dependency` describes the shape of an edge, not its value. Rank
-thin rows by `droppableSymbols` (`--sort gain`), then read the closure
-with `explain_dependency`: a thin edge onto a small leaf library is
-true and worthless, and a thin edge whose closure needs most of what
-the provider needs saves nothing.
+thin rows by `linkTargetGain` (`--sort link_gain`) or `droppableSymbols`
+(`--sort gain`), then read the closure and its fan-in with
+`explain_dependency`: a thin edge onto a small leaf library is true and
+worthless, a thin edge whose closure needs most of what the provider
+needs saves nothing, a closure with fan-in leaves the provider's own
+link as it is, and a thin finding with `"registration": true` is a
+registry hook whose real use the closure cannot follow.
 
 ## `explain_dependency`
 
@@ -343,9 +436,11 @@ observed) answers `ok` with empty `seeds` and exit code 1.
 | Member | Meaning |
 |---|---|
 | `edge` | the row, as in the edge table |
-| `seeds` | every provider symbol the consumer references — certain before uncertain, named by a source before via-inline, then by site. Each: `symbol` (`name`, `usr`, `file`, `line`), `owner` (`defined` / `presumed`), `via` (`direct` / `inline`), `kind` (the edge kind), `site` (where the reference to the symbol is written), `from` (the function that makes it), and for `via: "inline"` `through`: the call in the consumer's own files (`site`, `from`, `to`) the walk started from |
-| `closure` | the closure's symbols by qualified name, then USR: `name`, `usr`, `file`, `line` (the declaration), `definedIn` (the file its calls are written in, when known) |
+| `linkTargetsHelped` | each final link target the split would help: `target`, `droppableSymbols` — by symbols descending, then name |
+| `seeds` | every provider symbol the consumer references — certain before uncertain, named by a source before via-inline, then by site. Each: `symbol` (`name`, `usr`, `kind` — `function`, `variable`, `class` — and the declaration's `file`, `line`), `owner` (`defined` / `presumed`), `via` (`direct` / `inline`), `kind` (the reference's role or added kind), `site` (where the reference to the symbol is written), `from` (the symbol that makes it), `registers: true` for a registration, and for `via: "inline"` `through`: the reference in the consumer's own files (`site`, `from`, `to`) the walk started from |
+| `closure` | the closure's symbols by qualified name, then USR: `name`, `usr`, `kind`, `file`, `line` (the declaration), `definedIn` (the file that defines it, when known) |
 | `closureTotal`, `closureTruncated` | the full count, and whether `closure_limit` cut the list |
+| `fanIn`, `fanInTruncated` | the symbols `closureFanIn` counts, in the closure's order and shape, cut at `closure_limit` |
 
 ## Completeness
 
@@ -353,71 +448,89 @@ Every payload of both tools carries `completeness`:
 
 | Member | Meaning |
 |---|---|
-| `edgeSource` | `"call-edges"` — what the references were derived from |
+| `edgeSource` | `"references"`, or `"call-edges"` for an index without reference facts — what the references were derived from |
 | `unusedIsUniversal` | `false`: an unused finding is not a proof |
 | `invisible` | the kinds of link dependency this evidence cannot see, as stable tags (below) |
 | `depsForm` | the map's form |
 | `coverageStated` | whether the index states its coverage (`indexScope`) and carries the per-TU tables attribution needs |
-| `edgesCollapsed` | the index was baked with `--collapse-paths`; the `collapsed-call-edges` tag is then present and no unused finding is raised |
+| `edgesCollapsed` | call-edge fallback only: the index was baked with `--collapse-paths`; the `collapsed-call-edges` tag is then present and no unused finding is raised. Reference facts are recorded whatever `--collapse-paths` says |
 | `targets` | `total`, `withSources`, `covered` |
 | `sources` | `mapped` (distinct sources in the map), `indexed` (parsed cleanly), `failed`, `notIndexed`, `unmappedTus` |
-| `symbols` | `defined`, `presumed`, `inline`, `unattributed` |
-| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with a caller), `virtualDispatchSkipped`, `deferredSkipped`, `unmappedBody` (made by a function whose body is in an indexed source no target lists), `unresolvedSite` (the call site's file matched no known file) |
+| `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU) and `emittedEverywhere` (weak or `used` header definitions held by every includer) |
+| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
 
-`invisible`:
+`invisible` with reference facts:
 
 | Tag | What is missed |
 |---|---|
-| `variable-references` | reading, writing, or taking the address of another target's global or static data member |
-| `vtable-and-typeinfo-references` | constructing or deriving from a class whose vtable another target emits; `typeid`, `dynamic_cast`, catching its type |
-| `static-initializer-calls` | a call made while initializing a namespace-scope variable: it has no enclosing function, so no edge |
-| `implicit-destructor-calls` | destroying a local, a temporary, or a member whose destructor another target defines: no call is written, so no edge (the index records a destructor only for a local of a polymorphic class) |
-| `calls-in-template-bodies` | a call written in a function template or in a member of a class template. The index does not walk instantiations: a dependent call is recorded nowhere, and the instantiation a caller reaches has no outgoing edges, so the walk through inline code stops there |
-| `definitions-without-calls` | a function whose body makes no call is placed by its declaration alone (rules 2, 5, 6) |
+| `template-instantiation-bodies` | the body of an implicit instantiation is not traversed: a reference only the instantiation makes — the constructor and vtable behind `std::make_unique<T>()`, a call resolved by argument-dependent lookup, what a registry's `callDefaultCtor<T>` builds — is recorded nowhere, and a closure through template code stops at the pattern |
+| `implicit-special-member-calls` | constructors, destructors and assignment the compiler writes or calls implicitly (members, bases, temporaries, end of scope), and implicitly defined special members as targets |
+| `qualified-virtual-calls` | without the call graph, a call of a virtual function bound statically (`Base::run()` from an override) cannot be told from a dispatched one and is soft |
+| `same-basename-internal-symbols` | two internal symbols of one name in files of one basename share an identity (`docs/symbol-references.md`, "Limits") and their facts merge |
 | `name-based-lookup` | `dlsym`, plugin registries, linker sections, `--whole-archive` |
 | `other-build-configurations` | code under an `#if` the indexed configuration did not take; other platforms' sources |
-| `collapsed-call-edges` | only for an index baked with `--collapse-paths`: calls between two files under a collapsed path were never recorded, so closures inside those paths are undercounted. Bake the index for an audit without collapse paths |
 
 Known ways an answer is wrong, beyond what the tags say:
 
-- **A leaf defined in a source, declared in a shared header** is
-  `presumed`, or unattributed when the header has no owner by listing,
-  vote, or stem. A consumer that calls *only* unattributed functions of
-  a provider is reported as not using it. List the provider's public
-  headers under `headers` to close most of this.
-- **An inline leaf in an owned header** looks `presumed`: the consumer
-  appears to need a symbol that links nothing.
-- **A forward declaration in a source file** makes rule 2 place the
-  function in that source's target.
-- **A function whose calls are all written in macro bodies or `.inc`
-  files outside `roots`** has no call in a target's file and looks
-  `inline` or `presumed`.
-- **An explicit template instantiation** is template code by its USR,
-  so `inline`, though one target's object emits it. A consumer that
-  calls it shows an indirect use of the header's owner, not a symbol.
-- **A function with a body in several targets** (the same function
-  defined in sources of different targets) holds the references of
-  every copy, so a closure through it over-counts.
+- **The closure is too small where templates do the work.** The
+  dominant error on a large tree: a seed that constructs a class through
+  `std::make_unique`, or hands a factory to a registry, has a closure of
+  itself or little more, because what the instantiation calls is not in
+  the facts. Every gain column of such a row is too large; `fanIn`,
+  `registrationSeeds` and reading the closure are the checks.
+- **Seeds can be compile-time only.** A call the optimizer folded or an
+  inline body the compiler never emitted is still a reference here; the
+  objects do not need the symbol.
+- **Overload candidates are soft.** A call that a template resolves to
+  one of several same-named candidates names no seed; when the
+  candidates are the consumer's only use of a provider the row shows an
+  indirect use, not a symbol.
+- **An inline body carries every reference it makes** in every target
+  that uses it, whatever the optimizer removes.
+- **A function template named `operator<`** spells its instantiations
+  `operator<<#...`, the same as `operator<<` itself; the name is read as
+  the stream inserter.
 - **A source another translation unit includes** (a unity build, an
   `#include "impl.cpp"`) counts as indexed when the including unit
   parsed cleanly, though its own compile command was never used.
 - **A call site the index cannot match to one file**
-  (`references.unresolvedSite`) loses its reference, and no finding is
-  withheld for it.
+  (`references.unresolvedSite`) is still charged to its referrer's
+  owner, and no finding is withheld for it.
 - **The map and the index are not checked against each other.** A map
   written from another checkout or configuration than the index was
   baked from is compared as it stands.
-- **A function template named `operator<`** spells its instantiations
-  `operator<<#...`, the same as `operator<<` itself; the name is read as
-  the stream inserter, so the instantiation looks `presumed` rather
-  than `inline`.
 - **A partial index** can make a shared header look private: only the
   indexed translation units vote. `consumerCovered` / `providerCovered`
   say when that can be the case.
 - **A generated header** is private to nobody unless the build
   directory is among `roots` (the CMake adapter adds it).
-- **The optimizer.** A call the compiler removed or inlined is still an
-  edge here; the objects do not need the symbol.
+
+### Call-edge fallback
+
+An index without reference facts is audited from its call edges. A
+function is placed by where its calls are written, in six rules applied
+in order:
+
+| # | The function | Class | Owner |
+|---|---|---|---|
+| 1 | makes a call written in a target's file | `defined` | the targets of every such file |
+| 2 | makes no such call, but is declared in a target's file | `defined` | the targets of that file |
+| 3 | makes calls, all written in shared headers | `inline` | none |
+| 4 | makes no call and is template code (its USR names an instantiation or a member of a class template) | `inline` | none |
+| 5 | makes no call and is declared in a shared header that has an owner | `presumed` | the header's owner |
+| 6 | anything else | unattributed | none |
+
+A reference is held by the target whose file its call site is written
+in, or by a `defined` function's owners when the site is a shared header
+(a macro or an `.inc` body expanded there). An unproven
+`VirtualDispatch` call and a `FunctionPointerReturn` call are soft. Its
+`invisible` tags add what call edges cannot see: `variable-references`,
+`vtable-and-typeinfo-references`, `static-initializer-calls`,
+`implicit-destructor-calls`, `calls-in-template-bodies`,
+`definitions-without-calls` (a leaf is placed by its declaration alone,
+so a leaf defined in a source and declared in a shared header is
+`presumed` or unattributed), and `collapsed-call-edges` for an index
+baked with `--collapse-paths`. Re-index to audit from references.
 
 ## Checking against the objects
 
@@ -442,7 +555,10 @@ drops the underscore Mach-O puts before every symbol.
 The report splits every difference by cause:
 
 - **Object symbols by class**: functions, variables, vtables, typeinfo.
-  Everything but functions is invisible to call edges by construction.
+  `all names` compares every class: a vtable or typeinfo symbol is
+  matched to the audit's seed on its class (`class Name`), a function or
+  variable by qualified name. Under the call-edge fallback everything
+  but functions is invisible by construction.
 - **Functions the objects need and the audit missed**, by why: the
   call exists in the consumer's own sources but the callee was not
   placed in the provider (`calleeNotPlaced`), the only calls are in
@@ -460,7 +576,10 @@ The report splits every difference by cause:
   findings the objects confirm.
 
 Functions are matched by qualified name without parameters or template
-arguments, so a set of overloads counts once on both sides.
+arguments, so a set of overloads counts once on both sides. The
+comparison measures seeds and findings; it says nothing about closure
+size, which only reading `explain_dependency` against the provider's
+code checks.
 
 ## Adapters
 
@@ -502,14 +621,14 @@ complete adapter.
 - `TargetMap.h` — the parsed map: flat CSR tables, validated once at
   load.
 - `DependencyAudit.h` — two layers. `LinkFacts` is the evidence: symbols
-  with an owning target set and a class, and the references between
-  them, in flat arrays. `linkFactsFromCallEdges` fills it from the call
-  graph (the attribution rules above). `auditDependencies` is the
-  kernel: it reads `LinkFacts` and the map only, and computes seeds,
-  closures, needs and gains with bit matrices and stamp arrays sized
-  once per audit. A producer over reference facts — variables, vtables,
-  typeinfo — replaces the first layer and leaves the kernel and the
-  payloads as they are; `completeness.edgeSource` and `invisible` come
-  from the producer.
+  with an owning target set, a class and flags, and the hard and soft
+  references between them, in flat CSR arrays over interned ids.
+  `linkFactsFromReferences` fills it from the reference facts (the rules
+  above), `linkFactsFromCallEdges` from the call graph (the fallback).
+  `auditDependencies` is the kernel: it reads `LinkFacts` and the map
+  only, and computes seeds, closures, needs, fan-in and gains with bit
+  matrices and stamp arrays sized once per audit.
+  `completeness.edgeSource` and `invisible` come from the producer.
 
-`src/query/DependencyTools.cpp` holds the two tools.
+`src/query/DependencyTools.cpp` holds the two tools; they read the
+references section and the graph (`ToolEntry::needs`).

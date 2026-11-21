@@ -436,10 +436,10 @@ vycor-cpp megascope explain-dependency --index proj.vycs \
     --target-map targets.json --consumer app --provider bigdep
 ```
 
-Bake the index for this **without** `--collapse-paths`: collapsed edges
-hide what a dependency needs internally. The evidence is call edges
-only, so every payload says what it cannot see (`completeness`) and no
-finding is a proof; `docs/dependency-audit.md` has the target-map
+The evidence is the index's symbol reference facts (an index baked
+before them falls back to call edges; bake that one without
+`--collapse-paths`). Every payload says what it cannot see
+(`completeness`) and no finding is a proof; `docs/dependency-audit.md` has the target-map
 schema, the attribution rules, and how to check a result against the
 built objects.
 

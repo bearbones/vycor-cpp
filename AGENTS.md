@@ -310,7 +310,7 @@ directly.
 | `ChannelTools.cpp` | channel listing/query, channels-for-function, explain-ordering |
 | `ReferenceTools.cpp` | `lookup_symbol` (linkage, attributes, declarations, defining TUs, referrers per role) and `get_references` (who references a symbol, or what it references, by role); both read the references section alone |
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
-| `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the call edges, run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
+| `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the reference facts (the call edges for an index without them), run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
 | `MetricsTools.cpp` | the `metrics` tool: metric selection, roll-up level, target map, paging, and the `--list-metrics` listing over the `metrics/` module |
 | `EffectTools.cpp` | `query_path_effects`: roots, patterns, profile, `min_count`, effect subset and allow list over `HotPath.h`; the profile join and verdict in the payload (`clean` needs no `templateLeaves`) |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
@@ -338,7 +338,7 @@ Contract and worked examples: `docs/change-impact.md`.
 | File | Purpose |
 |---|---|
 | `TargetMap.h/.cpp` | The build-system-neutral target map (`schema` 1: link targets, their sources and headers, declared `deps`, `depsForm` `direct` or `closure`), parsed and validated once at load; an external query-time input, never part of the snapshot |
-| `DependencyAudit.h/.cpp` | Two layers. `LinkFacts` — flat arrays: one class (`Defined`, `Presumed`, `Inline`, `Unattributed`) and one interned owner-target set per symbol, references in CSR form — produced by `linkFactsFromCallEdges(graph, map, meta)`. `auditDependencies(facts, map)` — the kernel: the declared-reach bit matrix, per-edge seeds, closure and needs, what each direct edge alone pulls in, the findings. It reads `LinkFacts` only, so a different producer (reference facts) replaces the edge source without touching it |
+| `DependencyAudit.h/.cpp` | Two layers. `LinkFacts` — flat arrays: one class (`Defined`, `Presumed`, `Inline`, `Unattributed`), one interned owner-target set and flags per symbol, hard and soft references in CSR form — produced by `linkFactsFromReferences(refs, graph, map, meta)` (overload candidates and dispatched virtual calls soft; vtable entries, bases and inherited virtuals added) or, for an index without reference facts, `linkFactsFromCallEdges(graph, map, meta)`. `auditDependencies(facts, map)` — the kernel: the declared-reach bit matrix, per-edge seeds, closure (soft references to the provider's own symbols included), needs, fan-in, what each direct edge alone pulls in, and which final link targets each split helps (`linkTargetsHelped`/`linkTargetGain`), the findings. It reads `LinkFacts` only |
 
 Attribution rules, the closure's treatment of inline bodies, the
 payload members, and every known way an answer is wrong:

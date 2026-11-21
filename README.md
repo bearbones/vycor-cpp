@@ -465,7 +465,7 @@ scales to the largest indexes.
 See `docs/megascope-usage.md`. `megascope diff --before A --after B` compares
 two saved indexes (`docs/change-impact.md`). `audit_dependencies` and
 `explain_dependency` compare the build's declared link dependencies with
-the calls the index holds, given a target map written by a build adapter
+the symbol references the index holds, given a target map written by a build adapter
 (`scripts/cmake-target-map.py`): which symbols each dependency is needed
 for, what they drag along, and which dependencies are thin, undeclared, or
 not seen in use (`docs/dependency-audit.md`). `lookup_symbol` and

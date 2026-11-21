@@ -74,8 +74,8 @@ enum : uint8_t {
   /// builds is reached through the registry at run time, so a closure
   /// that starts here stops at the registration.
   kSymFlagRegisters = 1,
-  /// A variable whose initializer calls a function or takes an address:
-  /// code that runs at load time in whichever program links its object.
+  /// A defined variable whose initializer calls a function: code that runs
+  /// at load time in whichever program links its object.
   kSymFlagStaticInit = 2,
 };
 
@@ -206,9 +206,10 @@ struct LinkFacts {
     /// Base classes the hierarchy names but no TU saw with the derived
     /// class (a template's or an anonymous namespace's name): not taken.
     uint64_t baseClassUnseen = 0;
-    /// Calls and address-ofs that share one witness site with a reference
-    /// of the same role to another symbol: the candidates of an overload
-    /// set a template left open. Taken as indirect uses, not references.
+    /// Calls and address-ofs that share one referrer and witness site with
+    /// a reference of the same role to another symbol of the same
+    /// unqualified name: the candidates of an overload set a template left
+    /// open. Taken as soft references (indirect uses), not seeds.
     uint64_t overloadCandidateRefs = 0;
     /// References of a symbol with definitions in several target sets (a
     /// USR two targets' code share, such as `main`) charged to the target
