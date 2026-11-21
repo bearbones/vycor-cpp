@@ -1421,9 +1421,11 @@ int main(int argc, const char **argv) {
                        << (configuredRoots
                                ? "no configured root names a function"
                                : "no root is configured")
-                       << (hotProfile ? " and the profile matched no call "
-                                        "site\n"
-                                      : "\n");
+                       << (!hotProfile ? "\n"
+                           : hotReport.join.callSitesInProfile == 0
+                               ? " and the profile matched no call site\n"
+                               : " and no profiled function reached the "
+                                 "minimum count\n");
           return kUsage;
         }
         if (hotReport.templateLeaves != 0)
