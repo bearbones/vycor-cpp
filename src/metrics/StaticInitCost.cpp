@@ -119,8 +119,10 @@ private:
         return *id;
     auto [it, inserted] = extraByUsr_.try_emplace(
         usr, static_cast<uint32_t>(graphIds_ + extraNames_.size()));
-    if (inserted)
+    if (inserted) {
       extraNames_.push_back(display);
+      extraUsrs_.push_back(usr);
+    }
     return it->second;
   }
 
@@ -154,11 +156,16 @@ private:
                             : extraNames_[node - graphIds_];
   }
 
+  const std::string &usrOf(uint32_t node) const {
+    return node < graphIds_ ? graph_.interner().resolve(node)
+                            : extraUsrs_[node - graphIds_];
+  }
+
   uint8_t effectsOf(uint32_t node) {
     uint8_t &cached = effect_[node];
     if (!(cached & kEffectKnown))
-      cached = static_cast<uint8_t>(kEffectKnown |
-                                    effects_.effectsOf(nameOf(node)));
+      cached = static_cast<uint8_t>(
+          kEffectKnown | effects_.effectsOf(nameOf(node), usrOf(node)));
     return cached & static_cast<uint8_t>(~kEffectKnown);
   }
 
@@ -315,6 +322,7 @@ private:
   std::vector<Seed> seeds_;
   llvm::StringMap<uint32_t> extraByUsr_;
   std::vector<std::string> extraNames_;
+  std::vector<std::string> extraUsrs_;
 
   // Lazily built adjacency: adjPool_[adjBegin_[n] .. +adjCount_[n]).
   std::vector<uint32_t> adjBegin_;

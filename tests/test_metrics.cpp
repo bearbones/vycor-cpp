@@ -812,6 +812,66 @@ Name names[] = {"a", "b"};
   }
 }
 
+TEST_CASE("static-init-cost sees a new-expression at any depth and tells "
+          "placement apart",
+          "[metrics][static-init]") {
+  std::string path;
+  {
+    llvm::SmallString<128> tmp;
+    int fd = -1;
+    REQUIRE_FALSE(
+        llvm::sys::fs::createTemporaryFile("vycor_metrics", "cpp", fd, tmp));
+    ::close(fd);
+    path = std::string(tmp.str());
+    std::ofstream out(path);
+    out << R"cpp(
+using size_t = decltype(sizeof 0);
+void *operator new(size_t, void *) noexcept;
+struct Node { Node(); int v; };
+
+Node *grow(int n) { return new Node[n]; }
+Node *makeNodes() { return grow(4); }
+Node *nodes = makeNodes();
+
+alignas(Node) char storage[2 * sizeof(Node)];
+Node *placeInto(void *buf) { return new (buf) Node; }
+Node *placed = placeInto(storage);
+Node *direct = new (storage + sizeof(Node)) Node;
+)cpp";
+  }
+  BakedIndexes ix = bakeFiles({path});
+  llvm::sys::fs::remove(path);
+  Surface surface(ix);
+  llvm::json::Object payload = surface.run();
+  using Chain = std::vector<std::string>;
+  CHECK(payload.getInteger("total") == 3);
+
+  SECTION("a new two calls below the initializer is an allocation") {
+    const llvm::json::Object *nodes = recordNamed(payload, "nodes");
+    REQUIRE(nodes != nullptr);
+    // makeNodes, grow, operator new[], Node::Node
+    CHECK(nodes->getInteger("value") == 4);
+    CHECK(component(*nodes, "allocation") == 1);
+    CHECK(chain(*nodes, "allocation") ==
+          Chain{"makeNodes", "grow", "operator new[]"});
+  }
+
+  SECTION("a placement new is reached and is not an allocation") {
+    const llvm::json::Object *placed = recordNamed(payload, "placed");
+    REQUIRE(placed != nullptr);
+    // placeInto, the placement operator new, Node::Node
+    CHECK(placed->getInteger("value") == 3);
+    CHECK(component(*placed, "allocation") == 0);
+    CHECK(placed->get("witness") == nullptr);
+
+    // Written in the initializer itself, where the collector sees it.
+    const llvm::json::Object *direct = recordNamed(payload, "direct");
+    REQUIRE(direct != nullptr);
+    CHECK(direct->getInteger("value") == 2);
+    CHECK(component(*direct, "allocation") == 0);
+  }
+}
+
 TEST_CASE("the effect table decides what counts as an effect",
           "[metrics][static-init][ext]") {
   RegistryReset reset;

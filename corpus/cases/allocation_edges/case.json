@@ -1,0 +1,315 @@
+{
+ "schema": 1,
+ "title": "A new-expression is a call of the allocation function it selects: plain, array, placement, and a class's own; a delete-expression of the deallocation function",
+ "sources": [
+  "alloc.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "new-calls-operator-new",
+   "argv": [
+    "get-callees",
+    "--name",
+    "build"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callees": 1
+    },
+    "witnesses": [
+     {
+      "in": "callees",
+      "match": {
+       "callerName": "build",
+       "calleeName": "operator new",
+       "kind": "DirectCall",
+       "confidence": "Proven"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator new[]"
+      }
+     },
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "Pooled::operator new"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "array-new-calls-operator-new-array",
+   "argv": [
+    "get-callees",
+    "--name",
+    "grow"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callees": 1
+    },
+    "witnesses": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator new[]",
+       "kind": "DirectCall",
+       "confidence": "Proven"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator new"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "class-new-calls-the-class-operator",
+   "argv": [
+    "get-callees",
+    "--name",
+    "pooled"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callees": 1
+    },
+    "witnesses": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "Pooled::operator new",
+       "kind": "DirectCall",
+       "confidence": "Proven"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator new"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "delete-calls-operator-delete",
+   "argv": [
+    "get-callees",
+    "--name",
+    "drop"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callees": 1
+    },
+    "witnesses": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator delete",
+       "kind": "DirectCall",
+       "confidence": "Proven"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callees",
+      "match": {
+       "calleeName": "operator new"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "operator-new-names-two-functions",
+   "argv": [
+    "get-callers",
+    "--name",
+    "operator new"
+   ],
+   "expect": {
+    "exit": 4,
+    "status": "ambiguous",
+    "fields": {
+     "ambiguous": true,
+     "total_candidates": 2
+    },
+    "witnesses": [
+     {
+      "in": "candidates",
+      "match": {
+       "usr": "c:@F@operator new#l#"
+      }
+     },
+     {
+      "in": "candidates",
+      "match": {
+       "usr": "c:@F@operator new#l#*v#"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "callers-of-the-allocating-form",
+   "argv": [
+    "get-callers",
+    "--usr",
+    "c:@F@operator new#l#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callers": 1
+    },
+    "witnesses": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "build",
+       "kind": "DirectCall"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "place"
+      }
+     },
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "pooled"
+      }
+     },
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "grow"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "callers-of-the-placement-form",
+   "argv": [
+    "get-callers",
+    "--usr",
+    "c:@F@operator new#l#*v#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "callers": 1
+    },
+    "witnesses": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "place",
+       "kind": "DirectCall",
+       "confidence": "Proven"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "callers",
+      "match": {
+       "callerName": "build"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "main-reaches-operator-new-two-calls-down",
+   "argv": [
+    "find-call-chain",
+    "--from",
+    "main",
+    "--to-usr",
+    "c:@F@operator new#l#"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "complete": true,
+     "exhaustive": true,
+     "pathCount": 2,
+     "indexScope": {
+      "complete": true
+     }
+    },
+    "witnesses": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "make_list"
+       },
+       {
+        "fromName": "make_list",
+        "toName": "build"
+       },
+       {
+        "fromName": "build",
+        "toName": "operator new",
+        "to": "c:@F@operator new#l#",
+        "kind": "DirectCall",
+        "confidence": "Proven"
+       }
+      ]
+     }
+    ],
+    "negatives": [
+     {
+      "in": "paths",
+      "match": [
+       {
+        "fromName": "main",
+        "toName": "place"
+       },
+       {
+        "fromName": "place",
+        "toName": "operator new"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

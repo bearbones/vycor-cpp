@@ -667,6 +667,12 @@ TEST_CASE("analyze_dead_code filters system headers and paginates",
   auto graph = buildTestGraph();
   // Add synthetic dead nodes in system and project locations.
   graph.addNode({"std::sys_dead", "/usr/include/fake.h", 10, false, false, ""});
+  // What the compiler declares on its own (the global operator new) sits at
+  // no file at all.
+  graph.addNode({"operator new", "<unknown>", 0, false, false, ""});
+  // A function whose name a macro pastes together has no file either, but
+  // it has a line, and it is the project's.
+  graph.addNode({"handle_pasted", "<unknown>", 4, false, false, ""});
   graph.addNode({"project_dead_a", "src/a.cpp", 11, false, false, ""});
   graph.addNode({"project_dead_b", "src/b.cpp", 12, false, false, ""});
   ControlFlowIndex cfIndex;
@@ -703,6 +709,8 @@ TEST_CASE("analyze_dead_code filters system headers and paginates",
     auto *dead = obj.getArray("dead");
     REQUIRE(dead != nullptr);
     CHECK(countNamed(*dead, "std::sys_dead") == 0);
+    CHECK(countNamed(*dead, "operator new") == 0);
+    CHECK(countNamed(*dead, "handle_pasted") == 1);
     CHECK(countNamed(*dead, "project_dead_a") == 1);
   }
 
@@ -714,6 +722,7 @@ TEST_CASE("analyze_dead_code filters system headers and paginates",
     auto *dead = obj.getArray("dead");
     REQUIRE(dead != nullptr);
     CHECK(countNamed(*dead, "std::sys_dead") == 1);
+    CHECK(countNamed(*dead, "operator new") == 1);
   }
 
   SECTION("limit and offset paginate") {

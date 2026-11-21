@@ -553,7 +553,35 @@ public:
     return true;
   }
 
+  // The site of the edge CallGraphEdgeVisitor::addAllocationEdge records
+  // for a new- or delete-expression, under the same conditions, so a path
+  // that ends at `operator new` has the try scopes around the expression.
+  bool VisitCXXNewExpr(clang::CXXNewExpr *expr) {
+    recordAllocationSite(expr->getOperatorNew(), expr->getBeginLoc());
+    return true;
+  }
+
+  bool VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
+    recordAllocationSite(expr->getOperatorDelete(), expr->getBeginLoc());
+    return true;
+  }
+
 private:
+  void recordAllocationSite(const clang::FunctionDecl *fn,
+                            clang::SourceLocation loc) {
+    if (!fn)
+      return; // unresolved: the type or the operand is dependent
+    Ident caller = getCurrentFunction();
+    if (caller.display.empty())
+      return;
+    if (!isInUserCode(loc))
+      return;
+    if (!funcStack_.empty() &&
+        isCollapsedEdge(funcStack_.back()->getLocation(), fn->getLocation()))
+      return;
+    index_.addCallSiteContext(buildContext(caller, usrs_.identFor(fn), loc));
+  }
+
   ControlFlowIndex &index_;
   // Not read by this visitor today; kept so the constructor matches the
   // other per-TU visitors. [[maybe_unused]] for clang -Wunused-private-field.

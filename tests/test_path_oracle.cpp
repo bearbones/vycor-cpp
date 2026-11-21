@@ -199,6 +199,55 @@ TEST_CASE("duplicate calls: each call site is its own path with its own "
   }
 }
 
+// ============================================================================
+// A new-expression is a call site like any other: the edge to `operator new`
+// has the context of the expression, so "is std::bad_alloc caught" is
+// answered instead of unknown.
+// ============================================================================
+
+TEST_CASE("a new-expression carries the try scopes around it",
+          "[paths][oracle][allocation]") {
+  auto b = bake({R"cpp(
+namespace std { struct bad_alloc {}; }
+struct Node { int v; };
+Node *guarded() {
+  try { return new Node{1}; } catch (const std::bad_alloc &) { return nullptr; }
+}
+Node *bare() { return new Node{2}; }
+void drop(Node *n) { try { delete n; } catch (...) {} }
+int main() { drop(guarded()); drop(bare()); }
+)cpp"});
+  ControlFlowOracle oracle(b.ix.graph, b.ix.cfIndex);
+
+  auto r = oracle.queryThrowPropagation("operator new", "std::bad_alloc",
+                                        {"main"});
+  CHECK(r.protection == Protection::SometimesCaught);
+  CHECK(r.verdictExhaustive);
+  REQUIRE(r.paths.size() == 2);
+  CHECK(r.caughtCount == 1);
+  CHECK(r.uncaughtCount == 1);
+  CHECK(r.unknownCount == 0);
+
+  std::map<std::string, const PathInfo *> bySite;
+  for (const auto &p : r.paths) {
+    REQUIRE(p.hops.size() == 2);
+    CHECK(p.hops[1].kind == EdgeKind::DirectCall);
+    bySite[lineCol(p.hops[1].callSite)] = &p;
+  }
+  // The `new` keyword: line 5 column 16 under the try, line 7 column 23 bare.
+  REQUIRE(bySite.count("5:16"));
+  REQUIRE(bySite.count("7:23"));
+  CHECK(bySite["5:16"]->outcome == PathOutcome::Caught);
+  CHECK(lineCol(bySite["5:16"]->caughtAt) == "5:3");
+  CHECK(bySite["7:23"]->outcome == PathOutcome::Uncaught);
+
+  // The delete-expression too: its one site sits under the catch-all.
+  auto d = oracle.queryExceptionProtection("operator delete", "", {"main"});
+  CHECK(d.protection == Protection::AlwaysCaught);
+  CHECK(d.paths.size() == 2);
+  CHECK(d.unknownCount == 0);
+}
+
 TEST_CASE("overloads: the verdict is per identity, not per display name",
           "[paths][oracle]") {
   auto b = bake({R"cpp(
