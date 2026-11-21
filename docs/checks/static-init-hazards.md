@@ -59,7 +59,8 @@ vycor-cpp check --build-path build --source ... --checks=static-init-hazards
 ```
 
 Grouped **compute-heavy**: it builds the full cross-TU call graph (shared
-with `dead-code` when both are enabled). One diagnostic per root, showing
+with `dead-code` and `could-be-internal` when they are enabled, and read
+from the megascope index at `--index` when that is fresh). One diagnostic per root, showing
 the shortest hazard chain.
 
 ## Extending the hazard list

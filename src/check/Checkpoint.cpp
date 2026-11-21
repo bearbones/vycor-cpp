@@ -42,8 +42,9 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // used it up (a worker crash or timeout). v11: odrEntries carry tuPath,
 // specializations carry resolutionSummary, functionSummaries carry
 // unguardedCallSites & uncaughtThrowSite, diagnostics carry file.
-// v12: computed ABI record layouts.
-constexpr uint32_t kVersion = 12;
+// v12: computed ABI record layouts. v13: the could-be-internal
+// Diagnostic kinds renumber Custom.
+constexpr uint32_t kVersion = 13;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -1023,8 +1024,9 @@ namespace {
 // v10: diagnostics carry their enclosing scope.
 // v11: odrEntries carry tuPath, specializations carry resolutionSummary,
 // functionSummaries carry unguardedCallSites & uncaughtThrowSite,
-// diagnostics carry file. v12: computed ABI record layouts.
-constexpr uint32_t kShardVersion = 12;
+// diagnostics carry file. v12: computed ABI record layouts. v13: the
+// could-be-internal Diagnostic kinds renumber Custom.
+constexpr uint32_t kShardVersion = 13;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

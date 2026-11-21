@@ -66,12 +66,14 @@ initial seeding and may evolve. Organizations can define their own groups
 | [coverage-properties](coverage-properties.md) | off | note | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
 | [callback-under-lock](callback-under-lock.md) | off | warning | compute-heavy | Application callbacks reached with a live nonrecursive mutex guard |
 | [dead-code](dead-code.md) | off | note | compute-heavy | Functions unreachable from the entry points via the call graph |
+| [could-be-internal](could-be-internal.md) | off | warning | compute-heavy | External functions and variables no other TU references |
 
 Severity is the SARIF `level` and what `--fail-on` compares against:
 `error` for ill-formed programs (IFNDR, ODR), `warning` for proven
 hazards, `note` for leads that need triage. Two kinds are notes
-whatever their check: `ADL_SameScore` (`--warn-same-score`) and
-`DeadCode_Optimistic`. Organization checks are warnings.
+whatever their check: `ADL_SameScore` (`--warn-same-score`),
+`DeadCode_Optimistic`, and every could-be-internal kind but
+`Internal_Unreferenced`. Organization checks are warnings.
 
 ## Organization checks
 

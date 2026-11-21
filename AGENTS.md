@@ -134,6 +134,21 @@ with `--checkpoint`: shard results are journaled per TU as they land.
 workers, no spawning). `--worker-timeout`/`--worker-memory-limit` apply
 to these workers too (`runWorkerProcess`, below).
 
+`could-be-internal` (`check/CouldBeInternal.h/.cpp`) is an opt-in
+whole-program check over the megascope reference facts: external
+functions and variables with one defining TU and no reference from
+another TU (`Internal_Unreferenced`, a warning), or declared in a header
+(`Internal_DeclaredInHeader`), or referenced from elsewhere only by test
+sources (`Internal_TestOnly`, `--test-path-re`, matched relative to the
+project root). Its verdict needs every C/C++ entry of the compilation
+database parsed cleanly (`describeCoverageGap`); otherwise tier 1 is
+`Internal_Unproven` and every message says why. main.cpp reads the
+references section from `--index` (default
+`<build-path>/.vycor/megascope.vycs`) when it holds exactly the selected
+sources and none is stale, else bakes once with `bakeIndexes` and shares
+the graph with `dead-code` / `static-init-hazards`. See
+`docs/checks/could-be-internal.md` and `tests/test_could_be_internal.cpp`.
+
 `callback-under-lock` is an opt-in TU-local AST check in
 `check/CallbackUnderLock.cpp`: lexical standard mutex guard ownership plus
 cycle-safe helper/virtual-override paths to application callbacks. It emits named

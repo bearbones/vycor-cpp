@@ -1,0 +1,105 @@
+{
+ "schema": 1,
+ "title": "External functions and variables no other TU references (check could-be-internal): both tiers, a test-only reference, and every exclusion silent; the same answer from a saved index and with test detection off",
+ "sources": [
+  "lib.cpp",
+  "user.cpp",
+  "tests/lib_test.cpp"
+ ],
+ "entry_points": [],
+ "queries": [
+  {
+   "id": "could-be-internal",
+   "argv": [
+    "check",
+    "--checks=-all,could-be-internal",
+    "--entry-point",
+    "plugin_entry",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "lib\\.cpp:3: \\[could-be-internal\\] function 'lonely' has external linkage, but no header declares it",
+      "lib\\.cpp:4: \\[could-be-internal\\] variable 'lonelyVar' has external linkage",
+      "lib\\.cpp:6: \\[could-be-internal\\] function 'headerOnly' is declared in a header \\(.*api\\.h:3\\)",
+      "lib\\.cpp:8: \\[could-be-internal\\] function 'forTests' is referenced from other translation units only by tests \\(.*tests/lib_test\\.cpp:3\\)",
+      "user\\.cpp:3: \\[could-be-internal\\] function 'useShared' has external linkage"
+     ],
+     "absent": [
+      "'shared'",
+      "'sharedVar'",
+      "'already'",
+      "'anon'",
+      "'cfunc'",
+      "'kept'",
+      "'S::method'",
+      "'pick'",
+      "'inl'",
+      "'plugin_entry'",
+      "'main'",
+      "Not proven"
+     ]
+    }
+   }
+  },
+  {
+   "id": "from-the-saved-index",
+   "argv": [
+    "check",
+    "--checks=-all,could-be-internal",
+    "--index",
+    "{index}",
+    "--entry-point",
+    "plugin_entry",
+    "--threads",
+    "1",
+    "--verbose"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "function 'lonely' has external linkage",
+      "function 'headerOnly' is declared in a header",
+      "function 'forTests' is referenced from other translation units only by tests"
+     ],
+     "absent": [
+      "'shared'",
+      "'plugin_entry'",
+      "Not proven"
+     ],
+     "stderr_present": [
+      "^check: graph-backed checks read the index "
+     ]
+    }
+   }
+  },
+  {
+   "id": "test-detection-off",
+   "argv": [
+    "check",
+    "--checks=-all,could-be-internal",
+    "--test-path-re=",
+    "--entry-point",
+    "plugin_entry",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "function 'lonely' has external linkage",
+      "function 'testForTests' has external linkage"
+     ],
+     "absent": [
+      "'forTests'"
+     ]
+    }
+   }
+  }
+ ]
+}
