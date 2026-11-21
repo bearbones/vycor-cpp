@@ -92,7 +92,10 @@ public:
                    const std::string &tuPath,
                    const LockTypeConfig *lockCfg = nullptr);
 
-  // Traverse the TU and register its facts with the index under tuPath.
+  // Traverse the TU and register its facts with the index under tuPath:
+  // the references and symbols, then the emission facts
+  // (ReferenceIndex::EmissionRecord) from what its code generation emits
+  // (EmissionGraph.h).
   void run(clang::ASTContext &ctx);
 
   bool TraverseDecl(clang::Decl *decl);
@@ -389,14 +392,26 @@ private:
   [[nodiscard]] bool filePath(clang::FileID fid,
                               llvm::SmallVectorImpl<char> &path) const;
   void lower();
+  // The emission walk: fills pendingEmissions_ (before lower(), which may
+  // need entity slots it adds).
+  void collectEmissions();
   void spliceTransparent(std::vector<std::pair<uint64_t, RefAcc>> &refs,
                          std::vector<std::pair<uint64_t, uint64_t>> &lockVia);
   static void mergeLockFacts(RefAcc &acc, const RefAcc &other);
   [[nodiscard]] Id lowerEntity(const Entity &entity,
                                std::vector<ReferenceIndex::SymbolRecord> &out);
 
+  // One emitted body, lowered with the symbols.
+  struct PendingEmission {
+    const clang::FunctionDecl *def;
+    uint32_t slot;     // its entity, or kDropped
+    uint32_t size;     // EmissionGraph::statements
+    uint8_t flags;     // EmissionFlag bits
+  };
+
   ReferenceIndex &index_;
   clang::SourceManager &sm_;
+  std::vector<PendingEmission> pendingEmissions_;
   clang::ASTContext *ctx_ = nullptr;
   std::string tuPath_;
   UsrCache usrs_;

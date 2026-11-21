@@ -55,5 +55,6 @@ bool metricsRequestReadsIndex(const llvm::json::Object &args);
 
 /// The built-in metric constructors (src/metrics/).
 std::unique_ptr<Metric> makeStaticInitCostMetric();
+std::unique_ptr<Metric> makeRedundantInstantiationMetric();
 
 } // namespace vycor

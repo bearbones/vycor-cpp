@@ -23,6 +23,7 @@ and answer with the same payload. Every flag below is that tool's schema
 
 | Metric | Unit | Native level | Summary |
 |---|---|---|---|
+| [redundant-instantiation](redundant-instantiation.md) | statements | symbol | Function bodies compiled by many TUs: each inline function, template instantiation and header-defined internal function two or more TUs emit, as copies × statements |
 | [static-init-cost](static-init-cost.md) | functions | symbol | Work done before `main`: what each dynamic initializer and constructor function reaches, and whether that reach allocates, locks or does I/O |
 
 `vycor-cpp metrics --list-metrics` prints the live table, organization
@@ -64,7 +65,7 @@ report that asked for it.
 | Member | Meaning |
 |---|---|
 | `metric` | The metric's name. |
-| `entity` | What was measured. All five members are always present; one a kind does not use is `""` or `0`. `kind` is the metric's own at the symbol level (`variable`, `constructor-function`, …) and the roll-up level's name above it (`file`, `tu`, `directory`, `target`). `name` is a qualified name at the symbol level and the group's key above it: a path, or a target name. |
+| `entity` | What was measured. All five members are always present; one a kind does not use is `""` or `0`. `kind` is the metric's own at the symbol level (`variable`, `constructor-function`, …) and the roll-up level's name above it (`template`, `file`, `tu`, `directory`, `target`). `name` is a qualified name at the symbol level and the group's key above it: a path, or a target name. |
 | `value` | The measurement: one integer, in `unit`. The number records are ordered by. |
 | `unit` | What `value` counts. |
 | `components` | Optional. Named integers that break the value down or sit beside it. Each metric's page defines its own. A rolled-up record always carries `entities`, the number of measured entities in the group. |
@@ -77,6 +78,7 @@ report that asked for it.
 | Level | A record is | Grouped by |
 |---|---|---|
 | `symbol` (default) | one measured entity | — |
+| `template` | a template pattern, or a non-template function | the pattern the entity instantiates (metrics whose samples name one; otherwise the entity itself) |
 | `file` | a file | the file the entity is written in |
 | `tu` | a translation unit | the TUs the entity belongs to |
 | `directory` | a directory | the directory of each of those TUs |
@@ -176,7 +178,8 @@ a value is large.
 
 A metric reduces facts the megascope bake already collected; it does not
 parse. Each metric's page names the facts it reads and whether a saved
-index carries them. `static-init-cost` reads facts that today exist only
+index carries them. `redundant-instantiation` reads the emission facts
+of the references section (format v20), which every bake records. `static-init-cost` reads facts that today exist only
 in an in-memory bake, so it is run with `--source`, `--source-list` or
 `--source-re` rather than against a saved index.
 

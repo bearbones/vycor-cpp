@@ -262,7 +262,14 @@ public:
   ///     a v18 graph has neither, so its instantiations would read as
   ///     leaves and a warm refresh would mix the two graphs: it is
   ///     rebuilt.
-  static constexpr uint32_t kFormatVersion = 19;
+  /// v20: emission facts — the references section gains, after the
+  ///     reference records, the vague-linkage and header-internal function
+  ///     bodies each TU's code generation emits (linkage name, symbol,
+  ///     definition, size in statements, flags) with their TUs, and the
+  ///     TUs whose emission facts were recorded (ReferenceIndex.h). Read
+  ///     by the redundant-instantiation metric.
+  ///     The other sections are unchanged from v19.
+  static constexpr uint32_t kFormatVersion = 20;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
   /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).

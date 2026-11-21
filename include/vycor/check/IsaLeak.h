@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "vycor/callgraph/EmissionGraph.h"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -79,23 +81,8 @@ bool parseIsaLeakFacets(const std::string &spec, unsigned &facets,
 // over the function's own body plus every body visible in the TU that it
 // calls (directly or transitively), since an optimizing build can inline
 // those into it.
-enum IsaLeakBodyBit : uint32_t {
-  kBodyLoop = 1u << 0,          // a loop: a vectorization candidate
-  kBodyFloat = 1u << 1,         // floating-point arithmetic, comparison or
-                                // conversion (what FP flags change)
-  kBodyVector = 1u << 2,        // vector-typed values (intrinsics, ext vectors)
-  kBodyBulkMemory = 1u << 3,    // memcpy / memset / memmove
-  kBodyBitBuiltin = 1u << 4,    // popcount / clz / ctz / bswap / rotate
-  kBodyTargetBuiltin = 1u << 5, // a target-specific builtin (_mm_* and kin)
-  kBodyCleanup = 1u << 6,       // a local or temporary with a destructor
-  kBodyMayThrowCall = 1u << 7,  // a call not declared non-throwing
-  kBodyTry = 1u << 8,           // a try block
-  kBodySignedArith = 1u << 9,   // signed integer arithmetic
-  kBodyTargetAttr = 1u << 10,   // own target / target_clones / cpu_* attribute
-  kBodyMathCall = 1u << 11,     // a floating-point math builtin (sqrt, exp...)
-  kBodyFloatMove = 1u << 12,    // a floating-point value at all, even only
-                                // loaded, passed or returned (VEX under -mavx)
-};
+// The bits are the emission walk's (callgraph/EmissionGraph.h).
+using IsaLeakBodyBit = EmittedBodyBit;
 
 // One vague-linkage function a TU emitted: what the collector hands over.
 struct EmittedFunction {

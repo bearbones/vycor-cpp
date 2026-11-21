@@ -253,7 +253,7 @@ exceptions; `--isa-leak-facets`, default `isa,fp,eh`). Phase 1
 (`check/IsaLeak.cpp`, `collectIsaLeakFacts`) reads one `CodegenProfile` per
 compile command from the parsed invocation (effective `TargetOptions`
 features, `LangOptions` FP/EH state) and walks the TU's emission graph the
-way codegen does: from strong definitions, the global variables
+way codegen does (`callgraph/EmissionGraph.h`): from strong definitions, the global variables
 `DeclMustBeEmitted` keeps, homed vtables (every slot, inherited ones
 included) and key-less vtables where a constructor or vptr-storing
 destructor is emitted, through every referenced body, skipping unevaluated,
@@ -303,7 +303,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
 | `ReferenceIndex.h/.cpp` | Symbol reference facts (`docs/symbol-references.md`): one record per (referrer, target, role) with an occurrence count and one witness site, and per symbol its kind, linkage class, attributes, declarations, and defining TUs; content-deduplicated with per-TU contributor lists (`removeTUs`, `absorb`), canonical encoding as the snapshot's references section |
-| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity. After the code as written it drains a worklist of the instantiation bodies the TU uses (attributed to the pattern, adding only keys the pattern lacks, at the largest single-instantiation count) and of transparent functions (implicit special members, system-template instantiations, generic-lambda call operators), whose references are spliced into their users at lowering (Tarjan SCC summaries); implicit constructor/destructor calls, `operator new`/`delete`, and a vtable's implicit virtual destructor are recorded on the way; tracks the locks held (scoped guards, lock/unlock calls, call_once and static-local once guards) and records the lock sets per reference (`docs/symbol-references.md` "Lock facts") |
+| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity. After the code as written it drains a worklist of the instantiation bodies the TU uses (attributed to the pattern, adding only keys the pattern lacks, at the largest single-instantiation count) and of transparent functions (implicit special members, system-template instantiations, generic-lambda call operators), whose references are spliced into their users at lowering (Tarjan SCC summaries); implicit constructor/destructor calls, `operator new`/`delete`, and a vtable's implicit virtual destructor are recorded on the way; tracks the locks held (scoped guards, lock/unlock calls, call_once and static-local once guards) and records the lock sets per reference (`docs/symbol-references.md` "Lock facts"); records the TU's emission facts from `EmissionGraph` (vague-linkage and header-internal bodies with linkage name, pattern symbol, definition and size; format v20) |
+| `EmissionGraph.h/.cpp` | `buildEmissionGraph`: one TU's emission graph, walked the way Clang's CodeGen decides what to emit (strong definitions, `DeclMustBeEmitted` globals, homed and key-less vtables, constant data's addresses; unevaluated, constant-evaluated and folded code skipped; devirtualized only where CodeGen does), with per-node body bits and a size in statements. Shared by isa-leak and the bake's emission facts (`ReferenceVisitor`, `docs/symbol-references.md` "Emission facts") |
 | `LockFacts.h/.cpp` | Type classification the lock facts share: mutex types, guard types, synchronization primitives, `std::defer_lock`-style tags |
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
@@ -485,9 +486,10 @@ paging, `batch` and the goldens are the tools' own.
 
 | File | Purpose |
 |---|---|
-| `Metric.h/.cpp` | `Metric` (name, summary, unit, native level, `unavailable`, `measure`), `MetricRun` (the samples, and `rollUp` — a group's value from its members, a sum unless the metric overrides it), `MetricSample`/`MetricEntity`, `RollupLevel` (symbol, file, tu, directory, target), `runMetric` (group, roll up, canonical order: value descending, then entity file, line, name, usr, kind), record serialization |
+| `Metric.h/.cpp` | `Metric` (name, summary, unit, native level, `unavailable`, `measure`), `MetricRun` (the samples, and `rollUp` — a group's value from its members, a sum unless the metric overrides it), `MetricSample`/`MetricEntity` (a sample's `pattern` keys the template roll-up, its `tuIds` index `MetricRun::tuNames`), `RollupLevel` (symbol, template, file, tu, directory, target), `runMetric` (group, roll up, canonical order: value descending, then entity file, line, name, usr, kind), record serialization |
 | `MetricSet.h/.cpp` | The built-in metric table plus the registry's, `resolveMetricSpec` (the `--checks` spec syntax), `metricsRequestReadsIndex` (a listing or a request that cannot succeed answers before any index is loaded or baked) |
 | `TargetOwners.h/.cpp` | The target map of the `target` roll-up: which link targets list a TU as a source (`targets[].name`, `targets[].sources`, `root`) |
+| `RedundantInstantiation.cpp` | `redundant-instantiation`: per linkage name two or more TUs emit (the emission facts), copies × statements, with the template pattern for the `template` roll-up (`docs/metrics/redundant-instantiation.md`) |
 | `StaticInitCost.cpp` | `static-init-cost`: per static-init root, the distinct functions reachable through the call graph and whether that reach meets the effect table; a group's value is the union of its members' reaches (`docs/metrics/static-init-cost.md`) |
 
 Record shape, roll-ups and payload: `docs/metrics/README.md`. A metric
@@ -523,7 +525,9 @@ place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
 v15 the references section and its two header counts, v16 each
 reference record's largest contributing TU, v17 lock facts and a flag
-byte on each reference record, v18 the lock acquisition records:
+byte on each reference record, v18 the lock acquisition records,
+v19 the calls of template instantiations and compiler-written code in
+the graph, v20 the emission facts in the references section:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels / references), so a
@@ -712,7 +716,7 @@ vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..
 vycor-cpp megascope dump    [--index <file> | --build-path <dir>] [--format ndjson|json] [--pretty]   # stream every call-site context and channel site
 vycor-cpp megascope diff    --before <index> --after <index> [--to <name>] [--impact] [--no-context] [--allow-mismatch]   # semantic diff of two saved indexes
 vycor-cpp megascope tools | info [--files] | help
-vycor-cpp metrics   [--list-metrics] [--metrics <spec>] [--rollup symbol|file|tu|directory|target] [--target-map <file>] [--limit <n>] [--offset <n>] --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex>   # = megascope metrics
+vycor-cpp metrics   [--list-metrics] [--metrics <spec>] [--rollup symbol|template|file|tu|directory|target] [--target-map <file>] [--limit <n>] [--offset <n>] --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex>   # = megascope metrics
 ```
 
 `--org-config` (check/megascope) loads the organization config JSON

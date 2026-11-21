@@ -27,6 +27,7 @@ const std::vector<std::unique_ptr<Metric>> &builtinMetrics() {
   static const std::vector<std::unique_ptr<Metric>> metrics = [] {
     std::vector<std::unique_ptr<Metric>> out;
     out.push_back(makeStaticInitCostMetric());
+    out.push_back(makeRedundantInstantiationMetric());
     return out;
   }();
   return metrics;

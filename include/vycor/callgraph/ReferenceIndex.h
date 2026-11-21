@@ -165,6 +165,19 @@ constexpr uint32_t kSymbolFlagMask = (1u << 23) - 1;
 constexpr uint32_t kSymbolPerDeclFlags =
     kSymDefinition | kSymInHeader | kSymSystemHeader;
 
+// ReferenceIndex::EmissionRecord::flags.
+enum EmissionFlag : uint8_t {
+  // An internal-linkage copy (a `static inline` function, a function in an
+  // anonymous namespace) of a function defined outside the TU's main file:
+  // every TU emits its own, under the same name.
+  kEmitInternal = 1u << 0,
+  // A body CodeGen keeps for inlining only and never emits out of line
+  // (an `extern template` class's member): the TU references what it
+  // references in an optimizing build, but holds no copy of its own.
+  kEmitAvailableExternally = 1u << 1,
+};
+constexpr uint8_t kEmissionFlagMask = (1u << 2) - 1;
+
 [[nodiscard]] const char *refRoleName(RefRole role) noexcept;
 [[nodiscard]] std::optional<RefRole> refRoleFromName(llvm::StringRef name);
 [[nodiscard]] const char *symbolKindName(SymbolKind kind) noexcept;
@@ -276,6 +289,21 @@ public:
     Id locks = kNoId; // lock facts (see kLockUnknownIdentity); kNoId = none
     uint8_t flags = 0; // RefFlag bits
   };
+  // Emission facts (docs/symbol-references.md "Emission facts"): one
+  // function body a TU's code generation emits that another TU can emit
+  // too, a vague-linkage function (inline, an implicit instantiation, an
+  // implicit special member) or an internal copy of one defined in a
+  // header. Deduplicated like the other records, with the TUs that emit
+  // it as contributors.
+  struct EmissionRecord {
+    Id symbol = kNoId; // the symbol's usr (an instantiation's pattern, as
+                       // its references are attributed); kNoId: none
+    Id name = 0;       // linkage (mangled) name: one per instantiation
+    Id file = 0;       // where it is defined
+    uint32_t line = 0;
+    uint32_t size = 0; // statements and expressions CodeGen lowers
+    uint8_t flags = 0; // EmissionFlag bits
+  };
 
   ReferenceIndex() = default;
   // std::mutex is neither copyable nor movable: the moves take every field
@@ -295,6 +323,11 @@ public:
   // from internText). The records' ids must come from this index.
   void addTuFacts(Id tu, llvm::ArrayRef<SymbolRecord> symbols,
                   llvm::ArrayRef<ReferenceRecord> references);
+
+  // Register what `tu`'s code generation emits. Marks `tu` as one whose
+  // emission facts were recorded, even when `emissions` is empty; a TU
+  // never given here has none (hasEmissionFacts, emissionTus).
+  void addTuEmissions(Id tu, llvm::ArrayRef<EmissionRecord> emissions);
 
   // String forms of the same (tests, hand-built indexes).
   void addSymbol(const SymbolFact &fact, const std::string &tuPath);
@@ -320,6 +353,7 @@ public:
   // Distinct symbols (USRs) among them.
   [[nodiscard]] size_t symbolCount() const;
   [[nodiscard]] size_t referenceCount() const;
+  [[nodiscard]] size_t emissionCount() const;
   [[nodiscard]] bool empty() const;
   // Decoded with `readOnly`: answers queries, cannot be changed or saved.
   [[nodiscard]] bool readOnly() const;
@@ -371,6 +405,21 @@ public:
       if (r.refs != 0)
         fn(r.rec, r.refs, r.minTu, r.maxTu);
   }
+  // Each live emission record once, with the TUs that emit it, ascending
+  // by path.
+  //   fn(const EmissionRecord &, llvm::ArrayRef<Id> tus)
+  template <typename Fn> void forEachEmissionRecord(Fn &&fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensureEmissionTus();
+    for (size_t i = 0; i < emissions_.size(); ++i)
+      if (emissions_[i].refs != 0)
+        fn(emissions_[i].rec, emissionTus_.at(static_cast<Id>(i)));
+  }
+  // The TUs whose emission facts were recorded, ascending by path. Empty
+  // for an index baked without them. After a save and load, a TU with no
+  // facts at all (no symbols, references or emissions) is not listed.
+  [[nodiscard]] std::vector<Id> emissionTus() const;
+  [[nodiscard]] bool hasEmissionFacts() const;
   // The table every record id resolves through. Valid while the index is
   // not mutated.
   [[nodiscard]] const StringInterner &strings() const noexcept {
@@ -416,9 +465,15 @@ private:
     mutable Id minTu = kNoId;
     mutable Id maxTu = kNoId; // largest contributing TU, derived alike
   };
+  struct StoredEmission {
+    EmissionRecord rec;
+    uint32_t refs = 0;
+  };
   struct TuContribution {
     std::vector<uint32_t> symbols;    // indices into symbols_
     std::vector<uint32_t> references; // indices into references_
+    std::vector<uint32_t> emissions;  // indices into emissions_
+    bool emissionsRecorded = false;   // addTuEmissions ran for the TU
   };
 
   // Open-addressing set of record indices, hashed by record content. Dead
@@ -456,18 +511,24 @@ private:
   static bool same(const SymbolRecord &a, const SymbolRecord &b) noexcept;
   static bool same(const ReferenceRecord &a,
                    const ReferenceRecord &b) noexcept;
+  static uint64_t hashOf(const EmissionRecord &r) noexcept;
+  static bool same(const EmissionRecord &a, const EmissionRecord &b) noexcept;
 
   uint32_t findOrInsertSymbol(const SymbolRecord &rec);
   uint32_t findOrInsertReference(const ReferenceRecord &rec);
+  uint32_t findOrInsertEmission(const EmissionRecord &rec);
   void rebuildTables();
   void invalidateDerived() noexcept {
     lookupValid_ = false;
     minTuValid_ = false;
+    emissionTusValid_ = false;
   }
   // Recompute every live record's minTu (and a reference's maxTu) from the
   // contributor lists.
   void ensureMinTu() const;
   void ensureLookup() const;
+  // emissionTus_: per emission record, its TUs in path order.
+  void ensureEmissionTus() const;
   size_t removeTUsLocked(const std::vector<std::string> &tuPaths);
 
   [[nodiscard]] SymbolInfo symbolInfoLocked(Id usr) const;
@@ -483,9 +544,19 @@ private:
   std::vector<StoredReference> references_;
   RecordTable symbolTable_;
   RecordTable referenceTable_;
+  std::vector<StoredEmission> emissions_;
+  RecordTable emissionTable_;
+  // Every TU's contributions. A read-only load keeps only the emission
+  // lists (the facts consumers read per TU).
   std::unordered_map<Id, TuContribution> byTu_;
   size_t liveSymbols_ = 0;
   size_t liveReferences_ = 0;
+  size_t liveEmissions_ = 0;
+  // Emission facts were recorded for a TU with no facts at all (nothing it
+  // emits, no symbols, no references). The encoding does not name such a
+  // TU: its path would enter the string table, which consumers read as
+  // "this TU has reference facts". Kept so hasEmissionFacts survives.
+  bool unlistedEmissionTus_ = false;
   // A snapshot loaded read-only carries no contributor lists and no dedup
   // tables: it answers queries and must not be mutated.
   bool readOnly_ = false;
@@ -497,6 +568,8 @@ private:
   mutable Csr refsByTarget_;   // target usr id -> references_ indices
   mutable Csr refsByReferrer_; // referrer usr id -> references_ indices
   mutable Csr usrsByName_;     // name id -> usr ids
+  mutable bool emissionTusValid_ = false;
+  mutable Csr emissionTus_;    // emissions_ index -> TU ids, path order
 };
 
 } // namespace vycor

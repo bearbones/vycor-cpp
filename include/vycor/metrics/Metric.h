@@ -80,11 +80,25 @@ struct MetricSample {
   /// target roll-ups group by. A sample with none is grouped by
   /// `entity.file`.
   std::vector<std::string> tus;
+  /// The same as indices into MetricRun::tuNames(), for a metric whose
+  /// samples share a few TUs among many (read in addition to `tus`).
+  std::vector<uint32_t> tuIds;
+  /// The template the entity is an instance of (kind "template"): what
+  /// the template roll-up groups by. A sample with no `pattern.usr` is a
+  /// group of its own there, under its own entity.
+  MetricEntity pattern;
 };
 
 /// Roll-up levels, finest first. A metric whose native level is coarser
 /// than the requested one reports at its native level.
-enum class RollupLevel : uint8_t { Symbol, File, Tu, Directory, Target };
+enum class RollupLevel : uint8_t {
+  Symbol,
+  Template,
+  File,
+  Tu,
+  Directory,
+  Target
+};
 
 llvm::StringRef rollupLevelName(RollupLevel level);
 std::optional<RollupLevel> rollupLevelFromName(llvm::StringRef name);
@@ -106,6 +120,8 @@ public:
 
   /// Native-level samples, in any order (the framework orders records).
   const std::vector<MetricSample> &samples() const { return samples_; }
+  /// The TU paths MetricSample::tuIds index.
+  const std::vector<std::string> &tuNames() const { return tuNames_; }
 
   /// Reduce the samples `members` (indices into samples(), ascending) to
   /// one record: fill `out.value`, `out.components` and, optionally,
@@ -116,6 +132,7 @@ public:
 
 protected:
   std::vector<MetricSample> samples_;
+  std::vector<std::string> tuNames_;
 };
 
 class Metric {

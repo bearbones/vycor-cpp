@@ -110,7 +110,8 @@ std::optional<llvm::json::Value> parseRequest(const llvm::json::Object &args,
     auto parsed = rollupLevelFromName(*name);
     if (!parsed)
       return usageError("Invalid rollup: '" + name->str() +
-                        "' (expected symbol, file, tu, directory or target)");
+                        "' (expected symbol, template, file, tu, directory or "
+                        "target)");
     request.level = *parsed;
   }
 
@@ -205,7 +206,8 @@ void registerMetricsTools(std::vector<ToolEntry> &tools) {
       "instead of running any.");
   props["rollup"] = stringProp(
       "The level of the records: symbol (default; one record per measured "
-      "entity), file, tu, directory, or target (needs target_map). A "
+      "entity), template (the template each entity instantiates), file, "
+      "tu, directory, or target (needs target_map). A "
       "metric whose native level is coarser reports at its native level; "
       "each entry of `metrics` says which level its records are at.");
   props["target_map"] = stringProp(
@@ -223,8 +225,8 @@ void registerMetricsTools(std::vector<ToolEntry> &tools) {
       {"metrics",
        "Measurements, not warnings: run named metrics over the index and "
        "report `{metric, entity, value, unit, components?, witness?}` "
-       "records, largest value first, rolled up by symbol, file, TU, "
-       "directory or link target. `metrics` carries each metric's total "
+       "records, largest value first, rolled up by symbol, template, file, "
+       "TU, directory or link target. `metrics` carries each metric's total "
        "over everything measured. Nothing passes or fails. See "
        "docs/metrics/README.md.",
        // Every section (query/Registry.cpp assigns it): a metric may

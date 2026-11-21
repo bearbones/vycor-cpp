@@ -30,7 +30,8 @@ struct LevelName {
   const char *name;
 };
 constexpr LevelName kLevelNames[] = {
-    {RollupLevel::Symbol, "symbol"},       {RollupLevel::File, "file"},
+    {RollupLevel::Symbol, "symbol"},       {RollupLevel::Template, "template"},
+    {RollupLevel::File, "file"},
     {RollupLevel::Tu, "tu"},               {RollupLevel::Directory, "directory"},
     {RollupLevel::Target, "target"},
 };
@@ -38,10 +39,20 @@ constexpr LevelName kLevelNames[] = {
 // The groups a sample belongs to at `level`, unique. A sample can be in
 // several: a header's initializer runs in every TU that includes it.
 void groupKeysOf(const MetricSample &sample, RollupLevel level,
-                 const TargetOwners *owners, std::vector<std::string> &keys) {
+                 const TargetOwners *owners,
+                 const std::vector<std::string> &tuNames,
+                 std::vector<std::string> &keys) {
   keys.clear();
   if (level == RollupLevel::File) {
     keys.push_back(sample.entity.file);
+    return;
+  }
+  if (level == RollupLevel::Template) {
+    // Kind first, so a template and an entity standing for itself never
+    // share a key.
+    const MetricEntity &e =
+        sample.pattern.usr.empty() ? sample.entity : sample.pattern;
+    keys.push_back(e.kind + '\0' + e.usr);
     return;
   }
   auto perTu = [&](llvm::StringRef tu) {
@@ -63,15 +74,20 @@ void groupKeysOf(const MetricSample &sample, RollupLevel level,
       break;
     }
   };
-  if (sample.tus.empty())
+  if (sample.tus.empty() && sample.tuIds.empty())
     perTu(sample.entity.file);
   for (const std::string &tu : sample.tus)
     perTu(tu);
+  for (uint32_t tu : sample.tuIds)
+    perTu(tuNames[tu]);
   std::sort(keys.begin(), keys.end());
   keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
 }
 
-MetricEntity groupEntity(RollupLevel level, const std::string &key) {
+MetricEntity groupEntity(RollupLevel level, const std::string &key,
+                         const MetricSample &first) {
+  if (level == RollupLevel::Template)
+    return first.pattern.usr.empty() ? first.entity : first.pattern;
   MetricEntity entity;
   entity.kind = rollupLevelName(level).str();
   entity.name = key;
@@ -164,7 +180,7 @@ MetricReport runMetric(const Metric &metric, const MetricContext &ctx,
     std::map<std::string, std::vector<uint32_t>> groups;
     std::vector<std::string> keys;
     for (uint32_t i = 0; i < samples.size(); ++i) {
-      groupKeysOf(samples[i], report.level, owners, keys);
+      groupKeysOf(samples[i], report.level, owners, run->tuNames(), keys);
       for (const std::string &key : keys)
         groups[key].push_back(i);
     }
@@ -173,7 +189,7 @@ MetricReport runMetric(const Metric &metric, const MetricContext &ctx,
       MetricRecord record;
       record.metric = report.metric;
       record.unit = report.unit;
-      record.entity = groupEntity(report.level, key);
+      record.entity = groupEntity(report.level, key, samples[members.front()]);
       run->rollUp(members, record);
       setComponent(record.components, "entities",
                    static_cast<int64_t>(members.size()));
