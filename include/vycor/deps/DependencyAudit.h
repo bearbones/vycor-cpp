@@ -126,8 +126,8 @@ struct LinkFacts {
   std::vector<uint32_t> symFile;  // defining file id (Defined), else kNoIndex
   /// Unattributed, yet declared in a file under the map's roots that is no
   /// unlisted source: the build's own code, owner unknown. It may belong
-  /// to any target, so a consumer that references one is never told a
-  /// dependency is unused.
+  /// to any target; counted per consumer (DependencyAudit::unplacedUses,
+  /// `consumerUnplacedUses`) and reported, never gating a finding.
   std::vector<uint8_t> symUnplaced;
   /// File of the declaration a reader would look for (a header's
   /// declaration before a definition), or kNoIndex.

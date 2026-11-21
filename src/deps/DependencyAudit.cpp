@@ -1497,16 +1497,32 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
           return true;
       return false;
     };
-    // vtables[c]: memoized, built depth first (state 1 on the stack guards
-    // a malformed cyclic hierarchy).
-    std::vector<std::vector<uint32_t>> vtables(symbolCount);
-    std::vector<uint8_t> state(symbolCount, 0);
+    // The classes the hierarchy names, densely numbered: the memo below is
+    // per class, not per symbol.
+    std::vector<uint32_t> classes;
+    classes.reserve(links.size() * 2);
+    for (const BaseLink &l : links) {
+      classes.push_back(l.derived);
+      classes.push_back(l.base);
+    }
+    std::sort(classes.begin(), classes.end());
+    classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+    auto classIndex = [&](uint32_t c) {
+      return static_cast<size_t>(
+          std::lower_bound(classes.begin(), classes.end(), c) -
+          classes.begin());
+    };
+    // vtables[class]: memoized, built depth first (state 1 on the stack
+    // guards a malformed cyclic hierarchy).
+    std::vector<std::vector<uint32_t>> vtables(classes.size());
+    std::vector<uint8_t> state(classes.size(), 0);
     std::function<const std::vector<uint32_t> &(uint32_t)> vtableOf =
         [&](uint32_t c) -> const std::vector<uint32_t> & {
-      std::vector<uint32_t> &vt = vtables[c];
-      if (state[c] != 0)
+      const size_t ci = classIndex(c);
+      std::vector<uint32_t> &vt = vtables[ci];
+      if (state[ci] != 0)
         return vt;
-      state[c] = 1;
+      state[ci] = 1;
       for (const auto &cf : ownOf(c))
         vt.push_back(cf.second);
       auto lo = std::lower_bound(
@@ -1524,7 +1540,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       inherited.erase(std::unique(inherited.begin(), inherited.end()),
                       inherited.end());
       vt.insert(vt.end(), inherited.begin(), inherited.end());
-      state[c] = 2;
+      state[ci] = 2;
       return vt;
     };
     auto addHeld = [&](const BaseLink &l, uint32_t to, uint8_t kind) {
