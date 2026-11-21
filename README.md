@@ -248,6 +248,16 @@ entry path of each; it is a warning only when both thread searches were
 exhaustive and the facts cover the whole program, else a note that says
 why. See [the check reference](docs/checks/unsynchronized-shared-global.md).
 
+**Lock order inversions** (`--checks=lock-order-inversion`) reports locks
+acquired in opposite orders on different paths across TUs (and a
+non-recursive mutex acquired again while held): an edge `A -> B`
+whenever `B` is acquired, directly or through a call chain, while `A`
+is held, and every cycle of those edges with one witness per edge.
+`std::scoped_lock` / `std::lock`, try-locks and recursive mutexes form
+no edge or self-cycle; it is a warning only when every witness is
+proven and exclusive and the facts cover the whole program. See
+[the check reference](docs/checks/lock-order-inversion.md).
+
 Other optional flags: `--warn-same-score`, `--model-convertibility`, the
 legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
 `--entry-point`), and `--org-config` (organization checks/config — see
