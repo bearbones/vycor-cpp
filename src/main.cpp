@@ -979,6 +979,12 @@ int main(int argc, const char **argv) {
     opts.enableAbiLayoutDiag = enabledChecks.count("abi-layout-divergence") > 0;
     opts.enableCallbackUnderLockDiag =
         enabledChecks.count("callback-under-lock") > 0;
+    opts.enableNoexceptCandidateDiag =
+        enabledChecks.count("noexcept-candidate") > 0;
+    opts.enableNoexceptCandidateMoveDiag =
+        enabledChecks.count("noexcept-candidate-move") > 0;
+    opts.enableNoexceptCandidateVirtualDiag =
+        enabledChecks.count("noexcept-candidate-virtual") > 0;
     opts.warnSameScore = CheckWarnSameScore;
     opts.modelConvertibility = CheckModelConvertibility;
     opts.includeCallSiteLocations = CheckExceptionEscapeCallSiteLocations;
@@ -1022,7 +1028,7 @@ int main(int argc, const char **argv) {
           vycor::IndexerActionFactory factory(
             shard, opts.enableOdrDiag,
             opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag,
-              opts.enableAbiLayoutDiag);
+              opts.enableAbiLayoutDiag, opts.collectNoexceptFacts());
           outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           shards.emplace_back(file, vycor::CheckIndexPayload::capture(shard));
         }

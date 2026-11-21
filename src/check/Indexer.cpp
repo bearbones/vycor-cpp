@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/check/Indexer.h"
+#include "vycor/check/NoexceptFacts.h"
 #include "vycor/check/TypeNormalize.h"
 #include "vycor/compat/ClangVersion.h"
 
@@ -971,42 +972,55 @@ std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
 
 IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
                                  bool collectOdr, bool collectSummaries,
-                                 bool collectAbiLayouts)
-    : visitor_(index, sm, collectOdr, collectSummaries, collectAbiLayouts) {}
+                                 bool collectAbiLayouts,
+                                 bool collectNoexceptFacts)
+    : index_(index),
+      visitor_(index, sm, collectOdr, collectSummaries, collectAbiLayouts),
+      collectNoexceptFacts_(collectNoexceptFacts) {}
 
 void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
   visitor_.TraverseDecl(context.getTranslationUnitDecl());
+  // The TU is complete here, pending template instantiations included,
+  // which the collector needs: it folds instantiated bodies into callers.
+  if (collectNoexceptFacts_)
+    collectNoexceptFacts(context, index_);
 }
 
 // --- IndexerAction ---
 
 IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr,
-                             bool collectSummaries, bool collectAbiLayouts)
+                             bool collectSummaries, bool collectAbiLayouts,
+                             bool collectNoexceptFacts)
     : index_(index), collectOdr_(collectOdr),
       collectSummaries_(collectSummaries),
-      collectAbiLayouts_(collectAbiLayouts) {}
+      collectAbiLayouts_(collectAbiLayouts),
+      collectNoexceptFacts_(collectNoexceptFacts) {}
 
 std::unique_ptr<clang::ASTConsumer>
 IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
                                  llvm::StringRef /*file*/) {
   return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager(),
                                            collectOdr_, collectSummaries_,
-                                           collectAbiLayouts_);
+                                           collectAbiLayouts_,
+                                           collectNoexceptFacts_);
 }
 
 // --- IndexerActionFactory ---
 
 IndexerActionFactory::IndexerActionFactory(GlobalIndex &index, bool collectOdr,
                                            bool collectSummaries,
-                                           bool collectAbiLayouts)
+                                           bool collectAbiLayouts,
+                                           bool collectNoexceptFacts)
     : index_(index), collectOdr_(collectOdr),
       collectSummaries_(collectSummaries),
-      collectAbiLayouts_(collectAbiLayouts) {}
+      collectAbiLayouts_(collectAbiLayouts),
+      collectNoexceptFacts_(collectNoexceptFacts) {}
 
 std::unique_ptr<clang::FrontendAction> IndexerActionFactory::create() {
   return std::make_unique<IndexerAction>(index_, collectOdr_, collectSummaries_,
-                                         collectAbiLayouts_);
+                                         collectAbiLayouts_,
+                                         collectNoexceptFacts_);
 }
 
 } // namespace vycor

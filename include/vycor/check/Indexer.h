@@ -87,13 +87,18 @@ private:
 // ASTConsumer that drives the IndexerVisitor.
 class IndexerConsumer : public clang::ASTConsumer {
 public:
+  // collectNoexceptFacts runs the noexcept-candidate fact collector
+  // (check/NoexceptFacts.h) over the finished TU, after the visitor.
   IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
                   bool collectOdr = false, bool collectSummaries = false,
-                  bool collectAbiLayouts = false);
+                  bool collectAbiLayouts = false,
+                  bool collectNoexceptFacts = false);
   void HandleTranslationUnit(clang::ASTContext &context) override;
 
 private:
+  GlobalIndex &index_;
   IndexerVisitor visitor_;
+  bool collectNoexceptFacts_ = false;
 };
 
 // FrontendAction that creates an IndexerConsumer.
@@ -101,7 +106,8 @@ class IndexerAction : public clang::ASTFrontendAction {
 public:
   explicit IndexerAction(GlobalIndex &index, bool collectOdr = false,
                          bool collectSummaries = false,
-                         bool collectAbiLayouts = false);
+                         bool collectAbiLayouts = false,
+                         bool collectNoexceptFacts = false);
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef file) override;
 
@@ -110,6 +116,7 @@ private:
   bool collectOdr_ = false;
   bool collectSummaries_ = false;
   bool collectAbiLayouts_ = false;
+  bool collectNoexceptFacts_ = false;
 };
 
 // Factory for creating IndexerActions, for use with ClangTool.
@@ -117,7 +124,8 @@ class IndexerActionFactory : public clang::tooling::FrontendActionFactory {
 public:
   explicit IndexerActionFactory(GlobalIndex &index, bool collectOdr = false,
                                 bool collectSummaries = false,
-                                bool collectAbiLayouts = false);
+                                bool collectAbiLayouts = false,
+                                bool collectNoexceptFacts = false);
   std::unique_ptr<clang::FrontendAction> create() override;
 
 private:
@@ -125,6 +133,7 @@ private:
   bool collectOdr_ = false;
   bool collectSummaries_ = false;
   bool collectAbiLayouts_ = false;
+  bool collectNoexceptFacts_ = false;
 };
 
 } // namespace vycor

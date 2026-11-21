@@ -280,13 +280,23 @@ void use_b() {
   auto diags = runAnalysis(*db, {a, b}, opts, &merged);
   writeSeed("checkpoint/journal", "\x01" + readFile(opts.checkpointPath));
 
+  // The shard seeds also carry noexcept facts and ranked findings, which
+  // a journaled run never has: those checks bypass the checkpoint.
+  AnalysisOptions shardOpts = opts;
+  shardOpts.checkpointPath.clear();
+  shardOpts.enableNoexceptCandidateDiag = true;
+  shardOpts.enableNoexceptCandidateMoveDiag = true;
+  shardOpts.enableNoexceptCandidateVirtualDiag = true;
+  GlobalIndex shardIndex;
+  auto shardDiags = runAnalysis(*db, {a, b}, shardOpts, &shardIndex);
+
   const std::vector<TuOutcome> clean{TuOutcome{TuStatus::Indexed, ""}};
   if (!writeCheckIndexShard(fuzz::scratchPath("index.shard"),
-                             {{a, CheckIndexPayload::capture(merged)}},
+                             {{a, CheckIndexPayload::capture(shardIndex)}},
                              clean) ||
-      !writeCheckDiagShard(fuzz::scratchPath("diag.shard"), {{a, diags}},
-                            clean) ||
-      !writeGlobalIndexFile(fuzz::scratchPath("global.index"), merged)) {
+      !writeCheckDiagShard(fuzz::scratchPath("diag.shard"),
+                            {{a, shardDiags}}, clean) ||
+      !writeGlobalIndexFile(fuzz::scratchPath("global.index"), shardIndex)) {
     std::fprintf(stderr, "fuzz_seeds: cannot write the shard seeds\n");
     std::exit(1);
   }

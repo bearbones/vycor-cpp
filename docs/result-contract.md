@@ -345,8 +345,10 @@ a patch), `tus` (one row per requested TU in source order: `file`,
 `status` — `analyzed`, `partial`, `skipped`, `crashed`, `poisoned`,
 `timeout` — and `detail` when not analyzed), `findings` (`check`,
 `kind`, `severity`, `file`, `line`, `column`, `message`,
-`fingerprint` — not unique: identical findings share it), `staleBaseline`
-with `--baseline` (`fingerprint`, `count`, `check`, `file`, `message`), and
+`fingerprint` — not unique: identical findings share it — and `rank`
+when the check orders its findings: they follow the unranked ones in
+rank order, and SARIF carries the rank as `properties.order`),
+`staleBaseline` with `--baseline` (`fingerprint`, `count`, `check`, `file`, `message`), and
 `unusedSuppressions` under `-v`. The document is byte-identical
 whether the run was in-process, resumed from `--checkpoint`, or run
 under `--isolate-workers`.

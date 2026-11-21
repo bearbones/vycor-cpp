@@ -19,6 +19,7 @@
 
 #include "llvm/ADT/StringRef.h"
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -311,6 +312,61 @@ struct AbiLayoutEntry {
   std::string layout;
 };
 
+// noexcept-candidate: what one function definition contributes to the
+// proof that it cannot let an exception out. Exact per function (keyed by
+// USR), unlike the name-level FunctionSummaryEntry: a "cannot throw"
+// claim must hold for every path, so overloads cannot be conflated and a
+// callee nothing is known about has to stay unknown.
+struct NoexceptFactEntry {
+  enum Flag : uint32_t {
+    // The definition's type cannot throw (noexcept, throw(), nothrow
+    // attribute, an implicitly noexcept destructor or deallocator).
+    DeclaredNothrow = 1u << 0,
+    // The definition's type can throw. Both bits on one function mean its
+    // sightings disagree; it is then proven by its body like any other.
+    DeclaredThrowing = 1u << 1,
+    // Its own body refutes it: a throw expression no catch-all encloses,
+    // or an operation whose target is not statically known (an indirect
+    // or virtually dispatched call, a coroutine, a reference dynamic_cast)
+    // or a function it folds in with no visible body.
+    MayThrow = 1u << 2,
+    // Collected from a TU that parsed with errors: the AST may be missing
+    // statements, so nothing is proven through this function.
+    Unreliable = 1u << 3,
+    Virtual = 1u << 4,
+    Move = 1u << 5, // move constructor or move assignment operator
+    Swap = 1u << 6, // a function or member named swap
+    // Part of the proof but never a finding: extern "C", main, a name
+    // spelled by a macro, a written noexcept(false), an explicit
+    // instantiation, a replaceable allocation function, a consteval
+    // function, a definition in a C translation unit.
+    NotReportable = 1u << 7,
+  };
+  enum CalleeBit : uint8_t {
+    // A proof obligation: an unguarded call (direct, or through functions
+    // folded into this one) to a function not declared non-throwing.
+    Exit = 1u << 0,
+    // A call made by this body or by a function folded into it, guarded
+    // or not. Ranking only.
+    Call = 1u << 1,
+    // The TU that recorded the call holds no definition of the callee, so
+    // which definition the call reaches is known only if every TU of the
+    // build was indexed.
+    Elsewhere = 1u << 2,
+    // What a callee recorded without bits is taken to be.
+    AllCalleeBits = Exit | Call | Elsewhere,
+  };
+  std::string usr;
+  std::string qualifiedName;
+  std::string filePath;
+  unsigned line = 0;
+  unsigned column = 0;
+  uint32_t flags = 0;
+  // Sorted by USR, no duplicates; calleeBits is parallel to it.
+  std::vector<std::string> callees;
+  std::vector<uint8_t> calleeBits;
+};
+
 // A diagnostic emitted when analysis finds an issue.
 struct Diagnostic {
   enum Kind {
@@ -362,7 +418,14 @@ struct Diagnostic {
                                   // reference it
     Internal_Unproven,            // Internal_Unreferenced from facts that do
                                   // not cover the whole program
-    Custom,                       // named built-in or org check (see checkName)
+    Noexcept_Candidate,           // a function proven unable to throw that
+                                  // is not declared noexcept
+    Noexcept_CandidateMove,       // the same, for a move constructor or
+                                  // move assignment operator
+    Noexcept_CandidateVirtual,    // the same, for a virtual function
+    Custom,                       // named built-in or org check (see
+                                  // checkName). Stays last: records carry
+                                  // the raw value and reject anything past it
   };
   Kind kind;
   std::string file;          // source file path (repo-relative when projectRoot is set)
@@ -382,6 +445,12 @@ struct Diagnostic {
   // own USR at namespace scope). Also a fingerprint input, so the same
   // fragile call in two functions is two findings, not a collision.
   std::string scope;
+  // Position in the emitting analysis's usefulness order, 1 first (the
+  // three noexcept-candidate kinds share one sequence); 0 for a check that
+  // does not rank. Ranked findings are reported after the unranked ones,
+  // in rank order (check/Report.h). Not a fingerprint input: it moves
+  // whenever the code around the finding does.
+  unsigned rank = 0;
 };
 
 // Project-wide database of all function overloads and deduction guides.
@@ -414,6 +483,11 @@ public:
   // common case of N TUs including one unchanged header — dedup at insert.
   void addOdrEntry(const OdrEntry &entry);
   void addAbiLayout(const AbiLayoutEntry &entry);
+  // Merges by (usr, definition site): flags are OR-ed, callees unioned
+  // with their bits OR-ed — every sighting of a definition constrains the
+  // proof. One lock for the whole batch (a TU contributes thousands).
+  void addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries);
+  void addNoexceptFact(NoexceptFactEntry entry);
   const std::vector<OdrEntry> &odrDefinitions() const { return odrEntries_; }
 
   // Explicit class template specializations (see SpecializationEntry).
@@ -453,6 +527,7 @@ public:
   size_t coverageEntryCount() const;
   size_t odrEntryCount() const;
   size_t abiLayoutCount() const;
+  size_t noexceptFactCount() const;
   size_t specializationCount() const;
   size_t defaultArgCount() const;
   size_t staticInitCount() const;
@@ -486,6 +561,10 @@ public:
   }
   template <typename Fn> void forEachAbiLayout(Fn fn) const {
     for (const auto &entry : abiLayouts_)
+      fn(entry);
+  }
+  template <typename Fn> void forEachNoexceptFact(Fn fn) const {
+    for (const auto &entry : noexceptFacts_)
       fn(entry);
   }
   template <typename Fn> void forEachOdrEntry(Fn fn) const {
@@ -536,6 +615,8 @@ private:
   // compaction (same call ChannelIndex made).
   std::vector<AbiLayoutEntry> abiLayouts_;
   std::unordered_set<std::string> abiLayoutKeys_;
+  std::vector<NoexceptFactEntry> noexceptFacts_;
+  std::unordered_map<std::string, size_t> noexceptFactByKey_;
   std::vector<OdrEntry> odrEntries_;
   std::unordered_map<std::string, size_t> odrByKey_; // full-identity dedup keys
   std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;

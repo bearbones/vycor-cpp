@@ -1499,9 +1499,21 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   std::unique_ptr<CheckCheckpoint> ckpt;
   std::vector<FileStamp> stamps;
   std::unordered_map<std::string, const FileStamp *> stampFor;
-  // The legacy journal does not validate headers/compile commands. This
-  // scope-sensitive check must see fresh ASTs, including included helpers.
-  if (!opts.checkpointPath.empty() && !opts.enableCallbackUnderLockDiag && !opts.enableAbiLayoutDiag) {
+  // The legacy journal does not validate headers/compile commands. These
+  // checks must see fresh ASTs, including included helpers: a replayed
+  // noexcept fact for a header function edited since would be a proof
+  // about code that no longer exists.
+  const bool journalUnusable = opts.enableCallbackUnderLockDiag ||
+                               opts.enableAbiLayoutDiag ||
+                               opts.collectNoexceptFacts();
+  if (!opts.checkpointPath.empty() && journalUnusable) {
+    // Say so: the flag is usually there for crash resume, and none of it
+    // happens on this run.
+    llvm::errs() << "check: --checkpoint is not used on this run: an enabled "
+                    "check (abi-layout-divergence, callback-under-lock, or "
+                    "noexcept-candidate) reads facts the journal cannot "
+                    "revalidate, so no TU is journaled or replayed\n";
+  } else if (!opts.checkpointPath.empty()) {
     ckpt = CheckCheckpoint::open(opts.checkpointPath,
                                   checkOptionsFingerprint(opts));
     if (!ckpt) {
@@ -1657,7 +1669,9 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         auto tool = vycor::makeClangTool(compDb, {file});
         IndexerActionFactory factory(shard, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
-                                         opts.enableExceptionEscapeDiag, opts.enableAbiLayoutDiag);
+                                         opts.enableExceptionEscapeDiag,
+                                     opts.enableAbiLayoutDiag,
+                                     opts.collectNoexceptFacts());
         TuOutcome outcome = outcomeForToolStatus(tool.run(&factory));
         noteOutcome(file, outcome);
         ckpt->recordPhase1(file, *st, shard, outcome);
@@ -1666,7 +1680,9 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
         auto tool = vycor::makeClangTool(compDb, {file});
         IndexerActionFactory factory(index, opts.enableOdrDiag,
                                      opts.enableStaticInitOrderDiag ||
-                                         opts.enableExceptionEscapeDiag, opts.enableAbiLayoutDiag);
+                                         opts.enableExceptionEscapeDiag,
+                                     opts.enableAbiLayoutDiag,
+                                     opts.collectNoexceptFacts());
         noteOutcome(file, outcomeForToolStatus(tool.run(&factory)));
       }
     });
@@ -1711,6 +1727,40 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     analyzeHeaderStaticDuplication(index, diagnostics);
   if (opts.enableExceptionSpecDiag)
     analyzeExceptionSpecDivergence(index, diagnostics);
+  if (opts.collectNoexceptFacts()) {
+    // The proof is only as wide as the index: with a TU missing, a call
+    // into another TU may reach a definition nobody saw.
+    size_t notClean = 0;
+    for (const TuOutcome &outcome : outcomes)
+      if (outcome.status != TuStatus::Indexed)
+        ++notClean;
+    NoexceptCandidateOptions candidateOpts;
+    candidateOpts.general = opts.enableNoexceptCandidateDiag;
+    candidateOpts.moves = opts.enableNoexceptCandidateMoveDiag;
+    candidateOpts.virtuals = opts.enableNoexceptCandidateVirtualDiag;
+    candidateOpts.coverageComplete = notClean == 0;
+    NoexceptCandidateStats stats;
+    analyzeNoexceptCandidates(index, candidateOpts, diagnostics, &stats);
+    // Say how much was withheld and why, so a short report is not read
+    // as "the rest can throw".
+    llvm::errs() << "check: noexcept-candidate: " << stats.proven
+                 << " function(s) proven non-throwing without a noexcept "
+                    "declaration, "
+                 << stats.reported << " reported; " << stats.refutedByBody
+                 << " can throw from code in their own TU, "
+                 << stats.refutedByCallee
+                 << " call into another TU's function that can or into one "
+                    "with no indexed definition";
+    if (notClean || stats.withheldUnreliable || stats.withheldCoverage)
+      llvm::errs() << "; " << notClean
+                   << " TU(s) did not parse cleanly, so "
+                   << stats.withheldCoverage
+                   << " finding(s) whose proof crosses into another TU and "
+                   << stats.withheldUnreliable
+                   << " definition(s) whose proof runs through a TU with "
+                      "errors are withheld";
+    llvm::errs() << "\n";
+  }
 
   // Phase 1.5c: organization IndexChecks (ext/) — cross-TU invariants over
   // the merged index. Recomputed every run, so they never touch journal

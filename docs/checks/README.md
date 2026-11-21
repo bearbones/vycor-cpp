@@ -67,6 +67,9 @@ initial seeding and may evolve. Organizations can define their own groups
 | [callback-under-lock](callback-under-lock.md) | off | warning | compute-heavy | Application callbacks reached with a live nonrecursive mutex guard |
 | [dead-code](dead-code.md) | off | note | compute-heavy | Functions unreachable from the entry points via the call graph |
 | [could-be-internal](could-be-internal.md) | off | warning | compute-heavy | External functions and variables no other TU references |
+| [noexcept-candidate](noexcept-candidate.md) | off | note | compute-heavy | Functions proven unable to throw across TUs that are not declared noexcept |
+| [noexcept-candidate-move](noexcept-candidate.md#the-sub-kinds) | off | note | compute-heavy | The same proof for move constructors and move assignment operators |
+| [noexcept-candidate-virtual](noexcept-candidate.md#the-sub-kinds) | off | note | compute-heavy | The same proof for virtual functions (noexcept there constrains every override) |
 
 Severity is the SARIF `level` and what `--fail-on` compares against:
 `error` for ill-formed programs (IFNDR, ODR), `warning` for proven

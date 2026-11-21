@@ -197,6 +197,13 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
       [this](const CoveragePropertyEntry &e) { addCoverageProperty(e); });
   shard.forEachOdrEntry([this](const OdrEntry &e) { addOdrEntry(e); });
   shard.forEachAbiLayout([this](const AbiLayoutEntry &e) { addAbiLayout(e); });
+  {
+    std::vector<NoexceptFactEntry> facts;
+    facts.reserve(shard.noexceptFactCount());
+    shard.forEachNoexceptFact(
+        [&](const NoexceptFactEntry &e) { facts.push_back(e); });
+    addNoexceptFacts(std::move(facts));
+  }
   shard.forEachSpecialization(
       [this](const SpecializationEntry &e) { addSpecialization(e); });
   shard.forEachDefaultArg(
@@ -404,6 +411,121 @@ void GlobalIndex::addAbiLayout(const AbiLayoutEntry &entry) {
 }
 
 size_t GlobalIndex::abiLayoutCount() const { return abiLayouts_.size(); }
+
+namespace {
+
+// (usr, definition site): two definitions sharing a USR (an internal-
+// linkage name in two files with one basename, or a definition that differs
+// across TUs) stay separate findings, and the analyzer joins them for the
+// proof.
+std::string noexceptFactKey(const NoexceptFactEntry &e) {
+  std::string key;
+  key.reserve(e.usr.size() + e.filePath.size() + 24);
+  key += e.usr;
+  key += '\n';
+  key += e.filePath;
+  key += ':';
+  key += std::to_string(e.line);
+  key += ':';
+  key += std::to_string(e.column);
+  return key;
+}
+
+// Union of two sorted callee lists, bits OR-ed. Only reached when two
+// sightings of one definition disagree (a preprocessor-dependent body), so
+// the merged vectors are built fresh.
+void mergeNoexceptCallees(NoexceptFactEntry &into,
+                          const NoexceptFactEntry &from) {
+  std::vector<std::string> names;
+  std::vector<uint8_t> bits;
+  names.reserve(into.callees.size() + from.callees.size());
+  bits.reserve(into.callees.size() + from.callees.size());
+  size_t a = 0, b = 0;
+  while (a < into.callees.size() || b < from.callees.size()) {
+    int order = a == into.callees.size()   ? 1
+                : b == from.callees.size() ? -1
+                                           : into.callees[a].compare(
+                                                 from.callees[b]);
+    if (order < 0) {
+      names.push_back(std::move(into.callees[a]));
+      bits.push_back(into.calleeBits[a++]);
+    } else if (order > 0) {
+      names.push_back(from.callees[b]);
+      bits.push_back(from.calleeBits[b++]);
+    } else {
+      names.push_back(std::move(into.callees[a]));
+      bits.push_back(into.calleeBits[a++] | from.calleeBits[b++]);
+    }
+  }
+  into.callees = std::move(names);
+  into.calleeBits = std::move(bits);
+}
+
+void normalizeNoexceptCallees(NoexceptFactEntry &e) {
+  e.calleeBits.resize(e.callees.size(),
+                      NoexceptFactEntry::AllCalleeBits);
+  if (std::adjacent_find(e.callees.begin(), e.callees.end(),
+                         [](const std::string &a, const std::string &b) {
+                           return !(a < b);
+                         }) == e.callees.end())
+    return; // strictly increasing: sorted and free of duplicates
+  std::vector<size_t> order(e.callees.size());
+  for (size_t i = 0; i < order.size(); ++i)
+    order[i] = i;
+  std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    return e.callees[a] < e.callees[b];
+  });
+  std::vector<std::string> names;
+  std::vector<uint8_t> bits;
+  for (size_t i : order) {
+    if (!names.empty() && names.back() == e.callees[i]) {
+      bits.back() |= e.calleeBits[i];
+      continue;
+    }
+    names.push_back(std::move(e.callees[i]));
+    bits.push_back(e.calleeBits[i]);
+  }
+  e.callees = std::move(names);
+  e.calleeBits = std::move(bits);
+}
+
+} // namespace
+
+void GlobalIndex::addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries) {
+  // Outside the lock: collectors hand in sorted lists with one bit per
+  // callee, so this is one is_sorted pass per entry. A hand-built or
+  // decoded entry that is not gets put in that shape, a missing bit
+  // reading as the most constraining value.
+  for (auto &entry : entries)
+    normalizeNoexceptCallees(entry);
+  std::lock_guard<std::mutex> lock(writeMutex_);
+  for (auto &entry : entries) {
+    auto [it, inserted] =
+        noexceptFactByKey_.try_emplace(noexceptFactKey(entry),
+                                       noexceptFacts_.size());
+    if (inserted) {
+      noexceptFacts_.push_back(std::move(entry));
+      continue;
+    }
+    // The common case: one inline definition seen identically from
+    // another TU. Nothing to merge beyond the flags.
+    auto &existing = noexceptFacts_[it->second];
+    existing.flags |= entry.flags;
+    if (existing.callees != entry.callees)
+      mergeNoexceptCallees(existing, entry);
+    else
+      for (size_t i = 0; i < existing.calleeBits.size(); ++i)
+        existing.calleeBits[i] |= entry.calleeBits[i];
+  }
+}
+
+void GlobalIndex::addNoexceptFact(NoexceptFactEntry entry) {
+  std::vector<NoexceptFactEntry> one;
+  one.push_back(std::move(entry));
+  addNoexceptFacts(std::move(one));
+}
+
+size_t GlobalIndex::noexceptFactCount() const { return noexceptFacts_.size(); }
 
 std::vector<const FunctionOverloadEntry *>
 GlobalIndex::findOverloads(const std::string &qualifiedName) const {

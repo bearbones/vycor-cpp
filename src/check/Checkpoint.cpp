@@ -43,8 +43,9 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // specializations carry resolutionSummary, functionSummaries carry
 // unguardedCallSites & uncaughtThrowSite, diagnostics carry file.
 // v12: computed ABI record layouts. v13: the could-be-internal
-// Diagnostic kinds renumber Custom.
-constexpr uint32_t kVersion = 13;
+// Diagnostic kinds renumber Custom. v14: noexcept facts; diagnostics
+// carry rank; three more Diagnostic kinds precede Custom.
+constexpr uint32_t kVersion = 14;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -190,6 +191,12 @@ uint64_t checkOptionsFingerprint(const AnalysisOptions &opts) {
   // absent), so it is part of the journal identity.
   canon += "|abi=";
   canon += opts.enableAbiLayoutDiag ? '1' : '0';
+  // Any of the three turns phase-1 fact collection on; which of them is on
+  // decides what the index-only pass reports.
+  canon += "|nxc=";
+  canon += opts.enableNoexceptCandidateDiag ? '1' : '0';
+  canon += opts.enableNoexceptCandidateMoveDiag ? '1' : '0';
+  canon += opts.enableNoexceptCandidateVirtualDiag ? '1' : '0';
   canon += "|odr=";
   canon += opts.enableOdrDiag ? '1' : '0';
   // These change phase-2 diagnostic content.
@@ -247,6 +254,9 @@ CheckIndexPayload CheckIndexPayload::capture(const GlobalIndex &shard) {
   shard.forEachOdrEntry([&](const OdrEntry &e) { p.odrEntries.push_back(e); });
   shard.forEachAbiLayout(
       [&](const AbiLayoutEntry &e) { p.abiLayouts.push_back(e); });
+  p.noexceptFacts.reserve(shard.noexceptFactCount());
+  shard.forEachNoexceptFact(
+      [&](const NoexceptFactEntry &e) { p.noexceptFacts.push_back(e); });
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
   shard.forEachDefaultArg(
@@ -284,6 +294,8 @@ void CheckIndexPayload::applyTo(GlobalIndex &into) const {
     into.addOdrEntry(e);
   for (const auto &e : abiLayouts)
     into.addAbiLayout(e);
+  if (!noexceptFacts.empty())
+    into.addNoexceptFacts(std::vector<NoexceptFactEntry>(noexceptFacts));
   for (const auto &e : specializations)
     into.addSpecialization(e);
   for (const auto &e : defaultArgs)
@@ -469,6 +481,26 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
     putStr(out, e.tuPath);
     putStr(out, e.layout);
   }
+  putU32(out, static_cast<uint32_t>(p.noexceptFacts.size()));
+  for (const auto &e : p.noexceptFacts) {
+    putStr(out, e.usr);
+    putStr(out, e.qualifiedName);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+    putU32(out, e.column);
+    putU32(out, e.flags);
+    // One (usr, bits) pair per callee, so the two lists cannot decode to
+    // different lengths. A hand-built entry with too few bits writes the
+    // most constraining value, as addNoexceptFacts would have stored.
+    putU32(out, static_cast<uint32_t>(e.callees.size()));
+    for (size_t i = 0; i < e.callees.size(); ++i) {
+      putStr(out, e.callees[i]);
+      putU8(out, i < e.calleeBits.size()
+                     ? e.calleeBits[i]
+                     : static_cast<uint8_t>(
+                           NoexceptFactEntry::AllCalleeBits));
+    }
+  }
 }
 
 bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
@@ -629,6 +661,22 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     e.layout = r.str();
     p.abiLayouts.push_back(std::move(e));
   }
+  uint32_t nFacts = r.u32();
+  for (uint32_t i = 0; i < nFacts && r.ok; ++i) {
+    NoexceptFactEntry e;
+    e.usr = r.str();
+    e.qualifiedName = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    e.column = r.u32();
+    e.flags = r.u32();
+    uint32_t nCallees = r.u32();
+    for (uint32_t k = 0; k < nCallees && r.ok; ++k) {
+      e.callees.push_back(r.str());
+      e.calleeBits.push_back(r.u8());
+    }
+    p.noexceptFacts.push_back(std::move(e));
+  }
   return r.ok;
 }
 
@@ -662,6 +710,7 @@ void encodeDiagnostics(std::string &out,
       putStr(out, e);
     putStr(out, d.scope);
     putStr(out, d.file);
+    putU32(out, d.rank);
   }
 }
 
@@ -688,6 +737,7 @@ bool decodeDiagnostics(Reader &r, std::vector<Diagnostic> &out) {
       d.entities.push_back(r.str());
     d.scope = r.str();
     d.file = r.str();
+    d.rank = r.u32();
     out.push_back(std::move(d));
   }
   return r.ok;
@@ -1025,8 +1075,9 @@ namespace {
 // v11: odrEntries carry tuPath, specializations carry resolutionSummary,
 // functionSummaries carry unguardedCallSites & uncaughtThrowSite,
 // diagnostics carry file. v12: computed ABI record layouts. v13: the
-// could-be-internal Diagnostic kinds renumber Custom.
-constexpr uint32_t kShardVersion = 13;
+// could-be-internal Diagnostic kinds renumber Custom. v14: noexcept facts;
+// diagnostics carry rank; three more Diagnostic kinds precede Custom.
+constexpr uint32_t kShardVersion = 14;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>
@@ -1172,7 +1223,12 @@ bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index) {
       path, kGlobalIndexMagic,
       {{std::string("<merged>"), [&] {
           std::string bytes;
-          encodeIndexPayload(bytes, CheckIndexPayload::capture(index));
+          auto payload = CheckIndexPayload::capture(index);
+          // The handoff feeds phase-2 workers, and the noexcept facts are
+          // read only by the parent's index-only pass: on a large project
+          // they would be the bulk of a file every worker decodes.
+          payload.noexceptFacts.clear();
+          encodeIndexPayload(bytes, payload);
           return bytes;
         }()}});
 }

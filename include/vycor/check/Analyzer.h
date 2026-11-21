@@ -108,6 +108,18 @@ struct AnalysisOptions {
   // Possible application callback invocation with a live nonrecursive mutex.
   bool enableCallbackUnderLockDiag = false;
 
+  // noexcept-candidate and its two sub-kinds: functions proven unable to
+  // let an exception out that are not declared noexcept. Any of the three
+  // turns the phase-1 fact collection on; each selects what is reported.
+  // Off by default: a list of opportunities, not defects.
+  bool enableNoexceptCandidateDiag = false;        // non-virtual, non-move
+  bool enableNoexceptCandidateMoveDiag = false;    // move ctor / assignment
+  bool enableNoexceptCandidateVirtualDiag = false; // virtual functions
+  bool collectNoexceptFacts() const {
+    return enableNoexceptCandidateDiag || enableNoexceptCandidateMoveDiag ||
+           enableNoexceptCandidateVirtualDiag;
+  }
+
   // Emit ADL_SameScore diagnostics when an invisible candidate ties the
   // resolved overload on every argument position. Off by default because
   // it's a noisier signal than the Pareto-dominance cases.
@@ -344,6 +356,56 @@ TuOutcome outcomeForToolStatus(int status);
 // One deterministic physical-layout witness per record / target ABI.
 void analyzeAbiLayoutDivergence(const GlobalIndex &index,
                                 std::vector<Diagnostic> &diagnostics);
+
+// Which of the noexcept-candidate checks report (docs/checks/
+// noexcept-candidate.md): the main one never reports a move operation or
+// a virtual function, each of which has its own check.
+struct NoexceptCandidateOptions {
+  bool general = true;
+  bool moves = false;
+  bool virtuals = false;
+  // Every TU of the run was indexed without an error. When false, a
+  // definition in a TU that is missing could be the one a cross-TU call
+  // reaches, so a proof that leaves the TU it was recorded in is withheld.
+  bool coverageComplete = true;
+};
+
+// What the proof did with every function definition it had facts for.
+// Counts are definition sites (a function defined at two places counts
+// twice, as it is reported twice); each site lands in exactly one of the
+// first five.
+struct NoexceptCandidateStats {
+  size_t declaredNothrow = 0; // already cannot throw: nothing to report
+  size_t proven = 0;          // cannot throw, not declared so
+  // Refuted by what its own TU saw: a throw, something not modeled, or a
+  // call to a function that TU defines and that can throw (the collector
+  // folds those into the caller).
+  size_t refutedByBody = 0;
+  // Refuted only through a call that leaves the TU: to a function another
+  // TU defines and that may throw, or to one with no definition in the
+  // index.
+  size_t refutedByCallee = 0;
+  // Not refuted, but the proof runs through a definition collected from a
+  // TU that parsed with errors: withheld rather than reported.
+  size_t withheldUnreliable = 0;
+  // Proven and selected, but coverage is incomplete and the proof relies
+  // on a callee defined in another TU: findings withheld.
+  size_t withheldCoverage = 0;
+  size_t reported = 0; // proven, reportable, and its check is selected
+};
+
+// noexcept-candidate (index-only, phase 1.5): the greatest fixed point of
+// "nothing in the body throws past it, and every callee it can unwind
+// through is declared non-throwing or is itself in the set" over the
+// per-function facts, so a recursion cycle with no throwing exit is proven
+// as a whole. A callee the index holds no definition of is unknown, never
+// non-throwing. Diagnostics carry a rank: functions called from a
+// non-throwing function first, then swap and move operations, then the
+// rest by the number of indexed callers.
+void analyzeNoexceptCandidates(const GlobalIndex &index,
+                               const NoexceptCandidateOptions &options,
+                               std::vector<Diagnostic> &diagnostics,
+                               NoexceptCandidateStats *stats = nullptr);
 
 // Run the full two-phase analysis: index all sources, then analyze for
 // fragile ADL/CTAD resolution. Opts controls which diagnostic classes are

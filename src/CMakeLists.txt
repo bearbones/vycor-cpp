@@ -8,6 +8,8 @@ add_library(vycor_lib
   check/Checkpoint.cpp
   check/CheckSet.cpp
   check/DeadCodeAnalyzer.cpp
+  check/NoexceptCandidate.cpp
+  check/NoexceptFacts.cpp
   check/Report.cpp
   morph/MatcherEngine.cpp
   morph/TemplateEngine.cpp

@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v10 is current).
+and worker shards (since journal/shard format v2; v14 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -155,6 +155,28 @@ cycle-safe helper/virtual-override paths to application callbacks. It emits name
 `Custom` diagnostics through the existing reporting/worker payload, and bypasses
 checkpoint reuse because headers and compile flags can change the lock witness.
 See `docs/checks/callback-under-lock.md` and `tests/test_callback_under_lock.cpp`.
+
+`noexcept-candidate` (with `noexcept-candidate-move` and
+`noexcept-candidate-virtual`) reports functions proven unable to throw that
+are not declared `noexcept`. Phase 1 (`check/NoexceptFacts.cpp`,
+`collectNoexceptFacts`) walks every function body of the TU itself — it
+does not read the megascope call graph — and exports one
+`NoexceptFactEntry` per project definition: flags plus the callees its
+exits depend on. Bodies with no fact of their own (template
+instantiations, implicit members, lambdas, system-header inlines) are
+folded into their callers per TU. Phase 1.5 (`check/NoexceptCandidate.cpp`,
+`analyzeNoexceptCandidates`) is a greatest fixed point over the merged
+facts on flat arrays (sorted fact view, reverse CSR, one worklist): a
+callee with no fact is unknown, never "cannot throw". When any TU did not
+index cleanly, findings whose proof crosses into another TU are withheld
+(`NoexceptCandidateOptions::coverageComplete`), a callee defined
+`noexcept` there included: an obligation on it exists only where the
+calling TU did not see that declaration. Findings carry
+`Diagnostic::rank`, which the report sorts by and emits as JSON `rank` /
+SARIF `properties.order`. Enabling it turns the `--checkpoint` journal off
+for the run (stderr says so). Proof
+rules, assumptions and what is withheld: `docs/checks/noexcept-candidate.md`;
+tests in `tests/test_check_noexcept_candidate.cpp`.
 
 ### `morph` — AST-Based Transformations
 
@@ -908,6 +930,6 @@ only, not a namespace boundary.
   required at runtime, not just at build time.
 
 `abi-layout-divergence` compares physical record layouts by canonical USR and
-target ABI. Its worker/journal payload is version 12. Enabling it bypasses legacy
+target ABI. Its worker/journal payload is version 14. Enabling it bypasses legacy
 checkpoint reuse because headers and compile flags affect layout. See
 `docs/checks/abi-layout-divergence.md`.

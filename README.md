@@ -231,6 +231,14 @@ does (a note), or only tests use them from elsewhere (a note). The
 verdict needs every TU of the compilation database; with fewer it is a
 note that says why. See [the check reference](docs/checks/could-be-internal.md).
 
+**noexcept candidates** (`--checks=noexcept-candidate`, with
+`noexcept-candidate-move` and `noexcept-candidate-virtual` selected
+separately) reports functions that provably cannot throw and are not declared
+`noexcept`, proven across TUs from the leaves up. A callee with no indexed
+definition is unknown, never "cannot throw", and proofs that cross TUs are
+withheld when any TU failed to index. Opt-in, severity note, most useful
+first; see [the check reference](docs/checks/noexcept-candidate.md).
+
 Other optional flags: `--warn-same-score`, `--model-convertibility`, the
 legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
 `--entry-point`), and `--org-config` (organization checks/config — see

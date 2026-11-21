@@ -71,7 +71,7 @@ hide precisely the flag-driven differences this check is intended to detect.
 Other check runs keep their existing checkpoint behavior.
 
 Layout facts survive the isolated-worker shard and merged-index handoff formats.
-The shared journal/shard format is version 12; older caches are discarded. No
+The shared journal/shard format is version 14; older caches are discarded. No
 megascope snapshot-format change is required because these are check facts.
 
 Selected TUs must parse successfully. The current CLI reports partial/failed TUs and exits 3 unless explicitly allowed. No source rewrite is generated.

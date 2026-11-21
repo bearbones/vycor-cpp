@@ -95,6 +95,10 @@ struct Finding {
   unsigned column = 0;
   std::string message;
   std::string fingerprint;
+  // Position in the usefulness order of the checks that rank (the
+  // noexcept-candidate checks share one sequence), 1 = first; 0 for the
+  // checks that do not rank (reported in location order, before these).
+  unsigned rank = 0;
 };
 
 /// `path` relative to `root` ('/'-separated) when it lies under it,

@@ -147,6 +147,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   analyzeExceptionEscape(index, diags);
   analyzeExceptionSpecDivergence(index, diags);
   analyzeHeaderStaticDuplication(index, diags);
+  // Every sub-kind, with and without the cross-TU withholding pass.
+  NoexceptCandidateOptions candidates;
+  candidates.moves = candidates.virtuals = true;
+  analyzeNoexceptCandidates(index, candidates, diags);
+  candidates.coverageComplete = false;
+  analyzeNoexceptCandidates(index, candidates, diags);
   // A replayed diagnostic is read like one produced by this run.
   size_t kinds = 0;
   for (const auto &d : diags)

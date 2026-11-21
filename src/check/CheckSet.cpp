@@ -95,6 +95,21 @@ const std::vector<CheckInfo> &builtinChecks() {
        "External functions and variables no other TU references",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"noexcept-candidate",
+       "Functions proven unable to throw across TUs that are not declared "
+       "noexcept",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
+      {"noexcept-candidate-move",
+       "Move constructors and move assignment operators proven unable to "
+       "throw that are not declared noexcept",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
+      {"noexcept-candidate-virtual",
+       "Virtual functions proven unable to throw that are not declared "
+       "noexcept (constrains every override)",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
   };
   return checks;
 }
