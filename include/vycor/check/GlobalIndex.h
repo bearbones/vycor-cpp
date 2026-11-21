@@ -16,6 +16,7 @@
 #pragma once
 
 #include "vycor/callgraph/StringInterner.h"
+#include "vycor/check/IsaLeak.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -423,6 +424,10 @@ struct Diagnostic {
     Noexcept_CandidateMove,       // the same, for a move constructor or
                                   // move assignment operator
     Noexcept_CandidateVirtual,    // the same, for a virtual function
+    IsaLeak_Divergent,            // a vague-linkage function emitted by TUs
+                                  // built with different code generation
+    IsaLeak_Inlined,              // the same, sensitive to the difference
+                                  // only through bodies it can inline
     Custom,                       // named built-in or org check (see
                                   // checkName). Stays last: records carry
                                   // the raw value and reject anything past it
@@ -492,6 +497,9 @@ public:
   // proof. One lock for the whole batch (a TU contributes thousands).
   void addNoexceptFacts(std::vector<NoexceptFactEntry> &&entries);
   void addNoexceptFact(NoexceptFactEntry entry);
+  // isa-leak facts (check/IsaLeak.h): their own store, own lock.
+  IsaLeakFacts &mutableIsaLeakFacts() { return isaLeak_; }
+  const IsaLeakFacts &isaLeakFacts() const { return isaLeak_; }
   const std::vector<OdrEntry> &odrDefinitions() const { return odrEntries_; }
 
   // Explicit class template specializations (see SpecializationEntry).
@@ -621,6 +629,7 @@ private:
   std::unordered_set<std::string> abiLayoutKeys_;
   std::vector<NoexceptFactEntry> noexceptFacts_;
   std::unordered_map<std::string, size_t> noexceptFactByKey_;
+  IsaLeakFacts isaLeak_;
   std::vector<OdrEntry> odrEntries_;
   std::unordered_map<std::string, size_t> odrByKey_; // full-identity dedup keys
   std::unordered_map<SId, std::vector<SpecializationEntry>> specializations_;

@@ -44,8 +44,10 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // unguardedCallSites & uncaughtThrowSite, diagnostics carry file.
 // v12: computed ABI record layouts. v13: the could-be-internal
 // Diagnostic kinds renumber Custom. v14: noexcept facts; diagnostics
-// carry rank; three more Diagnostic kinds precede Custom.
-constexpr uint32_t kVersion = 14;
+// carry rank; three more Diagnostic kinds precede Custom. v15: isa-leak
+// codegen profiles and emitted functions; IsaLeak_Divergent and
+// IsaLeak_Inlined precede Custom.
+constexpr uint32_t kVersion = 15;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -197,6 +199,8 @@ uint64_t checkOptionsFingerprint(const AnalysisOptions &opts) {
   canon += opts.enableNoexceptCandidateDiag ? '1' : '0';
   canon += opts.enableNoexceptCandidateMoveDiag ? '1' : '0';
   canon += opts.enableNoexceptCandidateVirtualDiag ? '1' : '0';
+  canon += "|isa=";
+  canon += opts.enableIsaLeakDiag ? '1' : '0';
   canon += "|odr=";
   canon += opts.enableOdrDiag ? '1' : '0';
   // These change phase-2 diagnostic content.
@@ -257,6 +261,14 @@ CheckIndexPayload CheckIndexPayload::capture(const GlobalIndex &shard) {
   p.noexceptFacts.reserve(shard.noexceptFactCount());
   shard.forEachNoexceptFact(
       [&](const NoexceptFactEntry &e) { p.noexceptFacts.push_back(e); });
+  {
+    const IsaLeakFacts &isa = shard.isaLeakFacts();
+    p.codegenProfiles = isa.profiles();
+    p.emittedFunctions.reserve(isa.sightingCount());
+    isa.forEachEntry([&](const EmittedFunctionEntry &e) {
+      p.emittedFunctions.push_back(e);
+    });
+  }
   shard.forEachSpecialization(
       [&](const SpecializationEntry &e) { p.specializations.push_back(e); });
   shard.forEachDefaultArg(
@@ -296,6 +308,22 @@ void CheckIndexPayload::applyTo(GlobalIndex &into) const {
     into.addAbiLayout(e);
   if (!noexceptFacts.empty())
     into.addNoexceptFacts(std::vector<NoexceptFactEntry>(noexceptFacts));
+  if (!emittedFunctions.empty()) {
+    IsaLeakFacts &isa = into.mutableIsaLeakFacts();
+    std::vector<uint32_t> remap;
+    remap.reserve(codegenProfiles.size());
+    for (const auto &profile : codegenProfiles)
+      remap.push_back(isa.addProfile(profile));
+    std::vector<EmittedFunctionEntry> entries;
+    entries.reserve(emittedFunctions.size());
+    for (const auto &e : emittedFunctions) {
+      if (e.profile >= remap.size())
+        continue; // a corrupt record names no profile: drop the sighting
+      entries.push_back(e);
+      entries.back().profile = remap[e.profile];
+    }
+    isa.addFunctions(std::move(entries));
+  }
   for (const auto &e : specializations)
     into.addSpecialization(e);
   for (const auto &e : defaultArgs)
@@ -501,6 +529,27 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
                            NoexceptFactEntry::AllCalleeBits));
     }
   }
+  putU32(out, static_cast<uint32_t>(p.codegenProfiles.size()));
+  for (const auto &cp : p.codegenProfiles) {
+    putStr(out, cp.triple);
+    putU32(out, static_cast<uint32_t>(cp.features.size()));
+    for (const auto &f : cp.features)
+      putStr(out, f);
+    putStr(out, cp.fp);
+    putU8(out, cp.exceptions ? 1 : 0);
+    putU8(out, cp.signedOverflow);
+  }
+  putU32(out, static_cast<uint32_t>(p.emittedFunctions.size()));
+  for (const auto &e : p.emittedFunctions) {
+    putStr(out, e.linkageName);
+    putStr(out, e.qualifiedName);
+    putStr(out, e.filePath);
+    putU32(out, e.line);
+    putU32(out, e.bodyBits);
+    putU32(out, e.ownBits);
+    putStr(out, e.tuPath);
+    putU32(out, e.profile);
+  }
 }
 
 bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
@@ -676,6 +725,33 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
       e.calleeBits.push_back(r.u8());
     }
     p.noexceptFacts.push_back(std::move(e));
+  }
+  uint32_t nProfiles = r.u32();
+  for (uint32_t i = 0; i < nProfiles && r.ok; ++i) {
+    CodegenProfile cp;
+    cp.triple = r.str();
+    uint32_t nFeatures = r.u32();
+    for (uint32_t k = 0; k < nFeatures && r.ok; ++k)
+      cp.features.push_back(r.str());
+    cp.fp = r.str();
+    cp.exceptions = r.u8() != 0;
+    cp.signedOverflow = r.u8();
+    p.codegenProfiles.push_back(std::move(cp));
+  }
+  uint32_t nEmitted = r.u32();
+  for (uint32_t i = 0; i < nEmitted && r.ok; ++i) {
+    EmittedFunctionEntry e;
+    e.linkageName = r.str();
+    e.qualifiedName = r.str();
+    e.filePath = r.str();
+    e.line = r.u32();
+    e.bodyBits = r.u32();
+    e.ownBits = r.u32();
+    e.tuPath = r.str();
+    e.profile = r.u32();
+    if (e.profile >= p.codegenProfiles.size())
+      r.ok = false;
+    p.emittedFunctions.push_back(std::move(e));
   }
   return r.ok;
 }
@@ -1077,7 +1153,9 @@ namespace {
 // diagnostics carry file. v12: computed ABI record layouts. v13: the
 // could-be-internal Diagnostic kinds renumber Custom. v14: noexcept facts;
 // diagnostics carry rank; three more Diagnostic kinds precede Custom.
-constexpr uint32_t kShardVersion = 14;
+// v15: isa-leak codegen profiles and emitted functions; IsaLeak_Divergent
+// and IsaLeak_Inlined precede Custom.
+constexpr uint32_t kShardVersion = 15;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>
@@ -1228,6 +1306,8 @@ bool writeGlobalIndexFile(const std::string &path, const GlobalIndex &index) {
           // read only by the parent's index-only pass: on a large project
           // they would be the bulk of a file every worker decodes.
           payload.noexceptFacts.clear();
+          payload.codegenProfiles.clear();
+          payload.emittedFunctions.clear();
           encodeIndexPayload(bytes, payload);
           return bytes;
         }()}});

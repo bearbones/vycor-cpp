@@ -100,6 +100,7 @@ add_executable(vycor_tests
   test_write_integrity.cpp
   test_check_odr.cpp
   test_check_abi.cpp
+  test_check_isa_leak.cpp
   test_check_noexcept_candidate.cpp
   test_check_specialization.cpp
   test_check_default_args.cpp

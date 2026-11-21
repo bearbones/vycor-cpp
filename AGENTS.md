@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v14 is current).
+and worker shards (since journal/shard format v2; v15 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -184,6 +184,28 @@ SARIF `properties.order`. Enabling it turns the `--checkpoint` journal off
 for the run (stderr says so). Proof
 rules, assumptions and what is withheld: `docs/checks/noexcept-candidate.md`;
 tests in `tests/test_check_noexcept_candidate.cpp`.
+
+`isa-leak` reports vague-linkage functions emitted by TUs whose compile
+commands disagree on code generation (target features, FP semantics,
+exceptions; `--isa-leak-facets`, default `isa,fp,eh`). Phase 1
+(`check/IsaLeak.cpp`, `collectIsaLeakFacts`) reads one `CodegenProfile` per
+compile command from the parsed invocation (effective `TargetOptions`
+features, `LangOptions` FP/EH state) and walks the TU's emission graph the
+way codegen does: from strong definitions, global initializers and homed
+vtables through every referenced body, so an inline function no emitted code
+reaches is not a sighting. Each emitted non-system `GVA_DiscardableODR`
+function gets body bits (loop, float, vector, bulk memory, bit/target
+builtins, cleanup around may-throw calls, signed arithmetic), folded over
+what it can inline. Phase 1.5 (`analyzeIsaLeaks`) projects each profile onto
+the feature classes and facets the body is sensitive to and reports a
+function with two or more projections on one triple: `IsaLeak_Divergent`
+(warning) when its own body is sensitive, `IsaLeak_Inlined` (note) when only
+what it can inline is (the copies then differ only in optimizing builds that
+keep it out of line). Facts live in
+`IsaLeakFacts` (own lock, interned profile and TU ids); they ride worker
+shards (v15) but not the phase-2 handoff. Enabling it turns the
+`--checkpoint` journal off. Reference: `docs/checks/isa-leak.md`; tests in
+`tests/test_check_isa_leak.cpp`.
 
 ### `morph` — AST-Based Transformations
 
@@ -946,6 +968,6 @@ only, not a namespace boundary.
   required at runtime, not just at build time.
 
 `abi-layout-divergence` compares physical record layouts by canonical USR and
-target ABI. Its worker/journal payload is version 14. Enabling it bypasses legacy
+target ABI. Its worker/journal payload is version 15. Enabling it bypasses legacy
 checkpoint reuse because headers and compile flags affect layout. See
 `docs/checks/abi-layout-divergence.md`.

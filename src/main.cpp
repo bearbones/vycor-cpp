@@ -229,6 +229,15 @@ static llvm::cl::opt<uint64_t>
                                     "hotPaths.minCount)"),
                      llvm::cl::value_desc("n"), llvm::cl::sub(CheckCmd));
 
+static llvm::cl::opt<std::string>
+    CheckIsaLeakFacets("isa-leak-facets",
+        llvm::cl::desc("isa-leak: comma-separated code-generation facets to "
+                       "compare: isa (target features), fp (floating-point "
+                       "semantics), eh (exceptions), overflow (-fwrapv / "
+                       "-ftrapv), default (isa,fp,eh), all"),
+        llvm::cl::value_desc("list"), llvm::cl::init("default"),
+        llvm::cl::sub(CheckCmd));
+
 static llvm::cl::opt<bool>
     CheckWarnSameScore("warn-same-score",
                         llvm::cl::desc("Warn on ADL candidates that tie the "
@@ -1041,6 +1050,16 @@ int main(int argc, const char **argv) {
     opts.enableCoverageDiag = enabledChecks.count("coverage-properties") > 0;
     opts.enableOdrDiag = enabledChecks.count("odr-violations") > 0;
     opts.enableAbiLayoutDiag = enabledChecks.count("abi-layout-divergence") > 0;
+    opts.enableIsaLeakDiag = enabledChecks.count("isa-leak") > 0;
+    {
+      // Validated before any parse: a typo should not cost a full run.
+      std::string why;
+      if (!vycor::parseIsaLeakFacets(CheckIsaLeakFacets, opts.isaLeakFacets,
+                                     why)) {
+        llvm::errs() << "check: --isa-leak-facets: " << why << "\n";
+        return kUsage;
+      }
+    }
     opts.enableCallbackUnderLockDiag =
         enabledChecks.count("callback-under-lock") > 0;
     opts.enableNoexceptCandidateDiag =
@@ -1092,7 +1111,8 @@ int main(int argc, const char **argv) {
           vycor::IndexerActionFactory factory(
             shard, opts.enableOdrDiag,
             opts.enableStaticInitOrderDiag || opts.enableExceptionEscapeDiag,
-              opts.enableAbiLayoutDiag, opts.collectNoexceptFacts());
+              opts.enableAbiLayoutDiag, opts.collectNoexceptFacts(),
+              opts.enableIsaLeakDiag);
           outcomes.push_back(vycor::outcomeForToolStatus(tool.run(&factory)));
           shards.emplace_back(file, vycor::CheckIndexPayload::capture(shard));
         }

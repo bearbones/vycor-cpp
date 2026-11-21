@@ -104,6 +104,11 @@ struct AnalysisOptions {
   bool enableOdrDiag = false;
   // Opt-in physical record-layout comparison; requires fresh header/flag facts.
   bool enableAbiLayoutDiag = false;
+  // isa-leak (check/IsaLeak.h): vague-linkage functions emitted under
+  // different code-generation flags; isaLeakFacets picks what is compared
+  // (IsaLeakFacet bits). Index-only, so the facets apply in the parent.
+  bool enableIsaLeakDiag = false;
+  unsigned isaLeakFacets = kIsaLeakDefaultFacets;
 
   // Possible application callback invocation with a live nonrecursive mutex.
   bool enableCallbackUnderLockDiag = false;

@@ -62,6 +62,7 @@ initial seeding and may evolve. Organizations can define their own groups
 | [static-init-hazards](static-init-hazards.md) | off | warning | compute-heavy | Static initializers reaching dlopen/dlsym or thread create/join (loader-lock deadlock risk) |
 | [exception-escape](exception-escape.md) | off | note | noisy | noexcept functions that can transitively reach an uncaught throw across TUs |
 | [abi-layout-divergence](abi-layout-divergence.md) | off | error | compute-heavy | Computed record layouts disagree across linked TUs with the same target ABI |
+| [isa-leak](isa-leak.md) | off | warning | compute-heavy | Vague-linkage functions emitted by TUs built with different code-generation flags (target features, FP semantics, exceptions) |
 | [odr-violations](odr-violations.md) | off | error | compute-heavy | Vague-linkage definitions that differ across sites or TUs |
 | [coverage-properties](coverage-properties.md) | off | note | noisy | GVA linkage / COMDAT properties that make coverage records vanish |
 | [callback-under-lock](callback-under-lock.md) | off | warning | compute-heavy | Application callbacks reached with a live nonrecursive mutex guard |
@@ -74,10 +75,10 @@ initial seeding and may evolve. Organizations can define their own groups
 
 Severity is the SARIF `level` and what `--fail-on` compares against:
 `error` for ill-formed programs (IFNDR, ODR), `warning` for proven
-hazards, `note` for leads that need triage. Two kinds are notes
+hazards, `note` for leads that need triage. Some kinds are notes
 whatever their check: `ADL_SameScore` (`--warn-same-score`),
-`DeadCode_Optimistic`, and every could-be-internal kind but
-`Internal_Unreferenced`. Organization checks are warnings.
+`DeadCode_Optimistic`, `IsaLeak_Inlined`, and every could-be-internal kind
+but `Internal_Unreferenced`. Organization checks are warnings.
 
 ## Organization checks
 

@@ -79,6 +79,11 @@ const std::vector<CheckInfo> &builtinChecks() {
        "Computed record layouts disagree across TUs with the same target ABI",
        /*defaultOn=*/false,
        {}},
+      {"isa-leak",
+       "Vague-linkage functions emitted by TUs built with different "
+       "code-generation flags (target features, FP semantics, exceptions)",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
       {"coverage-properties",
        "GVA linkage / COMDAT properties that make coverage records vanish",
        /*defaultOn=*/false,

@@ -96,6 +96,11 @@ struct CheckIndexPayload {
   // parent->worker handoff file (writeGlobalIndexFile): phase 2 never
   // reads it.
   std::vector<NoexceptFactEntry> noexceptFacts;
+  // Populated when isa-leak is enabled; `profile` of each emitted function
+  // indexes codegenProfiles. Left out of the handoff file like
+  // noexceptFacts.
+  std::vector<CodegenProfile> codegenProfiles;
+  std::vector<EmittedFunctionEntry> emittedFunctions;
   std::vector<SpecializationEntry> specializations;
   std::vector<DefaultArgEntry> defaultArgs;
   std::vector<StaticInitEntry> staticInits;
