@@ -237,11 +237,15 @@ Where the facts cannot tell, the check stays silent or reports a note.
   on paths that all hold the first, still makes an edge back to it
   (#160). A condition variable's wait, which releases and reacquires
   its lock, is no acquisition.
-- **Template instantiations** (#106). A call made inside a template
-  instantiation has no call graph edge, so an acquisition reached only
-  through one is not in its caller's closure. Acquisitions written in a
-  template body are recorded on the template as written, so they join
-  the graph as soon as the instantiation's calls do.
+- **Template instantiations** (#156). The closure walks into an
+  instantiation and on through the calls its body makes, so an
+  acquisition in a function the instantiation calls is found. The
+  reference facts are the pattern's, under the template's own identity,
+  so an acquisition written in the instantiation's body is not in its
+  closure, and the locks held at a call straight into an instantiation
+  are not joined to it: `lock(c); call(1);` makes no `c -> d` edge even
+  when `call<int>` calls a function that acquires `d` (through a
+  non-template function in between, it does).
 - **Unnamed locks.** A mutex reached through a pointer or a reference
   parameter (`std::lock_guard g(*mu)`, `void f(std::mutex &m)`) closes no
   cycle; an inversion between such locks is missed.
