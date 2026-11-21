@@ -1,0 +1,5 @@
+# megascope get-references --name cbs::finalFormat --format tsv -> exit 0
+25	1	{fixture}/workers.cpp	{fixture}/workers.cpp	true	36	tcpWriteBytes	function	c:@F@tcpWriteBytes#I#	address_of	1
+25	1	{fixture}/workers.cpp	{fixture}/workers.cpp	true	42	diskFsyncRange	function	c:@F@diskFsyncRange#I#	address_of	1
+26	1	{fixture}/stage5_sink.cpp	{fixture}/stage5_sink.cpp	true	13	stage5_sink	function	c:@F@stage5_sink#&$@S@Registry#I#	address_of	1
+col	count	file	firstTu	fromOtherTu	line	referrer	referrerKind	referrerUsr	role	tuCount

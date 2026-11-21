@@ -1,0 +1,485 @@
+{
+ "schema": 1,
+ "title": "A global, a header-declared function only its own TU uses, a file-local static, an address-taken callback and a dynamic class across two TUs: linkage, defining TU, per-role referrers, and whether any reference crosses a TU",
+ "sources": [
+  "store.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "global-is-external-and-used-elsewhere",
+   "argv": [
+    "lookup-symbol",
+    "--name",
+    "counter"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "kind": "variable",
+     "linkage": "external",
+     "definingTuCount": 1,
+     "declaredInHeader": true,
+     "referencedFromOtherTu": true,
+     "referrers": {
+      "read": 3,
+      "write": 2,
+      "call": 0,
+      "address_of": 0
+     }
+    },
+    "regex": {
+     "definingTu": "/store\\.cpp$"
+    },
+    "count": {
+     "declarations": 2
+    },
+    "witnesses": [
+     {
+      "in": "declarations",
+      "match": {
+       "line": 2,
+       "definition": false,
+       "inHeader": true
+      }
+     },
+     {
+      "in": "declarations",
+      "match": {
+       "line": 3,
+       "definition": true,
+       "inHeader": false
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "declarations",
+      "match": {
+       "definition": true,
+       "inHeader": true
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "declared-in-header-used-by-one-tu",
+   "argv": [
+    "lookup-symbol",
+    "--name",
+    "only_here"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "kind": "function",
+     "linkage": "external",
+     "definingTuCount": 1,
+     "declaredInHeader": true,
+     "referencedFromOtherTu": false,
+     "referrers": {
+      "call": 1,
+      "address_of": 0
+     }
+    },
+    "regex": {
+     "definingTu": "/store\\.cpp$"
+    }
+   }
+  },
+  {
+   "id": "static-is-internal",
+   "argv": [
+    "lookup-symbol",
+    "--name",
+    "scale"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "kind": "variable",
+     "linkage": "internal",
+     "declaredInHeader": false,
+     "referencedFromOtherTu": false
+    }
+   }
+  },
+  {
+   "id": "vtable-home-is-the-key-function-tu",
+   "argv": [
+    "lookup-symbol",
+    "--name",
+    "Shape"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "kind": "class",
+     "attributes": [
+      "dynamic_class"
+     ],
+     "definingTuCount": 2,
+     "referrers": {
+      "vtable_use": 2
+     }
+    },
+    "regex": {
+     "vtableHomeTu": "/store\\.cpp$"
+    }
+   }
+  },
+  {
+   "id": "unknown-symbol",
+   "argv": [
+    "lookup-symbol",
+    "--name",
+    "no_such_symbol"
+   ],
+   "expect": {
+    "exit": 1,
+    "status": "not_found"
+   }
+  },
+  {
+   "id": "reads-and-writes-of-a-global",
+   "argv": [
+    "get-references",
+    "--name",
+    "counter"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "total": 5,
+     "truncated": false,
+     "referencedFromOtherTu": true
+    },
+    "count": {
+     "references": 5
+    },
+    "witnesses": [
+     {
+      "in": "references",
+      "match": {
+       "referrer": "only_here",
+       "role": "read",
+       "fromOtherTu": false
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "only_here",
+       "role": "write",
+       "fromOtherTu": false
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "bump",
+       "role": "write",
+       "fromOtherTu": false
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "peek",
+       "role": "read",
+       "fromOtherTu": true
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "references",
+      "match": {
+       "referrer": "main"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "peek",
+       "role": "write"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "role": "address_of"
+      }
+     }
+    ],
+    "sequence": [
+     {
+      "in": "references",
+      "match": [
+       {
+        "referrer": "bump",
+        "role": "read"
+       },
+       {
+        "referrer": "bump",
+        "role": "write"
+       },
+       {
+        "referrer": "only_here",
+        "role": "read"
+       },
+       {
+        "referrer": "only_here",
+        "role": "write"
+       },
+       {
+        "referrer": "peek",
+        "role": "read"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "address-taken-in-another-tu",
+   "argv": [
+    "get-references",
+    "--name",
+    "on_event"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "referencedFromOtherTu": true
+    },
+    "count": {
+     "references": 1
+    },
+    "witnesses": [
+     {
+      "in": "references",
+      "match": {
+       "referrer": "main",
+       "role": "address_of",
+       "fromOtherTu": true,
+       "line": 7
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "references",
+      "match": {
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "install"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "role-filter",
+   "argv": [
+    "get-references",
+    "--name",
+    "counter",
+    "--roles",
+    "write"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "references": 2
+    },
+    "witnesses": [
+     {
+      "in": "references",
+      "match": {
+       "referrer": "bump",
+       "role": "write"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "referrer": "only_here",
+       "role": "write"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "references",
+      "match": {
+       "role": "read"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "what-main-references",
+   "argv": [
+    "get-references",
+    "--name",
+    "main",
+    "--direction",
+    "from"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "references": 6
+    },
+    "witnesses": [
+     {
+      "in": "references",
+      "match": {
+       "target": "bump",
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "install",
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "on_event",
+       "role": "address_of"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "peek",
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "Shape::area",
+       "role": "call"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "Shape",
+       "targetKind": "class",
+       "role": "vtable_use"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "references",
+      "match": {
+       "target": "counter"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "only_here"
+      }
+     },
+     {
+      "in": "references",
+      "match": {
+       "target": "on_event",
+       "role": "call"
+      }
+     }
+    ],
+    "sequence": [
+     {
+      "in": "references",
+      "match": [
+       {
+        "target": "Shape"
+       },
+       {
+        "target": "Shape::area"
+       },
+       {
+        "target": "bump"
+       },
+       {
+        "target": "install"
+       },
+       {
+        "target": "on_event"
+       },
+       {
+        "target": "peek"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "one-tu-reference-only",
+   "argv": [
+    "get-references",
+    "--name",
+    "only_here"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "referencedFromOtherTu": false
+    },
+    "count": {
+     "references": 1
+    },
+    "witnesses": [
+     {
+      "in": "references",
+      "match": {
+       "referrer": "bump",
+       "role": "call",
+       "fromOtherTu": false
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "references",
+      "match": {
+       "fromOtherTu": true
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

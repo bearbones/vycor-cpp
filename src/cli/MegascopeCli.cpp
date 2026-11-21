@@ -807,6 +807,8 @@ int runInfo(const SnapshotData &snap, llvm::StringRef indexPath,
   o["edges"] = static_cast<int64_t>(snap.summary.edges);
   o["call_sites"] = static_cast<int64_t>(snap.summary.callSites);
   o["channel_sites"] = static_cast<int64_t>(snap.summary.channelSites);
+  o["symbols"] = static_cast<int64_t>(snap.summary.symbols);
+  o["references"] = static_cast<int64_t>(snap.summary.references);
   // The meta keeps its strings as written (Utf8.h): converted here.
   auto texts = [](const std::vector<std::string> &v) {
     llvm::json::Array a;
@@ -1037,6 +1039,7 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
   snap->staticInits = std::move(baked.staticInits);
+  snap->references = std::move(baked.references);
   snap->meta.collapsePaths = collapsePaths;
   snap->meta.channelTypes = channelCfg.registeredTypes;
   // The in-memory index carries the same coverage facts a saved one
@@ -1053,6 +1056,8 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->summary.edges = snap->graph.edgeCount();
   snap->summary.callSites = snap->cfIndex.size();
   snap->summary.channelSites = snap->channels.size();
+  snap->summary.symbols = snap->references.symbolCount();
+  snap->summary.references = snap->references.referenceCount();
   snap->loaded = kSectionAll;
   if (common.verbose) {
     const double ms = std::chrono::duration<double, std::milli>(
@@ -1344,7 +1349,7 @@ int runMergeVerb(llvm::ArrayRef<std::string> args, llvm::StringRef indexFlag,
 
   std::string saveError;
   if (!SnapshotIO::save(o.output, merged->graph, merged->cfIndex, merged->meta,
-                        merged->channels, &saveError)) {
+                        merged->channels, merged->references, &saveError)) {
     err << "megascope merge: cannot save merged index to " << o.output << ": "
         << saveError << "\n";
     return kExitIndex;
@@ -1374,6 +1379,8 @@ int runMergeVerb(llvm::ArrayRef<std::string> args, llvm::StringRef indexFlag,
   summary["edges"] = static_cast<int64_t>(merged->summary.edges);
   summary["call_sites"] = static_cast<int64_t>(merged->summary.callSites);
   summary["channel_sites"] = static_cast<int64_t>(merged->summary.channelSites);
+  summary["symbols"] = static_cast<int64_t>(merged->summary.symbols);
+  summary["references"] = static_cast<int64_t>(merged->summary.references);
   writeJson(out, llvm::json::Value(std::move(summary)), pretty);
   return kExitResults;
 }
@@ -1983,6 +1990,7 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
   ToolContext ctx{snap->graph,  oracle,          snap->cfIndex,
                   entryPoints, &snap->channels, &cache,
                   &snap->summary};
+  ctx.references = &snap->references;
   // What every payload says about its index (docs/result-contract.md):
   // an in-memory bake is fresh by construction and has no saved bake to
   // cite; a loaded index is taken as-is, unchecked.

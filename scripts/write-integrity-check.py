@@ -57,7 +57,8 @@ TUS = 12
 FNS = 40
 
 # Section kinds in the v13 header table (Snapshot.cpp).
-SECTION_NAMES = {0: "meta", 1: "graph", 2: "control_flow", 3: "channels"}
+SECTION_NAMES = {0: "meta", 1: "graph", 2: "control_flow", 3: "channels",
+                 4: "references"}
 
 
 def tu_source(n: int) -> str:
@@ -251,15 +252,15 @@ class Check:
 
 
 def section_table(data: bytes) -> list[tuple[int, int, int]] | None:
-    """{kind, offset, length} per section from a v13 header: magic(4)
-    version(4) summary(32) count(4), then {kind u8, offset u64, length
+    """{kind, offset, length} per section from a v15 header: magic(4)
+    version(4) summary(48) count(4), then {kind u8, offset u64, length
     u64, checksum u64} entries."""
-    if len(data) < 44 or data[:4] != b"VYCS":
+    if len(data) < 60 or data[:4] != b"VYCS":
         return None
-    (count,) = struct.unpack_from("<I", data, 40)
+    (count,) = struct.unpack_from("<I", data, 56)
     out = []
     for i in range(count):
-        at = 44 + i * 25
+        at = 60 + i * 25
         if at + 25 > len(data):
             return None
         kind = data[at]

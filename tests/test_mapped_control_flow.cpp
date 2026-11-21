@@ -243,13 +243,13 @@ struct Layout {
 
 Layout layoutOf(const std::string &bytes, const ControlFlowIndex &eager) {
   Layout l{};
-  // magic(4) version(4) summary(32) table count(4), then
+  // magic(4) version(4) summary(48) table count(4), then
   // {kind u8, offset u64, length u64, checksum u64} entries.
   REQUIRE(u32At(bytes, 4) == SnapshotIO::kFormatVersion);
-  const uint32_t entries = u32At(bytes, 40);
+  const uint32_t entries = u32At(bytes, testing::kSnapshotTableAt - 4);
   bool found = false;
   for (uint32_t i = 0; i < entries; ++i) {
-    const size_t at = 44 + i * 25;
+    const size_t at = testing::snapshotTableEntryAt(i);
     if (static_cast<uint8_t>(bytes[at]) != 2)
       continue;
     l.sectionStart = static_cast<size_t>(u64At(bytes, at + 1));

@@ -157,7 +157,8 @@ std::string bakeAndSave(const clang::tooling::CompilationDatabase &db,
   const std::string path = fuzz::scratchPath(name);
   std::string error;
   if (!SnapshotIO::save(path, baked.graph, baked.cfIndex, meta,
-                        baked.channels, &error, /*durable=*/false)) {
+                        baked.channels, baked.references, &error,
+                        /*durable=*/false)) {
     std::fprintf(stderr, "fuzz_seeds: %s\n", error.c_str());
     std::exit(1);
   }

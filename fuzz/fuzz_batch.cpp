@@ -64,7 +64,8 @@ std::string bakeFixtureIndex() {
   const std::string path = fuzz::scratchPath("fixture.vycs");
   std::string error;
   if (!SnapshotIO::save(path, baked.graph, baked.cfIndex, meta,
-                        baked.channels, &error, /*durable=*/false)) {
+                        baked.channels, baked.references, &error,
+                        /*durable=*/false)) {
     std::fprintf(stderr, "fuzz_batch: cannot save the fixture index: %s\n",
                  error.c_str());
     std::abort();
@@ -107,6 +108,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   ToolContext ctx{gSnap->graph, oracle,          gSnap->cfIndex,
                   entryPoints,  &gSnap->channels, &cache,
                   &gSnap->summary};
+  ctx.references = &gSnap->references;
   ctx.facts = IndexFacts::of(gSnap->meta, IndexFreshness::Unchecked);
 
   const std::string input(reinterpret_cast<const char *>(data), size);

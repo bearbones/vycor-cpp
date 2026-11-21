@@ -26,6 +26,8 @@ add_library(vycor_lib
   callgraph/InputFingerprint.cpp
   callgraph/MegascopeBridge.cpp
   callgraph/PathSearch.cpp
+  callgraph/ReferenceIndex.cpp
+  callgraph/ReferenceVisitor.cpp
   callgraph/Snapshot.cpp
   callgraph/StaticInit.cpp
   callgraph/WorkerPool.cpp
@@ -50,6 +52,7 @@ add_library(vycor_lib
   metrics/MetricSet.cpp
   metrics/StaticInitCost.cpp
   metrics/TargetOwners.cpp
+  query/ReferenceTools.cpp
   impact/SemanticDiff.cpp
   impact/ImpactSearch.cpp
   impact/PatchMapping.cpp

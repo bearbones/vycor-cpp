@@ -145,6 +145,25 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
     ("alias-function",
      ["call", "get_callers", "--args", '{"function":"stage5_sink"}'],
      None, True),
+    ("lookup-symbol",
+     ["lookup-symbol", "--name", "cbs::startupHook", "--pretty"], None, True),
+    ("lookup-symbol-class",
+     ["lookup-symbol", "--name", "NetworkWorker"], None, True),
+    ("lookup-symbol-not-found",
+     ["lookup-symbol", "--name", "does_not_exist"], None, True),
+    ("get-references",
+     ["get-references", "--name", "cbs::startupHook", "--format", "ndjson"],
+     None, True),
+    ("get-references-tsv",
+     ["get-references", "--name", "cbs::finalFormat", "--format", "tsv"],
+     None, True),
+    ("get-references-from",
+     ["get-references", "--name", "Pipeline::runAsync", "--direction", "from",
+      "--roles", "address_of", "--roles", "vtable_use", "--format", "ndjson"],
+     None, True),
+    ("get-references-page",
+     ["get-references", "--name", "cbs::startupHook", "--limit", "1",
+      "--offset", "1"], None, True),
     ("usage-unknown-flag", ["get-callers", "--bogus", "x"], None, True),
     ("usage-missing-arg", ["get-callers"], None, True),
     ("no-index", ["get-callers", "--index", "{build}/none.vycs",
@@ -248,7 +267,10 @@ def scrub(v):
     if isinstance(v, dict):
         out = {}
         for k, x in v.items():
-            if k in VOLATILE_KEYS:
+            # get_references' `references` is its record list, not the
+            # audit's count object of the same name: keep it.
+            if k in VOLATILE_KEYS and not (
+                    k == "references" and isinstance(x, list)):
                 continue
             if k == "didYouMean" and isinstance(x, list):
                 x = [

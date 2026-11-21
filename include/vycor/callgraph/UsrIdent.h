@@ -22,6 +22,10 @@
 #include <string>
 #include <unordered_map>
 
+namespace clang {
+class SourceManager;
+} // namespace clang
+
 namespace vycor {
 
 // Node identity pair (design doc docs/design-f8-usr-identity.md): `usr` is
@@ -56,5 +60,12 @@ public:
 private:
   std::unordered_map<const clang::Decl *, Ident> memo_;
 };
+
+// Identity of a lambda's call operator, the one the call graph gives its
+// node: the closure's spelling location plus the qualified name of the
+// nearest enclosing function that is not itself a lambda ("" at file scope).
+// `loc` is the closure class's begin location.
+Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
+                         const std::string &enclosing);
 
 } // namespace vycor

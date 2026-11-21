@@ -7,6 +7,7 @@
   get-callees                    List the functions called by a given function, one record per call site (or per callee with distinct), paged by limit/offset.
   get-callers                    List the functions that call a given function, one record per call site (or per caller with distinct), paged by limit/offset.
   get-class-hierarchy            Query class inheritance relationships and virtual method overrides.
+  get-references                 Non-call and call references to (or from) a symbol: one record per (referrer, target, role) with the occurrence count, one witness site, and the TUs that contributed it.
   graph-summary                  Return aggregate statistics about the call graph: node and edge counts, call-site count, entry-point count, top-5 fan-out callers and callees, and histograms by confidence and edge kind.
   impact-of-change               Callers affected by a change: the functions with a call chain to any changed function within max_depth, each at its shallowest depth with a witness path, plus the entry points among them.
   list-callback-sites            List every callback registration or invocation site grouped by target.
@@ -14,6 +15,7 @@
   list-concurrency-entry-points  List every ThreadEntry edge: functions (including synthetic lambda targets) that are handed to std::thread, std::jthread, std::async, std::packaged_task, std::invoke, or std::bind.
   list-entry-points              List the configured entry-point functions with their file/line when resolved in the call graph.
   lookup-function                Look up metadata for a function by qualified name.
+  lookup-symbol                  Link-level facts about a function, global variable, or class: linkage class (external, template_instantiation, vague, internal), attributes (extern_c, visibility, used, weak, member, ...), every declaration with whether it sits in a header, the TU(s) that define it, a dynamic class's vtable home TU, how many referrers use it per role, and whether any reference comes from a TU other than the defining one.
   metrics                        Measurements, not warnings: run named metrics over the index and report `{metric, entity, value, unit, components?, witness?}` records, largest value first, rolled up by symbol, file, TU, directory or link target.
   query-all-path-contexts        Enumerate the call paths from the entry points to a function, each with the try/catch scopes and conditional guards along it.
   query-call-site-context        Get exception handling and guard context at a specific call site location (file:line:col).

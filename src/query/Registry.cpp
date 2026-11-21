@@ -178,6 +178,13 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"metrics", kSectionControlFlow | kSectionChannels},
 };
 
+// Tools that never touch the graph: the section named here is all they
+// read (docs/symbol-references.md).
+static const std::map<std::string, unsigned> kOnlyNeeds = {
+    {"lookup_symbol", kSectionReferences},
+    {"get_references", kSectionReferences},
+};
+
 static const std::map<std::string, std::string> kRecordsKeys = {
     {"search_functions", "matches"},
     {"get_callees", "callees"},
@@ -200,6 +207,7 @@ static const std::map<std::string, std::string> kRecordsKeys = {
     {"audit_dependencies", "edges"},
     {"explain_dependency", "seeds"},
     {"metrics", "records"},
+    {"get_references", "references"},
 };
 
 std::vector<std::string> sectionNames(unsigned needs) {
@@ -210,6 +218,8 @@ std::vector<std::string> sectionNames(unsigned needs) {
     out.push_back("control_flow");
   if (needs & kSectionChannels)
     out.push_back("channels");
+  if (needs & kSectionReferences)
+    out.push_back("references");
   return out;
 }
 
@@ -223,6 +233,7 @@ std::vector<ToolEntry> getRegisteredTools() {
   registerImpactTools(tools);
   registerDependencyTools(tools);
   registerMetricsTools(tools);
+  registerReferenceTools(tools);
   for (auto &tool : tools) {
     auto it = kRecordsKeys.find(tool.name);
     if (it != kRecordsKeys.end())
@@ -230,6 +241,9 @@ std::vector<ToolEntry> getRegisteredTools() {
     auto needs = kExtraNeeds.find(tool.name);
     tool.needs = kSectionGraph |
                  (needs != kExtraNeeds.end() ? needs->second : 0u);
+    auto only = kOnlyNeeds.find(tool.name);
+    if (only != kOnlyNeeds.end())
+      tool.needs = only->second;
   }
 
   return tools;

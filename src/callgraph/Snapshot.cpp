@@ -295,7 +295,8 @@ constexpr uint8_t kMetaKind = 0;
 constexpr uint8_t kGraphKind = 1;
 constexpr uint8_t kControlFlowKind = 2;
 constexpr uint8_t kChannelsKind = 3;
-constexpr uint32_t kSectionKinds = 4;
+constexpr uint8_t kReferencesKind = 4;
+constexpr uint32_t kSectionKinds = 5;
 
 void emitInternerTable(std::string &out, const StringInterner &interner) {
   putU32(out, static_cast<uint32_t>(interner.size()));
@@ -323,6 +324,8 @@ const char *sectionName(uint8_t kind) {
     return "control_flow";
   case kChannelsKind:
     return "channels";
+  case kReferencesKind:
+    return "references";
   }
   return "unknown";
 }
@@ -383,6 +386,8 @@ bool parseHeader(const llvm::MemoryBuffer &buf, Header &h,
   h.summary.edges = r.u64();
   h.summary.callSites = r.u64();
   h.summary.channelSites = r.u64();
+  h.summary.symbols = r.u64();
+  h.summary.references = r.u64();
   const uint32_t tableCount = r.u32();
   if (tableCount != kSectionKinds) {
     error = "section table has " + std::to_string(tableCount) +
@@ -438,8 +443,16 @@ bool verifySection(const Header &h, uint8_t kind, std::string &error) {
 bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
                       const ControlFlowIndex &cfIndex,
                       const SnapshotMeta &meta, const ChannelIndex &channels,
-                      std::string *error, bool durable) {
+                      const ReferenceIndex &references, std::string *error,
+                      bool durable) {
   using SId = StringInterner::Id;
+  // A read-only reference index dropped its contributor lists at load:
+  // what it would write could not be refreshed or merged later.
+  if (references.readOnly()) {
+    if (error)
+      *error = "the reference index was loaded read-only and cannot be saved";
+    return false;
+  }
   // One buffer per v8 section, concatenated behind the header below.
   std::string sections[kSectionKinds];
 
@@ -785,6 +798,10 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
     }
   }
 
+  // References: the index writes itself (canonical bytes; the layout is
+  // documented in ReferenceIndex.cpp).
+  references.encode(sections[kReferencesKind]);
+
   // Assemble the file: header (version, summary counts, section table
   // with a checksum per section, header checksum), then the sections.
   // Published atomically (unique temp file, fsync, rename): a crash or a
@@ -796,6 +813,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
   putU64(header, graph.edgeCount());
   putU64(header, cfIndex.size());
   putU64(header, channels.size());
+  putU64(header, references.symbolCount());
+  putU64(header, references.referenceCount());
   putU32(header, kSectionKinds);
   uint64_t offset = kHeaderBytes;
   for (uint32_t kind = 0; kind < kSectionKinds; ++kind) {
@@ -1347,6 +1366,21 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
   } else {
     skipSection("channels", kChannelsKind);
   }
+  if (!r.ok)
+    return malformed();
+
+  if (needs & kSectionReferences) {
+    if (std::string why = beginSection(kReferencesKind); !why.empty())
+      return fail(why);
+    if (!out.references.decode(r.p, r.end, !mutableLoad))
+      return malformed();
+    r.p = r.end;
+    mark("references");
+    sectionDone();
+    out.loaded |= kSectionReferences;
+  } else {
+    skipSection("references", kReferencesKind);
+  }
 
   if (!r.ok)
     return malformed();
@@ -1736,17 +1770,20 @@ SnapshotIO::merge(const std::vector<std::string> &inputPaths,
       snap->graph.removeTUs(overlapping);
       snap->cfIndex.removeTUs(overlapping);
       snap->channels.removeTUs(overlapping);
+      snap->references.removeTUs(overlapping);
     }
 
     if (firstShard && overlapping.empty()) {
       out.graph = std::move(snap->graph);
       out.cfIndex = std::move(snap->cfIndex);
       out.channels = std::move(snap->channels);
+      out.references = std::move(snap->references);
       firstShard = false;
     } else {
       out.graph.absorb(snap->graph);
       out.cfIndex.absorb(snap->cfIndex);
       out.channels.absorb(snap->channels);
+      out.references.absorb(snap->references);
       firstShard = false;
     }
   }
@@ -1764,6 +1801,8 @@ SnapshotIO::merge(const std::vector<std::string> &inputPaths,
   out.summary.edges = out.graph.edgeCount();
   out.summary.callSites = out.cfIndex.size();
   out.summary.channelSites = out.channels.size();
+  out.summary.symbols = out.references.symbolCount();
+  out.summary.references = out.references.referenceCount();
   out.loaded = kSectionAll;
   if (error)
     error->clear();

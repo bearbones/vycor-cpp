@@ -1,0 +1,49 @@
+# megascope lookup-symbol --name cbs::startupHook --pretty -> exit 0
+      "definition": false,
+      "definition": true,
+      "file": "{fixture}/callbacks.cpp",
+      "file": "{fixture}/callbacks.hpp",
+      "firstTu": "{fixture}/callbacks.cpp",
+      "firstTu": "{fixture}/callbacks.cpp",
+      "inHeader": false,
+      "inHeader": true,
+      "line": 18,
+      "line": 21,
+      "tuCount": 1
+      "tuCount": 4
+    "address_of": 3,
+    "bake": "<bake>",
+    "call": 0,
+    "complete": true,
+    "failed": 0,
+    "freshness": "unchecked",
+    "indexed": 14,
+    "partial": 0,
+    "read": 0,
+    "requested": 14
+    "typeinfo_use": 0,
+    "vtable_use": 0,
+    "write": 0
+    {
+    {
+    }
+    },
+  "attributes": [],
+  "bodyLines": 1,
+  "declarations": [
+  "declaredInHeader": true,
+  "definingTu": "{fixture}/callbacks.cpp",
+  "definingTuCount": 1,
+  "indexScope": {
+  "kind": "function",
+  "linkage": "external",
+  "qualifiedName": "cbs::startupHook",
+  "referencedFromOtherTu": true,
+  "referrers": {
+  "status": "ok",
+  "usr": "c:@N@cbs@F@startupHook#I#"
+  ],
+  },
+  },
+{
+}

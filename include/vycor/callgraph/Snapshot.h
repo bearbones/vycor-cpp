@@ -18,6 +18,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/FileStamp.h"
 #include "vycor/callgraph/TuOutcome.h"
 
@@ -109,13 +110,15 @@ struct SnapshotMeta {
 /// outcome (a meta written by an older bake path) counts as skipped.
 IndexCoverage coverageOf(const SnapshotMeta &meta);
 
-/// Counts recorded in the v8 header so `info` and graph_summary can
-/// describe an index without decoding it.
+/// Counts recorded in the header (v8; v15 adds the last two) so `info`
+/// and graph_summary can describe an index without decoding it.
 struct IndexSummary {
   uint64_t nodes = 0;
   uint64_t edges = 0;
   uint64_t callSites = 0;
   uint64_t channelSites = 0;
+  uint64_t symbols = 0;    // distinct symbols with reference facts
+  uint64_t references = 0; // (referrer, target, role) records
 };
 
 /// Sections a load may ask for (bitmask). Meta and the summary are always
@@ -125,13 +128,15 @@ enum IndexSection : unsigned {
   kSectionGraph = 1,
   kSectionControlFlow = 2,
   kSectionChannels = 4,
-  kSectionAll = 7,
+  kSectionReferences = 8,
+  kSectionAll = 15,
 };
 
 struct SnapshotData {
   CallGraph graph;
   ControlFlowIndex cfIndex;
   ChannelIndex channels;
+  ReferenceIndex references;
   SnapshotMeta meta;
   IndexSummary summary;
   unsigned loaded = 0; // IndexSection bits actually decoded
@@ -230,23 +235,31 @@ public:
   ///     so a v13 index would answer `not_found` for them: it is rebuilt.
   ///     A loader refuses a string that is not UTF-8 as damage. The meta
   ///     section is unchanged (TU paths stay raw).
-  static constexpr uint32_t kFormatVersion = 14;
-  /// Bytes before the first section: magic(4) + version(4) + summary(32) +
-  /// table count(4) + 4 entries of kind(1) + offset(8) + length(8) +
+  /// v15: symbol reference facts — a fifth section, `references`, holds
+  ///     the ReferenceIndex (who references which function, global or
+  ///     class and how, plus each symbol's linkage and declaration
+  ///     facts; ReferenceIndex.h has the encoding), and the header
+  ///     summary gains the symbol and reference counts. Only a load that
+  ///     asks for kSectionReferences decodes it. The other sections are
+  ///     unchanged from v14.
+  static constexpr uint32_t kFormatVersion = 15;
+  /// Bytes before the first section: magic(4) + version(4) + summary(48) +
+  /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).
-  static constexpr uint64_t kHeaderBytes = 4 + 4 + 32 + 4 + 4 * 25 + 8;
+  static constexpr uint64_t kHeaderBytes = 4 + 4 + 48 + 4 + 5 * 25 + 8;
 
-  /// Serialize graph + cfIndex + channels + meta to `path`, atomically:
+  /// Serialize graph + cfIndex + channels + references + meta to `path`,
+  /// atomically:
   /// through a uniquely named temp file in the same directory, fsync'ed
   /// and renamed over `path` (writeFileAtomically), so concurrent saves
-  /// and crashes never publish a torn or mixed file. `channels` defaults
-  /// to empty so callers that don't use --channel-types-json are
-  /// unaffected. Returns false on I/O failure (`path` untouched, no temp
+  /// and crashes never publish a torn or mixed file. `channels` and
+  /// `references` default to empty for callers that hold neither. Returns false on I/O failure (`path` untouched, no temp
   /// file left), with `error` saying what failed. `durable` false skips
   /// the fsyncs (worker shards: throwaway files the parent reads at once).
   static bool save(const std::string &path, const CallGraph &graph,
                    const ControlFlowIndex &cfIndex, const SnapshotMeta &meta,
                    const ChannelIndex &channels = ChannelIndex(),
+                   const ReferenceIndex &references = ReferenceIndex(),
                    std::string *error = nullptr, bool durable = true);
 
   /// Load a snapshot. Returns nullopt if the file is missing, has a

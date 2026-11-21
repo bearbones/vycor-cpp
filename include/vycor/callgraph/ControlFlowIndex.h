@@ -21,6 +21,7 @@
 #include "vycor/callgraph/ConditionalGuard.h"
 #include "vycor/callgraph/FileStamp.h"
 #include "vycor/callgraph/StaticInit.h"
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/TuOutcome.h"
 #include "vycor/callgraph/StringInterner.h"
 
@@ -498,6 +499,9 @@ struct BakedIndexes {
   CallGraph graph;
   ControlFlowIndex cfIndex;
   ChannelIndex channels;
+  // Symbol reference facts (ReferenceIndex.h); empty when the bake was
+  // asked not to record them.
+  ReferenceIndex references;
   // Every file each TU's parse opened (see FileStamp.h); a TU whose parse
   // crashed before the end of the TU has no entry.
   TuDependencies deps;
@@ -537,7 +541,8 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
                          BuildStats *stats = nullptr,
                          std::function<void(const std::string &)> preTu =
                              nullptr,
-                         const ChannelTypeConfig &channelCfg = {});
+                         const ChannelTypeConfig &channelCfg = {},
+                         bool recordReferences = true);
 
 // Index an already-parsed ASTContext in a single pass (used by the Clang
 // frontend plugin vycor_megascope_plugin to emit per-TU .vycs snapshots
@@ -545,6 +550,7 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
 BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
                           const std::vector<std::string> &collapsePaths = {},
                           const LockTypeConfig &lockCfg = {},
-                          const ChannelTypeConfig &channelCfg = {});
+                          const ChannelTypeConfig &channelCfg = {},
+                          bool recordReferences = true);
 
 } // namespace vycor

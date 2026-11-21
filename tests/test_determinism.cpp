@@ -114,6 +114,17 @@ std::vector<Call> battery() {
       {"graph_summary", O{}},
       {"list_callback_sites", O{}},
       {"list_concurrency_entry_points", O{}},
+      // Symbol reference facts (docs/symbol-references.md).
+      {"lookup_symbol", O{{"name", "cbs::startupHook"}}},
+      {"lookup_symbol", O{{"name", "NetworkWorker"}}},
+      {"get_references", O{{"name", "cbs::finalFormat"}}},
+      {"get_references", O{{"name", "cbs::startupHook"}, {"limit", 2}}},
+      {"get_references",
+       O{{"name", "cbs::startupHook"}, {"limit", 2}, {"offset", 2}}},
+      {"get_references", O{{"name", "runChainC"}, {"direction", "from"}}},
+      {"get_references",
+       O{{"name", "Pipeline::runAsync"}, {"direction", "from"},
+         {"roles", llvm::json::Array{"address_of", "vtable_use"}}}},
   };
 }
 
@@ -125,6 +136,7 @@ std::map<std::string, std::string> answers(BakedIndexes &ix) {
   ToolContext ctx{ix.graph, oracle, ix.cfIndex, entryPoints, &ix.channels,
                   &cache};
   ctx.facts.freshness = IndexFreshness::Baked;
+  ctx.references = &ix.references;
   auto tools = getRegisteredTools();
   std::map<std::string, std::string> out;
   for (const auto &[tool, args] : battery()) {
@@ -168,6 +180,16 @@ TEST_CASE("every tool answers the same over any bake of the same sources",
     CHECK(callers.find("\"callerCount\":0") == std::string::npos);
     const std::string &sites = reference.at("list_callback_sites {}");
     CHECK(sites.find("\"targetCount\":0") == std::string::npos);
+    // Three referrers of the hook, so a page of two is cut inside the
+    // list.
+    const std::string &refs = reference.at(
+        "get_references {\"limit\":2,\"name\":\"cbs::startupHook\"}");
+    CHECK(refs.find("\"total\":3") != std::string::npos);
+    CHECK(refs.find("\"truncated\":true") != std::string::npos);
+    const std::string &from = reference.at(
+        "get_references {\"direction\":\"from\",\"name\":\"runChainC\"}");
+    CHECK(from.find("\"role\":\"address_of\"") != std::string::npos);
+    CHECK(from.find("\"role\":\"call\"") != std::string::npos);
   }
 
   SECTION("four threads") {
@@ -189,10 +211,12 @@ TEST_CASE("every tool answers the same over any bake of the same sources",
     REQUIRE(warm.graph.removeTU(tu) > 0);
     warm.cfIndex.removeTU(tu);
     warm.channels.removeTU(tu);
+    REQUIRE(warm.references.removeTU(tu) > 0);
     auto shard = bakeDeepChains({tu}, 1);
     warm.graph.absorb(shard.graph);
     warm.cfIndex.absorb(shard.cfIndex);
     warm.channels.absorb(shard.channels);
+    warm.references.absorb(shard.references);
     expectSame(reference, answers(warm), "cold vs warm");
   }
 }

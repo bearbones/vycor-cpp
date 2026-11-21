@@ -141,6 +141,20 @@ printf '%s\n' \
 `exit` carries the same code the one-shot verb would have returned and
 `status` mirrors `result.status`.
 
+Beyond calls, the index records which function references which
+function, global variable, or class, and how (`call`, `address_of`,
+`read`, `write`, `vtable_use`, `typeinfo_use`), with each symbol's
+linkage and defining TU:
+
+```bash
+vycor-cpp megascope lookup-symbol --name ns::counter          # linkage, defining TU, referrers per role
+vycor-cpp megascope get-references --name ns::counter --roles write   # who writes it
+vycor-cpp megascope get-references --name main --direction from      # what main references
+```
+
+`docs/symbol-references.md` has the payloads, what is and is not
+recorded, and the cost.
+
 ---
 
 ## File selection

@@ -431,11 +431,13 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
           out.graph = std::move(snap->graph);
           out.cfIndex = std::move(snap->cfIndex);
           out.channels = std::move(snap->channels);
+          out.references = std::move(snap->references);
           firstShard = false;
         } else {
           out.graph.absorb(snap->graph);
           out.cfIndex.absorb(snap->cfIndex);
           out.channels.absorb(snap->channels);
+          out.references.absorb(snap->references);
         }
         // The worker records its batch's dependencies and per-TU
         // outcomes in the shard meta.
