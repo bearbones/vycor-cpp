@@ -93,6 +93,7 @@ uint8_t reasonBit(Why why, uint8_t guard) {
   using F = NoexceptFactEntry;
   if (guard == kGuardTyped)
     return why == kWhyThrow || why == kWhyLibraryThrow ? F::ThrowTyped
+           : why == kWhyAlloc                          ? F::AllocTyped
                                                        : F::OpaqueTyped;
   switch (why) {
   case kWhyThrow:
@@ -119,8 +120,11 @@ uint8_t throughGuard(uint8_t reasons, uint8_t guard) {
   uint8_t out = 0;
   if (reasons & (F::ThrowBare | F::LibraryThrowBare | F::ThrowTyped))
     out |= F::ThrowTyped;
-  if (reasons & (F::DynamicBare | F::OtherBare | F::AllocBare | F::OpaqueTyped))
+  if (reasons & (F::DynamicBare | F::OtherBare | F::OpaqueTyped))
     out |= F::OpaqueTyped;
+  // Allocation stays allocation (never a witness), guarded or not.
+  if (reasons & (F::AllocBare | F::AllocTyped))
+    out |= F::AllocTyped;
   return out;
 }
 

@@ -365,7 +365,8 @@ struct NoexceptFactEntry {
     DynamicBare = 1u << 3,    // a virtual or indirect call that may throw
     OtherBare = 1u << 4,      // anything else the walk does not model
     AllocBare = 1u << 5,      // a throwing operator new (std::bad_alloc)
-    OpaqueTyped = 1u << 6,    // dynamic, other or alloc under a typed try
+    OpaqueTyped = 1u << 6,    // dynamic or other under a typed try
+    AllocTyped = 1u << 7,     // a throwing operator new under a typed try
   };
   // The bits are in order of how much they tell: the lowest set one is
   // the reason a site is reported for. 8 when none is set.

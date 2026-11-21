@@ -111,7 +111,7 @@ the shortest path.
 | `unknown` | a virtual or indirect call that may throw, something the walk does not model, or a C++ callee with no definition in the index, with or without a `try` with typed handlers around it | note |
 
 A throwing `operator new` (`std::bad_alloc`) is not a witness on its
-own: nearly every function allocates, and a check that reported every
+own, whether or not a `try` encloses it: nearly every function allocates, and a check that reported every
 allocation behind a boundary would report everything. The standard
 library's own allocation and size failures (`std::__throw_bad_alloc`,
 `__throw_bad_array_new_length`, `__throw_length_error`, what

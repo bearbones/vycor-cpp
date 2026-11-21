@@ -494,7 +494,7 @@ TEST_CASE("exception boundary escape: a handler that rethrows stops nothing "
   CHECK(contains(before.message, "Confidence: typed-handlers"));
 }
 
-TEST_CASE("exception boundary escape: library throws, and unknown calls "
+TEST_CASE("exception boundary escape: library throws and unknown calls "
           "behind typed handlers",
           "[CheckExceptionBoundary]") {
   auto found = run({
@@ -510,9 +510,20 @@ TEST_CASE("exception boundary escape: library throws, and unknown calls "
                 "void guardedCall() {\n"
                 "  try { elsewhere(); } catch (int) {}\n"
                 "}\n"
+                "// Allocation is no witness, behind a typed try or not.\n"
+                "int allocs(int n) {\n"
+                "  try {\n"
+                "    std::vector<int> v(n);\n"
+                "    int *p = new int(n);\n"
+                "    int r = *p + int(v.size());\n"
+                "    delete p;\n"
+                "    return r;\n"
+                "  } catch (const std::exception &) { return 0; }\n"
+                "}\n"
                 "void go(std::vector<int> *v, Base *b) {\n"
-                "  std::thread x(third, v), y(guarded, b), z(guardedCall);\n"
-                "  x.join(); y.join(); z.join();\n"
+                "  std::thread x(third, v), y(guarded, b), z(guardedCall),\n"
+                "      w(allocs, 3);\n"
+                "  x.join(); y.join(); z.join(); w.join();\n"
                 "}\n"},
   });
   CHECK(keysOf(found) ==
