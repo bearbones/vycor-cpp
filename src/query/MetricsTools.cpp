@@ -227,7 +227,9 @@ void registerMetricsTools(std::vector<ToolEntry> &tools) {
        "directory or link target. `metrics` carries each metric's total "
        "over everything measured. Nothing passes or fails. See "
        "docs/metrics/README.md.",
-       llvm::json::Value(std::move(schema)), runMetrics, "", kSectionGraph});
+       // Every section (query/Registry.cpp assigns it): a metric may
+       // read any of them.
+       llvm::json::Value(std::move(schema)), runMetrics, "", kSectionAll});
 }
 
 } // namespace vycor

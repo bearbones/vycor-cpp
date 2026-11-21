@@ -173,6 +173,9 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"query_channel", kSectionChannels},
     {"query_channels_for_function", kSectionChannels},
     {"explain_ordering", kSectionChannels},
+    // Which sections a metrics run reads depends on the metrics selected,
+    // and an organization metric may read any of them.
+    {"metrics", kSectionControlFlow | kSectionChannels},
 };
 
 static const std::map<std::string, std::string> kRecordsKeys = {

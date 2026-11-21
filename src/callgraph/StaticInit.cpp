@@ -53,18 +53,22 @@ std::string rootFilePathOf(const clang::SourceManager &sm,
   return std::string(path);
 }
 
-// The graph's identity for a lambda at namespace scope. Must stay the
-// spelling CallGraphBuilder gives a lambda with no enclosing function
-// ("vycor-lambda:lambda#file:line:col#<tu>"), or a lambda in an
-// initializer finds no node; tests/test_static_init_facts.cpp pins it.
-Ident namespaceScopeLambdaIdent(const clang::SourceManager &sm,
-                                clang::SourceLocation loc) {
+// The graph's identity for a lambda an initializer evaluates. Must stay
+// the spelling CallGraphBuilder gives it
+// ("vycor-lambda:lambda#file:line:col#enclosing"), or the lambda finds no
+// node; tests/test_static_init_facts.cpp pins it. `enclosing` is the
+// function whose declaration the lambda is written in (a default
+// argument's), empty at namespace or class scope.
+Ident initializerLambdaIdent(const clang::SourceManager &sm,
+                             clang::SourceLocation loc,
+                             llvm::StringRef enclosing) {
   auto sLoc = sm.getSpellingLoc(loc);
   llvm::SmallString<160> buf;
   llvm::raw_svector_ostream os(buf);
   os << "lambda#" << sm.getFilename(sLoc) << ':'
      << sm.getSpellingLineNumber(sLoc) << ':'
-     << sm.getSpellingColumnNumber(sLoc) << "#<tu>";
+     << sm.getSpellingColumnNumber(sLoc) << '#'
+     << (enclosing.empty() ? llvm::StringRef("<tu>") : enclosing);
   Ident id;
   id.display = std::string(buf.str());
   id.usr = "vycor-lambda:" + id.display;
@@ -96,21 +100,58 @@ public:
     return true;
   }
 
+  // The base constructor an inheriting constructor (`using Base::Base;`)
+  // forwards to.
+  bool VisitCXXInheritedCtorInitExpr(clang::CXXInheritedCtorInitExpr *expr) {
+    addCallee(expr->getConstructor());
+    return true;
+  }
+
   // RecursiveASTVisitor leaves these to shouldVisitImplicitCode; the
   // calls in a default argument or a default member initializer run as
-  // part of this initializer.
+  // part of this initializer. A lambda in a default argument is the
+  // graph's under the function that declares the parameter.
   bool VisitCXXDefaultArgExpr(clang::CXXDefaultArgExpr *expr) {
-    return TraverseStmt(expr->getExpr());
+    std::string outer = std::move(enclosing_);
+    enclosing_.clear();
+    if (const auto *fn = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+            expr->getParam()->getDeclContext())) {
+      const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
+      enclosing_ = method && clang::isLambdaCallOperator(method)
+                       ? outer
+                       : fn->getQualifiedNameAsString();
+    }
+    bool ok = TraverseStmt(expr->getExpr());
+    enclosing_ = std::move(outer);
+    return ok;
   }
   bool VisitCXXDefaultInitExpr(clang::CXXDefaultInitExpr *expr) {
     return TraverseStmt(expr->getExpr());
+  }
+
+  // A braced list is walked in its semantic form: the converting
+  // constructors, default member initializers and array filler of
+  // `Entry table[] = {{"a", 1}, {"b", 2}};` exist only there, and the
+  // default traversal walks the list as written.
+  bool TraverseInitListExpr(clang::InitListExpr *list) {
+    clang::InitListExpr *semantic =
+        list->isSemanticForm() ? list : list->getSemanticForm();
+    if (!semantic)
+      semantic = list;
+    for (clang::Stmt *child : semantic->children())
+      if (child && !TraverseStmt(child))
+        return false;
+    if (clang::Expr *filler = semantic->getArrayFiller())
+      if (!TraverseStmt(filler))
+        return false;
+    return true;
   }
 
   // A lambda written in an initializer is taken as called by it: the
   // graph holds the body's calls under the lambda's own node. The body is
   // not walked here; the captures' initializers are.
   bool TraverseLambdaExpr(clang::LambdaExpr *expr) {
-    Ident id = namespaceScopeLambdaIdent(sm_, expr->getBeginLoc());
+    Ident id = initializerLambdaIdent(sm_, expr->getBeginLoc(), enclosing_);
     out_.push_back({std::move(id.usr), std::move(id.display), {}});
     for (clang::Expr *init : expr->capture_inits())
       if (init && !TraverseStmt(init))
@@ -126,18 +167,22 @@ private:
     if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee))
       if (clang::isLambdaCallOperator(method))
         return;
-    // A compiler-generated constructor has no graph node and no written
-    // body: look through it to what its member and base initializers run.
+    // A compiler-generated constructor (defaulted, or inherited with
+    // `using Base::Base;`) has no graph node and no written body: look
+    // through it to what its member and base initializers run.
     if (auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(callee)) {
-      if (ctor->isDefaulted()) {
-        if (seenDefaulted_.insert(ctor->getCanonicalDecl()).second) {
+      if (ctor->isDefaulted() || ctor->isInheritingConstructor()) {
+        if (seenGenerated_.insert(ctor->getCanonicalDecl()).second) {
           const clang::FunctionDecl *def = nullptr;
-          const auto *defined = ctor->hasBody(def)
-                                    ? llvm::cast<clang::CXXConstructorDecl>(def)
-                                    : ctor;
-          for (const clang::CXXCtorInitializer *init : defined->inits())
-            if (init->getInit())
-              TraverseStmt(init->getInit());
+          if (ctor->hasBody(def)) {
+            for (const clang::CXXCtorInitializer *init :
+                 llvm::cast<clang::CXXConstructorDecl>(def)->inits())
+              if (init->getInit())
+                TraverseStmt(init->getInit());
+          } else if (ctor->isInheritingConstructor()) {
+            // Never defined in this TU: the base constructor at least.
+            addCallee(ctor->getInheritedConstructor().getConstructor());
+          }
         }
         return;
       }
@@ -157,7 +202,9 @@ private:
   const clang::SourceManager &sm_;
   UsrCache &usrs_;
   std::vector<StaticInitCallee> &out_;
-  llvm::SmallPtrSet<const clang::Decl *, 8> seenDefaulted_;
+  llvm::SmallPtrSet<const clang::Decl *, 8> seenGenerated_;
+  // The function a lambda met now is written in; empty outside one.
+  std::string enclosing_;
 };
 
 class RootCollector {
@@ -204,6 +251,14 @@ private:
     StaticInitRoot root;
     root.kind = kind;
     root.name = id.display;
+    // `seeded<int>` and `seeded<long>`, not two records named `seeded`.
+    if (const auto *spec =
+            llvm::dyn_cast<clang::VarTemplateSpecializationDecl>(decl)) {
+      root.name.clear();
+      llvm::raw_string_ostream os(root.name);
+      spec->getNameForDiagnostic(os, ctx_.getPrintingPolicy(),
+                                 /*Qualified=*/true);
+    }
     root.usr = id.usr;
     const clang::SourceLocation at = fileLoc(decl);
     root.file = rootFilePathOf(sm_, at);
@@ -213,8 +268,19 @@ private:
     return out_.roots.back();
   }
 
-  // The rule of check's static-init index (check/Indexer.cpp), minus
-  // thread-locals, which initialize on first use.
+  // The shape of check's static-init index (check/Indexer.cpp), minus
+  // thread-locals, which initialize on first use. Constant initialization
+  // is Sema's own verdict on the variable, evaluated in place: asking
+  // whether the initializer alone is a constant expression says no for
+  // every type with a non-trivial destructor (`std::unique_ptr<T> p;`),
+  // however constexpr its constructor, and yes for `T table[3] = {};`
+  // whatever T's constructor does (it does not look at the array
+  // filler). Sema evaluates every global from C++11 on; the syntactic
+  // rule is for C++98, where it does not. One case Sema calls
+  // non-constant runs nothing all the same: a trivial default
+  // constructor (`static stack_t old;`, `static struct sigaction
+  // prev[N];`) leaves the members indeterminate, so the evaluation
+  // fails, and the object is the zero-initialized one it already was.
   void variable(const clang::VarDecl *var) {
     if (llvm::isa<clang::ParmVarDecl>(var) || !var->hasGlobalStorage() ||
         var->isStaticLocal() || var->getTLSKind() != clang::VarDecl::TLS_None)
@@ -233,8 +299,17 @@ private:
     if (init->isInstantiationDependent() || inSystemHeader(var))
       return;
     if (var->isConstexpr() || var->hasAttr<clang::ConstInitAttr>() ||
+        var->hasConstantInitialization())
+      return;
+    if (!ctx_.getLangOpts().CPlusPlus11 &&
         init->isConstantInitializer(ctx_, var->getType()->isReferenceType()))
       return;
+    if (const auto *construct =
+            llvm::dyn_cast<clang::CXXConstructExpr>(init->IgnoreImplicit())) {
+      const clang::CXXConstructorDecl *ctor = construct->getConstructor();
+      if (ctor->isDefaultConstructor() && ctor->isTrivial())
+        return;
+    }
     StaticInitRoot &root = addRoot(StaticInitKind::Variable, var);
     InitCallCollector calls(sm_, usrs_, root.callees);
     calls.TraverseStmt(const_cast<clang::Expr *>(init));

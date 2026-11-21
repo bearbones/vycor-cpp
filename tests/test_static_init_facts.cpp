@@ -33,6 +33,7 @@
 #include <fstream>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using namespace vycor;
@@ -307,6 +308,178 @@ int viaLambda = [] { return compute(); }();
   INFO(root->callees[0].usr);
   CHECK(b.ix.graph.findNode(root->callees[0].usr) != nullptr);
   CHECK(llvm::StringRef(root->callees[0].display).starts_with("lambda#"));
+}
+
+TEST_CASE("a lambda in a default argument is the graph's under the "
+          "function declaring the parameter",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+int withDefault(int x = [] { return compute(); }()) { return x; }
+int viaDefault = withDefault();
+)cpp"});
+  const StaticInitRoot *root = rootNamed(b.ix.staticInits, "viaDefault");
+  REQUIRE(root != nullptr);
+  // The function, and the lambda its default argument evaluates in the
+  // initializer. Every callee is a node: a lambda named as if it were at
+  // namespace scope would be a phantom leaf, counted and never entered.
+  REQUIRE(root->callees.size() == 2);
+  for (const StaticInitCallee &callee : root->callees) {
+    INFO(callee.usr);
+    CHECK(b.ix.graph.findNode(callee.usr) != nullptr);
+  }
+}
+
+TEST_CASE("a braced initializer is walked in its semantic form",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+struct Name { Name(const char *); };
+struct Row { Name name; int weight; };
+struct Defaults { int a = compute(); int b = 2; };
+struct Counted { Counted(); };
+
+Name names[] = {"a", "b"};
+Row rows[] = {{"a", 1}, {"b", 2}};
+Row oneRow = {"z", compute()};
+Defaults braced{};
+Defaults assigned = {};
+Counted padded[3] = {};
+)cpp"});
+  const StaticInitFacts &facts = b.ix.staticInits;
+  auto callees = [&](const char *name) {
+    const StaticInitRoot *root = rootNamed(facts, name);
+    REQUIRE(root != nullptr);
+    return calleeNames(*root);
+  };
+
+  // The converting constructors exist only in the semantic form of the
+  // list: `{"a", "b"}` as written holds two string literals.
+  CHECK(callees("names") == std::vector<std::string>{"Name::Name"});
+  CHECK(callees("rows") == std::vector<std::string>{"Name::Name"});
+  CHECK(callees("oneRow") ==
+        std::vector<std::string>{"Name::Name", "compute"});
+  // A default member initializer the list leaves to the class.
+  CHECK(callees("braced") == std::vector<std::string>{"compute"});
+  CHECK(callees("assigned") == std::vector<std::string>{"compute"});
+  // Elements the list does not name, built by the array filler.
+  CHECK(callees("padded") == std::vector<std::string>{"Counted::Counted"});
+}
+
+TEST_CASE("constant initialization is decided on the variable and not on "
+          "its initializer alone",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+struct Owner {
+  constexpr Owner() : p(nullptr) {}
+  constexpr Owner(int *q) : p(q) {}
+  ~Owner();
+  int *p;
+};
+struct Literal { constexpr Literal(int x) : v(x) {} int v; };
+struct Runtime { Runtime(); ~Runtime(); };
+
+Owner empty;
+Owner null(nullptr);
+Literal literal(3);
+Runtime runtime;
+Owner late(compute() ? nullptr : nullptr);
+)cpp"});
+  const StaticInitFacts &facts = b.ix.staticInits;
+  // A constexpr constructor and a non-trivial destructor: constant
+  // initialized (nothing runs before main), though its initializer is
+  // not a constant expression taken by itself. The shape of a global
+  // std::unique_ptr.
+  CHECK(rootNamed(facts, "empty") == nullptr);
+  CHECK(rootNamed(facts, "null") == nullptr);
+  CHECK(rootNamed(facts, "literal") == nullptr);
+  CHECK(rootNamed(facts, "runtime") != nullptr);
+  CHECK(rootNamed(facts, "late") != nullptr);
+  CHECK(facts.roots.size() == 2);
+}
+
+TEST_CASE("trivial default construction is not a root",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+struct Pod { int a; void *p; };
+struct Runtime { Runtime(); };
+struct Holds { Runtime r; };
+struct Seeded { int a = compute(); };
+
+static Pod pod;
+static Pod pods[4];
+static struct { Pod inner; int n; } unnamed[2];
+static Holds holds;
+static Holds heldArray[2];
+static Seeded seeded;
+)cpp"});
+  const StaticInitFacts &facts = b.ix.staticInits;
+  // Sema does not call these constant-initialized (the members are left
+  // indeterminate), and nothing runs: the shape of `static stack_t old;`
+  // and `static struct sigaction prev[N];`.
+  CHECK(rootNamed(facts, "pod") == nullptr);
+  CHECK(rootNamed(facts, "pods") == nullptr);
+  CHECK(rootNamed(facts, "unnamed") == nullptr);
+  // An implicit default constructor that runs a member's is not trivial.
+  REQUIRE(rootNamed(facts, "holds") != nullptr);
+  CHECK(calleeNames(*rootNamed(facts, "holds")) ==
+        std::vector<std::string>{"Runtime::Runtime"});
+  CHECK(rootNamed(facts, "heldArray") != nullptr);
+  REQUIRE(rootNamed(facts, "seeded") != nullptr);
+  CHECK(calleeNames(*rootNamed(facts, "seeded")) ==
+        std::vector<std::string>{"compute"});
+  CHECK(facts.roots.size() == 3);
+}
+
+TEST_CASE("an inherited constructor is looked through to the base's",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+struct Base { Base(int); };
+struct Member { Member(); };
+struct Derived : Base {
+  using Base::Base;
+  Member member;
+  int extra = compute();
+};
+Derived derived(1);
+)cpp"});
+  const StaticInitRoot *root = rootNamed(b.ix.staticInits, "derived");
+  REQUIRE(root != nullptr);
+  // The base constructor it forwards to, and what it initializes besides:
+  // the inheriting constructor itself is not a function anyone wrote.
+  CHECK(calleeNames(*root) == std::vector<std::string>{"Base::Base",
+                                                       "Member::Member",
+                                                       "compute"});
+}
+
+TEST_CASE("an explicit instantiation or specialization of a templated "
+          "variable is a root and the template is not",
+          "[metrics][static-init]") {
+  Baked b = bake({R"cpp(
+int compute();
+template <class T> T seeded = T(compute());
+template <> int seeded<int> = compute();
+template long seeded<long>;
+template <class T> struct Table { static int slot; };
+template <class T> int Table<T>::slot = compute();
+template struct Table<char>;
+int use = seeded<short>;
+)cpp"});
+  const StaticInitFacts &facts = b.ix.staticInits;
+  std::vector<std::pair<unsigned, std::string>> roots;
+  for (const StaticInitRoot &root : facts.roots)
+    roots.emplace_back(root.line, root.name);
+  // The explicit instantiation is located at the template it
+  // instantiates. Neither template is a root by itself, and neither is
+  // the implicit seeded<short> that `use` reads.
+  CHECK(roots == std::vector<std::pair<unsigned, std::string>>{
+                     {3, "seeded<long>"},
+                     {4, "seeded<int>"},
+                     {7, "Table<char>::slot"},
+                     {9, "use"}});
 }
 
 TEST_CASE("an instantiated callee names the template definition it came "

@@ -62,10 +62,14 @@ bool resolveMetricSpec(llvm::StringRef spec,
   if (spec.empty() || spec.starts_with("-"))
     enabled = knownNames;
 
+  // Split by hand: StringRef::split cannot tell "a" from "a,", and a
+  // trailing comma is an empty entry like any other.
   llvm::StringRef rest = spec;
-  while (!rest.empty()) {
-    auto [entry, tail] = rest.split(',');
-    rest = tail;
+  for (bool more = !rest.empty(); more;) {
+    const size_t comma = rest.find(',');
+    more = comma != llvm::StringRef::npos;
+    llvm::StringRef entry = rest.substr(0, comma);
+    rest = more ? rest.substr(comma + 1) : llvm::StringRef();
     entry = entry.trim();
     bool disable = entry.consume_front("-");
     if (entry.empty()) {

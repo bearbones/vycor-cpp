@@ -132,7 +132,8 @@ list counts in each.
   "rollup": "symbol",
   "metrics": [
     {"metric": "static-init-cost", "unit": "functions", "level": "symbol", "records": 8,
-     "overall": {"value": 12, "components": {"dynamicInitializers": 7, "constructorFunctions": 1, "entities": 8}}}
+     "overall": {"value": 12, "components": {"dynamicInitializers": 7, "constructorFunctions": 1, "directCalls": 8,
+                                             "allocation": 4, "lock": 3, "io": 3, "entities": 8}}}
   ],
   "records": [ ... ],
   "total": 8, "offset": 0, "limit": 200, "returned": 8, "truncated": false

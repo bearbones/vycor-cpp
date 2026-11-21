@@ -73,7 +73,7 @@ public:
     std::array<int64_t, kEffectKindCount> withEffect{};
     for (uint32_t member : members) {
       const Root &root = roots_[member];
-      (root.self == kNone ? variables : constructors) += 1;
+      (root.constructorFunction ? constructors : variables) += 1;
       direct += root.directCalls;
       for (unsigned k = 0; k < kEffectKindCount; ++k)
         withEffect[k] += (root.effects >> k) & 1u;
@@ -95,6 +95,7 @@ private:
     uint32_t self = kNone;
     int64_t directCalls = 0;
     uint8_t effects = 0; // mask over its own reach, set by measureRoots
+    bool constructorFunction = false;
   };
 
   struct Seed {
@@ -129,6 +130,7 @@ private:
       Root root;
       root.seedBegin = static_cast<uint32_t>(seeds_.size());
       if (fact.kind == StaticInitKind::ConstructorFunction) {
+        root.constructorFunction = true;
         if (auto id = graph_.interner().find(fact.usr))
           if (*id < graphIds_)
             root.self = *id;
@@ -267,7 +269,11 @@ private:
         // A constructor function was walked through, never built lazily
         // before its own walk: its adjacency exists now.
         assert(adjBegin_[root.self] != kNone);
-        root.directCalls = adjCount_[root.self];
+        // Itself, when it recurses, is not something it calls: the
+        // value does not count it either.
+        const uint32_t begin = adjBegin_[root.self];
+        for (uint32_t k = 0; k < adjCount_[root.self]; ++k)
+          root.directCalls += adjPool_[begin + k] != root.self;
       } else {
         root.directCalls = root.seedEnd - root.seedBegin;
       }

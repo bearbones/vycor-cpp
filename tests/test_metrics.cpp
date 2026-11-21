@@ -332,6 +332,17 @@ TEST_CASE("metric specs select by name like check specs", "[metrics]") {
                                   error));
     CHECK(error.find("empty entry") != std::string::npos);
   }
+
+  SECTION("so is a leading or a trailing comma") {
+    CHECK_FALSE(resolveMetricSpec("alpha-size,", known, selected, error));
+    CHECK(error.find("empty entry") != std::string::npos);
+    error.clear();
+    CHECK_FALSE(resolveMetricSpec(",alpha-size", known, selected, error));
+    CHECK(error.find("empty entry") != std::string::npos);
+    error.clear();
+    CHECK_FALSE(resolveMetricSpec(",", known, selected, error));
+    CHECK(error.find("empty entry") != std::string::npos);
+  }
 }
 
 TEST_CASE("static-init-cost is a built-in metric", "[metrics]") {
@@ -708,6 +719,96 @@ TEST_CASE("static-init-cost rolls up by TU and directory and target",
     CHECK(core->getObject("entity")->getString("kind") == "target");
     // coreSlot and the header's initializer.
     CHECK(component(*core, "dynamicInitializers") == 2);
+  }
+}
+
+TEST_CASE("static-init-cost walks cycles and recursion and braced tables",
+          "[metrics][static-init]") {
+  std::string path;
+  {
+    llvm::SmallString<128> tmp;
+    int fd = -1;
+    REQUIRE_FALSE(
+        llvm::sys::fs::createTemporaryFile("vycor_metrics", "cpp", fd, tmp));
+    ::close(fd);
+    path = std::string(tmp.str());
+    std::ofstream out(path);
+    out << R"cpp(
+extern "C" int puts(const char *);
+int helper();
+int ping(int);
+int pong(int n) { return n ? ping(n - 1) : helper(); }
+int ping(int n) { return pong(n); }
+int looped = ping(3);
+
+__attribute__((constructor)) void again() {
+  static int depth;
+  if (depth++ < 1)
+    again();
+  helper();
+}
+__attribute__((constructor)) void shared() { helper(); }
+int callsShared = (shared(), 0);
+
+struct Name { Name(const char *s) { puts(s); } };
+Name names[] = {"a", "b"};
+)cpp";
+  }
+  BakedIndexes ix = bakeFiles({path});
+  llvm::sys::fs::remove(path);
+  Surface surface(ix);
+  llvm::json::Object payload = surface.run();
+  CHECK(payload.getInteger("total") == 5);
+
+  SECTION("mutual recursion ends and counts each function once") {
+    const llvm::json::Object *looped = recordNamed(payload, "looped");
+    REQUIRE(looped != nullptr);
+    CHECK(looped->getInteger("value") == 3); // ping, pong, helper
+    CHECK(component(*looped, "directCalls") == 1);
+  }
+
+  SECTION("a constructor function that recurses does not call itself") {
+    const llvm::json::Object *again = recordNamed(payload, "again");
+    REQUIRE(again != nullptr);
+    CHECK(again->getInteger("value") == 1); // helper
+    CHECK(component(*again, "directCalls") == 1);
+  }
+
+  SECTION("a constructor function another initializer calls is a function "
+          "that initializer reaches") {
+    const llvm::json::Object *caller = recordNamed(payload, "callsShared");
+    REQUIRE(caller != nullptr);
+    CHECK(caller->getInteger("value") == 2); // shared, helper
+    const llvm::json::Object *shared = recordNamed(payload, "shared");
+    REQUIRE(shared != nullptr);
+    CHECK(shared->getInteger("value") == 1); // helper
+  }
+
+  SECTION("a table of objects reaches its elements' constructor") {
+    const llvm::json::Object *table = recordNamed(payload, "names");
+    REQUIRE(table != nullptr);
+    CHECK(table->getInteger("value") == 2); // Name::Name, puts
+    CHECK(component(*table, "io") == 1);
+    CHECK(chain(*table, "io") ==
+          std::vector<std::string>{"Name::Name", "puts"});
+  }
+
+  SECTION("the total is the union, less a constructor function that is "
+          "also called") {
+    const llvm::json::Array *metrics = payload.getArray("metrics");
+    REQUIRE(metrics != nullptr);
+    REQUIRE(metrics->size() == 1);
+    const llvm::json::Object *overall =
+        (*metrics)[0].getAsObject()->getObject("overall");
+    REQUIRE(overall != nullptr);
+    // ping, pong, helper, Name::Name, puts. `shared` is a starting point
+    // of the walk and is not counted as reached by `callsShared`: the
+    // limitation docs/metrics/static-init-cost.md states.
+    CHECK(overall->getInteger("value") == 5);
+    const llvm::json::Object *parts = overall->getObject("components");
+    REQUIRE(parts != nullptr);
+    CHECK(parts->getInteger("dynamicInitializers") == 3);
+    CHECK(parts->getInteger("constructorFunctions") == 2);
   }
 }
 

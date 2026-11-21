@@ -53,16 +53,28 @@ Against a saved index the metric is `unavailable` (exit 3), not zero.
 A **root** is one of:
 
 - a variable of static storage duration at namespace or class scope
-  whose initializer is not a constant expression (entity kind
-  `variable`);
+  whose initialization runs code: one that is not constant-initialized
+  (entity kind `variable`);
 - a function marked `__attribute__((constructor))` (entity kind
   `constructor-function`).
 
 Not roots: constant-initialized variables (`constexpr`, `constinit`, or
-an initializer the compiler can evaluate), thread-locals and
-function-local statics (both initialize on first use, not before
+an initialization the compiler evaluates, which includes a global
+`std::mutex` or an empty `std::unique_ptr`: a `constexpr` constructor
+runs nothing before `main`, whatever the destructor does), variables
+whose only initialization is a trivial default constructor
+(`static stack_t old;`, which stays the zeroed object it was), thread-locals
+and function-local statics (both initialize on first use, not before
 `main`), templated variables that are never instantiated explicitly,
-and anything declared in a system header.
+and anything declared in a system header. Constant initialization is the
+compiler's verdict under the TU's own flags, so the same `std::string`
+global can be a root under `-std=c++17` and not under `-std=c++20`.
+
+The initializer is read as the compiler completed it, not only as
+written: the converting constructors of a braced table
+(`Entry table[] = {{"a", 1}, {"b", 2}};`), default member initializers,
+default arguments, and the elements an array's initializer leaves out
+all count.
 
 `value` is the number of **distinct functions reachable** from the root:
 the functions its initializer expression calls, and everything those
@@ -219,8 +231,17 @@ before `main` at all.
   `operator new` calls and `std::make_unique` are seen at any depth.
 - **Lambdas are taken as called.** A lambda written in an initializer
   counts as called by it, whether it is invoked there or stored.
+- **A lambda in a header is one function per spelling of the header's
+  path.** The call graph names a lambda by the path its file was opened
+  under, so a header reached as `inc/h.hpp` from one TU and
+  `../lib/inc/h.hpp` from another holds two lambdas, and an initializer
+  in that header reaches both.
 - **Compiler-generated constructors are looked through** to the member
   and base constructors they run; they are not counted as functions.
+  That covers defaulted constructors and constructors inherited with
+  `using Base::Base;`.
+- **The effect table matches names.** A function of your own called
+  `::read` or `::send` is taken for the POSIX one.
 - **Destructors are out of scope.** What runs at exit, including the
   `atexit` registration a non-trivially-destructible global implies, is
   not measured.
