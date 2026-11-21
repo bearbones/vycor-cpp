@@ -34,6 +34,7 @@ add_library(vycor_lib
   callgraph/ControlFlowOracle.cpp
   callgraph/CoverageProfile.cpp
   callgraph/Effects.cpp
+  callgraph/EmissionGraph.cpp
   callgraph/HotPath.cpp
   callgraph/InputFingerprint.cpp
   callgraph/LockFacts.cpp
@@ -64,6 +65,7 @@ add_library(vycor_lib
   query/EffectTools.cpp
   metrics/Metric.cpp
   metrics/MetricSet.cpp
+  metrics/RedundantInstantiation.cpp
   metrics/StaticInitCost.cpp
   metrics/TargetOwners.cpp
   query/ReferenceTools.cpp

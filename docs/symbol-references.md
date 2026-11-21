@@ -262,6 +262,75 @@ transparent function takes, once spliced into a user, the lock sets and
 its own `mutates` flag; spliced into a reference the user's code holds
 itself, it adds those facts and keeps that reference's count and site.
 
+### Emission facts
+
+Which function bodies each TU's code generation emits: how many TUs
+compile one body (the
+[redundant-instantiation](metrics/redundant-instantiation.md) metric),
+and whether an inline body is code in a TU at all. A header defines far
+more inline functions than any one TU uses; a reference recorded in a
+body no TU emits is in no object.
+
+A TU **emits** a function when Clang's CodeGen would hand its body to
+the optimizer. The bake walks the TU's emission graph the way CodeGen
+decides what to emit (`callgraph/EmissionGraph.h`, shared with the
+[isa-leak](checks/isa-leak.md) check): from what the TU must emit on
+its own — strong definitions, the global variables
+`ASTContext::DeclMustBeEmitted` keeps, the vtables of classes whose key
+function the TU defines, explicit instantiation definitions, `used` and
+`constructor` functions — through every function an emitted body
+references. A body is walked as CodeGen lowers it:
+
+- unevaluated operands (`sizeof`, `decltype`, `noexcept`, a
+  requires-expression, a non-polymorphic `typeid`), a value the
+  compiler computed (a constant expression, an immediate invocation, a
+  `consteval` function), the discarded branch of `if constexpr`, and a
+  branch or loop a constant condition never enters are no code;
+- a constant initializer (a `constexpr` variable, a static local or
+  global the compiler initializes as data) runs nothing, but the
+  functions and globals whose addresses its value holds are emitted,
+  and an object of a dynamic class without a key function in it emits
+  that class's vtable;
+- a virtual call reaches its target only where CodeGen devirtualizes it
+  (a `final` class or method, a qualified call, an object whose dynamic
+  type is known); a constructor or vptr-storing destructor of a class
+  without a key function emits its vtable and every function in its
+  slots.
+
+Of the functions reached, a record is kept for each with a body whose
+code-generation linkage is vague or internal to a header:
+
+| Linkage (`GVALinkage`) | Recorded | `flags` |
+|---|---|---|
+| `DiscardableODR`: inline functions, functions defined in a class, implicit instantiations, implicitly defined members | yes | — |
+| `AvailableExternally`: an inline function an `extern template` declaration covers, kept only for inlining | yes | `available_externally` |
+| `Internal`: a `static` or anonymous-namespace function written in a header (not the TU's main file) | yes | `internal` |
+| strong (`StrongExternal`, `StrongODR`), or internal to the main file | no: one copy, where it is written | |
+
+A trivial special member (a defaulted constructor, assignment or
+destructor that copies bytes or does nothing) is not recorded: CodeGen
+lowers its uses to a copy or to nothing and emits no body (the rare
+trivial assignment operator whose address is taken does get one, and is
+missed). Anything
+declared in a system header is left out, so the facts do not depend on
+the host's standard library.
+
+Each record holds:
+
+| Field | Meaning |
+|---|---|
+| `name` | the linkage name (mangled; the base-object variant of a constructor or destructor, the one CodeGen always emits), so each instantiation is a record of its own |
+| `symbol` | the USR the reference facts identify it by: the function, or the template pattern of an instantiation. It has a symbol record only when the reference facts keep one (a pattern only system code instantiates has none); none for a function the reference facts never identify |
+| `file`, `line` | its definition |
+| `size` | statements and expressions CodeGen lowers for the body: the nodes of its syntax tree the walk visits, implicit ones included, discarded code excluded. A size proxy (redundant-instantiation, "Reading the numbers") |
+
+Records are deduplicated by content across TUs, like the other records,
+with the TUs that emit each one. The section also lists every TU whose
+emission facts were recorded, even one that emits nothing, so a reader
+can tell "emits nothing" from "not recorded" (a TU baked by an older
+version, or by a frontend plugin that records none).
+
+
 ## Tools
 
 Both tools read the references section alone (`megascope tools --format
@@ -364,7 +433,8 @@ from shards (`tests/test_determinism.cpp`,
 The facts are the fifth section of the index (`references`, format
 v15; v16 adds each record's largest contributing TU; v17 adds the lock
 facts and the flag byte to each reference record; v18 the lock
-acquisition records and their recursion flags), with its own
+acquisition records and their recursion flags; v20 the emission
+facts), with its own
 checksum, decoded only by a load that asks for it.
 The header's summary carries the symbol and reference counts, which
 `megascope info` and the `index` summary line report as `symbols` and
@@ -401,7 +471,8 @@ cannot be saved.
 Other shard formats: a `.shard.json` shard carries the facts as two
 arrays, `symbols` and `references`, beside the call-graph members; a
 reference has `locks` (the lock text), `in_loop: true` and
-`mutates: true` only when they are set. A
+`mutates: true` only when they are set. It does not carry the emission
+facts. A
 `.mgsc` snapshot does not carry them (its schema has no slot); the
 reference tools answer `unavailable` over one.
 
@@ -455,6 +526,27 @@ The run-to-run spread (25 s wall, 83 s CPU between two runs of one
 binary) is larger than any difference between the binaries. Lock state
 is a small vector of held locks per function body; a reference records
 a lock set only when one is held, and lock sets are interned per TU.
+
+The emission facts (format v20) were measured with one binary, the
+facts switched off and on, interleaved (off, on, on, off), on a host
+shared with other builds (load 3 to 4.5):
+
+| | Without emission facts | With them | Change |
+|---|---|---|---|
+| Cold bake, wall | 5:57.8, 5:52.2 | 5:56.4, 5:18.0 | −5.0% (noise) |
+| Cold bake, CPU (user) | 1290 s, 1251 s | 1268 s, 1136 s | −5.4% (noise) |
+| Peak RSS of the largest process | 2.743 GB | 2.754 GB | +0.4% |
+| Index size | 576.44 MB | 583.06 MB | +1.15% (6.62 MB) |
+
+The spread between two runs of one setting (38 s wall, 132 s CPU)
+hides the difference, so the CPU cost was measured per TU, in process,
+interleaved, best of five: `lib/Analysis/ScalarEvolution.cpp` 3.12 s
+without, 3.15 s with; `lib/Transforms/Scalar/GVN.cpp` 2.63 s and
+2.65 s; `lib/IR/Verifier.cpp` 2.41 s and 2.43 s;
+`lib/Support/CommandLine.cpp` 0.92 s and 0.94 s: +1.0% CPU over the
+four, +0.2% peak RSS. The emission walk is one more traversal of the
+function bodies the TU emits, over flat per-function arrays, and the
+records are lowered once per TU.
 
 The visitor is a fourth traversal of the AST the bake already holds; an
 occurrence is one hash-map increment keyed by (referrer, target, role),

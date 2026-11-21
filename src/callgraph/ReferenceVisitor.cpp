@@ -16,6 +16,7 @@
 #include "vycor/callgraph/ReferenceVisitor.h"
 #include "vycor/callgraph/CompilerWritten.h"
 
+#include "vycor/callgraph/EmissionGraph.h"
 #include "vycor/callgraph/LockFacts.h"
 
 #include "clang/AST/ASTLambda.h"
@@ -23,6 +24,8 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/GlobalDecl.h"
+#include "clang/AST/Mangle.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Basic/Builtins.h"
@@ -33,6 +36,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -240,7 +244,60 @@ void ReferenceVisitor::run(clang::ASTContext &ctx) {
   ctx_ = &ctx;
   TraverseDecl(ctx.getTranslationUnitDecl());
   drainWork();
+  collectEmissions();
   lower();
+}
+
+// ============================================================================
+// Emission facts
+// ============================================================================
+
+void ReferenceVisitor::collectEmissions() {
+  const EmissionGraph g = buildEmissionGraph(*ctx_);
+  pendingEmissions_.reserve(g.size());
+  for (uint32_t i = 1; i < g.size(); ++i) {
+    const clang::FunctionDecl *def = g.function[i];
+    // A trivial special member is lowered to a copy or to nothing, never
+    // to a call, so CodeGen emits no body for it.
+    if (!def || def->isConsteval() || def->isTrivial())
+      continue;
+    // What another TU emits too: a vague-linkage body (inline, an implicit
+    // instantiation, an implicit member), a body kept for inlining only,
+    // or an internal function a header defines. A strong definition is
+    // the TU's own.
+    uint8_t flags = 0;
+    switch (ctx_->GetGVALinkageForFunction(def)) {
+    case clang::GVA_DiscardableODR:
+      break;
+    case clang::GVA_AvailableExternally:
+      flags = kEmitAvailableExternally;
+      break;
+    case clang::GVA_Internal:
+      flags = kEmitInternal;
+      break;
+    default:
+      continue;
+    }
+    // The standard library's and other system code is everyone's.
+    clang::SourceLocation loc = sm_.getExpansionLoc(def->getLocation());
+    if (loc.isInvalid() || sm_.isInSystemHeader(loc) ||
+        !sm_.getFileEntryRefForID(sm_.getFileID(loc)))
+      continue;
+    if (flags == kEmitInternal && sm_.getFileID(loc) == sm_.getMainFileID())
+      continue;
+    uint32_t slot = kDropped;
+    if (clang::isLambdaCallOperator(def)) {
+      auto found = lambdaSlot_.find(def);
+      slot = found != lambdaSlot_.end() ? found->second
+                                        : lambdaPatternSlot(def);
+    } else {
+      slot = targetSlot(def);
+    }
+    if (slot != kDropped && entities_[slot].kind != EntityKind::Function &&
+        entities_[slot].kind != EntityKind::Lambda)
+      slot = kDropped;
+    pendingEmissions_.push_back({def, slot, g.statements[i], flags});
+  }
 }
 
 // ============================================================================
@@ -3586,7 +3643,60 @@ void ReferenceVisitor::lower() {
     assert(rec.referrer != ReferenceIndex::kNoId);
     records.push_back(rec);
   }
-  index_.addTuFacts(index_.internText(tuPath_), symbols, records);
+
+  const Id tu = index_.internText(tuPath_);
+  index_.addTuFacts(tu, symbols, records);
+
+  // Emission facts: the linkage name is the identity the linker merges
+  // copies by (one per instantiation); the symbol is the entity the
+  // references above attribute the body's references to.
+  std::unique_ptr<clang::MangleContext> mangle(ctx_->createMangleContext());
+  std::vector<ReferenceIndex::EmissionRecord> emissions;
+  emissions.reserve(pendingEmissions_.size());
+  std::string name;
+  for (const PendingEmission &pending : pendingEmissions_) {
+    const clang::FunctionDecl *def = pending.def;
+    name.clear();
+    {
+      llvm::raw_string_ostream os(name);
+      if (!mangle->shouldMangleDeclName(def)) {
+        if (def->getIdentifier())
+          os << def->getName();
+      } else if (const auto *ctor =
+                     llvm::dyn_cast<clang::CXXConstructorDecl>(def)) {
+        // The base-object variant (C2 / D2): CodeGen always emits it, and
+        // where the complete-object variant is equivalent (no virtual
+        // bases) a discardable definition is emitted only as the base one.
+        mangle->mangleName(clang::GlobalDecl(ctor, clang::Ctor_Base), os);
+      } else if (const auto *dtor =
+                     llvm::dyn_cast<clang::CXXDestructorDecl>(def)) {
+        mangle->mangleName(clang::GlobalDecl(dtor, clang::Dtor_Base), os);
+      } else {
+        mangle->mangleName(clang::GlobalDecl(def), os);
+      }
+    }
+    if (name.empty())
+      continue;
+    ReferenceIndex::EmissionRecord rec;
+    if (pending.slot != kDropped) {
+      rec.symbol = usrOf[pending.slot];
+      if (rec.symbol == ReferenceIndex::kNoId) {
+        const Entity &entity = entities_[pending.slot];
+        rec.symbol = index_.internText(
+            entity.kind == EntityKind::Lambda
+                ? lambdaIdents_[entity.aux].usr
+                : usrs_.identFor(entity.decl).usr);
+      }
+    }
+    rec.name = index_.internText(name);
+    const Site site = siteOf(def->getLocation());
+    rec.file = site.file;
+    rec.line = site.line;
+    rec.size = pending.size;
+    rec.flags = pending.flags;
+    emissions.push_back(rec);
+  }
+  index_.addTuEmissions(tu, emissions);
 }
 
 } // namespace vycor

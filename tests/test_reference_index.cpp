@@ -1979,7 +1979,12 @@ TEST_CASE("references: a reference's largest contributor is checked",
     }
   }
   REQUIRE(lists != std::string::npos);
-  const size_t maxAt = lists - 1, minAt = lists - 2, refsAt = lists - 3;
+  // Three empty emission varints (no records, no TUs, no unlisted TU) sit
+  // before the lists.
+  REQUIRE(bytes[lists - 1] == 0);
+  REQUIRE(bytes[lists - 2] == 0);
+  REQUIRE(bytes[lists - 3] == 0);
+  const size_t maxAt = lists - 4, minAt = lists - 5, refsAt = lists - 6;
   REQUIRE(bytes[refsAt] == 2);
   REQUIRE(bytes[maxAt] > bytes[minAt]);
   auto with = [&](size_t at, char v) {
@@ -2034,6 +2039,9 @@ std::string prefixBomb(size_t first, size_t count) {
   }
   appendVarint(out, 0); // symbol records
   appendVarint(out, 0); // reference records
+  appendVarint(out, 0); // emission records
+  appendVarint(out, 0); // emission TUs
+  appendVarint(out, 0); // no unlisted emission TU
   appendU64(out, 1);
   appendVarint(out, 0); // TUs
   return out;

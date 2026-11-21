@@ -127,15 +127,22 @@ ReferenceIndex::ReferenceIndex(ReferenceIndex &&other) noexcept {
   references_ = std::move(other.references_);
   symbolTable_ = std::move(other.symbolTable_);
   referenceTable_ = std::move(other.referenceTable_);
+  emissions_ = std::move(other.emissions_);
+  emissionTable_ = std::move(other.emissionTable_);
   byTu_ = std::move(other.byTu_);
   liveSymbols_ = other.liveSymbols_;
   liveReferences_ = other.liveReferences_;
+  liveEmissions_ = other.liveEmissions_;
+  unlistedEmissionTus_ = other.unlistedEmissionTus_;
   readOnly_ = other.readOnly_;
   minTuValid_ = other.minTuValid_;
   lookupValid_ = false;
+  emissionTusValid_ = false;
   other.liveSymbols_ = 0;
   other.liveReferences_ = 0;
+  other.liveEmissions_ = 0;
   other.lookupValid_ = false;
+  other.emissionTusValid_ = false;
 }
 
 ReferenceIndex &ReferenceIndex::operator=(ReferenceIndex &&other) noexcept {
@@ -147,15 +154,22 @@ ReferenceIndex &ReferenceIndex::operator=(ReferenceIndex &&other) noexcept {
   references_ = std::move(other.references_);
   symbolTable_ = std::move(other.symbolTable_);
   referenceTable_ = std::move(other.referenceTable_);
+  emissions_ = std::move(other.emissions_);
+  emissionTable_ = std::move(other.emissionTable_);
   byTu_ = std::move(other.byTu_);
   liveSymbols_ = other.liveSymbols_;
   liveReferences_ = other.liveReferences_;
+  liveEmissions_ = other.liveEmissions_;
+  unlistedEmissionTus_ = other.unlistedEmissionTus_;
   readOnly_ = other.readOnly_;
   minTuValid_ = other.minTuValid_;
   lookupValid_ = false;
+  emissionTusValid_ = false;
   other.liveSymbols_ = 0;
   other.liveReferences_ = 0;
+  other.liveEmissions_ = 0;
   other.lookupValid_ = false;
+  other.emissionTusValid_ = false;
   return *this;
 }
 
@@ -245,9 +259,21 @@ bool ReferenceIndex::same(const ReferenceRecord &a,
          a.flags == b.flags;
 }
 
+uint64_t ReferenceIndex::hashOf(const EmissionRecord &r) noexcept {
+  uint64_t h = mix(0x454Du, (static_cast<uint64_t>(r.name) << 32) | r.symbol);
+  h = mix(h, (static_cast<uint64_t>(r.file) << 32) | r.line);
+  return mix(h, (static_cast<uint64_t>(r.size) << 8) | r.flags);
+}
+
+bool ReferenceIndex::same(const EmissionRecord &a,
+                          const EmissionRecord &b) noexcept {
+  return a.name == b.name && a.symbol == b.symbol && a.file == b.file &&
+         a.line == b.line && a.size == b.size && a.flags == b.flags;
+}
+
 namespace {
 
-// One implementation for both record kinds. `records` is the backing
+// One implementation for every record kind. `records` is the backing
 // vector (StoredSymbol / StoredReference); the table holds index + 1.
 template <typename Stored, typename Record, typename Table, typename Hash,
           typename Same>
@@ -304,6 +330,15 @@ uint32_t ReferenceIndex::findOrInsertReference(const ReferenceRecord &rec) {
       });
 }
 
+uint32_t ReferenceIndex::findOrInsertEmission(const EmissionRecord &rec) {
+  return findOrInsertRecord(
+      emissions_, emissionTable_, rec,
+      [](const EmissionRecord &r) { return hashOf(r); },
+      [](const EmissionRecord &a, const EmissionRecord &b) {
+        return same(a, b);
+      });
+}
+
 void ReferenceIndex::rebuildTables() {
   symbolTable_.clear();
   referenceTable_.clear();
@@ -330,6 +365,19 @@ void ReferenceIndex::rebuildTables() {
     referenceTable_.slots[pos] = static_cast<uint32_t>(i) + 1;
   }
   referenceTable_.used = references_.size();
+
+  emissionTable_.clear();
+  cap = 64;
+  while (cap < emissions_.size() * 2 + 2)
+    cap *= 2;
+  emissionTable_.slots.assign(cap, 0);
+  for (size_t i = 0; i < emissions_.size(); ++i) {
+    size_t pos = hashOf(emissions_[i].rec) & (cap - 1);
+    while (emissionTable_.slots[pos] != 0)
+      pos = (pos + 1) & (cap - 1);
+    emissionTable_.slots[pos] = static_cast<uint32_t>(i) + 1;
+  }
+  emissionTable_.used = emissions_.size();
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +422,27 @@ void ReferenceIndex::addTuFacts(Id tu, llvm::ArrayRef<SymbolRecord> symbols,
   invalidateDerived();
 }
 
+void ReferenceIndex::addTuEmissions(Id tu,
+                                    llvm::ArrayRef<EmissionRecord> emissions) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  assert(!readOnly_ && "mutating a read-only ReferenceIndex");
+  if (readOnly_)
+    return;
+  std::vector<uint32_t> idx;
+  idx.reserve(emissions.size());
+  for (const EmissionRecord &rec : emissions) {
+    assert((rec.flags & ~kEmissionFlagMask) == 0 && "unknown emission flag");
+    idx.push_back(findOrInsertEmission(rec));
+  }
+  TuContribution &entry = byTu_[tu];
+  entry.emissionsRecorded = true;
+  mergeContribution(entry.emissions, idx, [&](uint32_t i) {
+    if (emissions_[i].refs++ == 0)
+      ++liveEmissions_;
+  });
+  invalidateDerived();
+}
+
 void ReferenceIndex::addSymbol(const SymbolFact &fact,
                                const std::string &tuPath) {
   SymbolRecord rec;
@@ -411,6 +480,7 @@ void ReferenceIndex::absorb(const ReferenceIndex &shard) {
          "absorb needs both indexes' contributor lists");
   if (readOnly_ || shard.readOnly_)
     return;
+  unlistedEmissionTus_ |= shard.unlistedEmissionTus_;
 
   // Shard string id -> this index's id, and shard record index -> this
   // index's record index, both filled on first use: a shard's strings and
@@ -424,12 +494,15 @@ void ReferenceIndex::absorb(const ReferenceIndex &shard) {
   };
   std::vector<uint32_t> symbolMap(shard.symbols_.size(), kNoId);
   std::vector<uint32_t> referenceMap(shard.references_.size(), kNoId);
+  std::vector<uint32_t> emissionMap(shard.emissions_.size(), kNoId);
 
   std::vector<uint32_t> symIdx;
   std::vector<uint32_t> refIdx;
+  std::vector<uint32_t> emitIdx;
   for (const auto &[shardTu, contribution] : shard.byTu_) {
     symIdx.clear();
     refIdx.clear();
+    emitIdx.clear();
     for (uint32_t i : contribution.symbols) {
       uint32_t &slot = symbolMap[i];
       if (slot == kNoId) {
@@ -454,7 +527,24 @@ void ReferenceIndex::absorb(const ReferenceIndex &shard) {
       }
       refIdx.push_back(slot);
     }
+    for (uint32_t i : contribution.emissions) {
+      uint32_t &slot = emissionMap[i];
+      if (slot == kNoId) {
+        EmissionRecord rec = shard.emissions_[i].rec;
+        if (rec.symbol != kNoId)
+          rec.symbol = mapString(rec.symbol);
+        rec.name = mapString(rec.name);
+        rec.file = mapString(rec.file);
+        slot = findOrInsertEmission(rec);
+      }
+      emitIdx.push_back(slot);
+    }
     TuContribution &entry = byTu_[mapString(shardTu)];
+    entry.emissionsRecorded |= contribution.emissionsRecorded;
+    mergeContribution(entry.emissions, emitIdx, [&](uint32_t idx) {
+      if (emissions_[idx].refs++ == 0)
+        ++liveEmissions_;
+    });
     mergeContribution(entry.symbols, symIdx, [&](uint32_t idx) {
       if (symbols_[idx].refs++ == 0)
         ++liveSymbols_;
@@ -507,6 +597,13 @@ ReferenceIndex::removeTUsLocked(const std::vector<std::string> &tuPaths) {
         ++dropped;
       }
     }
+    for (uint32_t idx : it->second.emissions) {
+      assert(emissions_[idx].refs > 0);
+      if (--emissions_[idx].refs == 0) {
+        --liveEmissions_;
+        ++dropped;
+      }
+    }
     byTu_.erase(it);
     any = true;
   }
@@ -520,10 +617,12 @@ void ReferenceIndex::compact() {
   if (readOnly_)
     return;
   if (liveSymbols_ == symbols_.size() &&
-      liveReferences_ == references_.size())
+      liveReferences_ == references_.size() &&
+      liveEmissions_ == emissions_.size())
     return;
   std::vector<uint32_t> symbolMap(symbols_.size(), kNoId);
   std::vector<uint32_t> referenceMap(references_.size(), kNoId);
+  std::vector<uint32_t> emissionMap(emissions_.size(), kNoId);
   size_t out = 0;
   for (size_t i = 0; i < symbols_.size(); ++i) {
     if (symbols_[i].refs == 0)
@@ -540,15 +639,26 @@ void ReferenceIndex::compact() {
     references_[out++] = references_[i];
   }
   references_.resize(out);
+  out = 0;
+  for (size_t i = 0; i < emissions_.size(); ++i) {
+    if (emissions_[i].refs == 0)
+      continue;
+    emissionMap[i] = static_cast<uint32_t>(out);
+    emissions_[out++] = emissions_[i];
+  }
+  emissions_.resize(out);
   // Compaction keeps relative order, so the contributor lists stay sorted.
   for (auto &[tu, contribution] : byTu_) {
     for (uint32_t &idx : contribution.symbols)
       idx = symbolMap[idx];
     for (uint32_t &idx : contribution.references)
       idx = referenceMap[idx];
+    for (uint32_t &idx : contribution.emissions)
+      idx = emissionMap[idx];
   }
   rebuildTables();
   lookupValid_ = false;
+  emissionTusValid_ = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,9 +750,63 @@ void ReferenceIndex::ensureLookup() const {
   lookupValid_ = true;
 }
 
+namespace {
+
+// The TUs of `byTu` whose emission facts were recorded, ascending by path.
+template <typename ByTu, typename Text>
+std::vector<StringInterner::Id> recordedEmissionTus(const ByTu &byTu,
+                                                    Text text) {
+  std::vector<StringInterner::Id> tus;
+  for (const auto &entry : byTu)
+    if (entry.second.emissionsRecorded)
+      tus.push_back(entry.first);
+  std::sort(tus.begin(), tus.end(), [&](StringInterner::Id a,
+                                        StringInterner::Id b) {
+    return text(a) < text(b);
+  });
+  return tus;
+}
+
+} // namespace
+
+void ReferenceIndex::ensureEmissionTus() const {
+  if (emissionTusValid_)
+    return;
+  const std::vector<Id> tus = recordedEmissionTus(
+      byTu_, [&](Id id) -> const std::string & { return text(id); });
+  buildCsr(emissionTus_.offsets, emissionTus_.items, emissions_.size(),
+           [&](auto put) {
+             for (Id tu : tus)
+               for (uint32_t idx : byTu_.find(tu)->second.emissions)
+                 put(idx, tu);
+           });
+  emissionTusValid_ = true;
+}
+
+std::vector<ReferenceIndex::Id> ReferenceIndex::emissionTus() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return recordedEmissionTus(
+      byTu_, [&](Id id) -> const std::string & { return text(id); });
+}
+
+bool ReferenceIndex::hasEmissionFacts() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (unlistedEmissionTus_)
+    return true;
+  for (const auto &entry : byTu_)
+    if (entry.second.emissionsRecorded)
+      return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Sizes
 // ---------------------------------------------------------------------------
+
+size_t ReferenceIndex::emissionCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return liveEmissions_;
+}
 
 size_t ReferenceIndex::symbolRecordCount() const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -965,9 +1129,19 @@ std::vector<ReferenceInfo> ReferenceIndex::allReferences() const {
 //     varint contributing TUs, varint smallest contributing TU
 //   varint referenceRecordCount
 //     per record, sorted by (referrer, target, role, file, line, col,
-//     count): varint referrer - previous referrer, varint target, u8 role,
-//     varint file, varint line, varint col, varint count,
-//     varint contributing TUs, varint smallest contributing TU
+//     count, locks, flags): varint referrer - previous referrer,
+//     varint target, u8 role, varint file, varint line, varint col,
+//     varint count, varint locks + 1, u8 flags, varint contributing TUs,
+//     varint smallest contributing TU, varint largest contributing TU
+//   varint emissionRecordCount
+//     per record, sorted by (name, symbol + 1, file, line, size, flags):
+//     varint name - previous name, varint symbol + 1 (0 = none),
+//     varint file, varint line, varint size, u8 flags,
+//     varint contributing TUs
+//   varint emissionTuCount (the TUs whose emission facts were recorded,
+//   but for those with no facts at all)
+//     per TU, ascending: varint tu, its emission records as runs (below)
+//   varint 1 when a TU with no facts at all was recorded, else 0
 //   u64 byte length of the rest (a read-only load skips it)
 //   varint tuCount
 //     per TU, ascending: varint tu, then its symbol records and its
@@ -1107,12 +1281,35 @@ void ReferenceIndex::encode(std::string &out) const {
     if (r.minTu != kNoId)
       used[r.minTu] = 1;
   }
+  for (const StoredEmission &e : emissions_) {
+    if (e.refs == 0)
+      continue;
+    used[e.rec.name] = used[e.rec.file] = 1;
+    if (e.rec.symbol != kNoId)
+      used[e.rec.symbol] = 1;
+  }
   std::vector<Id> tus;
-  for (const auto &[tu, contribution] : byTu_)
-    if (!contribution.symbols.empty() || !contribution.references.empty()) {
+  std::vector<Id> emissionTus;
+  bool unlisted = unlistedEmissionTus_;
+  for (const auto &[tu, contribution] : byTu_) {
+    const bool facts =
+        !contribution.symbols.empty() || !contribution.references.empty();
+    if (facts) {
       used[tu] = 1;
       tus.push_back(tu);
     }
+    // A TU with no facts at all stays out of the string table (consumers
+    // read a TU path there as "has reference facts"); one flag says it
+    // was recorded.
+    if (contribution.emissionsRecorded) {
+      if (facts || !contribution.emissions.empty()) {
+        used[tu] = 1;
+        emissionTus.push_back(tu);
+      } else {
+        unlisted = true;
+      }
+    }
+  }
   std::vector<std::pair<std::string_view, Id>> order;
   for (size_t id = 0; id < stringCount; ++id)
     if (used[id])
@@ -1248,12 +1445,67 @@ void ReferenceIndex::encode(std::string &out) const {
   }
   refs = {};
 
+  // Emission facts, with their TU lists (always decoded).
+  struct Emit {
+    EmissionRecord rec;
+    uint32_t refs;
+    uint32_t from;
+  };
+  const auto emitKey = [](const EmissionRecord &r) {
+    return std::make_tuple(r.name, r.symbol + 1, r.file, r.line, r.size,
+                           r.flags);
+  };
+  std::vector<Emit> emits;
+  emits.reserve(liveEmissions_);
+  for (size_t i = 0; i < emissions_.size(); ++i) {
+    const StoredEmission &e = emissions_[i];
+    if (e.refs == 0)
+      continue;
+    Emit x{e.rec, e.refs, static_cast<uint32_t>(i)};
+    x.rec.name = rank[e.rec.name];
+    x.rec.file = rank[e.rec.file];
+    x.rec.symbol = e.rec.symbol == kNoId ? kNoId : rank[e.rec.symbol];
+    emits.push_back(x);
+  }
+  std::sort(emits.begin(), emits.end(), [&](const Emit &a, const Emit &b) {
+    return emitKey(a.rec) < emitKey(b.rec);
+  });
+  std::vector<uint32_t> emissionPos(emissions_.size(), kNoId);
+  putVarint(out, emits.size());
+  prevId = 0;
+  for (size_t i = 0; i < emits.size(); ++i) {
+    const Emit &e = emits[i];
+    emissionPos[e.from] = static_cast<uint32_t>(i);
+    putVarint(out, e.rec.name - prevId);
+    prevId = e.rec.name;
+    putVarint(out, e.rec.symbol + 1); // kNoId wraps to 0: none
+    putVarint(out, e.rec.file);
+    putVarint(out, e.rec.line);
+    putVarint(out, e.rec.size);
+    out.push_back(static_cast<char>(e.rec.flags));
+    putVarint(out, e.refs);
+  }
+  emits = {};
+  std::sort(emissionTus.begin(), emissionTus.end(),
+            [&](Id a, Id b) { return rank[a] < rank[b]; });
+  putVarint(out, emissionTus.size());
+  std::vector<uint32_t> positions;
+  for (Id tu : emissionTus) {
+    putVarint(out, rank[tu]);
+    positions.clear();
+    for (uint32_t idx : byTu_.find(tu)->second.emissions)
+      positions.push_back(emissionPos[idx]);
+    std::sort(positions.begin(), positions.end());
+    putRuns(out, positions);
+  }
+  // Whether a TU with no facts at all was recorded too (0 or 1).
+  putVarint(out, unlisted ? 1 : 0);
+
   // Contributor lists, TU by TU.
   std::sort(tus.begin(), tus.end(),
             [&](Id a, Id b) { return rank[a] < rank[b]; });
   std::string lists;
   putVarint(lists, tus.size());
-  std::vector<uint32_t> positions;
   for (Id tu : tus) {
     const TuContribution &contribution = byTu_.find(tu)->second;
     putVarint(lists, rank[tu]);
@@ -1278,7 +1530,7 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
                             bool readOnly) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (strings_.size() != 0 || !symbols_.empty() || !references_.empty() ||
-      !byTu_.empty())
+      !emissions_.empty() || !byTu_.empty())
     return false;
   ByteReader r{reinterpret_cast<const unsigned char *>(begin),
                reinterpret_cast<const unsigned char *>(end)};
@@ -1397,12 +1649,70 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
     references.push_back(ref);
   }
 
+  // Emission facts and their TU lists, which every load keeps.
+  const uint32_t emissionCount = r.varint();
+  if (!r.ok || emissionCount > r.remaining() / 7)
+    return false;
+  std::vector<StoredEmission> emissions;
+  emissions.reserve(emissionCount);
+  const auto emitKey = [](const EmissionRecord &rec) {
+    return std::make_tuple(rec.name, rec.symbol + 1, rec.file, rec.line,
+                           rec.size, rec.flags);
+  };
+  prevId = 0;
+  for (uint32_t i = 0; i < emissionCount; ++i) {
+    StoredEmission e;
+    const uint64_t name = prevId + r.varint();
+    prevId = name;
+    const uint32_t symbol = r.varint();
+    e.rec.file = r.varint();
+    e.rec.line = r.varint();
+    e.rec.size = r.varint();
+    e.rec.flags = r.byte();
+    e.refs = r.varint();
+    if (!r.ok || name >= stringCount || symbol > stringCount ||
+        e.rec.file >= stringCount || e.refs == 0 ||
+        (e.rec.flags & ~kEmissionFlagMask) != 0)
+      return false;
+    e.rec.name = static_cast<Id>(name);
+    e.rec.symbol = symbol == 0 ? kNoId : symbol - 1;
+    if (i != 0 && !(emitKey(emissions.back().rec) < emitKey(e.rec)))
+      return false;
+    emissions.push_back(e);
+  }
+  std::unordered_map<Id, TuContribution> byTu;
+  {
+    const uint32_t tuCount = r.varint();
+    if (!r.ok || tuCount > r.remaining() / 2)
+      return false;
+    std::vector<uint32_t> seen(emissionCount, 0);
+    uint64_t prevTu = 0;
+    for (uint32_t i = 0; i < tuCount; ++i) {
+      const uint32_t tu = r.varint();
+      if (!r.ok || tu >= stringCount || (i != 0 && tu <= prevTu))
+        return false;
+      prevTu = tu;
+      TuContribution &contribution = byTu[tu];
+      contribution.emissionsRecorded = true;
+      if (!r.runs(emissionCount, contribution.emissions))
+        return false;
+      for (uint32_t idx : contribution.emissions)
+        if (++seen[idx] > emissions[idx].refs)
+          return false;
+    }
+    for (uint32_t i = 0; i < emissionCount; ++i)
+      if (seen[i] != emissions[i].refs)
+        return false;
+  }
+  const uint32_t unlisted = r.varint();
+  if (!r.ok || unlisted > 1)
+    return false;
+
   // Contributor lists: they must account for every record's TU count and
   // name its smallest TU, or removeTUs would corrupt the counts later.
   const uint64_t listBytes = r.fixed64();
   if (!r.ok || listBytes != r.remaining())
     return false;
-  std::unordered_map<Id, TuContribution> byTu;
   if (!readOnly) {
     const uint32_t tuCount = r.varint();
     if (!r.ok || tuCount > r.remaining() / 3)
@@ -1450,9 +1760,13 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
     return false;
   symbols_ = std::move(symbols);
   references_ = std::move(references);
+  emissions_ = std::move(emissions);
   byTu_ = std::move(byTu);
   liveSymbols_ = symbols_.size();
   liveReferences_ = references_.size();
+  liveEmissions_ = emissions_.size();
+  unlistedEmissionTus_ = unlisted != 0;
+  emissionTusValid_ = false;
   readOnly_ = readOnly;
   minTuValid_ = true;
   lookupValid_ = false;

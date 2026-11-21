@@ -1244,7 +1244,8 @@ public:
     edgeVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
     cfVisitor_.setASTContext(&ctx);
     cfVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
-    // Fourth traversal of the same AST: symbol reference facts.
+    // Fourth traversal of the same AST: symbol reference facts (and the
+    // emission facts, docs/symbol-references.md).
     if (references_)
       ReferenceVisitor(*references_, sm_, tuPath_, lockCfg_).run(ctx);
     if (depSink_ && depSink_->deps) {

@@ -104,6 +104,7 @@ struct Surface {
         ctx{baked.graph, oracle, baked.cfIndex, entryPoints} {
     if (withStaticInits)
       ctx.staticInits = &baked.staticInits;
+    ctx.references = &baked.references;
   }
 
   llvm::json::Value
@@ -523,7 +524,7 @@ TEST_CASE("static-init-cost measures each initializer of the fixture",
           "[metrics][static-init]") {
   BakedIndexes ix = bakeFiles(fixtureSources());
   Surface surface(ix);
-  llvm::json::Object payload = surface.run();
+  llvm::json::Object payload = surface.run({{"metrics", "static-init-cost"}});
   using Chain = std::vector<std::string>;
 
   CHECK(payload.getString("status") == "ok");
@@ -757,7 +758,7 @@ Name names[] = {"a", "b"};
   BakedIndexes ix = bakeFiles({path});
   llvm::sys::fs::remove(path);
   Surface surface(ix);
-  llvm::json::Object payload = surface.run();
+  llvm::json::Object payload = surface.run({{"metrics", "static-init-cost"}});
   CHECK(payload.getInteger("total") == 5);
 
   SECTION("mutual recursion ends and counts each function once") {
@@ -1140,8 +1141,9 @@ TEST_CASE("organization metrics register like organization checks",
     for (const llvm::json::Value &value : recordsOf(payload))
       listed.push_back(
           value.getAsObject()->getString("metric").value_or("").str());
-    CHECK(listed ==
-          std::vector<std::string>{"org-size", "static-init-cost"});
+    CHECK(listed == std::vector<std::string>{
+                        "org-size", "redundant-instantiation",
+                        "static-init-cost"});
   }
 
   SECTION("selected by name and reported in the one record shape") {
@@ -1161,9 +1163,11 @@ TEST_CASE("organization metrics register like organization checks",
     CHECK(payload.getInteger("total") == 11);
     const llvm::json::Array *metrics = payload.getArray("metrics");
     REQUIRE(metrics != nullptr);
-    REQUIRE(metrics->size() == 2);
+    REQUIRE(metrics->size() == 3);
     CHECK((*metrics)[0].getAsObject()->getString("metric") == "org-size");
     CHECK((*metrics)[1].getAsObject()->getString("metric") ==
+          "redundant-instantiation");
+    CHECK((*metrics)[2].getAsObject()->getString("metric") ==
           "static-init-cost");
     const llvm::json::Array &records = recordsOf(payload);
     CHECK(records[0].getAsObject()->getString("metric") == "org-size");

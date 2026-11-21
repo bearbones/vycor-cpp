@@ -180,7 +180,7 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"explain_dependency", kSectionReferences},
     // Which sections a metrics run reads depends on the metrics selected,
     // and an organization metric may read any of them.
-    {"metrics", kSectionControlFlow | kSectionChannels},
+    {"metrics", kSectionControlFlow | kSectionChannels | kSectionReferences},
 };
 
 // Tools that never touch the graph: the section named here is all they
