@@ -1,0 +1,2 @@
+# megascope metrics --list-metrics -> exit 0
+{"indexScope":{"complete":true,"failed":0,"freshness":"unknown","indexed":0,"partial":0,"requested":0},"limit":200,"offset":0,"records":[{"level":"symbol","metric":"static-init-cost","summary":"Work done before main: functions reachable from each dynamic initializer and constructor function, and whether that reach allocates, locks or does I/O","unit":"functions"}],"returned":1,"status":"ok","total":1,"truncated":false}

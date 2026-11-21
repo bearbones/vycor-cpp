@@ -22,6 +22,7 @@
 #include "vycor/callgraph/Utf8.h"
 #include "vycor/cli/BakeConfig.h"
 #include "vycor/cli/SourceSelection.h"
+#include "vycor/metrics/MetricSet.h"
 #include "vycor/query/Serialize.h"
 
 #include "clang/Tooling/CompilationDatabase.h"
@@ -1035,6 +1036,7 @@ static int bakeEphemeral(const CommonOpts &common, llvm::StringRef verb,
   snap->graph = std::move(baked.graph);
   snap->cfIndex = std::move(baked.cfIndex);
   snap->channels = std::move(baked.channels);
+  snap->staticInits = std::move(baked.staticInits);
   snap->meta.collapsePaths = collapsePaths;
   snap->meta.channelTypes = channelCfg.registeredTypes;
   // The in-memory index carries the same coverage facts a saved one
@@ -1867,6 +1869,20 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
     }
   }
 
+  // `metrics --list-metrics` describes the tool, not an index, and a
+  // malformed metrics request is refused whatever the index holds: both
+  // answer over an empty context, without a load or a bake.
+  if (tool && tool->name == "metrics" && !metricsRequestReadsIndex(toolArgs)) {
+    const CallGraph noGraph;
+    const ControlFlowIndex noContexts;
+    const ControlFlowOracle noOracle(noGraph, noContexts);
+    const std::vector<std::string> noEntryPoints;
+    const ToolContext noIndex{noGraph, noOracle, noContexts, noEntryPoints};
+    return emitToolResult(runTool(*tool, toolArgs, noIndex), tool->recordsKey,
+                          *format, common->pretty, out, err,
+                          hyphenated(tool->name));
+  }
+
   // Decode only what the verb reads: info wants the meta section, batch
   // may run any tool, dump the contexts and channel sites, a single tool
   // declares its needs (§3.1.1).
@@ -1974,6 +1990,10 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
                                              ? IndexFreshness::Baked
                                              : IndexFreshness::Unchecked);
   ctx.meta = &snap->meta;
+
+  // Facts only an in-memory bake collects (the metrics read them); a
+  // loaded index leaves them unset, which a reader answers `unavailable`.
+  ctx.staticInits = snap->staticInits.collected ? &snap->staticInits : nullptr;
 
   if (verb == "batch")
     return runBatch(tools, ctx, in, out);

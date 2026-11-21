@@ -1,0 +1,2 @@
+# megascope metrics --rollup target -> exit 2
+{"error":"Requires target_map: the target roll-up needs a target map (docs/metrics/README.md)","indexScope":{"complete":true,"failed":0,"freshness":"unknown","indexed":0,"partial":0,"requested":0},"status":"usage_error"}

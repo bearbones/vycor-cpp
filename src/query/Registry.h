@@ -31,5 +31,6 @@ void registerDeadCodeTools(std::vector<ToolEntry> &tools);
 void registerChannelTools(std::vector<ToolEntry> &tools);
 void registerImpactTools(std::vector<ToolEntry> &tools);
 void registerDependencyTools(std::vector<ToolEntry> &tools);
+void registerMetricsTools(std::vector<ToolEntry> &tools);
 
 } // namespace vycor

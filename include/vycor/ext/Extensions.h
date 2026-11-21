@@ -18,6 +18,8 @@
 #include "vycor/check/GlobalIndex.h"
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ConditionalGuard.h"
+#include "vycor/callgraph/Effects.h"
+#include "vycor/metrics/Metric.h"
 
 #include <functional>
 #include <memory>
@@ -121,6 +123,19 @@ public:
   // declaratively via the org config's "staticInitHazards" key.
   void addStaticInitHazards(std::vector<std::string> qualifiedNames);
 
+  // An organization metric (vycor/metrics/Metric.h, docs/metrics/README.md):
+  // selected by name through --metrics, rolled up and emitted exactly like
+  // a built-in one. A metric that reuses a built-in name is ignored.
+  void addMetric(std::unique_ptr<Metric> metric);
+
+  // Qualified function names that have an effect (allocation, lock
+  // acquisition, I/O) in ADDITION to the built-in effect table
+  // (vycor/callgraph/Effects.h): an organization's own allocators, lock
+  // wrappers and logging sinks. Also settable declaratively via the org
+  // config's "effects" key.
+  void addEffectFunctions(EffectKind kind,
+                          std::vector<std::string> qualifiedNames);
+
   // Register (or extend) a named check group usable in --checks
   // specifications, e.g. addCheckGroup("myorg-strict", {"no-legacy-alloc",
   // "ipc-struct-parity"}). The built-in groups ("all", "noisy",
@@ -161,6 +176,15 @@ public:
     return channelTypes_;
   }
 
+  // Registered organization metrics, in registration order.
+  const std::vector<std::unique_ptr<Metric>> &metrics() const {
+    return metrics_;
+  }
+
+  // The effect table every effect-reading analysis uses: the built-in
+  // entries plus addEffectFunctions' additions.
+  const EffectTable &effectTable() const { return effects_; }
+
   // First classifier that recognizes the guard, or nullopt.
   std::optional<GuardAnnotation> classify(const ConditionalGuard &g) const;
 
@@ -169,7 +193,7 @@ public:
   void clear();
 
 private:
-  ExtensionRegistry() = default;
+  ExtensionRegistry();
 
   std::vector<CheckFactory> checkFactories_;
   std::vector<IndexCheckFactory> indexCheckFactories_;
@@ -178,6 +202,8 @@ private:
   std::vector<ChannelTypeSpec> channelTypes_;
   std::vector<GuardClassifier> classifiers_;
   std::unordered_map<std::string, std::vector<std::string>> checkGroups_;
+  std::vector<std::unique_ptr<Metric>> metrics_;
+  EffectTable effects_;
 };
 
 // Shorthand for ExtensionRegistry::instance().classify(g), used at the
@@ -204,6 +230,19 @@ std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g);
   const bool vycorIndexCheckRegistrar_##CheckClass = [] {                      \
     ::vycor::ExtensionRegistry::instance().addIndexCheck(                      \
         [] { return std::make_unique<CheckClass>(); });                        \
+    return true;                                                               \
+  }();                                                                         \
+  }
+
+// Registers a Metric subclass (default-constructible) at static-init time,
+// the metrics counterpart of VYCOR_REGISTER_CHECK:
+//   class VtableCountMetric : public vycor::Metric { ... };
+//   VYCOR_REGISTER_METRIC(VtableCountMetric)
+#define VYCOR_REGISTER_METRIC(MetricClass)                                     \
+  namespace {                                                                  \
+  const bool vycorMetricRegistrar_##MetricClass = [] {                         \
+    ::vycor::ExtensionRegistry::instance().addMetric(                          \
+        std::make_unique<MetricClass>());                                      \
     return true;                                                               \
   }();                                                                         \
   }

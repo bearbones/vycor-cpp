@@ -23,6 +23,8 @@
 
 namespace vycor {
 
+ExtensionRegistry::ExtensionRegistry() : effects_(EffectTable::builtin()) {}
+
 ExtensionRegistry &ExtensionRegistry::instance() {
   // Function-local static: safe across static-init-time registrations from
   // ext/ translation units regardless of their link order.
@@ -70,6 +72,17 @@ void ExtensionRegistry::addStaticInitHazards(
     if (std::find(staticInitHazards_.begin(), staticInitHazards_.end(),
                   name) == staticInitHazards_.end())
       staticInitHazards_.push_back(std::move(name));
+}
+
+void ExtensionRegistry::addMetric(std::unique_ptr<Metric> metric) {
+  if (metric)
+    metrics_.push_back(std::move(metric));
+}
+
+void ExtensionRegistry::addEffectFunctions(
+    EffectKind kind, std::vector<std::string> qualifiedNames) {
+  for (const auto &name : qualifiedNames)
+    effects_.add(kind, name);
 }
 
 bool ExtensionRegistry::addFeatureFlagPattern(const std::string &pattern,
@@ -150,6 +163,8 @@ void ExtensionRegistry::clear() {
   channelTypes_.clear();
   classifiers_.clear();
   checkGroups_.clear();
+  metrics_.clear();
+  effects_ = EffectTable::builtin();
 }
 
 std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g) {

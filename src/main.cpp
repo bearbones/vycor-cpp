@@ -679,6 +679,13 @@ int main(int argc, const char **argv) {
            "Run `vycor-cpp megascope help`.\n";
     return vycor::kExitUsage;
   }
+  if (argc >= 2 && llvm::StringRef(argv[1]) == "metrics") {
+    // `vycor-cpp metrics ...` is `vycor-cpp megascope metrics ...`
+    // (docs/metrics/README.md): measurements are a megascope tool.
+    std::vector<std::string> rest(argv + 1, argv + argc);
+    return vycor::runMegascopeQueryVerb(rest, llvm::outs(), llvm::errs(),
+                                        std::cin);
+  }
   if (argc >= 2 && llvm::StringRef(argv[1]) == "megascope") {
     if (argc == 2)
       return vycor::runMegascopeQueryVerb({}, llvm::outs(), llvm::errs(),
@@ -748,7 +755,9 @@ int main(int argc, const char **argv) {
           "units\n"
           "  morph     Apply rule-driven AST matcher transformations\n"
           "  megascope  Index a project's call graph and query it "
-          "(`megascope help`)\n",
+          "(`megascope help`)\n"
+          "  metrics   Measurements, not warnings: named metrics over the "
+          "index (`metrics --help`)\n",
           &llvm::errs()))
     return checkArgv ? vycor::kCheckExitUsage : 1;
 

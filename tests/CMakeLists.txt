@@ -98,6 +98,8 @@ add_executable(vycor_tests
   test_check_specialization.cpp
   test_check_default_args.cpp
   test_check_static_init.cpp
+  test_static_init_facts.cpp
+  test_metrics.cpp
   test_check_exception_escape.cpp
   test_check_header_static.cpp
   test_check_exception_spec.cpp

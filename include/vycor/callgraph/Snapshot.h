@@ -135,6 +135,10 @@ struct SnapshotData {
   SnapshotMeta meta;
   IndexSummary summary;
   unsigned loaded = 0; // IndexSection bits actually decoded
+  /// Static-initialization roots (StaticInit.h). Not a section of the
+  /// saved index: an in-memory bake fills them, a load leaves them
+  /// uncollected.
+  StaticInitFacts staticInits;
 };
 
 /// Where the load time goes, section by section in file order. Decode,

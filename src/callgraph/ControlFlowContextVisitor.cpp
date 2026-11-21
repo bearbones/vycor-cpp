@@ -20,6 +20,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/RetainUntilExit.h"
+#include "vycor/callgraph/StaticInit.h"
 #include "vycor/callgraph/UsrIdent.h"
 #include "vycor/compat/CallLoc.h"
 #include "vycor/compat/ClangVersion.h"
@@ -1129,10 +1130,21 @@ std::vector<FileStamp> openedFiles(clang::SourceManager &sm,
   return out;
 }
 
-// Sink for openedFiles across a parallel bake: null when the caller does
-// not record dependencies.
+// Move `from`'s roots onto the end of `into`.
+void appendStaticInits(StaticInitFacts &into, StaticInitFacts &from) {
+  into.roots.insert(into.roots.end(),
+                    std::make_move_iterator(from.roots.begin()),
+                    std::make_move_iterator(from.roots.end()));
+  into.collected = into.collected || from.collected;
+  from.roots.clear();
+}
+
+// Sink for the per-TU side facts of a parallel bake: openedFiles (`deps`,
+// null when the caller does not record dependencies) and the
+// static-initialization roots (`staticInits`, null when not collected).
 struct DependencySink {
   TuDependencies *deps = nullptr;
+  StaticInitFacts *staticInits = nullptr;
   std::mutex mutex;
 };
 
@@ -1167,6 +1179,12 @@ public:
       auto opened = openedFiles(sm_, tuPath_);
       std::lock_guard<std::mutex> lock(depSink_->mutex);
       (*depSink_->deps)[tuPath_] = std::move(opened);
+    }
+    if (depSink_ && depSink_->staticInits) {
+      StaticInitFacts found;
+      collectStaticInits(ctx, tuPath_, found);
+      std::lock_guard<std::mutex> lock(depSink_->mutex);
+      appendStaticInits(*depSink_->staticInits, found);
     }
   }
 
@@ -1257,6 +1275,8 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
   auto local = std::make_unique<BakedIndexes>();
   DependencySink localDeps;
   localDeps.deps = &local->deps;
+  if (depSink && depSink->staticInits)
+    localDeps.staticInits = &local->staticInits;
   BakeEdgeAndContextFactory factory(local->graph, local->cfIndex, collapse,
                                     lockCfg, channelCfg,
                                     channels ? &local->channels : nullptr,
@@ -1282,6 +1302,10 @@ int bakeTuLocally(CallGraph &graph, ControlFlowIndex &cfIndex,
     std::lock_guard<std::mutex> lock(depSink->mutex);
     for (auto &kv : local->deps)
       (*depSink->deps)[kv.first] = std::move(kv.second);
+  }
+  if (depSink && depSink->staticInits) {
+    std::lock_guard<std::mutex> lock(depSink->mutex);
+    appendStaticInits(*depSink->staticInits, local->staticInits);
   }
   return status;
 }
@@ -1315,6 +1339,7 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
   auto bakeStart = std::chrono::steady_clock::now();
   DependencySink depSink;
   depSink.deps = &out.deps;
+  depSink.staticInits = &out.staticInits;
   OutcomeSink outcomeSink;
   outcomeSink.outcomes = &out.outcomes;
 
@@ -1364,6 +1389,11 @@ BakedIndexes bakeIndexes(const clang::tooling::CompilationDatabase &compDb,
     stats->phase2WallMs = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - bakeStart)
                               .count();
+
+  // TUs arrive in completion order; the canonical order does not depend
+  // on it. Collected even when no TU had a root: "none" is a fact.
+  out.staticInits.collected = true;
+  out.staticInits.canonicalize();
 
   unsigned crashes = g_cfCrashCount.load(std::memory_order_relaxed);
   if (crashes > 0) {

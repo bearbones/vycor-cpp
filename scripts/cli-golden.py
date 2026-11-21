@@ -49,6 +49,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "examples" / "deep_chains"
 GOLDEN_DIR = FIXTURE / "cli-golden"
+# The metrics fixture: dynamic initializers, which deep_chains has none
+# of. Baked in memory per query (static-init facts are not in a saved
+# index), from flags after `--` rather than a compile database.
+STATIC_INIT = ROOT / "examples" / "static_init"
+STATIC_INIT_BAKE = [
+    "--source", "{static_init}/core/registry.cpp",
+    "--source", "{static_init}/plugins/plugins.cpp",
+    "--source", "{static_init}/plugins/codecs.cpp",
+    "--threads", "1",
+]
 
 # The fixture's TUs (gen_compile_commands.sh's list; not-indexed.cpp is
 # deliberately absent so the "not indexed" paths stay testable).
@@ -60,7 +70,7 @@ SOURCES = [
 ]
 
 # (name, argv after "megascope", stdin, golden?). `{fixture}`, `{build}`,
-# and `{index}` are substituted; a query with golden=False is checked for
+# `{index}` and `{static_init}` are substituted; a query with golden=False is checked for
 # its exit code only (its stdout depends on the host toolchain).
 # `{callsite:CALLER->CALLEE}` resolves to that edge's call site through
 # get-callees at run time.
@@ -170,6 +180,28 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
      ["explain-dependency", "--target-map", "{fixture}/targets.json",
       "--consumer", "stages", "--provider", "plugins"], None, True),
     ("audit-dependencies-no-map", ["audit-dependencies"], None, True),
+    # Metrics (docs/metrics/README.md).
+    ("metrics-list", ["metrics", "--list-metrics"], None, True),
+    ("metrics-saved-index", ["metrics"], None, True),
+    ("metrics-usage-unknown", ["metrics", "--metrics", "nope"], None, True),
+    ("metrics-usage-target-map", ["metrics", "--rollup", "target"], None,
+     True),
+    ("metrics-static-init",
+     ["metrics", *STATIC_INIT_BAKE, "--format", "ndjson", "--",
+      "-std=c++17"], None, True),
+    ("metrics-static-init-json",
+     ["metrics", "--metrics", "static-init-cost", "--limit", "2",
+      *STATIC_INIT_BAKE, "--", "-std=c++17"], None, True),
+    ("metrics-static-init-tu",
+     ["metrics", "--rollup", "tu", *STATIC_INIT_BAKE, "--format", "tsv",
+      "--", "-std=c++17"], None, True),
+    ("metrics-static-init-directory",
+     ["metrics", "--rollup", "directory", *STATIC_INIT_BAKE, "--format",
+      "ndjson", "--", "-std=c++17"], None, True),
+    ("metrics-static-init-target",
+     ["metrics", "--rollup", "target", "--target-map",
+      "{static_init}/targets.json", *STATIC_INIT_BAKE, "--format",
+      "ndjson", "--", "-std=c++17"], None, True),
 ]
 
 # Keys whose values depend on the host, the run, or the scratch location
@@ -295,7 +327,8 @@ def main() -> int:
 
     build = Path(tempfile.mkdtemp(prefix="vycor-cli-golden-"))
     index = build / "deep_chains.vycs"
-    subs = [(str(FIXTURE), "{fixture}"), (str(build), "{build}")]
+    subs = [(str(FIXTURE), "{fixture}"), (str(build), "{build}"),
+            (str(STATIC_INIT), "{static_init}")]
     failures: list[str] = []
     try:
         write_compile_commands(build)
@@ -313,7 +346,8 @@ def main() -> int:
             for a in argv:
                 a = a.replace("{fixture}", str(FIXTURE)) \
                      .replace("{build}", str(build)) \
-                     .replace("{index}", str(index))
+                     .replace("{index}", str(index)) \
+                     .replace("{static_init}", str(STATIC_INIT))
                 m = re.fullmatch(r"\{callsite:(.+)\}", a)
                 if m:
                     a = resolve_callsite(binary, index, m.group(1), build)
