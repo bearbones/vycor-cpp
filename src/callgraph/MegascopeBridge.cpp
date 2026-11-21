@@ -402,6 +402,12 @@ void appendReferenceFacts(const ReferenceIndex &references,
     o["column"] = static_cast<int64_t>(r.col);
     o["tu"] = r.firstTu;
     o["tu_count"] = static_cast<int64_t>(r.tuCount);
+    if (!r.locks.empty())
+      o["locks"] = r.locks; // lock facts (docs/symbol-references.md)
+    if ((r.flags & kRefInLoop) != 0)
+      o["in_loop"] = true;
+    if ((r.flags & kRefMutates) != 0)
+      o["mutates"] = true;
     refs.push_back(std::move(o));
   }
 }

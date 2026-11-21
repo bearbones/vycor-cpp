@@ -239,6 +239,15 @@ definition is unknown, never "cannot throw", and proofs that cross TUs are
 withheld when any TU failed to index. Opt-in, severity note, most useful
 first; see [the check reference](docs/checks/noexcept-candidate.md).
 
+**Unsynchronized shared globals** (`--checks=unsynchronized-shared-global`)
+reports globals, static members and function-local statics that one
+thread writes and another accesses with no lock in common, from the
+megascope call graph and the lock sets the bake records at each
+reference. Each finding names both accesses, the lock set and thread
+entry path of each; it is a warning only when both thread searches were
+exhaustive and the facts cover the whole program, else a note that says
+why. See [the check reference](docs/checks/unsynchronized-shared-global.md).
+
 Other optional flags: `--warn-same-score`, `--model-convertibility`, the
 legacy check toggles (`--coverage-diag`, `--odr-diag`, `--dead-code` with
 `--entry-point`), and `--org-config` (organization checks/config — see

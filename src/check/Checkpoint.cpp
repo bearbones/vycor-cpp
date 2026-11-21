@@ -48,7 +48,8 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // codegen profiles and emitted functions; IsaLeak_Divergent and
 // IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons and
 // keep a refuted function's Exit callees; exception-boundary entries.
-constexpr uint32_t kVersion = 16;
+// v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
+constexpr uint32_t kVersion = 17;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -1223,7 +1224,8 @@ namespace {
 // v15: isa-leak codegen profiles and emitted functions; IsaLeak_Divergent
 // and IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons
 // and keep a refuted function's Exit callees; exception-boundary entries.
-constexpr uint32_t kShardVersion = 16;
+// v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
+constexpr uint32_t kShardVersion = 17;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

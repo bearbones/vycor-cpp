@@ -15,6 +15,8 @@
 
 #include "vycor/callgraph/ReferenceVisitor.h"
 
+#include "vycor/callgraph/LockFacts.h"
+
 #include "clang/AST/ASTLambda.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
@@ -30,6 +32,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <optional>
 #include <utility>
 
 namespace vycor {
@@ -228,8 +231,9 @@ attributeFlags(const clang::NamedDecl *decl,
 
 ReferenceVisitor::ReferenceVisitor(ReferenceIndex &index,
                                    clang::SourceManager &sm,
-                                   const std::string &tuPath)
-    : index_(index), sm_(sm), tuPath_(tuPath) {}
+                                   const std::string &tuPath,
+                                   const LockTypeConfig *lockCfg)
+    : index_(index), sm_(sm), tuPath_(tuPath), lockCfg_(lockCfg) {}
 
 void ReferenceVisitor::run(clang::ASTContext &ctx) {
   ctx_ = &ctx;
@@ -288,11 +292,17 @@ bool ReferenceVisitor::traverseFunction(clang::FunctionDecl *fn) {
       fn->isThisDeclarationADefinition() && !fn->isDeleted();
   if (definition)
     noteFunctionDefinition(fn);
+  LockState saved;
+  enterBody(saved);
   const bool ok = Base::TraverseDecl(fn);
+  leaveBody(saved);
   if (ok && definition && !fn->isInvalidDecl()) {
     // What the compiler writes into this function: member and base
     // initializers not written, the body of a defaulted function (the
-    // traversal skips both), the destruction of members and bases.
+    // traversal skips both), the destruction of members and bases. None
+    // of it runs under a lock the body takes.
+    LockState outer;
+    enterBody(outer);
     if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn)) {
       traverseImplicitInits(ctor);
       if (!ctor->isDependentContext())
@@ -302,6 +312,7 @@ bool ReferenceVisitor::traverseFunction(clang::FunctionDecl *fn) {
       TraverseStmt(fn->getBody());
     if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
       noteImplicitDestruction(dtor);
+    leaveBody(outer);
   }
   popFrame();
   return ok;
@@ -334,13 +345,29 @@ bool ReferenceVisitor::traverseVariable(clang::VarDecl *var) {
   // at exit for a static.
   if (!var->isFileVarDecl() || mode_ != Mode::AsWritten) {
     noteVariableDestruction(var);
-    return Base::TraverseDecl(var);
+    // A function-local static is initialized once, under the guard the
+    // compiler emits: its initializer holds that once lock.
+    // A thread_local's initializer runs once per thread: no once lock.
+    const bool onceInit = var->isStaticLocal() && var->hasInit() &&
+                          var->getTLSKind() == clang::VarDecl::TLS_None &&
+                          !frames_.empty() && unevaluated_ == 0;
+    if (onceInit)
+      acquire(onceLock(var));
+    const bool ok = Base::TraverseDecl(var);
+    if (onceInit)
+      release(onceLock(var));
+    if (var->isLocalVarDecl() && !var->isStaticLocal())
+      noteGuard(var);
+    return ok;
   }
   frames_.push_back({var, kUnresolved, FrameKind::Variable, var->isTemplated()});
   if (var->isThisDeclarationADefinition() != clang::VarDecl::DeclarationOnly)
     noteVariableDefinition(var);
   noteVariableDestruction(var);
+  LockState saved;
+  enterBody(saved);
   const bool ok = Base::TraverseDecl(var);
+  leaveBody(saved);
   popFrame();
   return ok;
 }
@@ -518,13 +545,482 @@ bool ReferenceVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
         return false;
     return true;
   }
-  frames_.push_back({op, kUnresolved, FrameKind::Lambda, op->isTemplated()});
+  // Written under a lock: the enclosing function references the lambda
+  // with that lock set, read as where it runs when it is called in place
+  // (an algorithm, a callback invoked before the lock is released).
+  // A once lock (a static local's initializer) covers the creation, not
+  // later calls.
+  const uint32_t creationLocks =
+      unevaluated_ == 0 ? currentLocksetWithoutOnce() : 0;
+  const bool inLoop = lockState_.loopDepth > 0;
+  const uint32_t enclosing =
+      creationLocks != 0 ? referrerSlot(expr->getBeginLoc()) : kDropped;
+  frames_.push_back(
+      {op, kUnresolved, FrameKind::Lambda, op->isTemplated(), inLoop});
   // A lambda an instantiation copies needs its identity when that copy is
   // read, whether or not the code as written references anything.
   if (op->isTemplated())
     resolveFrame(frames_.size() - 1);
+  if (enclosing != kDropped) {
+    const uint32_t self = resolveFrame(frames_.size() - 1);
+    if (self != kDropped)
+      addRefFrom(enclosing, self, RefRole::Call, expr->getBeginLoc(),
+                 creationLocks, inLoop ? kRefInLoop : 0);
+  }
+  LockState saved;
+  enterBody(saved);
+  if (auto once = onceLambdas_.find(expr); once != onceLambdas_.end())
+    acquire(once->second);
   const bool ok = Base::TraverseLambdaExpr(expr);
+  leaveBody(saved);
   popFrame();
+  return ok;
+}
+
+// ---- lexical lock scopes and loops ---------------------------------------------
+
+namespace {
+[[nodiscard]] const clang::LambdaExpr *lambdaArgument(const clang::Expr *arg);
+[[nodiscard]] const clang::LambdaExpr *heldLambda(const clang::Expr *arg);
+} // namespace
+
+namespace {
+
+// The statement has a break that leaves it: one not inside a nested loop
+// or switch (or an expression: a lambda's body is its own).
+[[nodiscard]] bool hasOwnBreak(const clang::Stmt *stmt) {
+  if (!stmt || llvm::isa<clang::Expr>(stmt))
+    return false;
+  if (llvm::isa<clang::BreakStmt>(stmt))
+    return true;
+  if (llvm::isa<clang::ForStmt, clang::WhileStmt, clang::DoStmt,
+                clang::CXXForRangeStmt, clang::SwitchStmt>(stmt))
+    return false;
+  for (const clang::Stmt *child : stmt->children())
+    if (hasOwnBreak(child))
+      return true;
+  return false;
+}
+
+// A loop condition spelled as a constant true: absent (`for (;;)`),
+// `true` or a nonzero integer.
+[[nodiscard]] bool spelledTrue(const clang::Expr *cond) {
+  if (!cond)
+    return true;
+  cond = cond->IgnoreParenImpCasts();
+  if (const auto *b = llvm::dyn_cast<clang::CXXBoolLiteralExpr>(cond))
+    return b->getValue();
+  if (const auto *i = llvm::dyn_cast<clang::IntegerLiteral>(cond))
+    return i->getValue().getBoolValue();
+  return false;
+}
+
+// The statement cannot fall through its end: it is (or its last statement
+// is) a return, break, continue, goto, co_return, throw, a call of a
+// noreturn function, an if both of whose branches jump, a switch with a
+// default and no break whose last statement jumps, or a loop spelled to
+// run forever with no break.
+[[nodiscard]] bool jumps(const clang::Stmt *stmt) {
+  while (stmt) {
+    if (const auto *label = llvm::dyn_cast<clang::LabelStmt>(stmt))
+      stmt = label->getSubStmt();
+    else if (const auto *attributed = llvm::dyn_cast<clang::AttributedStmt>(stmt))
+      stmt = attributed->getSubStmt();
+    else if (const auto *sc = llvm::dyn_cast<clang::SwitchCase>(stmt))
+      stmt = sc->getSubStmt();
+    else if (const auto *full = llvm::dyn_cast<clang::FullExpr>(stmt))
+      stmt = full->getSubExpr();
+    else if (const auto *block = llvm::dyn_cast<clang::CompoundStmt>(stmt))
+      stmt = block->body_empty() ? nullptr : block->body_back();
+    else
+      break;
+  }
+  if (!stmt)
+    return false;
+  if (llvm::isa<clang::ReturnStmt, clang::BreakStmt, clang::ContinueStmt,
+                clang::GotoStmt, clang::CoreturnStmt, clang::CXXThrowExpr>(
+          stmt))
+    return true;
+  if (const auto *branch = llvm::dyn_cast<clang::IfStmt>(stmt))
+    return branch->getElse() && jumps(branch->getThen()) &&
+           jumps(branch->getElse());
+  if (const auto *call = llvm::dyn_cast<clang::CallExpr>(stmt))
+    if (const clang::FunctionDecl *fn = call->getDirectCallee())
+      return fn->isNoReturn();
+  if (const auto *sw = llvm::dyn_cast<clang::SwitchStmt>(stmt)) {
+    bool hasDefault = false;
+    for (const clang::SwitchCase *c = sw->getSwitchCaseList(); c;
+         c = c->getNextSwitchCase())
+      hasDefault |= llvm::isa<clang::DefaultStmt>(c);
+    return hasDefault && !hasOwnBreak(sw->getBody()) && jumps(sw->getBody());
+  }
+  if (const auto *loop = llvm::dyn_cast<clang::ForStmt>(stmt))
+    return spelledTrue(loop->getCond()) && !hasOwnBreak(loop->getBody());
+  if (const auto *loop = llvm::dyn_cast<clang::WhileStmt>(stmt))
+    return spelledTrue(loop->getCond()) && !hasOwnBreak(loop->getBody());
+  if (const auto *loop = llvm::dyn_cast<clang::DoStmt>(stmt))
+    return spelledTrue(loop->getCond()) && !hasOwnBreak(loop->getBody());
+  return false;
+}
+
+// How long a held lock lasts: its guard's scope, the scope a met unknown
+// lock was given, or the body (null).
+template <typename Lock> const clang::VarDecl *lifetimeOf(const Lock &h) {
+  return h.guard ? h.guard : h.scope;
+}
+
+// Must-hold meet: keep in `a` only the locks active in both `a` and `b`. A
+// guard active only in `a` stays as an inactive guard (later toggles still
+// find it); a lock taken by hand only in `a` is dropped. True when each
+// side held a lock the other did not: some lock is held, but not which
+// (ReferenceVisitor::meetLocks). `lifetimes` gets the lifetimes of the
+// locks held on one side only.
+template <typename Locks>
+[[nodiscard]] bool
+meetHeld(Locks &a, const Locks &b,
+         llvm::SmallVectorImpl<const clang::VarDecl *> &lifetimes) {
+  const auto activeIn = [](const Locks &locks, uint32_t lock) {
+    for (const auto &h : locks)
+      if (h.active && h.lock == lock)
+        return true;
+    return false;
+  };
+  lifetimes.clear();
+  bool onlyB = false;
+  for (const auto &h : b)
+    if (h.active && !activeIn(a, h.lock)) {
+      onlyB = true;
+      lifetimes.push_back(lifetimeOf(h));
+    }
+  bool onlyA = false;
+  for (size_t i = a.size(); i-- > 0;) {
+    if (!a[i].active || activeIn(b, a[i].lock))
+      continue;
+    onlyA = true;
+    lifetimes.push_back(lifetimeOf(a[i]));
+    if (a[i].guard)
+      a[i].active = false;
+    else
+      a.erase(a.begin() + static_cast<std::ptrdiff_t>(i));
+  }
+  return onlyA && onlyB;
+}
+
+// Drop the guards in `held` that `outer` does not have: they were declared
+// in a scope that has ended (a block, an if or switch init statement). A
+// met unknown lock scoped to such a guard goes with it.
+template <typename Locks> void dropScopedGuards(Locks &held, const Locks &outer) {
+  const auto declaredInside = [&](const auto &h) {
+    const clang::VarDecl *lifetime = lifetimeOf(h);
+    if (!lifetime)
+      return false;
+    for (const auto &o : outer)
+      if (o.guard == lifetime)
+        return false;
+    return true;
+  };
+  held.erase(std::remove_if(held.begin(), held.end(), declaredInside),
+             held.end());
+}
+
+template <typename Locks> bool sameHeld(const Locks &a, const Locks &b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(),
+                    [](const auto &x, const auto &y) {
+                      return x.lock == y.lock && x.guard == y.guard &&
+                             x.active == y.active && x.met == y.met &&
+                             x.scope == y.scope;
+                    });
+}
+
+// The condition is a constant that is true (`while (true)`, `for (;;)`) or
+// false (`do ... while (0)`); std::nullopt when it is not constant.
+std::optional<bool> constantCondition(const clang::Expr *cond,
+                                      const clang::ASTContext *ctx) {
+  if (!cond)
+    return true;
+  if (!ctx || cond->isValueDependent())
+    return std::nullopt;
+  bool value = false;
+  if (!cond->EvaluateAsBooleanCondition(value, *ctx))
+    return std::nullopt;
+  return value;
+}
+
+} // namespace
+
+void ReferenceVisitor::assignHeld(const HeldLocks &held) {
+  if (sameHeld(lockState_.held, held))
+    return;
+  lockState_.held = held;
+  heldSetValid_ = false;
+}
+
+// A different lock on each path (`if (x) a.lock(); else b.lock();`) meets
+// to an unknown lock, not to no lock. It lasts as long as the longest-lived
+// of those locks (the outermost guard, or the body when one was taken by
+// hand), and the paired unlocks after the join (an unlock of a mutex not
+// held) drop it.
+void ReferenceVisitor::meetLocks(HeldLocks &a, const HeldLocks &b) {
+  llvm::SmallVector<const clang::VarDecl *, 4> lifetimes;
+  if (!meetHeld(a, b, lifetimes))
+    return;
+  const uint32_t unknown = unknownLock();
+  for (const HeldLock &h : a)
+    if (h.active && h.lock == unknown)
+      return;
+  // Guards in scope here are nested: the first declared is the outermost.
+  const clang::VarDecl *scope = lifetimes.front();
+  for (const clang::VarDecl *lifetime : lifetimes) {
+    if (!lifetime || !scope) {
+      scope = nullptr;
+      break;
+    }
+    if (sm_.isBeforeInTranslationUnit(lifetime->getLocation(),
+                                      scope->getLocation()))
+      scope = lifetime;
+  }
+  a.push_back({unknown, nullptr, true, true, scope});
+}
+
+void ReferenceVisitor::meetLocksInto(bool &any, HeldLocks &into,
+                                     const HeldLocks &state) {
+  if (!any) {
+    into = state;
+    any = true;
+  } else {
+    meetLocks(into, state);
+  }
+}
+
+// A label a forward goto reaches starts from the states at those gotos,
+// met with the state above it when that falls through. A label reached
+// only by a backward goto keeps the state above it.
+void ReferenceVisitor::enterLabels(const clang::Stmt *stmt, bool falls) {
+  while (const auto *label = llvm::dyn_cast_or_null<clang::LabelStmt>(stmt)) {
+    if (auto it = gotoStates_.find(label->getDecl()); it != gotoStates_.end()) {
+      HeldLocks in = std::move(it->second.held);
+      gotoStates_.erase(it);
+      dropScopedGuards(in, lockState_.held); // the guards a goto left behind
+      if (falls)
+        meetLocks(in, lockState_.held);
+      assignHeld(in);
+      falls = true;
+    }
+    stmt = label->getSubStmt();
+  }
+}
+
+bool ReferenceVisitor::TraverseGotoStmt(clang::GotoStmt *stmt) {
+  const clang::LabelDecl *label = stmt->getLabel();
+  if (label && !sm_.isBeforeInTranslationUnit(label->getLocation(),
+                                              stmt->getGotoLoc())) {
+    GotoState &state = gotoStates_[label];
+    meetLocksInto(state.any, state.held, lockState_.held);
+  }
+  return Base::TraverseGotoStmt(stmt);
+}
+
+bool ReferenceVisitor::TraverseCompoundStmt(clang::CompoundStmt *stmt) {
+  // A guard declared in the block is released at its end. A lock taken or
+  // dropped by hand inside it stays so after it (a `do { lock } while (0)`
+  // macro). A block that ends in a jump leaves the state as it was before
+  // it: the code after it is reached from elsewhere. Branches and loops
+  // meet their paths' states (TraverseIfStmt, finishLoop).
+  const HeldLocks saved = lockState_.held;
+  if (!WalkUpFromCompoundStmt(stmt))
+    return false;
+  bool falls = true;
+  for (clang::Stmt *child : stmt->body()) {
+    enterLabels(child, falls);
+    if (!TraverseStmt(child))
+      return false;
+    falls = !jumps(child);
+  }
+  if (jumps(stmt)) {
+    assignHeld(saved);
+  } else {
+    HeldLocks after = lockState_.held;
+    dropScopedGuards(after, saved);
+    assignHeld(after);
+  }
+  return true;
+}
+
+bool ReferenceVisitor::TraverseIfStmt(clang::IfStmt *stmt) {
+  // Each branch starts from the state after the condition; after the if a
+  // lock is held when it is held at the end of every branch that falls
+  // through.
+  if (!WalkUpFromIfStmt(stmt))
+    return false;
+  const HeldLocks outer = lockState_.held;
+  if (!TraverseStmt(stmt->getInit()) ||
+      !TraverseStmt(stmt->getConditionVariableDeclStmt()) ||
+      !TraverseStmt(stmt->getCond()))
+    return false;
+  const HeldLocks entry = lockState_.held;
+  if (!TraverseStmt(stmt->getThen()))
+    return false;
+  const bool thenJumps = jumps(stmt->getThen());
+  const HeldLocks thenExit = lockState_.held;
+  assignHeld(entry);
+  bool elseJumps = false;
+  if (clang::Stmt *otherwise = stmt->getElse()) {
+    if (!TraverseStmt(otherwise))
+      return false;
+    elseJumps = jumps(otherwise);
+  }
+  HeldLocks after = lockState_.held; // the else branch's end, or entry
+  if (thenJumps && elseJumps)
+    after = entry; // nothing falls through
+  else if (elseJumps)
+    after = thenExit;
+  else if (!thenJumps)
+    meetLocks(after, thenExit);
+  dropScopedGuards(after, outer);
+  assignHeld(after);
+  return true;
+}
+
+bool ReferenceVisitor::TraverseSwitchStmt(clang::SwitchStmt *stmt) {
+  // Each case starts from the state at the switch, met with the state of
+  // the case above when that one falls through. After the switch a lock is
+  // held when it is held at every break, at the end of the body when it
+  // falls through, and at the switch when no default catches the rest.
+  if (!WalkUpFromSwitchStmt(stmt))
+    return false;
+  const HeldLocks outer = lockState_.held;
+  if (!TraverseStmt(stmt->getInit()) ||
+      !TraverseStmt(stmt->getConditionVariableDeclStmt()) ||
+      !TraverseStmt(stmt->getCond()))
+    return false;
+  const HeldLocks entry = lockState_.held;
+  bool hasDefault = false;
+  for (const clang::SwitchCase *c = stmt->getSwitchCaseList(); c;
+       c = c->getNextSwitchCase())
+    hasDefault |= llvm::isa<clang::DefaultStmt>(c);
+  flow_.push_back(FlowFrame{});
+  flow_.back().isSwitch = true;
+  bool ok = true;
+  bool falls = false;
+  clang::Stmt *body = stmt->getBody();
+  if (auto *block = llvm::dyn_cast_or_null<clang::CompoundStmt>(body)) {
+    for (clang::Stmt *child : block->body()) {
+      if (llvm::isa<clang::SwitchCase>(child)) {
+        HeldLocks start = entry;
+        if (falls)
+          meetLocks(start, lockState_.held);
+        assignHeld(start);
+      }
+      if (!(ok = TraverseStmt(child)))
+        break;
+      falls = !jumps(child);
+    }
+  } else if (body) {
+    ok = TraverseStmt(body);
+    falls = !jumps(body);
+  }
+  FlowFrame frame = std::move(flow_.back());
+  flow_.pop_back();
+  if (!ok)
+    return false;
+  bool any = frame.anyBreak;
+  HeldLocks after = std::move(frame.breaks);
+  if (falls)
+    meetLocksInto(any, after, lockState_.held);
+  if (!hasDefault)
+    meetLocksInto(any, after, entry);
+  if (!any)
+    after = entry; // nothing leaves the switch: what follows is unreachable
+  dropScopedGuards(after, outer);
+  assignHeld(after);
+  return true;
+}
+
+bool ReferenceVisitor::TraverseBreakStmt(clang::BreakStmt *stmt) {
+  if (!flow_.empty())
+    meetLocksInto(flow_.back().anyBreak, flow_.back().breaks, lockState_.held);
+  return Base::TraverseBreakStmt(stmt);
+}
+
+bool ReferenceVisitor::TraverseContinueStmt(clang::ContinueStmt *stmt) {
+  for (size_t i = flow_.size(); i-- > 0;)
+    if (!flow_[i].isSwitch) {
+      meetLocksInto(flow_[i].anyContinue, flow_[i].continues, lockState_.held);
+      break;
+    }
+  return Base::TraverseContinueStmt(stmt);
+}
+
+// A loop leaves through its condition (from the state before it when it
+// can run zero times, and from the end of its body and each continue) and
+// through its breaks; a lock is held after it when it is held on all of
+// those. A loop whose condition is constant true leaves by breaks only.
+void ReferenceVisitor::finishLoop(const HeldLocks &outer, bool zeroTrips,
+                                  bool condTrue, bool bodyFalls) {
+  FlowFrame frame = std::move(flow_.back());
+  flow_.pop_back();
+  bool any = frame.anyBreak;
+  HeldLocks after = std::move(frame.breaks);
+  if (!condTrue) {
+    if (zeroTrips)
+      meetLocksInto(any, after, outer);
+    if (bodyFalls)
+      meetLocksInto(any, after, lockState_.held);
+    if (frame.anyContinue)
+      meetLocksInto(any, after, frame.continues);
+  }
+  if (!any)
+    after = outer; // the loop never leaves: what follows is unreachable
+  dropScopedGuards(after, outer);
+  assignHeld(after);
+}
+
+bool ReferenceVisitor::TraverseForStmt(clang::ForStmt *stmt) {
+  const HeldLocks outer = lockState_.held;
+  flow_.push_back(FlowFrame{});
+  ++lockState_.loopDepth;
+  const bool ok = Base::TraverseForStmt(stmt);
+  --lockState_.loopDepth;
+  const auto cond = constantCondition(stmt->getCond(), ctx_);
+  finishLoop(outer, true, cond.value_or(false), !jumps(stmt->getBody()));
+  return ok;
+}
+
+bool ReferenceVisitor::TraverseWhileStmt(clang::WhileStmt *stmt) {
+  const HeldLocks outer = lockState_.held;
+  flow_.push_back(FlowFrame{});
+  ++lockState_.loopDepth;
+  const bool ok = Base::TraverseWhileStmt(stmt);
+  --lockState_.loopDepth;
+  const auto cond = constantCondition(stmt->getCond(), ctx_);
+  finishLoop(outer, true, cond.value_or(false), !jumps(stmt->getBody()));
+  return ok;
+}
+
+bool ReferenceVisitor::TraverseDoStmt(clang::DoStmt *stmt) {
+  // `do { ... } while (0)` (a statement macro) runs its body once: not a
+  // loop for in_loop, and its exits are the body's end and its breaks.
+  const auto cond = constantCondition(stmt->getCond(), ctx_);
+  const bool once = cond.has_value() && !*cond;
+  const HeldLocks outer = lockState_.held;
+  flow_.push_back(FlowFrame{});
+  if (!once)
+    ++lockState_.loopDepth;
+  const bool ok = Base::TraverseDoStmt(stmt);
+  if (!once)
+    --lockState_.loopDepth;
+  finishLoop(outer, false, cond.value_or(false), !jumps(stmt->getBody()));
+  return ok;
+}
+
+bool ReferenceVisitor::TraverseCXXForRangeStmt(clang::CXXForRangeStmt *stmt) {
+  const HeldLocks outer = lockState_.held;
+  flow_.push_back(FlowFrame{});
+  ++lockState_.loopDepth;
+  const bool ok = Base::TraverseCXXForRangeStmt(stmt);
+  --lockState_.loopDepth;
+  finishLoop(outer, true, false, !jumps(stmt->getBody()));
   return ok;
 }
 
@@ -709,6 +1205,93 @@ uint8_t ReferenceVisitor::marksOf(const clang::Expr *expr) const {
 // An argument bound to `const T &` is read; bound to any other reference
 // its identity escapes. By value the lvalue-to-rvalue conversion (or the
 // copy constructor's own parameter) says so.
+namespace {
+
+// True when `a` and `b` take the same parameters and ref-qualifier.
+bool sameSignature(const clang::FunctionDecl *a, const clang::FunctionDecl *b) {
+  if (a->getNumParams() != b->getNumParams())
+    return false;
+  const auto *ma = llvm::dyn_cast<clang::CXXMethodDecl>(a);
+  const auto *mb = llvm::dyn_cast<clang::CXXMethodDecl>(b);
+  if (!ma || !mb || ma->getRefQualifier() != mb->getRefQualifier())
+    return false;
+  const clang::ASTContext &ctx = a->getASTContext();
+  for (unsigned i = 0, n = a->getNumParams(); i < n; ++i)
+    if (!ctx.hasSameType(a->getParamDecl(i)->getType(),
+                         b->getParamDecl(i)->getType()))
+      return false;
+  return true;
+}
+
+// A class returned by value that writes through to its source when
+// assigned (std::vector<bool>::reference, std::bitset::reference): it has
+// an assignment operator other than copy and move.
+bool isWriteProxy(const clang::CXXRecordDecl *cls) {
+  const clang::CXXRecordDecl *def = cls ? cls->getDefinition() : nullptr;
+  if (!def)
+    return false;
+  for (const clang::CXXMethodDecl *method : def->methods())
+    if (method->getOverloadedOperator() == clang::OO_Equal &&
+        !method->isCopyAssignmentOperator() &&
+        !method->isMoveAssignmentOperator())
+      return true;
+  return false;
+}
+
+// A non-const member whose result cannot change the object by itself
+// being returned: not a reference or pointer to something non-const, nor
+// a proxy that writes through when assigned.
+bool returnsDetached(const clang::FunctionDecl *fn) {
+  const clang::QualType ret = fn->getReturnType();
+  if (ret->isReferenceType() || ret->isPointerType() ||
+      ret->isMemberPointerType())
+    return ret->getPointeeType().isConstQualified();
+  if (ret->isDependentType())
+    return false;
+  return !isWriteProxy(ret->getAsCXXRecordDecl());
+}
+
+// The non-const `method` has a const overload taking the same parameters.
+bool hasConstTwin(const clang::CXXMethodDecl *method) {
+  const clang::CXXRecordDecl *cls = method->getParent();
+  if (!cls)
+    return false;
+  const clang::FunctionTemplateDecl *tmpl = method->getPrimaryTemplate();
+  const clang::FunctionDecl *self = method;
+  if (tmpl)
+    self = tmpl->getTemplatedDecl();
+  for (const clang::NamedDecl *decl : cls->lookup(method->getDeclName())) {
+    const clang::NamedDecl *under = decl->getUnderlyingDecl();
+    const clang::FunctionDecl *other = nullptr;
+    if (tmpl) {
+      if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(under))
+        other = ft->getTemplatedDecl();
+    } else {
+      other = llvm::dyn_cast<clang::CXXMethodDecl>(under);
+    }
+    const auto *twin = llvm::dyn_cast_or_null<clang::CXXMethodDecl>(other);
+    if (twin && twin != self && twin->isConst() && !twin->isStatic() &&
+        sameSignature(self, twin))
+      return true;
+  }
+  return false;
+}
+
+} // namespace
+
+// The mark a member call puts on its object: a const member reads it, any
+// other may write it. A non-const member with a const overload of the same
+// parameters that returns by value (a non-const map's find, begin, end) is
+// a weak write: the call does not change the object, what it returns
+// might later.
+uint8_t ReferenceVisitor::objectMarks(const clang::CXXMethodDecl *method) {
+  if (method->isConst())
+    return kMarkRead;
+  if (returnsDetached(method) && hasConstTwin(method))
+    return kMarkWrite | kMarkWeakWrite;
+  return kMarkWrite;
+}
+
 void ReferenceVisitor::markArgument(const clang::FunctionDecl *callee,
                                     unsigned param, const clang::Expr *arg) {
   if (param >= callee->getNumParams())
@@ -949,6 +1532,17 @@ bool ReferenceVisitor::VisitCXXBindTemporaryExpr(
 }
 
 bool ReferenceVisitor::VisitCallExpr(clang::CallExpr *expr) {
+  noteLockCall(expr);
+  // A local holding a lambda, called (l()) or handed to a call
+  // (std::invoke(l), an algorithm taking it by reference): the call graph's
+  // edge to the lambda starts at this call, so a call reference records
+  // the locks held here. A copy, a capture or a return is no call.
+  if (unevaluated_ == 0)
+    for (const clang::Expr *arg : expr->arguments())
+      if (const clang::LambdaExpr *lambda = heldLambda(arg))
+        if (auto slot = lambdaSlot_.find(lambda->getCallOperator());
+            slot != lambdaSlot_.end())
+          addRef(slot->second, RefRole::Call, arg->getExprLoc());
   const clang::Expr *callee = expr->getCallee();
   while (callee) {
     callee = callee->IgnoreParenImpCasts();
@@ -969,7 +1563,7 @@ bool ReferenceVisitor::VisitCallExpr(clang::CallExpr *expr) {
     const auto *method =
         llvm::dyn_cast<clang::CXXMethodDecl>(member->getMemberDecl());
     if (method && method->isInstance() && !member->isArrow())
-      mark(member->getBase(), method->isConst() ? kMarkRead : kMarkWrite);
+      mark(member->getBase(), objectMarks(method));
   } else if (const auto *overloads =
                  llvm::dyn_cast<clang::OverloadExpr>(callee)) {
     marks_.try_emplace(callee, kMarkCallee);
@@ -1019,7 +1613,7 @@ void ReferenceVisitor::markCallArguments(const clang::CallExpr *expr,
     // A member operator's object is argument 0 (g += 1, g[i], g()).
     const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
     if (method && method->isInstance() && expr->getNumArgs() > 0) {
-      mark(expr->getArg(0), method->isConst() ? kMarkRead : kMarkWrite);
+      mark(expr->getArg(0), objectMarks(method));
       first = 1;
     }
   }
@@ -1049,8 +1643,9 @@ bool ReferenceVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *expr) {
 
 bool ReferenceVisitor::VisitDeclRefExpr(clang::DeclRefExpr *expr) {
   const clang::ValueDecl *decl = expr->getDecl();
-  if (const clang::VarDecl *var = variableOf(decl))
+  if (const clang::VarDecl *var = variableOf(decl)) {
     noteVariableUse(var, expr, expr->isNonOdrUse(), expr->getLocation());
+  }
   else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
     noteFunctionUse(fn, expr, expr->isNonOdrUse(), expr->getLocation());
   return true;
@@ -1116,7 +1711,8 @@ void ReferenceVisitor::noteVariableUse(const clang::VarDecl *var,
     accessed = true;
   }
   if ((marks & kMarkWrite) != 0) {
-    addRef(target, RefRole::Write, loc);
+    addRef(target, RefRole::Write, loc,
+           (marks & kMarkWeakWrite) != 0 ? 0 : kRefMutates);
     accessed = true;
   }
   if (accessed)
@@ -1138,10 +1734,15 @@ void ReferenceVisitor::noteFunctionUse(const clang::FunctionDecl *fn,
   const uint32_t target = functionTarget(fn);
   if (target == kDropped)
     return;
+  const auto once = onceCallables_.find(expr);
+  if (once != onceCallables_.end())
+    acquire(once->second);
   addRef(target,
          (marksOf(expr) & kMarkCallee) != 0 ? RefRole::Call
                                             : RefRole::AddressOf,
          loc);
+  if (once != onceCallables_.end())
+    release(once->second);
 }
 
 // The class whose typeinfo an RTTI operation on `type` names: the type
@@ -1188,15 +1789,24 @@ bool ReferenceVisitor::VisitCXXCatchStmt(clang::CXXCatchStmt *stmt) {
 }
 
 void ReferenceVisitor::addRef(uint32_t target, RefRole role,
-                              clang::SourceLocation site) {
+                              clang::SourceLocation site, uint8_t flags) {
   if (target == kDropped)
     return;
-  addRefFrom(referrerSlot(site), target, role, site);
+  const uint32_t referrer = referrerSlot(site);
+  // Lock facts are kept for accesses and calls; a vtable or typeinfo use
+  // is not something a lock protects.
+  const bool tracked = role != RefRole::VtableUse &&
+                       role != RefRole::TypeinfoUse;
+  if (lockState_.loopDepth > 0)
+    flags |= kRefInLoop;
+  addRefFrom(referrer, target, role, site, tracked ? currentLockset() : 0,
+             flags);
 }
 
 void ReferenceVisitor::addRefFrom(uint32_t referrer, uint32_t target,
-                                  RefRole role, clang::SourceLocation site) {
-  if (target == kDropped || referrer == kDropped)
+                                  RefRole role, clang::SourceLocation site,
+                                  uint32_t lockset, uint8_t flags) {
+  if (referrer == kDropped || target == kDropped)
     return;
   const uint64_t key = (static_cast<uint64_t>(referrer) << kReferrerShift) |
                        (static_cast<uint64_t>(target) << kTargetShift) |
@@ -1204,6 +1814,483 @@ void ReferenceVisitor::addRefFrom(uint32_t referrer, uint32_t target,
   RefAcc &acc = (mode_ == Mode::Instantiation ? instAcc_ : refs_)[key];
   if (acc.count++ == 0)
     acc.site = site;
+  acc.flags |= flags;
+  // A transparent function's references take the lock sets of the uses
+  // they are spliced into; an instantiation's add nothing to a reference
+  // the code as written holds (lower keeps that one).
+  if (mode_ == Mode::Transparent ||
+      (mode_ == Mode::Instantiation && refs_.count(key) != 0))
+    return;
+  const uint32_t seq = seq_++;
+  if (lockset == 0) {
+    if (!acc.unlocked) {
+      acc.unlocked = true;
+      acc.unlockedSite = site;
+      acc.unlockedSeq = seq;
+    }
+    return;
+  }
+  acc.locked = true;
+  lockedOcc_.try_emplace({key, lockset}, LockedOcc{seq, site});
+}
+
+// ============================================================================
+// Locks
+// ============================================================================
+
+void ReferenceVisitor::enterBody(LockState &saved) {
+  saved = std::move(lockState_);
+  lockState_ = LockState();
+  heldSetValid_ = false;
+}
+
+void ReferenceVisitor::leaveBody(LockState &saved) {
+  lockState_ = std::move(saved);
+  heldSetValid_ = false;
+}
+
+void ReferenceVisitor::acquire(uint32_t lock) {
+  lockState_.held.push_back({lock, nullptr, true, false, nullptr});
+  heldSetValid_ = false;
+}
+
+// Drop the innermost lock taken by hand on this mutex. A guard keeps its
+// mutex: unlocking a guarded mutex by hand is a bug this does not model.
+void ReferenceVisitor::release(uint32_t lock) {
+  auto &held = lockState_.held;
+  for (size_t i = held.size(); i-- > 0;) {
+    if (held[i].lock == lock && !held[i].guard && !held[i].met) {
+      held.erase(held.begin() + static_cast<std::ptrdiff_t>(i));
+      heldSetValid_ = false;
+      return;
+    }
+  }
+  // Not held: the unlock pairs with a lock a meet made unknown.
+  for (size_t i = held.size(); i-- > 0;) {
+    if (held[i].met) {
+      held.erase(held.begin() + static_cast<std::ptrdiff_t>(i));
+      heldSetValid_ = false;
+      return;
+    }
+  }
+}
+
+uint32_t ReferenceVisitor::internLockset(
+    llvm::SmallVectorImpl<uint32_t> &locks) {
+  if (locks.empty())
+    return 0;
+  llvm::sort(locks);
+  locks.erase(std::unique(locks.begin(), locks.end()), locks.end());
+  std::vector<uint32_t> key(locks.begin(), locks.end());
+  auto [it, inserted] = locksetOf_.try_emplace(
+      std::move(key), static_cast<uint32_t>(locksets_.size()));
+  if (inserted)
+    locksets_.push_back(it->first);
+  return it->second;
+}
+
+uint32_t ReferenceVisitor::currentLockset() {
+  if (heldSetValid_)
+    return heldSet_;
+  heldSetValid_ = true;
+  llvm::SmallVector<uint32_t, 4> locks;
+  for (const HeldLock &h : lockState_.held)
+    if (h.active)
+      locks.push_back(h.lock);
+  heldSet_ = internLockset(locks);
+  return heldSet_;
+}
+
+uint32_t ReferenceVisitor::currentLocksetWithoutOnce() {
+  llvm::SmallVector<uint32_t, 4> locks;
+  for (const HeldLock &h : lockState_.held)
+    if (h.active && !llvm::StringRef(lockIdents_[h.lock].usr)
+                         .starts_with(kLockOncePrefix))
+      locks.push_back(h.lock);
+  return internLockset(locks);
+}
+
+uint32_t ReferenceVisitor::lockIdentity(const clang::NamedDecl *decl,
+                                        llvm::StringRef prefix) {
+  const Ident &ident = usrs_.identFor(decl);
+  std::string usr = (prefix + ident.usr).str();
+  auto [it, inserted] = lockIdentOf_.try_emplace(
+      usr, static_cast<uint32_t>(lockIdents_.size()));
+  if (inserted) {
+    std::string display = ident.display;
+    if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl);
+        var && var->isStaticLocal()) {
+      if (const auto *fn =
+              llvm::dyn_cast<clang::FunctionDecl>(var->getDeclContext()))
+        display = fn->getQualifiedNameAsString() + "::" + display;
+    }
+    if (!prefix.empty())
+      display = (llvm::Twine("once(") + display + ")").str();
+    lockIdents_.push_back({std::move(usr), std::move(display)});
+  }
+  return it->second;
+}
+
+uint32_t ReferenceVisitor::unknownLock() {
+  if (unknownLock_ == UINT32_MAX) {
+    unknownLock_ = static_cast<uint32_t>(lockIdents_.size());
+    lockIdents_.push_back({kLockUnknownIdentity, "<unknown mutex>"});
+    lockIdentOf_[kLockUnknownIdentity] = unknownLock_;
+  }
+  return unknownLock_;
+}
+
+uint32_t ReferenceVisitor::onceLock(const clang::NamedDecl *decl) {
+  return decl ? lockIdentity(decl, kLockOncePrefix) : unknownLock();
+}
+
+// The mutex an expression names: a global, static member or function-local
+// static by its USR, a data member by the member's USR (every object's
+// mutex alike), anything else (through a pointer, a reference, a call, an
+// array element) unknown.
+uint32_t ReferenceVisitor::mutexIdentity(const clang::Expr *expr) {
+  if (!expr)
+    return unknownLock();
+  expr = expr->IgnoreParenImpCasts();
+  if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(expr))
+    if (unary->getOpcode() == clang::UO_AddrOf)
+      expr = unary->getSubExpr()->IgnoreParenImpCasts();
+  // A variable or member that is itself a pointer or reference names
+  // whatever it points at: unknown.
+  const auto names = [](const clang::ValueDecl *decl) {
+    const clang::QualType type = decl->getType();
+    return !type->isPointerType() && !type->isReferenceType();
+  };
+  if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
+    if (const auto *var = llvm::dyn_cast<clang::VarDecl>(ref->getDecl()))
+      if (var->hasGlobalStorage() && names(var))
+        return lockIdentity(var->getCanonicalDecl(), "");
+    return unknownLock();
+  }
+  if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(expr)) {
+    const clang::ValueDecl *decl = member->getMemberDecl();
+    if (!names(decl))
+      return unknownLock();
+    if (const auto *field = llvm::dyn_cast<clang::FieldDecl>(decl))
+      return lockIdentity(field, "");
+    if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))
+      if (var->hasGlobalStorage())
+        return lockIdentity(var->getCanonicalDecl(), "");
+  }
+  return unknownLock();
+}
+
+namespace {
+
+// The constructor call that initializes a local, through the wrappers a
+// copy-initialization or a functional cast leaves (`auto g =
+// std::lock_guard(m);`); null for a call or anything else.
+[[nodiscard]] const clang::CXXConstructExpr *
+constructionOf(const clang::Expr *init) {
+  while (init) {
+    if (const auto *construct = llvm::dyn_cast<clang::CXXConstructExpr>(init)) {
+      if (construct->isElidable() && construct->getNumArgs() == 1) {
+        init = construct->getArg(0);
+        continue;
+      }
+      return construct;
+    }
+    if (const auto *full = llvm::dyn_cast<clang::FullExpr>(init))
+      init = full->getSubExpr();
+    else if (const auto *temp =
+                 llvm::dyn_cast<clang::MaterializeTemporaryExpr>(init))
+      init = temp->getSubExpr();
+    else if (const auto *bind = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(init))
+      init = bind->getSubExpr();
+    else if (const auto *cast = llvm::dyn_cast<clang::CastExpr>(init))
+      init = cast->getSubExpr();
+    else if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(init))
+      init = paren->getSubExpr();
+    else
+      return nullptr;
+  }
+  return nullptr;
+}
+
+enum class LockOp : uint8_t { None, Acquire, Release, Disown };
+
+// What a member function does to the lock its object holds or is: by the
+// thread-safety attributes when the class carries them, else by the
+// standard and Abseil spellings.
+[[nodiscard]] LockOp lockOpOf(const clang::FunctionDecl *fn) {
+  if (fn->hasAttrs()) {
+    if (fn->hasAttr<clang::AcquireCapabilityAttr>() ||
+        fn->hasAttr<clang::TryAcquireCapabilityAttr>())
+      return LockOp::Acquire;
+    if (fn->hasAttr<clang::ReleaseCapabilityAttr>())
+      return LockOp::Release;
+  }
+  const clang::IdentifierInfo *id = fn->getIdentifier();
+  if (!id)
+    return LockOp::None;
+  const llvm::StringRef name = id->getName();
+  if (name == "lock" || name == "lock_shared" || name == "try_lock" ||
+      name == "try_lock_shared" || name == "try_lock_for" ||
+      name == "try_lock_until" || name == "try_lock_shared_for" ||
+      name == "try_lock_shared_until" || name == "Lock" ||
+      name == "ReaderLock" || name == "WriterLock" || name == "TryLock" ||
+      name == "ReaderTryLock" || name == "WriterTryLock")
+    return LockOp::Acquire;
+  if (name == "unlock" || name == "unlock_shared" || name == "Unlock" ||
+      name == "ReaderUnlock" || name == "WriterUnlock")
+    return LockOp::Release;
+  if (name == "release")
+    return LockOp::Disown;
+  return LockOp::None;
+}
+
+[[nodiscard]] const clang::LambdaExpr *lambdaArgument(const clang::Expr *arg) {
+  return arg ? llvm::dyn_cast<clang::LambdaExpr>(arg->IgnoreImplicit())
+             : nullptr;
+}
+
+// The lambda a local was initialized from, through the wrappers the call
+// graph looks through (std::function, a cast, a temporary): the call
+// graph's varLambdaSources_.
+[[nodiscard]] const clang::LambdaExpr *initLambda(const clang::Expr *init) {
+  const clang::Expr *cur = init ? init->IgnoreParenImpCasts() : nullptr;
+  while (cur) {
+    if (const auto *lambda = llvm::dyn_cast<clang::LambdaExpr>(cur))
+      return lambda;
+    if (const auto *temp = llvm::dyn_cast<clang::MaterializeTemporaryExpr>(cur))
+      cur = temp->getSubExpr();
+    else if (const auto *bind = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(cur))
+      cur = bind->getSubExpr();
+    else if (const auto *cast = llvm::dyn_cast<clang::CastExpr>(cur))
+      cur = cast->getSubExpr();
+    else if (const auto *construct = llvm::dyn_cast<clang::CXXConstructExpr>(cur);
+             construct && construct->getNumArgs() >= 1)
+      cur = construct->getArg(0);
+    else
+      return nullptr;
+  }
+  return nullptr;
+}
+
+// A call argument naming a local that holds a lambda (`l`, `&l`), as the
+// call graph's processCallableArgs matches it for an edge to the lambda.
+[[nodiscard]] const clang::LambdaExpr *heldLambda(const clang::Expr *arg) {
+  if (!arg)
+    return nullptr;
+  const clang::Expr *e = arg->IgnoreParenImpCasts();
+  if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(e);
+      unary && unary->getOpcode() == clang::UO_AddrOf)
+    e = unary->getSubExpr()->IgnoreParenImpCasts();
+  const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(e);
+  const auto *var = ref ? llvm::dyn_cast<clang::VarDecl>(ref->getDecl()) : nullptr;
+  if (!var || !var->isLocalVarDecl())
+    return nullptr;
+  return initLambda(var->getInit());
+}
+
+} // namespace
+
+// A local that guards a mutex from here to the end of its block.
+void ReferenceVisitor::noteGuard(const clang::VarDecl *var) {
+  if (unevaluated_ > 0 || frames_.empty())
+    return;
+  const clang::QualType type = var->getType();
+  if (type.isNull() || type->isReferenceType() || type->isDependentType())
+    return;
+  const clang::CXXRecordDecl *cls = type->getAsCXXRecordDecl();
+  if (!cls)
+    return;
+  static const LockTypeConfig kBuiltins;
+  const bool known = isGuardType(type, lockCfg_ ? *lockCfg_ : kBuiltins);
+  if (!known && (inStdNamespace(cls->getDeclContext()) ||
+                 !isHeuristicGuard(cls) || isMutexLike(type)))
+    return;
+  const clang::CXXConstructExpr *construct = constructionOf(var->getInit());
+  if (!construct || construct->getConstructor()->isCopyOrMoveConstructor()) {
+    // A guard handed over from elsewhere (a factory, a moved lock): it may
+    // hold any mutex.
+    if (known && var->getInit()) {
+      lockState_.held.push_back({unknownLock(), var, true, false, nullptr});
+      heldSetValid_ = false;
+    }
+    return;
+  }
+  bool active = true;
+  bool sawArgument = false;
+  llvm::SmallVector<uint32_t, 2> mutexes;
+  for (const clang::Expr *arg : construct->arguments()) {
+    if (llvm::isa<clang::CXXDefaultArgExpr>(arg))
+      continue;
+    switch (lockTagOf(arg->getType())) {
+    case LockTag::Defer:
+      active = false;
+      continue;
+    case LockTag::TryToLock: // read as taken: a race needs it not to be
+    case LockTag::Adopt:
+      continue;
+    case LockTag::None:
+      break;
+    }
+    sawArgument = true;
+    if (isMutexLike(arg->getType()))
+      mutexes.push_back(mutexIdentity(arg));
+  }
+  // A lock type constructed from something the bake does not read as a
+  // mutex still holds one: unknown, never no lock. (Constructed from
+  // nothing, it owns nothing.)
+  if (known && mutexes.empty() && sawArgument)
+    mutexes.push_back(unknownLock());
+  for (uint32_t lock : mutexes)
+    lockState_.held.push_back({lock, var, active, false, nullptr});
+  if (!mutexes.empty())
+    heldSetValid_ = false;
+}
+
+void ReferenceVisitor::noteLockCall(const clang::CallExpr *expr) {
+  if (unevaluated_ > 0 || frames_.empty())
+    return;
+  const clang::FunctionDecl *fn = expr->getDirectCallee();
+  if (!fn)
+    return;
+  if (const auto *call = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr)) {
+    const LockOp op = lockOpOf(fn);
+    if (op == LockOp::None)
+      return;
+    const clang::Expr *object = call->getImplicitObjectArgument();
+    if (!object)
+      return;
+    object = object->IgnoreParenImpCasts();
+    // A guard of this block: lock()/unlock() toggle what it owns, and
+    // release() hands its mutex over still locked (a later unlock() by
+    // hand drops it).
+    if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(object)) {
+      bool guard = false;
+      auto &held = lockState_.held;
+      for (size_t i = held.size(); i-- > 0;) {
+        if (held[i].guard != ref->getDecl())
+          continue;
+        guard = true;
+        if (op != LockOp::Disown)
+          held[i].active = op == LockOp::Acquire;
+        else if (held[i].active)
+          held[i].guard = nullptr;
+        else
+          held.erase(held.begin() + static_cast<std::ptrdiff_t>(i));
+      }
+      if (guard) {
+        heldSetValid_ = false;
+        return;
+      }
+    }
+    if (!isMutexLike(object->getType()))
+      return;
+    if (op == LockOp::Acquire)
+      acquire(mutexIdentity(object));
+    else if (op == LockOp::Release)
+      release(mutexIdentity(object));
+    return;
+  }
+  const clang::IdentifierInfo *id = fn->getIdentifier();
+  if (!id)
+    return;
+  const llvm::StringRef name = id->getName();
+  if (fn->isInStdNamespace()) {
+    if (name == "call_once" && expr->getNumArgs() >= 2) {
+      // The callable runs once, and every other call_once on the flag
+      // waits for it: its body holds the flag's once lock.
+      const clang::Expr *flag = expr->getArg(0)->IgnoreParenImpCasts();
+      const clang::NamedDecl *flagDecl = nullptr;
+      if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(flag))
+        flagDecl = ref->getDecl();
+      else if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(flag))
+        flagDecl = member->getMemberDecl();
+      const clang::Expr *callable = expr->getArg(1)->IgnoreParenImpCasts();
+      if (const clang::LambdaExpr *lambda = lambdaArgument(expr->getArg(1))) {
+        onceLambdas_[lambda] = onceLock(flagDecl);
+      } else {
+        // A function named there: its address is taken under the once
+        // lock, which the call graph's edge to it reads.
+        if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(callable))
+          if (unary->getOpcode() == clang::UO_AddrOf)
+            callable = unary->getSubExpr()->IgnoreParenImpCasts();
+        if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(callable))
+          if (llvm::isa<clang::FunctionDecl>(ref->getDecl()))
+            onceCallables_[ref] = onceLock(flagDecl);
+      }
+    } else if (name == "lock" || name == "try_lock") {
+      // std::lock(a, b): mutexes, or guards made with defer_lock.
+      for (const clang::Expr *arg : expr->arguments()) {
+        const clang::Expr *bare = arg->IgnoreParenImpCasts();
+        bool guard = false;
+        if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(bare))
+          for (HeldLock &h : lockState_.held)
+            if (h.guard == ref->getDecl()) {
+              h.active = true;
+              guard = true;
+            }
+        if (guard)
+          heldSetValid_ = false;
+        else if (isMutexLike(arg->getType()))
+          acquire(mutexIdentity(arg));
+      }
+    }
+    return;
+  }
+  if (expr->getNumArgs() == 0 || !name.starts_with("pthread_"))
+    return;
+  if (name == "pthread_mutex_lock" || name == "pthread_mutex_trylock" ||
+      name == "pthread_mutex_timedlock" || name == "pthread_rwlock_rdlock" ||
+      name == "pthread_rwlock_wrlock" || name == "pthread_rwlock_tryrdlock" ||
+      name == "pthread_rwlock_trywrlock" || name == "pthread_spin_lock" ||
+      name == "pthread_spin_trylock")
+    acquire(mutexIdentity(expr->getArg(0)));
+  else if (name == "pthread_mutex_unlock" || name == "pthread_rwlock_unlock" ||
+           name == "pthread_spin_unlock")
+    release(mutexIdentity(expr->getArg(0)));
+}
+
+// The lock text of one reference (ReferenceIndex.h): its lock sets in
+// first-occurrence order. "" when every occurrence was made under none.
+std::string ReferenceVisitor::lockText(
+    const RefAcc &acc, llvm::ArrayRef<std::pair<uint32_t, LockedOcc>> locked) {
+  if (!acc.locked)
+    return {};
+  struct Entry {
+    uint32_t seq;
+    uint32_t lockset;
+    clang::SourceLocation site;
+  };
+  llvm::SmallVector<Entry, 4> entries;
+  if (acc.unlocked)
+    entries.push_back({acc.unlockedSeq, 0, acc.unlockedSite});
+  for (const auto &[lockset, occ] : locked)
+    entries.push_back({occ.seq, lockset, occ.site});
+  llvm::sort(entries, [](const Entry &a, const Entry &b) {
+    return a.seq < b.seq;
+  });
+  std::string text;
+  llvm::SmallVector<const Ident *, 4> locks;
+  for (const Entry &e : entries) {
+    if (!text.empty())
+      text += '\n';
+    const Site site = siteOf(e.site);
+    text += std::to_string(site.line);
+    text += ':';
+    text += std::to_string(site.col);
+    locks.clear();
+    for (uint32_t lock : locksets_[e.lockset])
+      locks.push_back(&lockIdents_[lock]);
+    llvm::sort(locks, [](const Ident *a, const Ident *b) {
+      return a->usr < b->usr;
+    });
+    for (const Ident *lock : locks) {
+      text += '\t';
+      text += lock->usr;
+      text += '\t';
+      text += lock->display;
+    }
+  }
+  return text;
 }
 
 // ============================================================================
@@ -1382,6 +2469,8 @@ void ReferenceVisitor::drainWork() {
 
 void ReferenceVisitor::traverseWork(const Work &work) {
   assert(frames_.empty() && unevaluated_ == 0);
+  LockState outer;
+  enterBody(outer);
   mode_ = work.mode;
   if (mode_ == Mode::Instantiation)
     instAcc_.clear();
@@ -1397,13 +2486,34 @@ void ReferenceVisitor::traverseWork(const Work &work) {
   marks_.clear();
   if (mode_ == Mode::Instantiation) {
     // The largest count any one instantiation has, at its first site.
+    // Its lock facts are those of every instantiation: the occurrences
+    // under a lock are already in lockedOcc_; the first one under none
+    // and the flags are carried over.
     for (const auto &entry : instAcc_) {
       auto [it, inserted] = instRefs_.try_emplace(entry.first, entry.second);
-      if (!inserted && entry.second.count > it->second.count)
-        it->second = entry.second;
+      if (!inserted) {
+        const RefAcc before = it->second;
+        if (entry.second.count > before.count)
+          it->second = entry.second;
+        mergeLockFacts(it->second, before);
+        mergeLockFacts(it->second, entry.second);
+      }
     }
   }
   mode_ = Mode::AsWritten;
+  leaveBody(outer);
+}
+
+// Fold another accumulation's lock facts (not its count or site) into acc.
+void ReferenceVisitor::mergeLockFacts(RefAcc &acc, const RefAcc &other) {
+  acc.flags |= other.flags;
+  acc.locked |= other.locked;
+  if (other.unlocked &&
+      (!acc.unlocked || other.unlockedSeq < acc.unlockedSeq)) {
+    acc.unlocked = true;
+    acc.unlockedSite = other.unlockedSite;
+    acc.unlockedSeq = other.unlockedSeq;
+  }
 }
 
 void ReferenceVisitor::traverseWorkFunction(const clang::FunctionDecl *fn,
@@ -1578,7 +2688,7 @@ void ReferenceVisitor::noteVtableUse(const clang::CXXRecordDecl *cls,
     }
     const uint32_t target = functionTarget(method);
     if (target != kDropped && entities_[target].kind == EntityKind::Transparent)
-      addRefFrom(slot, target, RefRole::Call, site);
+      addRefFrom(slot, target, RefRole::Call, site, 0, 0);
   }
 }
 
@@ -1719,6 +2829,8 @@ uint32_t ReferenceVisitor::resolveFrame(size_t frameIndex) {
   Entity entity;
   entity.decl = op;
   entity.kind = EntityKind::Lambda;
+  if (frame.inLoop)
+    entity.flags |= kSymInLoop;
   entity.aux = static_cast<uint32_t>(lambdaIdents_.size());
   lambdaIdents_.push_back(
       lambdaClosureIdent(sm_, op->getParent()->getBeginLoc(), enclosing));
@@ -1865,6 +2977,8 @@ uint32_t ReferenceVisitor::symbolFlags(const Entity &entity) const {
         flags |= kSymConst;
       if (isAtomic(element))
         flags |= kSymAtomic;
+      if (isSyncPrimitiveType(*ctx_, element))
+        flags |= kSymSyncPrimitive;
     }
     break;
   }
@@ -2017,7 +3131,7 @@ ReferenceVisitor::Id ReferenceVisitor::lowerEntity(
     rec.line = site.line;
     rec.kind = SymbolKind::Function;
     rec.linkage = LinkageClass::Internal;
-    rec.flags = kSymLambda | kSymDefinition;
+    rec.flags = kSymLambda | kSymDefinition | entity.flags;
     if (!site.mainFile)
       rec.flags |= kSymInHeader;
     rec.size = definitionSize(EntityKind::Lambda, op);
@@ -2113,10 +3227,12 @@ ReferenceVisitor::Id ReferenceVisitor::lowerEntity(
 // are computed once per strongly connected component of the transparent
 // functions (Tarjan, iterative), sinks first. A spliced reference keeps the
 // count and site of the reference to the transparent function; one the code
-// as written already holds is not added again. `refs` is sorted by key on
-// entry and on return.
+// as written already holds is not added again. Either way the reference
+// takes the lock facts and loop flag of the use and the `mutates` flag of
+// the transparent code. `refs` is sorted by key on entry and on return.
 void ReferenceVisitor::spliceTransparent(
-    std::vector<std::pair<uint64_t, RefAcc>> &refs) {
+    std::vector<std::pair<uint64_t, RefAcc>> &refs,
+    std::vector<std::pair<uint64_t, uint64_t>> &lockVia) {
   const uint32_t n = transparentCount_;
   const auto referrerOf = [](uint64_t key) {
     return static_cast<uint32_t>(key >> kReferrerShift);
@@ -2154,11 +3270,11 @@ void ReferenceVisitor::spliceTransparent(
     uint32_t edge;
   };
   std::vector<Step> calls;
-  // Component summaries, flat: component c's keys (referrer bits clear) are
-  // sumData[sumBegin[c], sumBegin[c + 1]).
-  std::vector<uint64_t> sumData;
+  // Component summaries, flat: component c's keys (referrer bits clear) and
+  // the `mutates` flag of each are sumData[sumBegin[c], sumBegin[c + 1]).
+  std::vector<std::pair<uint64_t, uint8_t>> sumData;
   std::vector<uint32_t> sumBegin{0};
-  std::vector<uint64_t> acc;
+  std::vector<std::pair<uint64_t, uint8_t>> acc;
   uint32_t counter = 0;
   const auto open = [&](uint32_t v) {
     order[v] = low[v] = counter++;
@@ -2205,7 +3321,9 @@ void ReferenceVisitor::spliceTransparent(
           const uint64_t key = refs[e].first;
           const uint32_t target = targetOf(key);
           if (!transparent(target)) {
-            acc.push_back(key & ((uint64_t{1} << kReferrerShift) - 1));
+            acc.emplace_back(key & ((uint64_t{1} << kReferrerShift) - 1),
+                             static_cast<uint8_t>(refs[e].second.flags &
+                                                  kRefMutates));
             continue;
           }
           const uint32_t other = sccOf[entities_[target].aux];
@@ -2216,13 +3334,23 @@ void ReferenceVisitor::spliceTransparent(
       }
       stack.resize(first);
       llvm::sort(acc);
-      acc.erase(std::unique(acc.begin(), acc.end()), acc.end());
+      // One entry per key, its flags the union.
+      size_t out = 0;
+      for (size_t m = 0; m < acc.size(); ++m) {
+        if (out != 0 && acc[out - 1].first == acc[m].first)
+          acc[out - 1].second |= acc[m].second;
+        else
+          acc[out++] = acc[m];
+      }
+      acc.resize(out);
       sumData.insert(sumData.end(), acc.begin(), acc.end());
       sumBegin.push_back(static_cast<uint32_t>(sumData.size()));
     }
   }
 
   llvm::DenseMap<uint64_t, RefAcc> spliced;
+  // Uses folded into a reference the code as written holds: (key, facts).
+  std::vector<std::pair<uint64_t, RefAcc>> intoWritten;
   size_t kept = 0;
   for (size_t i = 0; i < refs.size(); ++i) {
     const uint64_t key = refs[i].first;
@@ -2238,20 +3366,41 @@ void ReferenceVisitor::spliceTransparent(
     const uint64_t from = static_cast<uint64_t>(referrer) << kReferrerShift;
     const uint32_t scc = sccOf[entities_[target].aux];
     for (uint32_t k = sumBegin[scc]; k < sumBegin[scc + 1]; ++k) {
-      const uint64_t reached = sumData[k];
+      const uint64_t reached = sumData[k].first;
       const uint64_t joined = from | reached;
       // A class whose implicit destructor stores its own vtable pointer
-      // says nothing new; one the code as written holds is not added again.
-      if ((static_cast<uint32_t>(reached >> kTargetShift) == referrer &&
-           static_cast<RefRole>(reached & kRoleMask) == RefRole::VtableUse) ||
-          refs_.count(joined) != 0)
+      // says nothing new.
+      if (static_cast<uint32_t>(reached >> kTargetShift) == referrer &&
+          static_cast<RefRole>(reached & kRoleMask) == RefRole::VtableUse)
         continue;
-      auto [it, inserted] = spliced.try_emplace(joined, via);
-      if (!inserted)
-        it->second.count = std::max(it->second.count, via.count);
+      RefAcc use = via;
+      use.flags = static_cast<uint8_t>((via.flags & kRefInLoop) |
+                                       sumData[k].second);
+      if (via.locked)
+        lockVia.emplace_back(joined, key);
+      // One the code as written holds keeps its count and site.
+      if (refs_.count(joined) != 0) {
+        intoWritten.emplace_back(joined, use);
+        continue;
+      }
+      auto [it, inserted] = spliced.try_emplace(joined, use);
+      if (!inserted) {
+        it->second.count = std::max(it->second.count, use.count);
+        mergeLockFacts(it->second, use);
+      }
     }
   }
   refs.resize(kept);
+  // Every such key is kept above: its referrer and target are not
+  // transparent.
+  for (const auto &[joined, use] : intoWritten) {
+    auto at = std::lower_bound(
+        refs.begin(), refs.end(), joined,
+        [](const auto &entry, uint64_t key) { return entry.first < key; });
+    assert(at != refs.end() && at->first == joined);
+    if (at != refs.end() && at->first == joined)
+      mergeLockFacts(at->second, use);
+  }
   for (const auto &entry : spliced)
     refs.emplace_back(entry.first, entry.second);
   llvm::sort(refs, [](const auto &a, const auto &b) {
@@ -2272,8 +3421,11 @@ void ReferenceVisitor::lower() {
   llvm::sort(refs, [](const auto &a, const auto &b) {
     return a.first < b.first;
   });
+  // A spliced reference's occurrences under a lock are its uses' (spliced
+  // key, use key).
+  std::vector<std::pair<uint64_t, uint64_t>> lockVia;
   if (transparentCount_ != 0)
-    spliceTransparent(refs);
+    spliceTransparent(refs, lockVia);
   for (const auto &ref : refs) {
     entities_[ref.first >> kReferrerShift].emit = true;
     entities_[static_cast<uint32_t>(ref.first >> kTargetShift)].emit = true;
@@ -2286,9 +3438,60 @@ void ReferenceVisitor::lower() {
     if (entities_[slot].emit)
       usrOf[slot] = lowerEntity(entities_[slot], symbols);
 
+  // Occurrences under a lock, grouped by reference.
+  std::vector<std::pair<uint64_t, std::pair<uint32_t, LockedOcc>>> locked;
+  locked.reserve(lockedOcc_.size());
+  for (const auto &entry : lockedOcc_)
+    locked.push_back({entry.first.first, {entry.first.second, entry.second}});
+  if (!lockVia.empty()) {
+    llvm::sort(locked, [](const auto &a, const auto &b) {
+      return a.first < b.first;
+    });
+    // Indices, not iterators: the appends below may reallocate.
+    const size_t own = locked.size();
+    for (const auto &[joined, use] : lockVia) {
+      size_t at = static_cast<size_t>(
+          std::lower_bound(locked.begin(),
+                           locked.begin() + static_cast<std::ptrdiff_t>(own),
+                           use,
+                           [](const auto &entry, uint64_t key) {
+                             return entry.first < key;
+                           }) -
+          locked.begin());
+      for (; at < own && locked[at].first == use; ++at) {
+        const std::pair<uint32_t, LockedOcc> occ = locked[at].second;
+        locked.push_back({joined, occ});
+      }
+    }
+    // One occurrence per (reference, lock set): the first.
+    llvm::sort(locked, [](const auto &a, const auto &b) {
+      return std::tie(a.first, a.second.first, a.second.second.seq) <
+             std::tie(b.first, b.second.first, b.second.second.seq);
+    });
+    locked.erase(std::unique(locked.begin(), locked.end(),
+                             [](const auto &a, const auto &b) {
+                               return a.first == b.first &&
+                                      a.second.first == b.second.first;
+                             }),
+                 locked.end());
+  }
+  llvm::sort(locked, [](const auto &a, const auto &b) {
+    return std::tie(a.first, a.second.second.seq) <
+           std::tie(b.first, b.second.second.seq);
+  });
+  std::vector<std::pair<uint32_t, LockedOcc>> lockedOfRef;
+  size_t nextLocked = 0;
+
   std::vector<ReferenceIndex::ReferenceRecord> records;
   records.reserve(refs.size());
   for (const auto &ref : refs) {
+    lockedOfRef.clear();
+    while (nextLocked < locked.size() && locked[nextLocked].first < ref.first)
+      ++nextLocked;
+    for (; nextLocked < locked.size() && locked[nextLocked].first == ref.first;
+         ++nextLocked)
+      lockedOfRef.push_back(locked[nextLocked].second);
+    const std::string locks = lockText(ref.second, lockedOfRef);
     const Site site = siteOf(ref.second.site);
     ReferenceIndex::ReferenceRecord rec;
     rec.referrer = usrOf[ref.first >> kReferrerShift];
@@ -2298,6 +3501,8 @@ void ReferenceVisitor::lower() {
     rec.col = site.col;
     rec.count = ref.second.count;
     rec.role = static_cast<RefRole>(ref.first & kRoleMask);
+    rec.locks = locks.empty() ? ReferenceIndex::kNoId : index_.internText(locks);
+    rec.flags = ref.second.flags;
     assert(rec.referrer != ReferenceIndex::kNoId &&
            rec.target != ReferenceIndex::kNoId);
     records.push_back(rec);

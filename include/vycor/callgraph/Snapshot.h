@@ -245,7 +245,12 @@ public:
   /// v16: each reference record also carries its largest contributing
   ///     TU by path, after the smallest (ReferenceIndex.h). The other
   ///     sections are unchanged from v15.
-  static constexpr uint32_t kFormatVersion = 16;
+  /// v17: lock facts — each reference record carries the lock sets its
+  ///     occurrences were made under (as index text, or none) and a flags
+  ///     byte (kRefInLoop, kRefMutates); symbol flags gain kSymSyncPrimitive and
+  ///     kSymInLoop. Read by the unsynchronized-shared-global check. The
+  ///     other sections are unchanged from v16.
+  static constexpr uint32_t kFormatVersion = 17;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
   /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).

@@ -214,7 +214,7 @@ Profiles come from the compile command, so `--checkpoint` reuse is turned off
 when this check is enabled. The stderr output says so. The legacy journal does
 not revalidate compile-command changes (issue
 [#84](https://github.com/bearbones/vycor-cpp/issues/84)). Profiles and emitted
-functions travel in isolated-worker shards (journal/shard format version 15)
+functions travel in isolated-worker shards (since journal/shard format version 15)
 as a profile table, a TU table, a function table and flat id triples; a
 sighting that names no table entry, or a profile whose feature list is not
 strictly sorted, fails the shard.

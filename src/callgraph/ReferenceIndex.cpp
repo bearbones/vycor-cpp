@@ -86,6 +86,8 @@ std::vector<const char *> symbolAttributeNames(uint32_t flags) {
       {kSymVirtual, "virtual"},
       {kSymLambda, "lambda"},
       {kSymSpecialization, "explicit_specialization"},
+      {kSymSyncPrimitive, "sync_primitive"},
+      {kSymInLoop, "in_loop"},
   };
   std::vector<const char *> out;
   for (const FlagName &f : kNames)
@@ -220,6 +222,7 @@ uint64_t ReferenceIndex::hashOf(const ReferenceRecord &r) noexcept {
       mix(0x5246u, (static_cast<uint64_t>(r.referrer) << 32) | r.target);
   h = mix(h, (static_cast<uint64_t>(r.file) << 32) | r.line);
   h = mix(h, (static_cast<uint64_t>(r.col) << 32) | r.count);
+  h = mix(h, (static_cast<uint64_t>(r.locks) << 32) | r.flags);
   return mix(h, static_cast<uint64_t>(r.role));
 }
 
@@ -234,7 +237,8 @@ bool ReferenceIndex::same(const ReferenceRecord &a,
                           const ReferenceRecord &b) noexcept {
   return a.referrer == b.referrer && a.target == b.target &&
          a.file == b.file && a.line == b.line && a.col == b.col &&
-         a.count == b.count && a.role == b.role;
+         a.count == b.count && a.role == b.role && a.locks == b.locks &&
+         a.flags == b.flags;
 }
 
 namespace {
@@ -390,6 +394,8 @@ void ReferenceIndex::addReference(const ReferenceFact &fact,
   rec.col = fact.col;
   rec.count = std::max<uint32_t>(fact.count, 1); // external input (bridge)
   rec.role = fact.role;
+  rec.locks = fact.locks.empty() ? kNoId : internText(fact.locks);
+  rec.flags = fact.flags & kRefFlagMask;
   addTuFacts(internText(tuPath), {}, {rec});
 }
 
@@ -438,6 +444,8 @@ void ReferenceIndex::absorb(const ReferenceIndex &shard) {
         rec.referrer = mapString(rec.referrer);
         rec.target = mapString(rec.target);
         rec.file = mapString(rec.file);
+        if (rec.locks != kNoId)
+          rec.locks = mapString(rec.locks);
         slot = findOrInsertReference(rec);
       }
       refIdx.push_back(slot);
@@ -818,17 +826,20 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
     info.targetKind = target.kind;
     const std::string *file = nullptr;
     const std::string *firstTu = nullptr;
+    Id locks = kNoId;
     for (; i < order.size() && key(order[i]) == k; ++i) {
       const StoredReference &s = references_[order[i]];
       const ReferenceRecord &r = s.rec;
       info.count = std::max(info.count, r.count);
       info.tuCount += s.refs;
+      info.flags |= r.flags;
       const std::string &f = text(r.file);
       if (!file || std::tie(f, r.line, r.col) <
                        std::tie(*file, info.line, info.col)) {
         file = &f;
         info.line = r.line;
         info.col = r.col;
+        locks = r.locks;
       }
       if (s.minTu != kNoId) {
         const std::string &tu = text(s.minTu);
@@ -840,6 +851,8 @@ std::vector<ReferenceInfo> ReferenceIndex::referenceInfosLocked(
       info.file = *file;
     if (firstTu)
       info.firstTu = *firstTu;
+    if (locks != kNoId)
+      info.locks = text(locks);
     result.push_back(std::move(info));
   }
   std::sort(result.begin(), result.end(),
@@ -1079,6 +1092,8 @@ void ReferenceIndex::encode(std::string &out) const {
     if (r.refs == 0)
       continue;
     used[r.rec.referrer] = used[r.rec.target] = used[r.rec.file] = 1;
+    if (r.rec.locks != kNoId)
+      used[r.rec.locks] = 1;
     if (r.minTu != kNoId)
       used[r.minTu] = 1;
   }
@@ -1141,9 +1156,11 @@ void ReferenceIndex::encode(std::string &out) const {
                            static_cast<uint8_t>(r.kind),
                            static_cast<uint8_t>(r.linkage), r.name);
   };
+  // A record without locks sorts before one with (kNoId + 1 wraps to 0).
   const auto refKey = [](const ReferenceRecord &r) {
     return std::make_tuple(r.referrer, r.target, static_cast<uint8_t>(r.role),
-                           r.file, r.line, r.col, r.count);
+                           r.file, r.line, r.col, r.count, r.locks + 1,
+                           r.flags);
   };
   const auto rankOfTu = [&](Id tu) { return tu == kNoId ? 0 : rank[tu]; };
 
@@ -1193,6 +1210,7 @@ void ReferenceIndex::encode(std::string &out) const {
     e.rec.referrer = rank[r.rec.referrer];
     e.rec.target = rank[r.rec.target];
     e.rec.file = rank[r.rec.file];
+    e.rec.locks = r.rec.locks == kNoId ? kNoId : rank[r.rec.locks];
     refs.push_back(e);
   }
   std::sort(refs.begin(), refs.end(), [&](const Ref &a, const Ref &b) {
@@ -1212,6 +1230,8 @@ void ReferenceIndex::encode(std::string &out) const {
     putVarint(out, e.rec.line);
     putVarint(out, e.rec.col);
     putVarint(out, e.rec.count);
+    putVarint(out, e.rec.locks + 1); // 0 = no lock facts
+    out.push_back(static_cast<char>(e.rec.flags));
     putVarint(out, e.refs);
     putVarint(out, e.minTu);
     putVarint(out, e.maxTu);
@@ -1325,14 +1345,14 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
   }
 
   const uint32_t referenceCount = r.varint();
-  if (!r.ok || referenceCount > r.remaining() / 10)
+  if (!r.ok || referenceCount > r.remaining() / 12)
     return false;
   std::vector<StoredReference> references;
   references.reserve(referenceCount);
   const auto refKey = [](const ReferenceRecord &rec) {
     return std::make_tuple(rec.referrer, rec.target,
                            static_cast<uint8_t>(rec.role), rec.file, rec.line,
-                           rec.col, rec.count);
+                           rec.col, rec.count, rec.locks + 1, rec.flags);
   };
   prevId = 0;
   for (uint32_t i = 0; i < referenceCount; ++i) {
@@ -1345,6 +1365,8 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
     ref.rec.line = r.varint();
     ref.rec.col = r.varint();
     ref.rec.count = r.varint();
+    const uint64_t locks = r.varint();
+    const uint8_t flags = r.byte();
     ref.refs = r.varint();
     ref.minTu = r.varint();
     ref.maxTu = r.varint();
@@ -1353,8 +1375,11 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
         ref.rec.file >= stringCount || ref.minTu >= stringCount ||
         ref.maxTu >= stringCount || ref.maxTu < ref.minTu ||
         (ref.refs == 1) != (ref.maxTu == ref.minTu) || ref.refs == 0 ||
-        ref.rec.count == 0 || role >= kRefRoleCount)
+        ref.rec.count == 0 || role >= kRefRoleCount ||
+        locks > stringCount || (flags & ~kRefFlagMask) != 0)
       return false;
+    ref.rec.locks = locks == 0 ? kNoId : static_cast<Id>(locks - 1);
+    ref.rec.flags = flags;
     ref.rec.referrer = static_cast<Id>(referrer);
     ref.rec.role = static_cast<RefRole>(role);
     if (i != 0 && !(refKey(references.back().rec) < refKey(ref.rec)))
