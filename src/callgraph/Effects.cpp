@@ -112,7 +112,10 @@ bool isPlacementNewUsr(llvm::StringRef usr) {
   // "c:[<file>]@F@operator new[[]][<template args>]#<size>#<param>#...":
   // each parameter type is followed by '#'. <file> is there when a
   // parameter type has internal linkage; a class's own operator has its
-  // scope ("@S@Pool") before "@F@" and is not a global one.
+  // scope ("@S@Pool") before "@F@" and is not a global one. The file
+  // prefix ends at the first '@', which a file name may itself contain:
+  // such an overload is not recognized and stays an allocation (the
+  // conservative side). The string cannot tell the two apart.
   if (!usr.consume_front("c:"))
     return false;
   usr = usr.substr(usr.find('@'));
