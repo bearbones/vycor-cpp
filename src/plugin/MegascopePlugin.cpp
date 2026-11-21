@@ -172,7 +172,7 @@ public:
       } else {
         ok = SnapshotIO::save(targetPath, baked.graph, baked.cfIndex, meta,
                               baked.channels, baked.references, &saveError,
-                              durable_);
+                              durable_, baked.staticInits);
       }
       if (!ok) {
         llvm::errs() << "vycor-megascope plugin: failed to save index to "

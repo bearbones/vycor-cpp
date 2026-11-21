@@ -1,6 +1,6 @@
 # static-init-cost
 
-**Unit:** functions · **Native level:** symbol · **Roll-ups:** file, tu, directory, target · **Facts:** in-memory bake only
+**Unit:** functions · **Native level:** symbol · **Roll-ups:** file, tu, directory, target · **Facts:** the `static_inits` section of the index, or an in-memory bake
 
 How much work runs before `main`. For every dynamic initializer and
 every `__attribute__((constructor))` function, the number of distinct
@@ -31,6 +31,11 @@ does that reach touch the heap, a lock or a file descriptor.
 ## Usage
 
 ```bash
+# From a saved index
+vycor-cpp megascope index --build-path build
+vycor-cpp metrics --metrics=static-init-cost
+
+# Or baked in memory for this run
 vycor-cpp metrics --metrics=static-init-cost \
     --build-path build --source-re 'src/.*\.cpp$'
 
@@ -44,9 +49,20 @@ vycor-cpp metrics --metrics=static-init-cost --rollup target \
     --build-path build --source-re 'src/.*\.cpp$'
 ```
 
-The facts are collected by the megascope bake's parse and are held in
-memory only: run it with `--source`, `--source-list` or `--source-re`.
-Against a saved index the metric is `unavailable` (exit 3), not zero.
+The facts are collected by the megascope bake's parse and saved in the
+index's `static_inits` section (snapshot format v20), so a saved index
+answers byte for byte what an in-memory bake of the same TUs does; only
+`indexScope.freshness` differs (`unchecked` against `baked`). Worker
+shards carry the roots, a warm refresh replaces exactly what each
+re-parsed or dropped TU contributed, and `megascope merge` unions the
+roots of its inputs. The section is decoded only by a tool that declares
+it (`static_inits` in `megascope tools`' `needs`).
+
+An index whose writer did not collect the facts (a `SnapshotIO::save`
+caller that passes none, or a merge with such a shard) makes the metric
+`unavailable` (exit 3), never zero; an index saved before v20 is refused
+as a format mismatch. Rebuild it with `megascope index`, or bake in
+memory with `--source`, `--source-list` or `--source-re`.
 
 ## What is measured
 

@@ -20,6 +20,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/FileStamp.h"
+#include "vycor/callgraph/StaticInit.h"
 #include "vycor/callgraph/TuOutcome.h"
 
 #include <cstdint>
@@ -129,7 +130,8 @@ enum IndexSection : unsigned {
   kSectionControlFlow = 2,
   kSectionChannels = 4,
   kSectionReferences = 8,
-  kSectionAll = 15,
+  kSectionStaticInits = 16, // v20
+  kSectionAll = 31,
 };
 
 struct SnapshotData {
@@ -140,9 +142,9 @@ struct SnapshotData {
   SnapshotMeta meta;
   IndexSummary summary;
   unsigned loaded = 0; // IndexSection bits actually decoded
-  /// Static-initialization roots (StaticInit.h). Not a section of the
-  /// saved index: an in-memory bake fills them, a load leaves them
-  /// uncollected.
+  /// Static-initialization roots (StaticInit.h), the `static_inits`
+  /// section (v20). Uncollected unless the load asked for
+  /// kSectionStaticInits and the index was written with collected facts.
   StaticInitFacts staticInits;
 };
 
@@ -262,25 +264,34 @@ public:
   ///     a v18 graph has neither, so its instantiations would read as
   ///     leaves and a warm refresh would mix the two graphs: it is
   ///     rebuilt.
-  static constexpr uint32_t kFormatVersion = 19;
+  /// v20: static-initialization roots — a sixth section, `static_inits`,
+  ///     holds the StaticInitFacts (each dynamic initializer and
+  ///     constructor function with its TUs and direct callees, over one
+  ///     sorted string table), so static-init-cost answers from a saved
+  ///     index. Only a load that asks for kSectionStaticInits decodes
+  ///     it. The other sections are unchanged from v19.
+  static constexpr uint32_t kFormatVersion = 20;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
-  /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
+  /// table count(4) + 6 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).
-  static constexpr uint64_t kHeaderBytes = 4 + 4 + 48 + 4 + 5 * 25 + 8;
+  static constexpr uint64_t kHeaderBytes = 4 + 4 + 48 + 4 + 6 * 25 + 8;
 
-  /// Serialize graph + cfIndex + channels + references + meta to `path`,
-  /// atomically:
+  /// Serialize graph + cfIndex + channels + references + meta +
+  /// staticInits to `path`, atomically:
   /// through a uniquely named temp file in the same directory, fsync'ed
   /// and renamed over `path` (writeFileAtomically), so concurrent saves
   /// and crashes never publish a torn or mixed file. `channels` and
   /// `references` default to empty for callers that hold neither. Returns false on I/O failure (`path` untouched, no temp
   /// file left), with `error` saying what failed. `durable` false skips
   /// the fsyncs (worker shards: throwaway files the parent reads at once).
+  /// `staticInits` must be canonical (StaticInitFacts::canonicalize);
+  /// uncollected facts are written as such and load uncollected.
   static bool save(const std::string &path, const CallGraph &graph,
                    const ControlFlowIndex &cfIndex, const SnapshotMeta &meta,
                    const ChannelIndex &channels = ChannelIndex(),
                    const ReferenceIndex &references = ReferenceIndex(),
-                   std::string *error = nullptr, bool durable = true);
+                   std::string *error = nullptr, bool durable = true,
+                   const StaticInitFacts &staticInits = StaticInitFacts());
 
   /// Load a snapshot. Returns nullopt if the file is missing, has a
   /// different format version, fails a checksum, or fails to decode;

@@ -18,9 +18,11 @@
 For every kind of change a warm start must notice — a TU edit, a header
 edit, a compile-flag change, a working-directory change, a bake-environment
 change, a narrower selection, and a TU whose parse failed and later
-recovers — this script bakes an index cold, applies the change, refreshes
-the index warm, and demands that `megascope dump` over the refreshed index
-equals `dump` over a clean `--force` rebuild of the same tree. It also
+recovers, and an edited static initializer — this script bakes an index
+cold, applies the change, refreshes the index warm, and demands that
+`megascope dump` and the raw tool answers (the static-init-cost metric
+among them) over the refreshed index equal those over a clean `--force`
+rebuild of the same tree. It also
 checks the refresh accounting the `index` summary prints (what was
 refreshed and why) and the coverage facts `info` reports.
 
@@ -57,11 +59,20 @@ int main() { entry(); via_header(); return 0; }
 # `hits` is a global other.cpp defines and the header's inline function
 # uses: written in V1, read in V2, so a header edit must replace the
 # recorded reference (docs/symbol-references.md), not add to it.
+# `header_seed` is a dynamic initializer in the header whose callee the
+# header edit changes; `other_seed` one in other.cpp
+# (docs/metrics/static-init-cost.md).
 TARGET_H_V1 = ("void gamma();\nextern int hits;\n"
-               "inline void via_header() { hits = 1; gamma(); }\n")
+               "inline void via_header() { hits = 1; gamma(); }\n"
+               "int seed_v1();\ninline int header_seed = seed_v1();\n")
 TARGET_H_V2 = ("void delta();\nextern int hits;\n"
-               "inline int via_header() { delta(); return hits; }\n")
-OTHER = "int hits = 0;\nvoid other() {}\nvoid another() { other(); }\n"
+               "inline int via_header() { delta(); return hits; }\n"
+               "int seed_v2();\ninline int header_seed = seed_v2();\n")
+OTHER_SEED = ("void make_more() { another(); }\n"
+              "int make_other() { other(); return 1; }\n"
+              "int other_seed = make_other();\n")
+OTHER = ("int hits = 0;\nvoid other() {}\nvoid another() { other(); }\n"
+         + OTHER_SEED)
 BROKEN = '#include "missing.h"\nvoid broken_fn() { after_include(); }\n'
 # Untouched ballast: an edit plus the retried TU must stay under half the
 # selection, or the warm start (correctly) prefers a full rebuild.
@@ -92,6 +103,8 @@ RAW_QUERIES = (
     ["get-references", "--name", "hits"],
     ["get-references", "--name", "main", "--direction", "from"],
     ["get-references", "--name", "via_header", "--direction", "from"],
+    ["metrics"],
+    ["metrics", "--rollup", "tu"],
 )
 BAKE_RE = re.compile(r'"bake":"[0-9a-f]+@[0-9]+"')
 
@@ -220,16 +233,7 @@ class Check:
             self.expect(scenario, ia.get(count) == ib.get(count),
                         f"{count} differ: warm {ia.get(count)} vs clean "
                         f"{ib.get(count)}")
-        # The tool answers, raw: every list in its contractual order
-        # (docs/deterministic-output.md), not as a sorted multiset.
-        for argv in RAW_QUERIES:
-            ca, oa, _ = self.megascope([*argv, "--index", str(warm)], d)
-            cb, ob, _ = self.megascope([*argv, "--index", str(clean)], d)
-            oa, ob = strip_bake(oa), strip_bake(ob)
-            self.expect(scenario, (ca, oa) == (cb, ob),
-                        f"{' '.join(argv)}: warm answer differs from "
-                        f"clean rebuild (exit {ca} vs {cb})\n"
-                        f"  warm:  {oa[:200]!r}\n  clean: {ob[:200]!r}")
+        self.raw_equal(scenario, d, warm, clean)
         # The semantic diff of the two must be empty: same functions, same
         # calls, same call-site contexts (docs/change-impact.md).
         rc, out, _ = self.megascope(
@@ -245,6 +249,30 @@ class Check:
                     f"{payload.get('status')!r}, {n} changes\n"
                     f"  {out[:300]!r}")
 
+    def raw_equal(self, scenario: str, d: Path, warm: Path,
+                  clean: Path) -> None:
+        """The tool answers, raw: every list in its contractual order
+        (docs/deterministic-output.md), not as a sorted multiset."""
+        for argv in RAW_QUERIES:
+            ca, oa, _ = self.megascope([*argv, "--index", str(warm)], d)
+            cb, ob, _ = self.megascope([*argv, "--index", str(clean)], d)
+            oa, ob = strip_bake(oa), strip_bake(ob)
+            self.expect(scenario, (ca, oa) == (cb, ob),
+                        f"{' '.join(argv)}: warm answer differs from "
+                        f"clean rebuild (exit {ca} vs {cb})\n"
+                        f"  warm:  {oa[:200]!r}\n  clean: {ob[:200]!r}")
+        # The metric answers from the saved roots, not `unavailable`.
+        _, out, _ = self.megascope(["metrics", "--index", str(warm)], d)
+        status = json.loads(out).get("status") if out else None
+        self.expect(scenario, status == "ok",
+                    f"metrics over the warm index: status {status!r}")
+
+    def initializers(self, index: Path, d: Path) -> dict[str, int]:
+        """static-init-cost value per initializer name."""
+        _, out, _ = self.megascope(["metrics", "--index", str(index)], d)
+        return {r["entity"]["name"]: r["value"]
+                for r in json.loads(out).get("records", [])}
+
     def expect_summary(self, scenario: str, s: dict, **fields: int | str
                        ) -> None:
         for k, v in fields.items():
@@ -255,9 +283,10 @@ class Check:
 
     def run_all(self) -> None:
         for scenario in (self.unchanged, self.tu_edit, self.header_edit,
-                         self.compile_flag, self.working_directory,
-                         self.environment, self.selection,
-                         self.partial_recovery, self.chronic_failures):
+                         self.initializer_edit, self.compile_flag,
+                         self.working_directory, self.environment,
+                         self.selection, self.partial_recovery,
+                         self.chronic_failures):
             scenario()
 
     def cold(self, name: str) -> tuple[Path, Path, dict]:
@@ -327,6 +356,26 @@ class Check:
         dump = self.dump(idx, d)
         self.expect(name, any('"delta"' in line for line in dump),
                     "refreshed index does not see the new header callee")
+
+    def initializer_edit(self) -> None:
+        # Only a static initializer changes: other_seed now runs make_more
+        # (and through it another and other) as well.
+        name = "initializer-edit"
+        d, idx, _ = self.cold(name)
+        before = self.initializers(idx, d)
+        (d / "other.cpp").write_text(OTHER.replace(
+            "int other_seed = make_other();",
+            "int other_seed = (make_more(), make_other());"))
+        self.age(d)
+        s = self.index(d, idx)
+        self.expect_summary(name, s, mode="warm", refreshed=2, retried=1,
+                            refreshed_for_inputs=0, refreshed_for_headers=0)
+        self.equal_to_clean(name, d, idx)
+        after = self.initializers(idx, d)
+        self.expect(name, set(before) == set(after) and
+                    after.get("other_seed", 0) >
+                    before.get("other_seed", 0),
+                    f"other_seed cost did not grow: {before} -> {after}")
 
     def compile_flag(self) -> None:
         # The 2026-09-08 regression: only the compile command changes.
@@ -405,6 +454,10 @@ class Check:
         self.index(d, clean, "--source-re", r"(tu|broken)\.cpp$", force=True)
         self.expect(name, self.dump(idx, d) == self.dump(clean, d),
                     "narrowed warm index differs from a clean narrow bake")
+        # The dropped TU's initializer goes with it.
+        self.raw_equal(name, d, idx, clean)
+        self.expect(name, "other_seed" not in self.initializers(idx, d),
+                    "dropped TU's initializer is still measured")
 
     def partial_recovery(self) -> None:
         # broken.cpp fails to parse until missing.h appears. Nothing the
@@ -511,7 +564,7 @@ def main() -> int:
     if failures:
         print(f"{len(failures)} failure(s)", file=sys.stderr)
         return 1
-    print("warm-refresh-check: 9 scenarios x 2 bake modes OK")
+    print("warm-refresh-check: 10 scenarios x 2 bake modes OK")
     return 0
 
 

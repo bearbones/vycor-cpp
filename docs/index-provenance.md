@@ -317,9 +317,13 @@ and their recursion flags to that section; every other section is
 unchanged. Format v19 keeps v18's layout, but the graph holds the calls
 of template instantiations and of compiler-written code, and a node
 flag (`hasBody`) says some TU read the node's body: a v18 index lacks
-both, so it is rebuilt rather than refreshed. A
-warm refresh removes and re-adds a dirty TU's reference facts exactly as
-it does its edges.
+both, so it is rebuilt rather than refreshed. Format v20 adds a sixth
+section, `static_inits` (the static-initialization roots
+`static-init-cost` reads, `docs/metrics/static-init-cost.md`), with its
+own table entry and checksum (`kHeaderBytes` 218, was 193); the other
+sections are unchanged. A
+warm refresh removes and re-adds a dirty TU's reference facts and
+static-initialization roots exactly as it does its edges.
 
 ## Write integrity (format v13)
 

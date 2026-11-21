@@ -1513,12 +1513,16 @@ BakedIndexes bakeParsedTU(clang::ASTContext &ctx, const std::string &tuPath,
       channelCfg.registeredTypes.empty() ? nullptr : &channelCfg;
   DependencySink depSink;
   depSink.deps = &out.deps;
+  depSink.staticInits = &out.staticInits;
 
   BakeEdgeAndContextConsumer consumer(
       out.graph, out.cfIndex, ctx.getSourceManager(), collapsePtr, &lockCfg,
       channelCfgPtr, channelCfgPtr ? &out.channels : nullptr,
       recordReferences ? &out.references : nullptr, tuPath, &depSink);
   consumer.HandleTranslationUnit(ctx);
+  // The plugin's per-TU shard carries the TU's roots like a worker shard.
+  out.staticInits.collected = true;
+  out.staticInits.canonicalize();
 
   if (ctx.getDiagnostics().hasErrorOccurred())
     out.outcomes[tuPath] = TuOutcome{TuStatus::Partial, "parse errors"};

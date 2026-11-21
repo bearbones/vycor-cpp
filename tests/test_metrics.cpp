@@ -91,20 +91,22 @@ const ToolEntry &metricsTool(const std::vector<ToolEntry> &tools) {
   return tools.front();
 }
 
-/// The metrics tool over baked indexes, as an adapter would run it.
+/// The metrics tool over baked or loaded indexes, as an adapter would run
+/// it.
 struct Surface {
-  const BakedIndexes &ix;
   ControlFlowOracle oracle;
   std::vector<std::string> entryPoints{"main"};
   std::vector<ToolEntry> tools = getRegisteredTools();
   ToolContext ctx;
 
-  explicit Surface(const BakedIndexes &baked, bool withStaticInits = true)
-      : ix(baked), oracle(baked.graph, baked.cfIndex),
-        ctx{baked.graph, oracle, baked.cfIndex, entryPoints} {
-    if (withStaticInits)
-      ctx.staticInits = &baked.staticInits;
+  Surface(const CallGraph &graph, const ControlFlowIndex &cfIndex,
+          const StaticInitFacts *staticInits)
+      : oracle(graph, cfIndex), ctx{graph, oracle, cfIndex, entryPoints} {
+    ctx.staticInits = staticInits;
   }
+  explicit Surface(const BakedIndexes &baked, bool withStaticInits = true)
+      : Surface(baked.graph, baked.cfIndex,
+                withStaticInits ? &baked.staticInits : nullptr) {}
 
   llvm::json::Value
   runValue(std::initializer_list<llvm::json::Object::KV> kvs = {}) {
@@ -981,11 +983,32 @@ TEST_CASE("metrics payloads are byte-identical across thread counts and TU "
   BakedIndexes backwards = bakeFiles(reversed, 3);
   Surface a(serial), b(parallel), c(backwards);
 
+  // The same bake saved and loaded back the way `metrics --index` loads
+  // it: read-only, decoding only the sections the tool declares.
+  llvm::SmallString<128> index;
+  llvm::sys::fs::createUniquePath("vycor-metrics-%%%%%%.vycs", index,
+                                  /*MakeAbsolute=*/true);
+  SnapshotMeta meta;
+  meta.files = SnapshotIO::stampFiles(forward);
+  REQUIRE(SnapshotIO::save(std::string(index.str()), parallel.graph,
+                           parallel.cfIndex, meta, parallel.channels,
+                           ReferenceIndex(), nullptr, /*durable=*/false,
+                           parallel.staticInits));
+  auto snap = SnapshotIO::load(std::string(index.str()), nullptr,
+                               LoadMode::ReadOnly,
+                               metricsTool(a.tools).needs);
+  std::remove(index.c_str());
+  REQUIRE(snap.has_value());
+  REQUIRE((snap->loaded & kSectionStaticInits) != 0);
+  REQUIRE(snap->staticInits.collected);
+  Surface d(snap->graph, snap->cfIndex, &snap->staticInits);
+
   for (const char *rollup : {"symbol", "file", "tu", "directory"}) {
     INFO("rollup " << rollup);
     std::string first = serialized(a.runValue({{"rollup", rollup}}));
     CHECK(first == serialized(b.runValue({{"rollup", rollup}})));
     CHECK(first == serialized(c.runValue({{"rollup", rollup}})));
+    CHECK(first == serialized(d.runValue({{"rollup", rollup}})));
     // And the same context answers the same way twice.
     CHECK(first == serialized(a.runValue({{"rollup", rollup}})));
   }
@@ -997,6 +1020,8 @@ TEST_CASE("metrics payloads are byte-identical across thread counts and TU "
         serialized(b.runValue({{"rollup", "target"}, {"target_map", map}})));
   CHECK(first ==
         serialized(c.runValue({{"rollup", "target"}, {"target_map", map}})));
+  CHECK(first ==
+        serialized(d.runValue({{"rollup", "target"}, {"target_map", map}})));
 }
 
 TEST_CASE("paging walks the one canonical record order",
@@ -1268,8 +1293,7 @@ TEST_CASE("metrics verb: list and usage errors answer without an index",
   }
 }
 
-TEST_CASE("metrics verb: an in-memory bake answers and a saved index is "
-          "unavailable",
+TEST_CASE("metrics verb: an in-memory bake and a saved index answer alike",
           "[metrics][cli]") {
   SECTION("json") {
     Run r = runVerb(withFixtureSources({"metrics"}));
@@ -1324,7 +1348,35 @@ TEST_CASE("metrics verb: an in-memory bake answers and a saved index is "
     CHECK(valueOf(payload, "core") == 6);
   }
 
-  SECTION("a saved index does not carry the facts") {
+  SECTION("a saved index answers what the in-memory bake does") {
+    llvm::SmallString<128> dir;
+    REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-metrics-index", dir));
+    const std::string index = std::string(dir) + "/index.vycs";
+    // The facts `megascope index` writes: the bake's, saved with it.
+    BakedIndexes baked = bakeFiles(fixtureSources());
+    SnapshotMeta meta;
+    meta.files = SnapshotIO::stampFiles(fixtureSources());
+    REQUIRE(SnapshotIO::save(index, baked.graph, baked.cfIndex, meta,
+                             baked.channels, ReferenceIndex(), nullptr,
+                             /*durable=*/false, baked.staticInits));
+    for (const char *rollup : {"symbol", "tu"}) {
+      INFO("rollup " << rollup);
+      Run inMemory = runVerb(withFixtureSources(
+          {"metrics", "--rollup", rollup, "--format", "ndjson"}));
+      Run saved = runVerb({"metrics", "--rollup", rollup, "--format",
+                           "ndjson", "--index", index});
+      INFO(inMemory.out << inMemory.err << saved.out << saved.err);
+      REQUIRE(inMemory.code == 0);
+      REQUIRE(saved.code == 0);
+      // Past the summary line (whose indexScope says baked or unchecked),
+      // the records are the same bytes.
+      CHECK(inMemory.out.substr(inMemory.out.find('\n')) ==
+            saved.out.substr(saved.out.find('\n')));
+    }
+    llvm::sys::fs::remove_directories(std::string(dir));
+  }
+
+  SECTION("an index written without the facts is unavailable") {
     llvm::SmallString<128> index;
     llvm::sys::fs::createUniquePath("vycor-metrics-%%%%%%.vycs", index,
                                     /*MakeAbsolute=*/true);

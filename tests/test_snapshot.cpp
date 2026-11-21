@@ -19,12 +19,14 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/Snapshot.h"
+#include "vycor/callgraph/StaticInit.h"
 
 #include "SnapshotBytes.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -209,7 +211,8 @@ TEST_CASE("snapshot round-trips graph, CF index, and meta",
     CHECK(names == std::vector<std::string>{
                        "meta", "graph_interner", "nodes", "edges",
                        "graph_relations", "cf_interner", "cf_set_tables",
-                       "cf_contexts", "channels", "references"});
+                       "cf_contexts", "channels", "references",
+                       "static_inits"});
     // Everything after the fixed header is a section.
     CHECK(bytes + SnapshotIO::kHeaderBytes == loadStats.fileBytes);
     CHECK(loadStats.totalMs >= 0);
@@ -332,8 +335,9 @@ TEST_CASE("a sectioned load decodes only the requested sections",
         CHECK(sec.bytes > 0);
     }
     CHECK(names == std::vector<std::string>{"meta", "graph", "control_flow",
-                                            "channels", "references"});
-    CHECK(skipped == 4);
+                                            "channels", "references",
+                                            "static_inits"});
+    CHECK(skipped == 5);
   }
 
   SECTION("graph only: queries work, control flow stays empty") {
@@ -1315,3 +1319,217 @@ TEST_CASE("SnapshotIO::save is byte-for-byte deterministic across map insertion 
   CHECK(g1.edgeCount() == 0);
 }
 
+
+namespace {
+
+StaticInitFacts makeStaticInits() {
+  StaticInitFacts facts;
+  facts.collected = true;
+  StaticInitRoot shared;
+  shared.name = "shared";
+  shared.usr = "c:@shared";
+  shared.file = "/src/common.h";
+  shared.line = 4;
+  shared.tus = {"/src/a.cpp", "/src/b.cpp"};
+  shared.callees = {{"c:@F@compute#", "compute", {}},
+                    {"c:@F@trace#", "trace", {"/src/a.cpp"}}};
+  StaticInitRoot ctor;
+  ctor.kind = StaticInitKind::ConstructorFunction;
+  ctor.name = "boot";
+  ctor.usr = "c:@F@boot#";
+  ctor.file = "/src/b.cpp";
+  ctor.line = 9;
+  ctor.tus = {"/src/b.cpp"};
+  facts.roots = {shared, ctor};
+  facts.canonicalize();
+  return facts;
+}
+
+void checkSameStaticInits(const StaticInitFacts &got,
+                          const StaticInitFacts &want) {
+  CHECK(got.collected == want.collected);
+  REQUIRE(got.roots.size() == want.roots.size());
+  for (size_t i = 0; i < want.roots.size(); ++i) {
+    const StaticInitRoot &g = got.roots[i];
+    const StaticInitRoot &w = want.roots[i];
+    CHECK(g.kind == w.kind);
+    CHECK(g.name == w.name);
+    CHECK(g.usr == w.usr);
+    CHECK(g.file == w.file);
+    CHECK(g.line == w.line);
+    CHECK(g.tus == w.tus);
+    REQUIRE(g.callees.size() == w.callees.size());
+    for (size_t k = 0; k < w.callees.size(); ++k) {
+      CHECK(g.callees[k].usr == w.callees[k].usr);
+      CHECK(g.callees[k].display == w.callees[k].display);
+      CHECK(g.callees[k].tus == w.callees[k].tus);
+    }
+  }
+}
+
+std::string readAll(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("the static-initialization roots round-trip through the index",
+          "[snapshot][static-init]") {
+  auto path = tempSnapshotPath("static-inits");
+  const StaticInitFacts facts = makeStaticInits();
+  REQUIRE(SnapshotIO::save(path, makeGraph(), makeCfIndex(), makeMeta(),
+                           ChannelIndex(), ReferenceIndex(), nullptr,
+                           /*durable=*/false, facts));
+
+  SECTION("a mutable and a read-only load decode them alike") {
+    for (LoadMode mode : {LoadMode::Mutable, LoadMode::ReadOnly}) {
+      auto snap = SnapshotIO::load(path, nullptr, mode);
+      REQUIRE(snap.has_value());
+      CHECK((snap->loaded & kSectionStaticInits) != 0);
+      checkSameStaticInits(snap->staticInits, facts);
+    }
+  }
+
+  SECTION("a load that does not need them skips the section") {
+    SnapshotLoadStats stats;
+    auto snap =
+        SnapshotIO::load(path, &stats, LoadMode::ReadOnly, kSectionGraph);
+    REQUIRE(snap.has_value());
+    CHECK((snap->loaded & kSectionStaticInits) == 0);
+    CHECK(snap->staticInits.roots.empty());
+    CHECK_FALSE(snap->staticInits.collected);
+    bool skipped = false;
+    for (const auto &sec : stats.sections)
+      if (std::string(sec.name) == "static_inits")
+        skipped = sec.skipped;
+    CHECK(skipped);
+  }
+
+  SECTION("saving the same facts twice writes the same bytes") {
+    auto again = tempSnapshotPath("static-inits-again");
+    REQUIRE(SnapshotIO::save(again, makeGraph(), makeCfIndex(), makeMeta(),
+                             ChannelIndex(), ReferenceIndex(), nullptr,
+                             /*durable=*/false, makeStaticInits()));
+    CHECK(readAll(again) == readAll(path));
+    std::remove(again.c_str());
+  }
+
+  SECTION("an index written without them loads them uncollected") {
+    auto bare = tempSnapshotPath("static-inits-bare");
+    REQUIRE(SnapshotIO::save(bare, makeGraph(), makeCfIndex(), makeMeta()));
+    auto snap = SnapshotIO::load(bare);
+    REQUIRE(snap.has_value());
+    CHECK((snap->loaded & kSectionStaticInits) != 0);
+    CHECK_FALSE(snap->staticInits.collected);
+    CHECK(snap->staticInits.roots.empty());
+    std::remove(bare.c_str());
+  }
+
+  SECTION("a malformed section is rejected and named") {
+    std::string bytes = readAll(path);
+    bool found = false;
+    for (size_t i = 0; i < testing::kSnapshotSections; ++i) {
+      const size_t at = testing::snapshotTableEntryAt(i);
+      if (static_cast<uint8_t>(bytes[at]) != 5)
+        continue;
+      found = true;
+      const uint64_t offset = testing::snapshotU64At(bytes, at + 1);
+      bytes[offset] = 2; // the collected flag is 0 or 1
+    }
+    REQUIRE(found);
+    testing::resealSnapshot(bytes);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
+    SnapshotLoadStats stats;
+    CHECK_FALSE(SnapshotIO::load(path, &stats).has_value());
+    CHECK(stats.error.find("static_inits") != std::string::npos);
+    // A load that skips the section never decodes it.
+    CHECK(SnapshotIO::load(path, nullptr, LoadMode::ReadOnly, kSectionGraph)
+              .has_value());
+  }
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SnapshotIO::merge unions the static-initialization roots",
+          "[snapshot][merge][static-init]") {
+  llvm::SmallString<128> dir;
+  REQUIRE(!llvm::sys::fs::createUniqueDirectory("vycor-merge-static", dir));
+  const std::string base = std::string(dir) + "/";
+  auto shardFor = [&](const std::string &tu, const char *callee,
+                      bool withFacts) {
+    const std::string path = base + llvm::sys::path::filename(tu).str() +
+                             ".vycs";
+    CallGraph g;
+    g.addNode({"fn@" + tu, tu, 1, false, false, ""}, tu);
+    SnapshotMeta m;
+    m.files = {{tu, 1000, 100}};
+    m.fingerprints = {"fp"};
+    m.outcomes = {{TuStatus::Indexed, ""}};
+    StaticInitFacts facts;
+    facts.collected = withFacts;
+    if (withFacts) {
+      StaticInitRoot shared;
+      shared.name = "shared";
+      shared.usr = "c:@shared";
+      shared.file = "/src/common.h";
+      shared.line = 4;
+      shared.tus = {tu};
+      shared.callees = {{std::string("c:@F@") + callee, callee, {}}};
+      StaticInitRoot local;
+      local.name = "local";
+      local.usr = "c:@local@" + tu;
+      local.file = tu;
+      local.line = 2;
+      local.tus = {tu};
+      facts.roots = {shared, local};
+      facts.canonicalize();
+    }
+    REQUIRE(SnapshotIO::save(path, g, ControlFlowIndex(), m, ChannelIndex(),
+                             ReferenceIndex(), nullptr, /*durable=*/false,
+                             facts));
+    return path;
+  };
+  const std::string a = shardFor("/src/a.cpp", "f", true);
+  const std::string b = shardFor("/src/b.cpp", "g", true);
+
+  SECTION("each shard's roots, a shared root once with each TU's callees") {
+    std::string error;
+    // b twice: a duplicated input contributes once.
+    auto merged = SnapshotIO::merge({a, b, b}, {}, &error);
+    REQUIRE(merged.has_value());
+    const StaticInitFacts &facts = merged->staticInits;
+    CHECK(facts.collected);
+    REQUIRE(facts.roots.size() == 3);
+    const StaticInitRoot *shared = nullptr;
+    for (const StaticInitRoot &root : facts.roots)
+      if (root.name == "shared")
+        shared = &root;
+    REQUIRE(shared != nullptr);
+    CHECK(shared->tus ==
+          std::vector<std::string>{"/src/a.cpp", "/src/b.cpp"});
+    REQUIRE(shared->callees.size() == 2);
+    CHECK(shared->callees[0].display == "f");
+    CHECK(shared->callees[0].tus == std::vector<std::string>{"/src/a.cpp"});
+    CHECK(shared->callees[1].display == "g");
+    CHECK(shared->callees[1].tus == std::vector<std::string>{"/src/b.cpp"});
+
+    // The merged index persists them.
+    const std::string out = base + "merged.vycs";
+    REQUIRE(SnapshotIO::save(out, merged->graph, merged->cfIndex,
+                             merged->meta, merged->channels,
+                             merged->references, nullptr, false,
+                             merged->staticInits));
+    auto loaded = SnapshotIO::load(out);
+    REQUIRE(loaded.has_value());
+    checkSameStaticInits(loaded->staticInits, facts);
+  }
+
+  SECTION("a shard written without them leaves the merge uncollected") {
+    const std::string bare = shardFor("/src/c.cpp", "h", false);
+    auto merged = SnapshotIO::merge({a, bare});
+    REQUIRE(merged.has_value());
+    CHECK_FALSE(merged->staticInits.collected);
+  }
+  llvm::sys::fs::remove_directories(std::string(dir));
+}

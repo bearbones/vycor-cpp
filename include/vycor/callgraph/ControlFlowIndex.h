@@ -511,8 +511,9 @@ struct BakedIndexes {
   // bake the parent adds Poisoned for the TUs whose worker died.
   TuOutcomes outcomes;
   // What runs before `main`: dynamic initializers and constructor
-  // functions (StaticInit.h), in canonical order. Filled by bakeIndexes;
-  // in memory only (the saved index does not carry them).
+  // functions (StaticInit.h), in canonical order. Filled by bakeIndexes
+  // and by an isolated bake from its worker shards; saved as the
+  // snapshot's static_inits section.
   StaticInitFacts staticInits;
 };
 

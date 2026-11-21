@@ -1,0 +1,2 @@
+# megascope metrics -> exit 1
+{"indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"limit":200,"metrics":[{"level":"symbol","metric":"static-init-cost","overall":{"components":{"allocation":0,"constructorFunctions":0,"directCalls":0,"dynamicInitializers":0,"entities":0,"io":0,"lock":0},"value":0},"records":0,"unit":"functions"}],"offset":0,"records":[],"returned":0,"rollup":"symbol","status":"ok","total":0,"truncated":false}

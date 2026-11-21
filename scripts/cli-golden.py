@@ -50,8 +50,9 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "examples" / "deep_chains"
 GOLDEN_DIR = FIXTURE / "cli-golden"
 # The metrics fixture: dynamic initializers, which deep_chains has none
-# of. Baked in memory per query (static-init facts are not in a saved
-# index), from flags after `--` rather than a compile database.
+# of. Baked in memory per query from flags after `--` rather than a
+# compile database, and once into a saved index ({static_init_index}) that
+# must answer the same.
 STATIC_INIT = ROOT / "examples" / "static_init"
 STATIC_INIT_BAKE = [
     "--source", "{static_init}/core/registry.cpp",
@@ -201,7 +202,10 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
     ("audit-dependencies-no-map", ["audit-dependencies"], None, True),
     # Metrics (docs/metrics/README.md).
     ("metrics-list", ["metrics", "--list-metrics"], None, True),
-    ("metrics-saved-index", ["metrics"], None, True),
+    ("metrics-saved-index",
+     ["metrics", "--format", "ndjson", "--index", "{static_init_index}"],
+     None, True),
+    ("metrics-saved-index-none", ["metrics"], None, True),
     ("metrics-usage-unknown", ["metrics", "--metrics", "nope"], None, True),
     ("metrics-usage-target-map", ["metrics", "--rollup", "target"], None,
      True),
@@ -366,6 +370,7 @@ def main() -> int:
 
     build = Path(tempfile.mkdtemp(prefix="vycor-cli-golden-"))
     index = build / "deep_chains.vycs"
+    static_init_index = build / "static_init.vycs"
     subs = [(str(FIXTURE), "{fixture}"), (str(build), "{build}"),
             (str(STATIC_INIT), "{static_init}")]
     failures: list[str] = []
@@ -376,6 +381,14 @@ def main() -> int:
                      str(index), "--threads", "1"], None, build)
         if code != 0:
             sys.exit(f"cli-golden: megascope index failed ({code}):\n{err}")
+        code, out, err = run_megascope(
+            binary, ["index", *(a.replace("{static_init}", str(STATIC_INIT))
+                                for a in STATIC_INIT_BAKE),
+                     "--index", str(static_init_index), "--", "-std=c++17"],
+            None, build)
+        if code != 0:
+            sys.exit(f"cli-golden: megascope index of static_init failed "
+                     f"({code}):\n{err}")
 
         GOLDEN_DIR.mkdir(exist_ok=True)
         seen = set()
@@ -386,6 +399,8 @@ def main() -> int:
                 a = a.replace("{fixture}", str(FIXTURE)) \
                      .replace("{build}", str(build)) \
                      .replace("{index}", str(index)) \
+                     .replace("{static_init_index}",
+                              str(static_init_index)) \
                      .replace("{static_init}", str(STATIC_INIT))
                 m = re.fullmatch(r"\{callsite:(.+)\}", a)
                 if m:

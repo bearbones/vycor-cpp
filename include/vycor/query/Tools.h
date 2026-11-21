@@ -126,9 +126,10 @@ struct ToolContext {
   /// built directly; the audit then treats no target as covered.
   const SnapshotMeta *meta = nullptr;
   /// Static-initialization roots (vycor/callgraph/StaticInit.h), read by
-  /// the static-init-cost metric. Collected by an in-memory bake and not
-  /// part of a saved index, so null whenever the indexes were loaded from
-  /// one: a reader answers `unavailable`, never zero.
+  /// the static-init-cost metric: an in-memory bake's, or a loaded
+  /// index's static_inits section. Null when the context holds none (an
+  /// index written without them, a context built directly): a reader
+  /// answers `unavailable`, never zero.
   const StaticInitFacts *staticInits = nullptr;
   /// Symbol reference facts (get_references, lookup_symbol;
   /// docs/symbol-references.md). Null in a context built without them;

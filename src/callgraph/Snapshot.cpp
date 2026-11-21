@@ -296,7 +296,8 @@ constexpr uint8_t kGraphKind = 1;
 constexpr uint8_t kControlFlowKind = 2;
 constexpr uint8_t kChannelsKind = 3;
 constexpr uint8_t kReferencesKind = 4;
-constexpr uint32_t kSectionKinds = 5;
+constexpr uint8_t kStaticInitsKind = 5; // v20
+constexpr uint32_t kSectionKinds = 6;
 
 void emitInternerTable(std::string &out, const StringInterner &interner) {
   putU32(out, static_cast<uint32_t>(interner.size()));
@@ -326,6 +327,8 @@ const char *sectionName(uint8_t kind) {
     return "channels";
   case kReferencesKind:
     return "references";
+  case kStaticInitsKind:
+    return "static_inits";
   }
   return "unknown";
 }
@@ -424,6 +427,138 @@ bool parseHeader(const llvm::MemoryBuffer &buf, Header &h,
   return r.ok;
 }
 
+// ----------------------------------------------------------------------------
+// v20 static_inits section: the canonical StaticInitFacts over one string
+// table, sorted and unique, so equal facts encode to equal bytes.
+//
+//   u8  collected (0 or 1)
+//   u32 string count, then each string (u32 length + index text)
+//   u32 root count, then per root:
+//     u8 kind, u32 name, u32 usr, u32 file, u32 line,
+//     u32 TU count + TU string ids,
+//     u32 callee count, per callee: u32 usr, u32 display,
+//       u32 TU count + TU string ids (0: every TU of the root)
+// ----------------------------------------------------------------------------
+
+void emitStaticInits(std::string &out, const StaticInitFacts &facts) {
+  size_t refs = 0;
+  for (const StaticInitRoot &root : facts.roots) {
+    refs += 3 + root.tus.size();
+    for (const StaticInitCallee &c : root.callees)
+      refs += 2 + c.tus.size();
+  }
+  std::vector<llvm::StringRef> table;
+  table.reserve(refs);
+  for (const StaticInitRoot &root : facts.roots) {
+    table.push_back(root.name);
+    table.push_back(root.usr);
+    table.push_back(root.file);
+    table.insert(table.end(), root.tus.begin(), root.tus.end());
+    for (const StaticInitCallee &c : root.callees) {
+      table.push_back(c.usr);
+      table.push_back(c.display);
+      table.insert(table.end(), c.tus.begin(), c.tus.end());
+    }
+  }
+  std::sort(table.begin(), table.end());
+  table.erase(std::unique(table.begin(), table.end()), table.end());
+  auto idOf = [&](llvm::StringRef s) {
+    auto it = std::lower_bound(table.begin(), table.end(), s);
+    assert(it != table.end() && *it == s);
+    return static_cast<uint32_t>(it - table.begin());
+  };
+  auto putIds = [&](const std::vector<std::string> &strings) {
+    putU32(out, static_cast<uint32_t>(strings.size()));
+    for (const std::string &str : strings)
+      putU32(out, idOf(str));
+  };
+  putU8(out, facts.collected ? 1 : 0);
+  putU32(out, static_cast<uint32_t>(table.size()));
+  for (llvm::StringRef str : table) {
+    putU32(out, static_cast<uint32_t>(str.size()));
+    out.append(str.data(), str.size());
+  }
+  putU32(out, static_cast<uint32_t>(facts.roots.size()));
+  for (const StaticInitRoot &root : facts.roots) {
+    putU8(out, static_cast<uint8_t>(root.kind));
+    putU32(out, idOf(root.name));
+    putU32(out, idOf(root.usr));
+    putU32(out, idOf(root.file));
+    putU32(out, root.line);
+    putIds(root.tus);
+    putU32(out, static_cast<uint32_t>(root.callees.size()));
+    for (const StaticInitCallee &c : root.callees) {
+      putU32(out, idOf(c.usr));
+      putU32(out, idOf(c.display));
+      putIds(c.tus);
+    }
+  }
+}
+
+bool readStaticInits(Reader &r, StaticInitFacts &facts) {
+  // A count no record of at least `minBytes` each could fill is damage,
+  // refused before anything is sized by it.
+  auto counted = [&](uint32_t minBytes) -> uint32_t {
+    const uint32_t n = r.count();
+    if (r.ok && n > static_cast<uint64_t>(r.end - r.p) / minBytes) {
+      r.ok = false;
+      return 0;
+    }
+    return n;
+  };
+  const uint8_t collected = r.u8();
+  if (collected > 1)
+    return false;
+  const uint32_t stringCount = counted(4);
+  std::vector<std::string> table;
+  table.reserve(stringCount);
+  for (uint32_t i = 0; r.ok && i < stringCount; ++i)
+    table.push_back(r.text());
+  auto str = [&](std::string &into) {
+    const uint32_t id = r.u32();
+    if (!r.ok || id >= table.size()) {
+      r.ok = false;
+      return;
+    }
+    into = table[id];
+  };
+  auto strs = [&](std::vector<std::string> &into) {
+    const uint32_t n = counted(4);
+    into.resize(n);
+    for (uint32_t i = 0; r.ok && i < n; ++i)
+      str(into[i]);
+  };
+  const uint32_t rootCount = counted(25);
+  facts.roots.clear();
+  facts.roots.resize(rootCount);
+  for (uint32_t i = 0; r.ok && i < rootCount; ++i) {
+    StaticInitRoot &root = facts.roots[i];
+    const uint8_t kind = r.u8();
+    if (kind > static_cast<uint8_t>(StaticInitKind::ConstructorFunction))
+      return false;
+    root.kind = static_cast<StaticInitKind>(kind);
+    str(root.name);
+    str(root.usr);
+    str(root.file);
+    root.line = r.u32();
+    strs(root.tus);
+    const uint32_t calleeCount = counted(12);
+    root.callees.resize(calleeCount);
+    for (uint32_t k = 0; r.ok && k < calleeCount; ++k) {
+      StaticInitCallee &c = root.callees[k];
+      str(c.usr);
+      str(c.display);
+      strs(c.tus);
+    }
+  }
+  if (!r.ok) {
+    facts = StaticInitFacts();
+    return false;
+  }
+  facts.collected = collected == 1;
+  return true;
+}
+
 /// Whether the stored checksum of a section matches its bytes.
 bool verifySection(const Header &h, uint8_t kind, std::string &error) {
   const auto &range = h.ranges[kind];
@@ -444,7 +579,7 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
                       const ControlFlowIndex &cfIndex,
                       const SnapshotMeta &meta, const ChannelIndex &channels,
                       const ReferenceIndex &references, std::string *error,
-                      bool durable) {
+                      bool durable, const StaticInitFacts &staticInits) {
   using SId = StringInterner::Id;
   // A read-only reference index dropped its contributor lists at load:
   // what it would write could not be refreshed or merged later.
@@ -802,6 +937,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
   // References: the index writes itself (canonical bytes; the layout is
   // documented in ReferenceIndex.cpp).
   references.encode(sections[kReferencesKind]);
+
+  emitStaticInits(sections[kStaticInitsKind], staticInits);
 
   // Assemble the file: header (version, summary counts, section table
   // with a checksum per section, header checksum), then the sections.
@@ -1384,6 +1521,20 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
     skipSection("references", kReferencesKind);
   }
 
+  if (needs & kSectionStaticInits) {
+    if (std::string why = beginSection(kStaticInitsKind); !why.empty())
+      return fail(why);
+    if (!readStaticInits(r, out.staticInits))
+      return malformed();
+    sectionDone();
+    if (!r.ok)
+      return malformed();
+    mark("static_inits");
+    out.loaded |= kSectionStaticInits;
+  } else {
+    skipSection("static_inits", kStaticInitsKind);
+  }
+
   if (!r.ok)
     return malformed();
   finish();
@@ -1673,6 +1824,9 @@ SnapshotIO::merge(const std::vector<std::string> &inputPaths,
     return fail("no input snapshots specified");
 
   SnapshotData out;
+  // Collected until an input without the facts is appended (append ANDs);
+  // merged once after the last input.
+  out.staticInits.collected = true;
   bool haveConfig = false;
   std::string configSource;
   bool firstShard = true;
@@ -1773,6 +1927,7 @@ SnapshotIO::merge(const std::vector<std::string> &inputPaths,
       snap->cfIndex.removeTUs(overlapping);
       snap->channels.removeTUs(overlapping);
       snap->references.removeTUs(overlapping);
+      snap->staticInits.removeTUs(overlapping);
     }
 
     if (firstShard && overlapping.empty()) {
@@ -1780,15 +1935,18 @@ SnapshotIO::merge(const std::vector<std::string> &inputPaths,
       out.cfIndex = std::move(snap->cfIndex);
       out.channels = std::move(snap->channels);
       out.references = std::move(snap->references);
+      out.staticInits = std::move(snap->staticInits);
       firstShard = false;
     } else {
       out.graph.absorb(snap->graph);
       out.cfIndex.absorb(snap->cfIndex);
       out.channels.absorb(snap->channels);
       out.references.absorb(snap->references);
+      out.staticInits.append(std::move(snap->staticInits));
       firstShard = false;
     }
   }
+  out.staticInits.canonicalize();
 
   SnapshotIO::recordDependencies(out.meta, mergedDeps);
   if (!out.meta.files.empty())

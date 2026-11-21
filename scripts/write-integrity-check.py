@@ -56,9 +56,9 @@ except ImportError:  # not POSIX: the lock scenario is skipped
 TUS = 12
 FNS = 40
 
-# Section kinds in the v13 header table (Snapshot.cpp).
+# Section kinds in the header table (Snapshot.cpp).
 SECTION_NAMES = {0: "meta", 1: "graph", 2: "control_flow", 3: "channels",
-                 4: "references"}
+                 4: "references", 5: "static_inits"}
 
 
 def tu_source(n: int) -> str:

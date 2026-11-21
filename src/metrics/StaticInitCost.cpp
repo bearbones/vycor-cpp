@@ -332,9 +332,10 @@ public:
   std::string unavailable(const MetricContext &ctx) const override {
     if (ctx.index.staticInits && ctx.index.staticInits->collected)
       return {};
-    return "static-initialization facts are collected by an in-memory bake "
-           "and are not part of a saved index; run with --source, "
-           "--source-list or --source-re instead of --index";
+    return "this index holds no static-initialization facts (it was "
+           "written without them); rebuild it with `megascope index`, or "
+           "run with --source, --source-list or --source-re to bake in "
+           "memory";
   }
 
   std::unique_ptr<MetricRun>

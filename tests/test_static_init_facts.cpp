@@ -581,3 +581,163 @@ TEST_CASE("canonicalize merges and orders whatever order TUs arrived in",
     CHECK(twins.roots[1].callees[0].display == "g");
   }
 }
+
+namespace {
+
+StaticInitRoot rootFor(const char *name, const char *file, unsigned line,
+                       std::vector<std::string> tus,
+                       std::vector<const char *> callees) {
+  StaticInitRoot root;
+  root.name = name;
+  root.usr = std::string("c:@") + name;
+  root.file = file;
+  root.line = line;
+  root.tus = std::move(tus);
+  for (const char *callee : callees)
+    root.callees.push_back({std::string("c:@F@") + callee, callee, {}});
+  return root;
+}
+
+const StaticInitCallee *calleeNamed(const StaticInitRoot &root,
+                                    llvm::StringRef display) {
+  for (const StaticInitCallee &c : root.callees)
+    if (c.display == display)
+      return &c;
+  return nullptr;
+}
+
+/// Field-by-field equality, so a failure names nothing but the facts.
+bool sameFacts(const StaticInitFacts &a, const StaticInitFacts &b) {
+  if (a.collected != b.collected || a.roots.size() != b.roots.size())
+    return false;
+  for (size_t i = 0; i < a.roots.size(); ++i) {
+    const StaticInitRoot &x = a.roots[i];
+    const StaticInitRoot &y = b.roots[i];
+    if (x.kind != y.kind || x.name != y.name || x.usr != y.usr ||
+        x.file != y.file || x.line != y.line || x.tus != y.tus ||
+        x.callees.size() != y.callees.size())
+      return false;
+    for (size_t k = 0; k < x.callees.size(); ++k)
+      if (x.callees[k].usr != y.callees[k].usr ||
+          x.callees[k].display != y.callees[k].display ||
+          x.callees[k].tus != y.callees[k].tus)
+        return false;
+  }
+  return true;
+}
+
+} // namespace
+
+TEST_CASE("a callee only some TUs of a root call names those TUs",
+          "[metrics][static-init]") {
+  // A header initializer whose expansion differs per TU (an #ifdef in the
+  // initializer): /a.cpp calls f and g, /b.cpp calls only f.
+  StaticInitFacts facts;
+  facts.collected = true;
+  facts.roots = {rootFor("shared", "/h.hpp", 3, {"/a.cpp"}, {"f", "g"}),
+                 rootFor("shared", "/h.hpp", 3, {"/b.cpp"}, {"f"})};
+  facts.canonicalize();
+  REQUIRE(facts.roots.size() == 1);
+  const StaticInitRoot &root = facts.roots[0];
+  CHECK(root.tus == std::vector<std::string>{"/a.cpp", "/b.cpp"});
+  REQUIRE(root.callees.size() == 2);
+  // Every TU calls f: its list stays empty.
+  CHECK(calleeNamed(root, "f")->tus.empty());
+  CHECK(calleeNamed(root, "g")->tus == std::vector<std::string>{"/a.cpp"});
+
+  SECTION("canonicalize is idempotent over attributed callees") {
+    StaticInitFacts again = facts;
+    again.canonicalize();
+    CHECK(sameFacts(again, facts));
+  }
+}
+
+TEST_CASE("removeTUs takes back what the removed TUs contributed",
+          "[metrics][static-init]") {
+  StaticInitFacts facts;
+  facts.collected = true;
+  facts.roots = {rootFor("shared", "/h.hpp", 3, {"/a.cpp"}, {"f", "g"}),
+                 rootFor("shared", "/h.hpp", 3, {"/b.cpp"}, {"f"}),
+                 rootFor("local", "/a.cpp", 7, {"/a.cpp"}, {"h"}),
+                 rootFor("other", "/b.cpp", 9, {"/b.cpp"}, {"k"})};
+  facts.canonicalize();
+  REQUIRE(facts.roots.size() == 3);
+
+  SECTION("a root only the removed TU runs is dropped; a shared one loses "
+          "the TU and the callees only it called") {
+    CHECK(facts.removeTUs({"/a.cpp"}) == 1);
+    REQUIRE(facts.roots.size() == 2);
+    CHECK(rootNamed(facts, "local") == nullptr);
+    const StaticInitRoot *shared = rootNamed(facts, "shared");
+    REQUIRE(shared != nullptr);
+    CHECK(shared->tus == std::vector<std::string>{"/b.cpp"});
+    CHECK(calleeNames(*shared) == std::vector<std::string>{"f"});
+    CHECK(shared->callees[0].tus.empty());
+    CHECK(facts.collected);
+  }
+
+  SECTION("a callee left called by every remaining TU is unattributed "
+          "again") {
+    facts.removeTUs({"/b.cpp"});
+    const StaticInitRoot *shared = rootNamed(facts, "shared");
+    REQUIRE(shared != nullptr);
+    CHECK(shared->tus == std::vector<std::string>{"/a.cpp"});
+    CHECK(calleeNames(*shared) == std::vector<std::string>{"f", "g"});
+    for (const StaticInitCallee &c : shared->callees)
+      CHECK(c.tus.empty());
+  }
+
+  SECTION("removing a TU and absorbing its re-bake equals baking both "
+          "fresh") {
+    // /b.cpp is edited: its expansion of the header now calls g too, and
+    // its own initializer calls m instead of k.
+    StaticInitFacts rebakedB;
+    rebakedB.collected = true;
+    rebakedB.roots = {rootFor("shared", "/h.hpp", 3, {"/b.cpp"}, {"f", "g"}),
+                      rootFor("other", "/b.cpp", 9, {"/b.cpp"}, {"m"})};
+    rebakedB.canonicalize();
+
+    StaticInitFacts fresh;
+    fresh.collected = true;
+    fresh.roots = {rootFor("shared", "/h.hpp", 3, {"/a.cpp"}, {"f", "g"}),
+                   rootFor("local", "/a.cpp", 7, {"/a.cpp"}, {"h"})};
+    fresh.canonicalize();
+    StaticInitFacts copy = rebakedB;
+    fresh.absorb(std::move(copy));
+
+    facts.removeTUs({"/b.cpp"});
+    facts.absorb(std::move(rebakedB));
+    CHECK(sameFacts(facts, fresh));
+    const StaticInitRoot *shared = rootNamed(facts, "shared");
+    REQUIRE(shared != nullptr);
+    for (const StaticInitCallee &c : shared->callees)
+      CHECK(c.tus.empty());
+  }
+
+  SECTION("removing nothing, or a TU no root names, changes nothing") {
+    StaticInitFacts before = facts;
+    CHECK(facts.removeTUs({}) == 0);
+    CHECK(facts.removeTUs({"/elsewhere.cpp"}) == 0);
+    CHECK(sameFacts(facts, before));
+  }
+}
+
+TEST_CASE("absorbing facts nobody collected leaves the union uncollected",
+          "[metrics][static-init]") {
+  StaticInitFacts facts;
+  facts.collected = true;
+  facts.roots = {rootFor("a", "/a.cpp", 1, {"/a.cpp"}, {"f"})};
+  StaticInitFacts missing; // e.g. a shard written without the facts
+  facts.absorb(std::move(missing));
+  CHECK_FALSE(facts.collected);
+  CHECK(facts.roots.size() == 1);
+
+  StaticInitFacts both;
+  both.collected = true;
+  StaticInitFacts other;
+  other.collected = true;
+  other.roots = {rootFor("b", "/b.cpp", 1, {"/b.cpp"}, {"g"})};
+  both.absorb(std::move(other));
+  CHECK(both.collected);
+  CHECK(both.roots.size() == 1);
+}

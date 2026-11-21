@@ -325,24 +325,97 @@ private:
   UsrCache usrs_;
 };
 
-template <typename T, typename Less, typename Same>
-void sortUnique(std::vector<T> &v, Less less, Same same) {
-  std::sort(v.begin(), v.end(), less);
-  v.erase(std::unique(v.begin(), v.end(), same), v.end());
+void sortUniqueStrings(std::vector<std::string> &v) {
+  std::sort(v.begin(), v.end());
+  v.erase(std::unique(v.begin(), v.end()), v.end());
 }
 
-void normalizeLists(StaticInitRoot &root) {
-  std::sort(root.tus.begin(), root.tus.end());
-  root.tus.erase(std::unique(root.tus.begin(), root.tus.end()),
-                 root.tus.end());
-  sortUnique(
-      root.callees,
-      [](const StaticInitCallee &a, const StaticInitCallee &b) {
-        return a.usr < b.usr;
-      },
-      [](const StaticInitCallee &a, const StaticInitCallee &b) {
-        return a.usr == b.usr;
-      });
+bool calleeLess(const StaticInitCallee &a, const StaticInitCallee &b) {
+  return std::tie(a.usr, a.display) < std::tie(b.usr, b.display);
+}
+
+// One record's lists in canonical form, its TU list taken as the
+// record's own: TUs sorted and unique, callees by usr with duplicates
+// folded (an empty TU list is every TU of the record, so it absorbs any
+// other), and a callee list naming every TU of the record emptied.
+void normalizeRecord(StaticInitRoot &root) {
+  sortUniqueStrings(root.tus);
+  std::sort(root.callees.begin(), root.callees.end(), calleeLess);
+  size_t kept = 0;
+  for (size_t i = 0; i < root.callees.size(); ++i) {
+    StaticInitCallee &c = root.callees[i];
+    if (kept > 0 && root.callees[kept - 1].usr == c.usr) {
+      StaticInitCallee &into = root.callees[kept - 1];
+      if (into.tus.empty() || c.tus.empty()) {
+        into.tus.clear();
+      } else {
+        into.tus.insert(into.tus.end(), c.tus.begin(), c.tus.end());
+        sortUniqueStrings(into.tus);
+      }
+      continue;
+    }
+    if (kept != i)
+      root.callees[kept] = std::move(c);
+    ++kept;
+  }
+  root.callees.resize(kept);
+  for (StaticInitCallee &c : root.callees) {
+    if (c.tus.empty())
+      continue;
+    sortUniqueStrings(c.tus);
+    if (c.tus.size() >= root.tus.size())
+      c.tus.clear();
+  }
+}
+
+// Whether every record of [first, last) calls the same functions from
+// all of its TUs: then the merged record is the union of the TU lists
+// over the first record's callees, with nothing to attribute.
+bool sameCallsEverywhere(const std::vector<StaticInitRoot> &roots,
+                         size_t first, size_t last) {
+  const auto &calls = roots[first].callees;
+  for (size_t i = first; i < last; ++i) {
+    const auto &other = roots[i].callees;
+    if (other.size() != calls.size())
+      return false;
+    for (size_t k = 0; k < calls.size(); ++k)
+      if (!other[k].tus.empty() || other[k].usr != calls[k].usr ||
+          other[k].display != calls[k].display)
+        return false;
+  }
+  return true;
+}
+
+// Fold the normalized records [first, last) of one initializer into
+// roots[first]. The usual case (every TU calls the same functions) is a
+// union of TU lists; otherwise each callee's TUs are spelled out, merged,
+// and emptied again where they are all of the root's.
+void foldRecords(std::vector<StaticInitRoot> &roots, size_t first,
+                 size_t last) {
+  StaticInitRoot &into = roots[first];
+  if (sameCallsEverywhere(roots, first, last)) {
+    for (size_t i = first + 1; i < last; ++i)
+      into.tus.insert(into.tus.end(),
+                      std::make_move_iterator(roots[i].tus.begin()),
+                      std::make_move_iterator(roots[i].tus.end()));
+    sortUniqueStrings(into.tus);
+    return;
+  }
+  std::vector<StaticInitCallee> callees;
+  for (size_t i = first; i < last; ++i) {
+    StaticInitRoot &record = roots[i];
+    for (StaticInitCallee &c : record.callees) {
+      if (c.tus.empty())
+        c.tus = record.tus;
+      callees.push_back(std::move(c));
+    }
+    if (i != first)
+      into.tus.insert(into.tus.end(),
+                      std::make_move_iterator(record.tus.begin()),
+                      std::make_move_iterator(record.tus.end()));
+  }
+  into.callees = std::move(callees);
+  normalizeRecord(into);
 }
 
 } // namespace
@@ -376,34 +449,87 @@ void StaticInitFacts::canonicalize() {
   auto key = [](const StaticInitRoot &root) {
     return std::tie(root.usr, root.file, root.line);
   };
+  for (StaticInitRoot &root : roots)
+    normalizeRecord(root);
   std::stable_sort(roots.begin(), roots.end(),
                    [&](const StaticInitRoot &a, const StaticInitRoot &b) {
                      return key(a) < key(b);
                    });
   size_t kept = 0;
-  for (size_t i = 0; i < roots.size(); ++i) {
-    if (kept > 0 && key(roots[kept - 1]) == key(roots[i])) {
-      StaticInitRoot &into = roots[kept - 1];
-      into.tus.insert(into.tus.end(),
-                      std::make_move_iterator(roots[i].tus.begin()),
-                      std::make_move_iterator(roots[i].tus.end()));
-      into.callees.insert(into.callees.end(),
-                          std::make_move_iterator(roots[i].callees.begin()),
-                          std::make_move_iterator(roots[i].callees.end()));
-      continue;
-    }
-    if (kept != i)
-      roots[kept] = std::move(roots[i]);
+  for (size_t first = 0; first < roots.size();) {
+    size_t last = first + 1;
+    while (last < roots.size() && key(roots[last]) == key(roots[first]))
+      ++last;
+    if (last - first > 1)
+      foldRecords(roots, first, last);
+    if (kept != first)
+      roots[kept] = std::move(roots[first]);
     ++kept;
+    first = last;
   }
   roots.resize(kept);
-  for (StaticInitRoot &root : roots)
-    normalizeLists(root);
   std::sort(roots.begin(), roots.end(),
             [](const StaticInitRoot &a, const StaticInitRoot &b) {
               return std::tie(a.file, a.line, a.name, a.usr) <
                      std::tie(b.file, b.line, b.name, b.usr);
             });
+}
+
+void StaticInitFacts::append(StaticInitFacts &&other) {
+  collected = collected && other.collected;
+  roots.insert(roots.end(), std::make_move_iterator(other.roots.begin()),
+               std::make_move_iterator(other.roots.end()));
+  other.roots.clear();
+}
+
+void StaticInitFacts::absorb(StaticInitFacts &&other) {
+  append(std::move(other));
+  canonicalize();
+}
+
+size_t StaticInitFacts::removeTUs(const std::vector<std::string> &tuPaths) {
+  if (tuPaths.empty() || roots.empty())
+    return 0;
+  std::vector<std::string> gone;
+  gone.reserve(tuPaths.size());
+  for (const std::string &raw : tuPaths)
+    gone.push_back(toIndexText(raw));
+  sortUniqueStrings(gone);
+  auto isGone = [&](const std::string &tu) {
+    return std::binary_search(gone.begin(), gone.end(), tu);
+  };
+  size_t kept = 0;
+  for (size_t i = 0; i < roots.size(); ++i) {
+    StaticInitRoot &root = roots[i];
+    root.tus.erase(std::remove_if(root.tus.begin(), root.tus.end(), isGone),
+                   root.tus.end());
+    if (root.tus.empty())
+      continue;
+    // A callee every TU of the root calls still is; one some of them
+    // call loses the removed ones, and is gone with the last.
+    size_t keptCallees = 0;
+    for (size_t k = 0; k < root.callees.size(); ++k) {
+      StaticInitCallee &c = root.callees[k];
+      if (!c.tus.empty()) {
+        c.tus.erase(std::remove_if(c.tus.begin(), c.tus.end(), isGone),
+                    c.tus.end());
+        if (c.tus.empty())
+          continue;
+        if (c.tus.size() == root.tus.size())
+          c.tus.clear();
+      }
+      if (keptCallees != k)
+        root.callees[keptCallees] = std::move(c);
+      ++keptCallees;
+    }
+    root.callees.resize(keptCallees);
+    if (kept != i)
+      roots[kept] = std::move(root);
+    ++kept;
+  }
+  const size_t dropped = roots.size() - kept;
+  roots.resize(kept);
+  return dropped;
 }
 
 } // namespace vycor

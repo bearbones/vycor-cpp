@@ -311,7 +311,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, do I/O, or throw, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`); given the USR as well, a placement `operator new` (`isPlacementNewUsr`) is not an allocation. One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
 | `CoverageProfile.h/.cpp` | `llvm-cov export` JSON read into flat per-file tables once: `countAt(file, line, col)` (the count of the last segment at or before a location), `functionAt` (the innermost function body, entry counts summed over records sharing a body), `fileFor` (path-suffix match, ambiguity is no match) |
 | `HotPath.h/.cpp` | `analyzeHotPaths`: roots (names, USRs, regexes, profile entry counts ≥ `minCount`), one label-setting widest-path search over flat arrays sized once by the interner (weight = smallest call-site or entry count; fewest calls among equals; canonical parent on ties: Proven first, then caller USR, site, kind; profile files bound two-sided), effect functions end a path, allow list skips; reached template instantiations whose body no TU read counted as `templateLeaves`; findings per effect call with a witness, `observed` / `unprofiled` / `latent`, canonical order (`docs/checks/hot-path-effects.md`) |
-| `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location). Held in memory only (`BakedIndexes::staticInits`), not in the snapshot |
+| `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location; a callee only some of a root's TUs call lists them). Saved in the snapshot's `static_inits` section (v20); worker shards and `merge` combine them with `absorb`, a warm refresh takes back a TU's share with `removeTUs` |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
@@ -492,8 +492,9 @@ paging, `batch` and the goldens are the tools' own.
 
 Record shape, roll-ups and payload: `docs/metrics/README.md`. A metric
 whose facts the index does not hold answers `unavailable` (exit 3),
-never zero: `static-init-cost` reads `ToolContext::staticInits`, which
-only an in-memory bake fills. Organization metrics register with
+never zero: `static-init-cost` reads `ToolContext::staticInits`, which an
+in-memory bake fills or a loaded index's `static_inits` section does
+(the metrics tool declares it in its `needs`). Organization metrics register with
 `VYCOR_REGISTER_METRIC` (`ext/Extensions.h`).
 
 ### `cli` — megascope Verbs (adapter)
@@ -523,10 +524,12 @@ place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
 v15 the references section and its two header counts, v16 each
 reference record's largest contributing TU, v17 lock facts and a flag
-byte on each reference record, v18 the lock acquisition records:
-header with
+byte on each reference record, v18 the lock acquisition records, v19
+the calls of template instantiations and compiler-written code, v20 the
+`static_inits` section: header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
-for meta / graph / control flow / channels / references), so a
+for meta / graph / control flow / channels / references / static
+inits), so a
 graph-only tool never
 decodes (or checksums) the
 call-site contexts, `info` reads the meta section alone, and
