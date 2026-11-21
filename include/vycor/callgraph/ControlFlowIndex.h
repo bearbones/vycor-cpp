@@ -20,6 +20,7 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ConditionalGuard.h"
 #include "vycor/callgraph/FileStamp.h"
+#include "vycor/callgraph/StaticInit.h"
 #include "vycor/callgraph/TuOutcome.h"
 #include "vycor/callgraph/StringInterner.h"
 
@@ -505,6 +506,10 @@ struct BakedIndexes {
   // fired, no facts), Skipped (no compile command). Under an isolated
   // bake the parent adds Poisoned for the TUs whose worker died.
   TuOutcomes outcomes;
+  // What runs before `main`: dynamic initializers and constructor
+  // functions (StaticInit.h), in canonical order. Filled by bakeIndexes;
+  // in memory only (the saved index does not carry them).
+  StaticInitFacts staticInits;
 };
 
 // Build both indexes in a single frontend parse per TU: the node/hierarchy

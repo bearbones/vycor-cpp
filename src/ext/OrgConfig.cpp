@@ -63,7 +63,7 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
   static const char *knownKeys[] = {"lockTypes", "channelTypes",
                                     "featureFlags", "collapsePaths",
                                     "disabledChecks",
-                                    "staticInitHazards"};
+                                    "staticInitHazards", "effects"};
   for (const auto &kv : *root) {
     bool known = false;
     for (const char *k : knownKeys)
@@ -71,7 +71,7 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
     if (!known) {
       error = "unknown key '" + kv.first.str() +
               "' (expected one of: lockTypes, channelTypes, featureFlags, "
-              "collapsePaths, disabledChecks, staticInitHazards)";
+              "collapsePaths, disabledChecks, staticInitHazards, effects)";
       return false;
     }
   }
@@ -83,6 +83,27 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
       !parseStringArray(*root, "disabledChecks",
                         out.disabledChecks, error))
     return false;
+
+  if (const llvm::json::Value *effects = root->get("effects")) {
+    const llvm::json::Object *obj = effects->getAsObject();
+    if (!obj) {
+      error = "'effects' must be an object of string arrays";
+      return false;
+    }
+    for (const auto &kv : *obj) {
+      auto kind = effectKindFromName(kv.first.str());
+      if (!kind) {
+        error = "unknown effect '" + kv.first.str() +
+                "' (expected one of: allocation, lock, io)";
+        return false;
+      }
+      if (!parseStringArray(*obj, kv.first.str(),
+                            out.effects[static_cast<size_t>(*kind)], error)) {
+        error = "'effects': " + error;
+        return false;
+      }
+    }
+  }
 
   if (const llvm::json::Value *channels = root->get("channelTypes")) {
     const llvm::json::Array *arr = channels->getAsArray();
@@ -169,6 +190,8 @@ bool applyOrgConfig(const OrgConfig &cfg, std::string &error) {
   registry.addLockTypes(cfg.lockTypes);
   registry.addStaticInitHazards(cfg.staticInitHazards);
   registry.addChannelTypes(cfg.channelTypes);
+  for (EffectKind kind : kEffectKinds)
+    registry.addEffectFunctions(kind, cfg.effects[static_cast<size_t>(kind)]);
   for (const auto &flag : cfg.featureFlags) {
     if (!registry.addFeatureFlagPattern(flag.pattern, flag.nameGroup)) {
       error = "featureFlags pattern is not a valid regex: " + flag.pattern;

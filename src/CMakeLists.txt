@@ -22,10 +22,12 @@ add_library(vycor_lib
   callgraph/ControlFlowContextVisitor.cpp
   callgraph/ChannelIndex.cpp
   callgraph/ControlFlowOracle.cpp
+  callgraph/Effects.cpp
   callgraph/InputFingerprint.cpp
   callgraph/MegascopeBridge.cpp
   callgraph/PathSearch.cpp
   callgraph/Snapshot.cpp
+  callgraph/StaticInit.cpp
   callgraph/WorkerPool.cpp
   callgraph/Interrupt.cpp
   callgraph/CrashGuard.cpp
@@ -43,6 +45,11 @@ add_library(vycor_lib
   query/DependencyTools.cpp
   deps/TargetMap.cpp
   deps/DependencyAudit.cpp
+  query/MetricsTools.cpp
+  metrics/Metric.cpp
+  metrics/MetricSet.cpp
+  metrics/StaticInitCost.cpp
+  metrics/TargetOwners.cpp
   impact/SemanticDiff.cpp
   impact/ImpactSearch.cpp
   impact/PatchMapping.cpp

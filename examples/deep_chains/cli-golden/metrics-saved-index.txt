@@ -1,0 +1,2 @@
+# megascope metrics -> exit 3
+{"error":"metric 'static-init-cost' is unavailable: static-initialization facts are collected by an in-memory bake and are not part of a saved index; run with --source, --source-list or --source-re instead of --index","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"unavailable"}

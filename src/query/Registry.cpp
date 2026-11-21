@@ -173,6 +173,9 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"query_channel", kSectionChannels},
     {"query_channels_for_function", kSectionChannels},
     {"explain_ordering", kSectionChannels},
+    // Which sections a metrics run reads depends on the metrics selected,
+    // and an organization metric may read any of them.
+    {"metrics", kSectionControlFlow | kSectionChannels},
 };
 
 static const std::map<std::string, std::string> kRecordsKeys = {
@@ -196,6 +199,7 @@ static const std::map<std::string, std::string> kRecordsKeys = {
     {"impact_of_change", "affected"},
     {"audit_dependencies", "edges"},
     {"explain_dependency", "seeds"},
+    {"metrics", "records"},
 };
 
 std::vector<std::string> sectionNames(unsigned needs) {
@@ -218,6 +222,7 @@ std::vector<ToolEntry> getRegisteredTools() {
   registerChannelTools(tools);
   registerImpactTools(tools);
   registerDependencyTools(tools);
+  registerMetricsTools(tools);
   for (auto &tool : tools) {
     auto it = kRecordsKeys.find(tool.name);
     if (it != kRecordsKeys.end())

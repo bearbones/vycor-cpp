@@ -180,9 +180,9 @@ static llvm::json::Object parseToolResult(const llvm::json::Value &result) {
 // Tool registration tests
 // ============================================================================
 
-TEST_CASE("getRegisteredTools returns all 26 tools", "[tools]") {
+TEST_CASE("getRegisteredTools returns all 27 tools", "[tools]") {
   auto tools = getRegisteredTools();
-  CHECK(tools.size() == 26);
+  CHECK(tools.size() == 27);
 
   // Verify tool names.
   std::set<std::string> names;
@@ -213,6 +213,7 @@ TEST_CASE("getRegisteredTools returns all 26 tools", "[tools]") {
   CHECK(names.count("explain_ordering") == 1);
   CHECK(names.count("audit_dependencies") == 1);
   CHECK(names.count("explain_dependency") == 1);
+  CHECK(names.count("metrics") == 1);
 }
 
 // ============================================================================

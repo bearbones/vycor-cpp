@@ -125,6 +125,11 @@ struct ToolContext {
   /// by the dependency audit (docs/dependency-audit.md). Null in a context
   /// built directly; the audit then treats no target as covered.
   const SnapshotMeta *meta = nullptr;
+  /// Static-initialization roots (vycor/callgraph/StaticInit.h), read by
+  /// the static-init-cost metric. Collected by an in-memory bake and not
+  /// part of a saved index, so null whenever the indexes were loaded from
+  /// one: a reader answers `unavailable`, never zero.
+  const StaticInitFacts *staticInits = nullptr;
 };
 
 /// Signature for a tool handler function.

@@ -90,6 +90,13 @@ VYCOR_EXTENSION_SETUP(MyOrgHazards) {
   Plausible-edge semantics; a hazard reached only through an unresolvable
   pointer may be missed.
 
+## See also
+
+The measurement beside this verdict is the metric
+[static-init-cost](../metrics/static-init-cost.md): how many functions
+each initializer reaches, and whether that reach allocates, locks or
+does I/O.
+
 ## Remediation
 
 Move the work behind an explicit `init()` called after load, or a

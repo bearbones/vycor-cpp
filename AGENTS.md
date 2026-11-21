@@ -171,6 +171,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
+| `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, or do I/O, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`). One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
+| `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location). Held in memory only (`BakedIndexes::staticInits`), not in the snapshot |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
 
@@ -241,6 +243,7 @@ directly.
 | `ChannelTools.cpp` | channel listing/query, channels-for-function, explain-ordering |
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
 | `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the call edges, run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
+| `MetricsTools.cpp` | the `metrics` tool: metric selection, roll-up level, target map, paging, and the `--list-metrics` listing over the `metrics/` module |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
 | `Schema.h` | JSON Schema property builders shared by the registrations |
 | `Limits.h/.cpp` | `readLimit`/`readLimitAs`: every user-supplied search limit is clamped to a documented maximum (`kMaxSearchDepth`, ...) before it is narrowed; `docs/path-analysis.md` "Limits" |
@@ -277,6 +280,31 @@ targets' sources are fully indexed. Adapters that write the target map
 are scripts (`scripts/cmake-target-map.py`, CMake File API);
 `scripts/dep-audit-nm-compare.py` measures the audit against the
 undefined symbols of a built tree.
+### `metrics` — Named Measurements
+
+**Headers:** `include/vycor/metrics/`
+**Sources:** `src/metrics/`
+
+Some findings are measurements, not warnings. A metric is a named
+reduction over the megascope index with no pass/fail, selected like a
+check (`--metrics=<spec>`, `--list-metrics`) and documented under
+`docs/metrics/`. The surface is the megascope tool `metrics`
+(`query/MetricsTools.cpp`); `vycor-cpp metrics ...` is an alias for
+`vycor-cpp megascope metrics ...` (`main.cpp`), so the output contract,
+paging, `batch` and the goldens are the tools' own.
+
+| File | Purpose |
+|---|---|
+| `Metric.h/.cpp` | `Metric` (name, summary, unit, native level, `unavailable`, `measure`), `MetricRun` (the samples, and `rollUp` — a group's value from its members, a sum unless the metric overrides it), `MetricSample`/`MetricEntity`, `RollupLevel` (symbol, file, tu, directory, target), `runMetric` (group, roll up, canonical order: value descending, then entity file, line, name, usr, kind), record serialization |
+| `MetricSet.h/.cpp` | The built-in metric table plus the registry's, `resolveMetricSpec` (the `--checks` spec syntax), `metricsRequestReadsIndex` (a listing or a request that cannot succeed answers before any index is loaded or baked) |
+| `TargetOwners.h/.cpp` | The target map of the `target` roll-up: which link targets list a TU as a source (`targets[].name`, `targets[].sources`, `root`) |
+| `StaticInitCost.cpp` | `static-init-cost`: per static-init root, the distinct functions reachable through the call graph and whether that reach meets the effect table; a group's value is the union of its members' reaches (`docs/metrics/static-init-cost.md`) |
+
+Record shape, roll-ups and payload: `docs/metrics/README.md`. A metric
+whose facts the index does not hold answers `unavailable` (exit 3),
+never zero: `static-init-cost` reads `ToolContext::staticInits`, which
+only an in-memory bake fills. Organization metrics register with
+`VYCOR_REGISTER_METRIC` (`ext/Extensions.h`).
 
 ### `cli` — megascope Verbs (adapter)
 
@@ -399,7 +427,7 @@ appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
 
-**26 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
+**27 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -408,7 +436,7 @@ failure mode.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`, `audit_dependencies`, `explain_dependency`.
+`impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`.
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
@@ -439,8 +467,8 @@ and report `total` / `truncated` / `nextOffset`.
 
 | File | Purpose |
 |---|---|
-| `Extensions.h/.cpp` | `ExtensionRegistry` (process-wide): custom `Check`s, lock/channel type registration, guard classifiers (feature flags). Macros `VYCOR_REGISTER_CHECK` / `VYCOR_EXTENSION_SETUP` |
-| `OrgConfig.h/.cpp` | `--org-config` JSON: declarative lock/channel types, feature-flag patterns, collapse paths, disabled checks |
+| `Extensions.h/.cpp` | `ExtensionRegistry` (process-wide): custom `Check`s, custom `Metric`s, lock/channel type registration, effect functions, guard classifiers (feature flags). Macros `VYCOR_REGISTER_CHECK` / `VYCOR_REGISTER_METRIC` / `VYCOR_EXTENSION_SETUP` |
+| `OrgConfig.h/.cpp` | `--org-config` JSON: declarative lock/channel types, feature-flag patterns, collapse paths, disabled checks, effect functions |
 
 The scheme exists so organization forks never edit upstream files (clean
 merges): declarative config goes in an org JSON passed as `--org-config`;
@@ -488,6 +516,7 @@ vycor-cpp megascope batch   [--index <file>]      # NDJSON {"tool":..,"args":{..
 vycor-cpp megascope dump    [--index <file> | --build-path <dir>] [--format ndjson|json] [--pretty]   # stream every call-site context and channel site
 vycor-cpp megascope diff    --before <index> --after <index> [--to <name>] [--impact] [--no-context] [--allow-mismatch]   # semantic diff of two saved indexes
 vycor-cpp megascope tools | info [--files] | help
+vycor-cpp metrics   [--list-metrics] [--metrics <spec>] [--rollup symbol|file|tu|directory|target] [--target-map <file>] [--limit <n>] [--offset <n>] --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex>   # = megascope metrics
 ```
 
 `--org-config` (check/megascope) loads the organization config JSON
@@ -560,7 +589,7 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
-- Builds `vycor_lib` from `check/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, `deps/*.cpp`, and `ext/*.cpp`.
+- Builds `vycor_lib` from `check/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, `deps/*.cpp`, `metrics/*.cpp`, and `ext/*.cpp`.
 - Builds `vycor-cpp` executable from `main.cpp` plus a `CONFIGURE_DEPENDS`
   glob of top-level `ext/*.cpp` (organization slot-in — attached to the
   executable, not the archive, so static registrars survive linking).

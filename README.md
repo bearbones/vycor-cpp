@@ -384,7 +384,7 @@ batch on one loaded index).
 ./build/vycor-cpp megascope find-call-chain --to Foo::bar --format ndjson
 ./build/vycor-cpp megascope search-functions --query Foo --format tsv | cut -f4
 ./build/vycor-cpp megascope info            # what the index holds
-./build/vycor-cpp megascope tools           # the 26 tools
+./build/vycor-cpp megascope tools           # the 27 tools
 
 # Many queries, one load: NDJSON requests in, one response per line out.
 printf '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}\n' | \
@@ -435,7 +435,7 @@ line after a `{"_summary":...}` line — or as one JSON document with
 `--format json`; the stream never holds the materialized index, so it
 scales to the largest indexes.
 
-**26 tools**: `search_functions`, `lookup_function`, `get_callees`,
+**27 tools**: `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -444,7 +444,7 @@ scales to the largest indexes.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`, `audit_dependencies`, `explain_dependency`.
+`impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`.
 See `docs/megascope-usage.md`. `megascope diff --before A --after B` compares
 two saved indexes (`docs/change-impact.md`). `audit_dependencies` and
 `explain_dependency` compare the build's declared link dependencies with
@@ -569,6 +569,34 @@ Rust engine (`brew tap bearbones/megascope && brew install megascope`):
 
 ---
 
+### metrics — Measurements
+
+Some findings are measurements, not warnings. `vycor-cpp metrics`
+reports named metrics, selected the way checks are, as records with one
+shape and no pass/fail:
+
+```bash
+./build/vycor-cpp metrics --list-metrics
+
+# Work done before main, largest reach first
+./build/vycor-cpp metrics --metrics=static-init-cost \
+  --build-path /path/to/compile_commands_dir --source-re 'src/.*\.cpp$'
+
+# The same, per TU / directory / link target
+./build/vycor-cpp metrics --rollup tu --format ndjson \
+  --build-path /path/to/compile_commands_dir --source-re 'src/.*\.cpp$'
+```
+
+| Metric | Measures |
+|---|---|
+| [static-init-cost](docs/metrics/static-init-cost.md) | Per dynamic initializer and constructor function: the functions it can reach before `main`, and whether that reach allocates, locks or does I/O |
+
+It is the megascope tool `metrics` under a top-level name, so the output
+formats, paging, exit codes and `batch` are megascope's. Record shape,
+roll-ups and organization metrics: **[docs/metrics/README.md](docs/metrics/README.md)**.
+
+---
+
 ## Customizing for your organization
 
 Organizations forking/mirroring this repo can add their own semantics
@@ -582,6 +610,7 @@ without editing upstream files (so upstream merges stay conflict-free):
   paths, and per-check kill switches.
 - **`ext/` slot-in directory** — compiled hooks: custom **check checks**
   (full AST access, registered with `VYCOR_REGISTER_CHECK`),
+  custom **metrics** (`VYCOR_REGISTER_METRIC`),
   arbitrary guard classifiers, and code-registered type lists. `ext/*.cpp`
   is auto-globbed into the build; `ext/tests/*.cpp` into the test binary.
 - **CLI flags** (`--lock-types`, `--channel-types-json`,
@@ -614,14 +643,16 @@ include/vycor/
                                 Identity, Serialize)
   cli/                          megascope verbs: schema-derived flags,
                                 output contract, exit codes (MegascopeCli)
+  metrics/                      Named measurements (Metric, MetricSet,
+                                TargetOwners)
   ext/                          Organization extension API (Extensions.h,
                                 OrgConfig.h)
   compat/                       LLVM-version compat, PCH cache, tool adjusters
 
 src/
-  main.cpp                      CLI entry point (check/morph/megascope)
+  main.cpp                      CLI entry point (check/morph/megascope/metrics)
   plugin/MegascopePlugin.cpp    Clang frontend plugin (libvycor_megascope_plugin)
-  check/ morph/ callgraph/ query/ cli/ impact/ ext/ compat/   Implementations
+  check/ morph/ callgraph/ query/ cli/ impact/ metrics/ ext/ compat/   Implementations
 
 ext/                            Organization slot-in (fork-owned; globbed
                                 into the build — see ext/README.md)

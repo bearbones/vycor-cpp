@@ -16,9 +16,11 @@
 #pragma once
 
 #include "vycor/callgraph/ChannelIndex.h"
+#include "vycor/callgraph/Effects.h"
 
 #include "llvm/ADT/StringRef.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,9 @@ struct FeatureFlagPattern {
 //                       "consume": ["drain"], "category": "bus"}],
 //     "featureFlags": [{"pattern": "FFlag::([A-Za-z0-9_]+)", "nameGroup": 1}],
 //     "staticInitHazards": ["myorg::JniEnv::attach"],
+//     "effects": {"allocation": ["myorg::Arena::alloc"],
+//                 "lock": ["myorg::SpinLock::acquire"],
+//                 "io": ["myorg::log::write"]},
 //     "collapsePaths": ["ThirdParty/Math"],
 //     "disabledChecks": ["some-ext-check"]
 //   }
@@ -48,11 +53,14 @@ struct FeatureFlagPattern {
 // Every key is optional. lockTypes/channelTypes/collapsePaths merge with
 // (never replace) the corresponding CLI flags; featureFlags become guard
 // classifiers (see Extensions.h); disabledChecks suppresses compiled
-// ext/ checks by name.
+// ext/ checks by name; effects adds functions to the effect table
+// (vycor/callgraph/Effects.h) the metrics read.
 struct OrgConfig {
   std::vector<std::string> lockTypes;
   // Extra loader-hostile functions for static-init-hazards.
   std::vector<std::string> staticInitHazards;
+  // Extra effect-table functions, indexed by EffectKind.
+  std::array<std::vector<std::string>, kEffectKindCount> effects;
   std::vector<ChannelTypeSpec> channelTypes;
   std::vector<FeatureFlagPattern> featureFlags;
   std::vector<std::string> collapsePaths;
@@ -70,7 +78,7 @@ bool loadOrgConfigFile(const std::string &path, OrgConfig &out,
                        std::string &error);
 
 // Install the config's hook-shaped parts (lockTypes, channelTypes,
-// featureFlags) into ExtensionRegistry::instance(). collapsePaths and
+// featureFlags, staticInitHazards, effects) into ExtensionRegistry::instance(). collapsePaths and
 // disabledChecks are not registry concerns — the CLI layer consumes
 // those directly. Returns false and fills `error` when a featureFlags
 // pattern is not a valid regex.

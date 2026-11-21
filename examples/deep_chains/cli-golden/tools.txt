@@ -14,6 +14,7 @@
   list-concurrency-entry-points  List every ThreadEntry edge: functions (including synthetic lambda targets) that are handed to std::thread, std::jthread, std::async, std::packaged_task, std::invoke, or std::bind.
   list-entry-points              List the configured entry-point functions with their file/line when resolved in the call graph.
   lookup-function                Look up metadata for a function by qualified name.
+  metrics                        Measurements, not warnings: run named metrics over the index and report `{metric, entity, value, unit, components?, witness?}` records, largest value first, rolled up by symbol, file, TU, directory or link target.
   query-all-path-contexts        Enumerate the call paths from the entry points to a function, each with the try/catch scopes and conditional guards along it.
   query-call-site-context        Get exception handling and guard context at a specific call site location (file:line:col).
   query-channel                  List every producer and consumer call site on one channel: {producers:[...], consumers:[...]}, each site {channelType, category, operation, function, functionUsr, callSite, guards:[{conditionText, location, inTrueBranch, isAssertion}]}.

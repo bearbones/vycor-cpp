@@ -52,7 +52,12 @@ loudly — see `include/vycor/ext/OrgConfig.h`):
     { "pattern": "isFeatureEnabled\\(\"([A-Za-z0-9_.-]+)\"\\)", "nameGroup": 1 }
   ],
   "collapsePaths": ["ThirdParty/Math"],
-  "disabledChecks": ["some-ext-check"]
+  "disabledChecks": ["some-ext-check"],
+  "effects": {
+    "allocation": ["myorg::Arena::grow"],
+    "lock": ["myorg::SpinLock::acquire"],
+    "io": ["myorg::log"]
+  }
 }
 ```
 
@@ -62,6 +67,18 @@ Qualified function names the [static-init-hazards](checks/static-init-hazards.md
 check treats as loader-hostile in addition to its built-in
 dlopen/thread set — your "never during static initialization" bank.
 Also registrable in code: `registry.addStaticInitHazards({...})`.
+
+### `effects`
+
+Qualified function names added to the effect table
+(`include/vycor/callgraph/Effects.h`): the functions that allocate,
+acquire a lock, or do I/O. The table is one shared answer to "does this
+call path have that effect"; the
+[static-init-cost](metrics/static-init-cost.md) metric reads it today.
+Keys are `allocation`, `lock` and `io`; an unknown kind is an error.
+Names match whatever their template arguments and inline namespaces.
+Read at query time, so changing it never invalidates an index. Also
+registrable in code: `registry.addEffectFunctions(kind, {...})`.
 
 ### `lockTypes`
 
@@ -207,6 +224,35 @@ VYCOR_EXTENSION_SETUP(MyOrgGroups) {
 }
 ```
 
+### Metrics
+
+A metric is a named measurement over the megascope index, reported by
+`vycor-cpp metrics` ([docs/metrics/README.md](metrics/README.md)).
+Implement `vycor::Metric` (`include/vycor/metrics/Metric.h`) and
+register it; it joins `--list-metrics` and `--metrics=<spec>` beside the
+built-in ones:
+
+```cpp
+#include "vycor/ext/Extensions.h"
+
+class VtableCountMetric : public vycor::Metric {
+public:
+  std::string name() const override { return "myorg-vtable-count"; }
+  std::string summary() const override { return "Polymorphic classes per TU"; }
+  std::string unit() const override { return "classes"; }
+
+  std::unique_ptr<vycor::MetricRun>
+  measure(const vycor::MetricContext &ctx) const override;
+};
+
+VYCOR_REGISTER_METRIC(VtableCountMetric)
+```
+
+`measure` returns one `MetricSample` per measured entity; ordering,
+roll-ups (file, TU, directory, link target), paging and the result
+contract are the framework's. A metric has no pass/fail. A name that
+collides with a built-in metric is ignored.
+
 ### Lock types, channel types, feature flags — in code
 
 For hooks that are code-level policy rather than per-repo config, register
@@ -217,6 +263,7 @@ VYCOR_EXTENSION_SETUP(MyOrgHooks) {
   registry.addLockTypes({"myorg::SpinLockGuard"});
   registry.addChannelTypes({...});                       // ChannelTypeSpec
   registry.addFeatureFlagPattern("FFlag::([A-Za-z0-9_]+)", 1);
+  registry.addEffectFunctions(vycor::EffectKind::Io, {"myorg::log"});
 }
 ```
 
@@ -271,6 +318,9 @@ check per TU:      built-in analyzer, then each registered Check
 query/serialize:    guard classifiers annotate guards in megascope dump,
                     query_call_site_context, the path tools, and
                     channel-site listings
+metrics:            built-in metrics, then each registered Metric; the
+                    effect table is the built-in one plus the registry's
+                    effect functions
 ```
 
 `--isolate-workers` note: worker processes receive the already-merged lock
