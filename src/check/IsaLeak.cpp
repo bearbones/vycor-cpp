@@ -528,6 +528,17 @@ private:
             scanRecord(spec);
         break;
       }
+      case clang::Decl::VarTemplate: {
+        // Instantiations are not members of any DeclContext; Clang hands
+        // them to CodeGen, which keeps them as for any variable.
+        const auto *vtd = llvm::cast<clang::VarTemplateDecl>(d);
+        if (!vtd->isFirstDecl())
+          break;
+        for (const auto *spec :
+             const_cast<clang::VarTemplateDecl *>(vtd)->specializations())
+          rootVariable(spec);
+        break;
+      }
       case clang::Decl::FunctionTemplate: {
         const auto *ftd = llvm::cast<clang::FunctionTemplateDecl>(d);
         if (!ftd->isFirstDecl())
@@ -566,6 +577,14 @@ private:
       stack_.push_back(s);
   }
 
+  // Any floating-point value, even one only loaded, passed or returned:
+  // with -mavx every scalar FP move is VEX-encoded. FP flags change only
+  // arithmetic, comparisons and conversions (kBodyFloat).
+  void markFloat(clang::QualType type) {
+    if (!type.isNull() && type->isFloatingType())
+      bits_[cur_] |= kBodyFloatMove;
+  }
+
   void destroy(clang::QualType type) {
     if (type.isNull())
       return;
@@ -580,16 +599,10 @@ private:
       }
   }
 
-  // Constructing a dynamic class stores its vtable pointer: a vtable with
-  // no key function is emitted, with its virtual functions, by every TU
-  // that uses it.
   void construct(const clang::CXXConstructorDecl *ctor) {
     addEdge(ctor);
     if (!ctor->isTrivial() && !nothrow(ctor))
       bits_[cur_] |= kBodyMayThrowCall;
-    const clang::CXXRecordDecl *rd = ctor->getParent();
-    if (rd->isDynamicClass() && !ctx_.getCurrentKeyFunction(rd))
-      vtableMembers(rd);
   }
 
   static bool nothrow(const clang::FunctionDecl *fd) {
@@ -665,9 +678,25 @@ private:
       break;
     }
     // A math builtin (sqrt, exp, floor, ...) on floating-point values:
-    // -fno-math-errno and -fapprox-func change how it is lowered.
-    if (call->getType()->isFloatingType())
-      bits_[cur_] |= kBodyFloat | kBodyMathCall;
+    // -fno-math-errno and -fapprox-func change how it is lowered. One the
+    // compiler folds (inf, nan, huge_val on constants) is a constant, and
+    // fabs/copysign only move bits, whatever the FP flags.
+    if (!call->getType()->isFloatingType())
+      return;
+    if (!call->isValueDependent() && call->isEvaluatable(ctx_)) {
+      bits_[cur_] |= kBodyFloatMove;
+      return;
+    }
+    const std::string name(ctx_.BuiltinInfo.getName(id));
+    llvm::StringRef base(name);
+    base.consume_front("__builtin_");
+    if (base.starts_with("fabs") || base.starts_with("copysign") ||
+        base.starts_with("nan") || base.starts_with("inf") ||
+        base.starts_with("huge_val")) {
+      bits_[cur_] |= kBodyFloatMove;
+      return;
+    }
+    bits_[cur_] |= kBodyFloat | kBodyMathCall;
   }
 
   static bool floatCast(clang::CastKind kind) {
@@ -706,6 +735,18 @@ private:
   void walkFunction(const clang::FunctionDecl *def) {
     if (!def)
       return;
+    // A constructor or destructor body stores the vtable pointer: a vtable
+    // with no key function is emitted, with every function in its slots,
+    // by each TU that emits such a body (not by each TU that constructs
+    // an object: the constructor may be defined elsewhere).
+    if (const auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(def)) {
+      const clang::CXXRecordDecl *rd = md->getParent();
+      if ((llvm::isa<clang::CXXConstructorDecl>(md) ||
+           (llvm::isa<clang::CXXDestructorDecl>(md) &&
+            destructorStoresVptr(llvm::cast<clang::CXXDestructorDecl>(md)))) &&
+          rd->isDynamicClass() && !ctx_.getCurrentKeyFunction(rd))
+        vtableMembers(rd);
+    }
     if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(def))
       for (const clang::CXXCtorInitializer *init : ctor->inits())
         push(init->getInit());
@@ -717,14 +758,14 @@ private:
       for (const clang::CXXBaseSpecifier &base : rd->bases())
         destroy(base.getType());
     }
-    // By-value parameters are destroyed by the callee only in ABIs that
-    // say so (Microsoft); in Itanium the caller destroys them, which the
-    // caller's walk sees as a bound temporary.
-    const bool calleeDestroys =
-        ctx_.getTargetInfo().getCXXABI().areArgsDestroyedLeftToRightInCallee();
+    // A by-value parameter is destroyed by the callee only where Clang
+    // says so (the Microsoft ABI, or a trivial_abi class); otherwise the
+    // caller destroys it, which the caller's walk sees as a bound
+    // temporary.
     for (const clang::ParmVarDecl *param : def->parameters()) {
-      if (calleeDestroys)
-        destroy(param->getType());
+      if (const clang::RecordDecl *rd = param->getType()->getAsRecordDecl())
+        if (rd->isParamDestroyedInCallee())
+          destroy(param->getType());
       if (param->getType()->isFloatingType())
         bits_[cur_] |= kBodyFloatMove;
     }
@@ -734,6 +775,25 @@ private:
     drain();
   }
 
+  // CodeGen's CanSkipVTablePointerInitialization, inverted: a destructor
+  // resets the vtable pointer unless the class is effectively final or
+  // the body and every field's destruction are trivial.
+  static bool destructorStoresVptr(const clang::CXXDestructorDecl *dtor) {
+    const clang::CXXRecordDecl *rd = dtor->getParent();
+    if (rd->isEffectivelyFinal())
+      return false;
+    if (!dtor->hasTrivialBody())
+      return true;
+    for (const clang::FieldDecl *field : rd->fields()) {
+      const clang::CXXRecordDecl *frd = field->getType()
+                                            ->getBaseElementTypeUnsafe()
+                                            ->getAsCXXRecordDecl();
+      if (frd && frd->hasDefinition() && !frd->hasTrivialDestructor())
+        return true;
+    }
+    return false;
+  }
+
   void drain() {
     while (!stack_.empty()) {
       const clang::Stmt *s = stack_.pop_back_val();
@@ -741,24 +801,43 @@ private:
     }
   }
 
-  // A call on an object whose dynamic type is its static type (a variable
-  // of class type, or a temporary): code generation calls the function
-  // directly, as CodeGen's CanDevirtualizeMemberFunctionCall does.
-  static bool completeObject(const clang::MemberExpr *member) {
-    if (member->isArrow())
+  // Clang's own answer (CXXMethodDecl::getDevirtualizedMethod, what
+  // CodeGen asks): the function a virtual call on `base` calls directly,
+  // or null when the call goes through the vtable.
+  static const clang::CXXMethodDecl *
+  directTarget(const clang::CXXMethodDecl *md, const clang::Expr *base) {
+    return md->getDevirtualizedMethod(base, /*IsAppleKext=*/false);
+  }
+
+  // An if/?:/&&/|| condition Clang folds without side effects: CodeGen
+  // emits only the branch that runs (unless the other holds a label).
+  bool foldedCondition(const clang::Expr *cond, bool &value) const {
+    clang::Expr::EvalResult result;
+    if (!cond || cond->isValueDependent() ||
+        !cond->EvaluateAsInt(result, ctx_))
       return false;
-    const clang::Expr *base = member->getBase()->IgnoreParenImpCasts();
-    if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(base))
-      if (const auto *vd = llvm::dyn_cast<clang::VarDecl>(ref->getDecl()))
-        return !vd->getType()->isReferenceType();
-    return base->isPRValue() ||
-           llvm::isa<clang::MaterializeTemporaryExpr>(base);
+    value = result.Val.getInt().getBoolValue();
+    return true;
+  }
+
+  static bool containsLabel(const clang::Stmt *s) {
+    llvm::SmallVector<const clang::Stmt *, 16> work;
+    if (s)
+      work.push_back(s);
+    while (!work.empty()) {
+      const clang::Stmt *cur = work.pop_back_val();
+      if (llvm::isa<clang::LabelStmt>(cur))
+        return true;
+      for (const clang::Stmt *child : cur->children())
+        if (child)
+          work.push_back(child);
+    }
+    return false;
   }
 
   bool constantFalse(const clang::Expr *cond) const {
     bool value = true;
-    return cond && !cond->isValueDependent() &&
-           cond->EvaluateAsBooleanCondition(value, ctx_) && !value;
+    return foldedCondition(cond, value) && !value;
   }
 
   void visit(const clang::Stmt *s) {
@@ -787,6 +866,10 @@ private:
         if (const auto *v = llvm::dyn_cast<clang::VarDecl>(d)) {
           if (v->hasLocalStorage())
             destroy(v->getType());
+          else if (v->isStaticLocal() && v->needsDestruction(ctx_))
+            if (const clang::CXXRecordDecl *rd =
+                    ctx_.getBaseElementType(v->getType())->getAsCXXRecordDecl())
+              addEdge(rd->getDestructor(), 0); // registered with atexit
           // A constexpr local's initializer is evaluated by the compiler.
           if (!v->isConstexpr())
             push(v->getInit());
@@ -803,6 +886,37 @@ private:
         // if constexpr: the discarded branch is never emitted.
         push(ifs->getInit());
         push(*taken);
+        return;
+      }
+      bool value = false;
+      if (!ifs->getConditionVariable() &&
+          foldedCondition(ifs->getCond(), value) &&
+          !containsLabel(value ? ifs->getElse() : ifs->getThen())) {
+        push(ifs->getInit());
+        push(value ? ifs->getThen() : ifs->getElse());
+        return;
+      }
+      break;
+    }
+    case clang::Stmt::ConditionalOperatorClass: {
+      const auto *co = llvm::cast<clang::ConditionalOperator>(s);
+      bool value = false;
+      if (foldedCondition(co->getCond(), value)) {
+        markFloat(co->getType());
+        push(value ? co->getTrueExpr() : co->getFalseExpr());
+        return;
+      }
+      break;
+    }
+    case clang::Stmt::BinaryOperatorClass: {
+      const auto *bo = llvm::cast<clang::BinaryOperator>(s);
+      bool value = false;
+      if ((bo->getOpcode() == clang::BO_LAnd ||
+           bo->getOpcode() == clang::BO_LOr) &&
+          foldedCondition(bo->getLHS(), value)) {
+        // false && x and true || x never evaluate x.
+        if (value == (bo->getOpcode() == clang::BO_LAnd))
+          push(bo->getRHS());
         return;
       }
       break;
@@ -855,15 +969,11 @@ private:
       if (!type.isNull() &&
           (type->isVectorType() || type->isSizelessBuiltinType()))
         bits_[cur_] |= kBodyVector;
-      // Any floating-point value, even one only loaded, passed or returned:
-      // with -mavx every scalar FP move is VEX-encoded. FP flags change
-      // only arithmetic, comparisons and conversions (kBodyFloat).
-      if (!type.isNull() && type->isFloatingType())
-        bits_[cur_] |= kBodyFloatMove;
+      markFloat(type);
       if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(e)) {
         clang::QualType operand = bo->getLHS()->getType();
-        if (operand->isFloatingType() ||
-            bo->getRHS()->getType()->isFloatingType()) {
+        if (operand->hasFloatingRepresentation() ||
+            bo->getRHS()->getType()->hasFloatingRepresentation()) {
           if (bo->getOpcode() != clang::BO_Assign &&
               bo->getOpcode() != clang::BO_Comma)
             bits_[cur_] |= kBodyFloat;
@@ -874,7 +984,7 @@ private:
       } else if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(e)) {
         clang::QualType operand = uo->getSubExpr()->getType();
         if (uo->isArithmeticOp() || uo->isIncrementDecrementOp()) {
-          if (operand->isFloatingType())
+          if (operand->hasFloatingRepresentation())
             bits_[cur_] |= kBodyFloat;
           else if (operand->isSignedIntegerType() &&
                    uo->getOpcode() != clang::UO_Plus &&
@@ -883,27 +993,48 @@ private:
             bits_[cur_] |= kBodySignedArith;
         }
       } else if (const auto *cast = llvm::dyn_cast<clang::CastExpr>(e)) {
-        if (floatCast(cast->getCastKind()))
+        if (floatCast(cast->getCastKind()) ||
+            (cast->getCastKind() == clang::CK_VectorSplat &&
+             type->hasFloatingRepresentation()))
           bits_[cur_] |= kBodyFloat;
       } else if (const auto *call = llvm::dyn_cast<clang::CallExpr>(e)) {
         callee(call);
-        // A virtual call goes through the vtable: it neither emits the
-        // callee here nor lets this body inline it. Walk the object and
-        // the arguments, not the member reference.
-        if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(call))
-          if (const auto *member =
-                  llvm::dyn_cast<clang::MemberExpr>(mc->getCallee()->IgnoreParens()))
-            if (const auto *md =
-                    llvm::dyn_cast<clang::CXXMethodDecl>(member->getMemberDecl()))
-              if (md->isVirtual() && !member->hasQualifier() &&
-                  !md->hasAttr<clang::FinalAttr>() &&
-                  !md->getParent()->hasAttr<clang::FinalAttr>() &&
-                  !completeObject(member)) {
-                push(member->getBase());
-                for (const clang::Expr *arg : mc->arguments())
+        // A virtual call goes through the vtable unless Clang can call the
+        // function directly: through the vtable it neither emits the callee
+        // here nor lets this body inline it. Walk the object and the
+        // arguments, and add the direct target, if any, instead of the
+        // named member.
+        if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(call)) {
+          if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(
+                  mc->getCallee()->IgnoreParens()))
+            if (const auto *md = llvm::dyn_cast<clang::CXXMethodDecl>(
+                    member->getMemberDecl()))
+              if (md->isVirtual() && !member->hasQualifier()) {
+                const clang::CXXMethodDecl *direct =
+                    directTarget(md, member->getBase());
+                if (direct != md) {
+                  addEdge(direct);
+                  push(member->getBase());
+                  for (const clang::Expr *arg : mc->arguments())
+                    push(arg);
+                  return;
+                }
+              }
+        } else if (const auto *oc =
+                       llvm::dyn_cast<clang::CXXOperatorCallExpr>(call)) {
+          if (const auto *md = llvm::dyn_cast_or_null<clang::CXXMethodDecl>(
+                  oc->getDirectCallee()))
+            if (md->isVirtual() && oc->getNumArgs() > 0) {
+              const clang::CXXMethodDecl *direct =
+                  directTarget(md, oc->getArg(0));
+              if (direct != md) {
+                addEdge(direct);
+                for (const clang::Expr *arg : oc->arguments())
                   push(arg);
                 return;
               }
+            }
+        }
       } else if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(e)) {
         if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(ref->getDecl())) {
           if (!fd->getBuiltinID())
@@ -933,7 +1064,24 @@ private:
           bits_[cur_] |= kBodyMayThrowCall;
       } else if (const auto *del = llvm::dyn_cast<clang::CXXDeleteExpr>(e)) {
         addEdge(del->getOperatorDelete());
-        destroy(del->getDestroyedType());
+        // A virtual destructor runs through the vtable (the deleting
+        // destructor) unless Clang can call it directly.
+        const clang::CXXRecordDecl *rd =
+            del->getDestroyedType().isNull()
+                ? nullptr
+                : ctx_.getBaseElementType(del->getDestroyedType())
+                      ->getAsCXXRecordDecl();
+        const clang::CXXDestructorDecl *dtor =
+            rd && rd->hasDefinition() ? rd->getDestructor() : nullptr;
+        if (dtor && dtor->isVirtual() && !del->isArrayForm()) {
+          if (const clang::CXXMethodDecl *direct =
+                  directTarget(dtor, del->getArgument())) {
+            addEdge(direct);
+            bits_[cur_] |= kBodyCleanup;
+          }
+        } else {
+          destroy(del->getDestroyedType());
+        }
       } else if (llvm::isa<clang::CXXThrowExpr>(e)) {
         bits_[cur_] |= kBodyMayThrowCall;
       }
@@ -1164,22 +1312,28 @@ enum Relevance : unsigned {
   kRelEh = 1u << 4,
   kRelOverflow = 1u << 5,
   kRelFpMath = 1u << 6, // the math-library keys of the fp facet
+  // Only FP values that are moved: the one feature that changes their
+  // encoding is x86 `avx` (VEX); the rest of the vector class does not.
+  kRelFeatureVex = 1u << 7,
   kRelAnyFeature = kRelFeatureVector | kRelFeatureBit | kRelFeatureOther,
 };
 
 unsigned relevanceOf(uint32_t bits, unsigned facets) {
   unsigned r = 0;
   if (facets & kIsaLeakIsa) {
-    if (bits & (kBodyLoop | kBodyFloat | kBodyFloatMove | kBodyVector |
-                kBodyBulkMemory))
+    if (bits & (kBodyLoop | kBodyFloat | kBodyVector | kBodyBulkMemory))
       r |= kRelFeatureVector;
+    else if (bits & kBodyFloatMove)
+      r |= kRelFeatureVex;
     if (bits & (kBodyBitBuiltin | kBodyLoop))
       r |= kRelFeatureBit;
     if (bits & kBodyTargetBuiltin)
       r |= kRelAnyFeature;
   }
-  if ((facets & kIsaLeakFp) && (bits & (kBodyFloat | kBodyVector)))
-    r |= kRelFp; // moving an FP value is the same under any FP flags
+  // Arithmetic on FP values, vectors of floats included; moving an FP
+  // value, or integer vector code, is the same under any FP flags.
+  if ((facets & kIsaLeakFp) && (bits & kBodyFloat))
+    r |= kRelFp;
   if ((facets & kIsaLeakFp) && (bits & kBodyMathCall))
     r |= kRelFpMath;
   if ((facets & kIsaLeakEh) &&
@@ -1201,9 +1355,10 @@ struct Projection {
 
 Projection project(const CodegenProfile &p, unsigned rel) {
   Projection out;
-  if (rel & kRelAnyFeature)
+  if (rel & (kRelAnyFeature | kRelFeatureVex))
     for (const auto &f : p.features)
-      if (rel & classifyFeature(f))
+      if ((rel & classifyFeature(f)) ||
+          ((rel & kRelFeatureVex) && f == "avx"))
         out.features.push_back(f);
   // errno and approximate functions change only math-library calls; the
   // other keys change floating-point arithmetic itself.
@@ -1301,14 +1456,14 @@ std::string fpSpelling(const std::string &key, const std::string &value) {
 // What in the body the differing classes `rel` change, in words.
 std::string bodyPhrase(uint32_t bits, unsigned rel) {
   std::vector<const char *> parts;
-  const bool vectorUnits = rel & kRelFeatureVector;
+  const bool vectorUnits = rel & (kRelFeatureVector | kRelFeatureVex);
   if ((vectorUnits || (rel & kRelFeatureBit)) && (bits & kBodyLoop))
     parts.push_back("a loop");
   if ((vectorUnits || (rel & kRelFp)) && (bits & kBodyFloat))
     parts.push_back("floating-point arithmetic");
   else if (vectorUnits && (bits & kBodyFloatMove))
     parts.push_back("floating-point values");
-  if ((vectorUnits || (rel & kRelFp)) && (bits & kBodyVector))
+  if (vectorUnits && (bits & kBodyVector))
     parts.push_back("vector types");
   if (vectorUnits && (bits & kBodyBulkMemory))
     parts.push_back("memcpy/memset");
@@ -1339,6 +1494,7 @@ struct Group {
   uint32_t projection = 0;
   std::string witness; // smallest TU path
   size_t tuCount = 0;
+  std::string key; // projectionKey, the order among equal witnesses
 };
 
 } // namespace
@@ -1418,7 +1574,7 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
         const auto &[t, proj, tu] = seen[end];
         (void)t;
         if (groups.empty() || groups.back().projection != proj)
-          groups.push_back({proj, facts.tuPath(tu), 0});
+          groups.push_back({proj, facts.tuPath(tu), 0, std::string()});
         Group &g = groups.back();
         ++g.tuCount;
         if (facts.tuPath(tu) < g.witness)
@@ -1428,10 +1584,14 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
       begin = end;
       if (groups.size() < 2)
         continue;
+      // One file compiled twice can witness two groups: break the tie by
+      // the projection's content, never by its first-seen id.
+      for (Group &g : groups)
+        g.key = projectionKey(projections[g.projection]);
       std::sort(groups.begin(), groups.end(),
                 [](const Group &a, const Group &b) {
-                  return std::tie(a.witness, a.projection) <
-                         std::tie(b.witness, b.projection);
+                  return std::tie(a.witness, a.key) <
+                         std::tie(b.witness, b.key);
                 });
 
       // Which facets actually differ between the groups.
@@ -1477,6 +1637,7 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
 
       std::string groupsText;
       unsigned featureDiff = 0; // the feature classes that differ
+      bool avxDiffers = false;
       for (size_t gi = 0; gi < groups.size(); ++gi) {
         const Group &g = groups[gi];
         const Projection &p = projections[g.projection];
@@ -1487,7 +1648,11 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
                               common.begin(), common.end(),
                               std::back_inserter(extra));
           for (const std::string &f : extra)
-            featureDiff |= classifyFeature(f);
+            avxDiffers |= f == "avx";
+          for (const std::string &f : extra)
+            featureDiff |= (f == "avx" && (rel & kRelFeatureVex))
+                               ? unsigned(kRelFeatureVex)
+                               : unsigned(classifyFeature(f));
           if (extra.empty()) {
             desc.push_back("no extra target features");
           } else {
@@ -1579,7 +1744,9 @@ void analyzeIsaLeaks(const GlobalIndex &index, unsigned facets,
       // Sensitive in its own body, or only through what it inlines: the
       // second needs an optimizing build that leaves this function out of
       // line yet inlines into it, so it is a lead, not a finding.
-      const bool ownBody = (relevanceOf(rec.ownBits, facets) & differing) != 0;
+      const unsigned ownRel = relevanceOf(rec.ownBits, facets);
+      const bool ownBody = (ownRel & differing) != 0 ||
+                           ((ownRel & kRelFeatureVex) && avxDiffers);
       Diagnostic diag;
       diag.kind = ownBody ? Diagnostic::IsaLeak_Divergent
                           : Diagnostic::IsaLeak_Inlined;

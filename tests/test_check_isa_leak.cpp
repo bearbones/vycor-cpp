@@ -188,6 +188,10 @@ TEST_CASE("isa-leak reports floating-point functions built with differing "
     CHECK(mentions(d, "(fp)"));
     CHECK(mentions(d, "-fassociative-math"));
     CHECK(mentions(d, "-fno-associative-math"));
+    // Only what FP flags change is named: not dot's loop.
+    CHECK(mentions(d, "floating-point arithmetic"));
+    CHECK_FALSE(mentions(d, "a loop"));
+    CHECK_FALSE(mentions(d, "target features"));
   }
   // The fp facet off: nothing to compare.
   CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(kIsaLeakIsa)))
@@ -559,6 +563,11 @@ inline float first(const Pair &p) { return narrow(p.re); }
   REQUIRE(result.size() == 1);
   CHECK(result[0].kind == Diagnostic::IsaLeak_Divergent);
   CHECK(mentions(result[0], "floating-point values"));
+  CHECK(mentions(result[0], "+avx)"));
+  // Both copies are VEX-encoded: only avx changes how values move.
+  fixture.database({"-mavx2", "-mfma"}, {"-mavx"});
+  db = fixture.db();
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions())).empty());
   // FP flags change arithmetic, not moves: -ffast-math leaves it alone.
   fixture.database({"-ffast-math"}, {});
   db = fixture.db();
@@ -585,6 +594,30 @@ inline void take(Owner o) { may_throw(); }
   CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
             .empty());
   CHECK(index.isaLeakFacts().functionCount() == 1);
+  // The Microsoft ABI destroys it in the callee: a cleanup around a call
+  // that may throw.
+  fixture.database({"--target=x86_64-pc-windows-msvc", "-fno-exceptions"},
+                   {"--target=x86_64-pc-windows-msvc", "-fexceptions",
+                    "-fcxx-exceptions"});
+  db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(mentions(result[0], "-fno-exceptions"));
+}
+
+TEST_CASE("isa-leak destroys trivial_abi parameters in the callee",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+struct [[clang::trivial_abi]] Handle { Handle(); Handle(const Handle &); ~Handle(); int v; };
+void may_throw();
+inline void take(Handle h) { may_throw(); }
+)cpp",
+                     "  Handle h;\n  take(h);\n");
+  fixture.database({"-fno-exceptions"}, {"-fexceptions"});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl == "take(Handle)");
 }
 
 TEST_CASE("isa-leak skips code the compiler evaluates or discards",
@@ -613,6 +646,34 @@ template <bool B> inline int pick() {
     names.insert(r.function.qualifiedName);
   CHECK(names.count("use(int)"));
   CHECK(names.count("pick<false>()"));
+  CHECK_FALSE(names.count("sum(int)"));
+}
+
+TEST_CASE("isa-leak skips requires expressions and if consteval branches",
+          "[CheckIsaLeak]") {
+  // C++23 forms of unevaluated or constant-only code: sum stays unemitted.
+  IsaFixture fixture(R"cpp(
+constexpr int sum(int n) { int s = 0; for (int i = 0; i < n; ++i) s += i; return s; }
+constexpr int twice(int x) {
+  if consteval { return sum(x); } else { return 2 * x; }
+}
+inline int use(int x) {
+  constexpr bool ok = requires { sum(1); };
+  int g = _Generic(sum(2), int: 1, default: 0);
+  decltype(sum(3)) d = 0;
+  return twice(x) + int(ok) + g + d;
+}
+)cpp",
+                     "  (void)use(1);\n");
+  fixture.database({"-std=c++23", "-mavx2"}, {"-std=c++23"});
+  auto db = fixture.db();
+  GlobalIndex index;
+  (void)runAnalysis(*db, fixture.files(), isaOptions(), &index);
+  std::set<std::string> names;
+  for (const auto &r : index.isaLeakFacts().records())
+    names.insert(r.function.qualifiedName);
+  CHECK(names.count("use(int)"));
+  CHECK(names.count("twice(int)"));
   CHECK_FALSE(names.count("sum(int)"));
 }
 
@@ -846,4 +907,172 @@ TEST_CASE("isa-leak turns the checkpoint journal off", "[CheckIsaLeak]") {
   opts.checkpointPath = fixture.dir + "/journal.bin";
   CHECK(messages(runAnalysis(*db, fixture.files(), opts)) == expected);
   CHECK_FALSE(llvm::sys::fs::exists(opts.checkpointPath));
+}
+
+TEST_CASE("isa-leak skips branches Clang folds away", "[CheckIsaLeak]") {
+  // Every call to work() sits in a branch whose condition folds: no TU
+  // emits it, even at -O0.
+  IsaFixture fixture(R"cpp(
+inline float work(const float *a, unsigned long n) {
+  float s = 0;
+  for (unsigned long i = 0; i < n; ++i) s += a[i];
+  return s;
+}
+constexpr bool kSimd = false;
+inline float gate(const float *a) {
+  if constexpr (kSimd) return work(a, 1);
+  if (kSimd) return work(a, 2);
+  if (sizeof(float) == 8) return work(a, 3);
+  float r = kSimd ? work(a, 4) : 0.0f;
+  if (kSimd && work(a, 5) > 0) r = 1;
+  if (!kSimd || work(a, 6) > 0) r += 1;
+  return r;
+}
+)cpp",
+                     "  float v[2] = {};\n  (void)gate(v);\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  (void)runAnalysis(*db, fixture.files(), isaOptions(), &index);
+  std::set<std::string> names;
+  for (const auto &r : index.isaLeakFacts().records())
+    names.insert(r.function.qualifiedName);
+  CHECK(names.count("gate(const float *)"));
+  CHECK_FALSE(names.count("work(const float *, unsigned long)"));
+}
+
+TEST_CASE("isa-leak leaves fast-math alone for sign operations and integer "
+          "vectors",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+typedef int v4si __attribute__((vector_size(16)));
+inline double magnitude(double x) { return __builtin_fabs(x); }
+inline double sign(double x, double y) { return __builtin_copysign(x, y); }
+inline v4si add4(v4si a, v4si b) { return a + b; }
+)cpp",
+                     "  (void)magnitude(-1.0);\n"
+                     "  (void)sign(1.0, -1.0);\n  v4si x = {1, 2, 3, 4};\n"
+                     "  (void)add4(x, x);\n");
+  fixture.database({"-ffast-math"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  CHECK(index.isaLeakFacts().functionCount() == 3);
+}
+
+TEST_CASE("isa-leak emits a key-less vtable where the constructor is",
+          "[CheckIsaLeak]") {
+  // W's constructor is defined elsewhere: that TU stores the vtable
+  // pointer and emits the vtable, not the TUs that construct a W.
+  IsaFixture fixture(R"cpp(
+struct W {
+  W();
+  virtual float draw(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+)cpp",
+                     "  W w;\n  (void)&w;\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  CHECK(isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index))
+            .empty());
+  CHECK(index.isaLeakFacts().functionCount() == 0);
+}
+
+TEST_CASE("isa-leak follows virtual operators and delete through the vtable",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+struct V {
+  virtual ~V();
+  virtual float operator()(const float *a, unsigned long n) const {
+    float s = 0;
+    for (unsigned long i = 0; i < n; ++i) s += a[i];
+    return s;
+  }
+};
+struct Leaf final : V {
+  ~Leaf() override { float s = 0; for (int i = 0; i < 3; ++i) s += 1.5f; sink = s; }
+  float sink = 0;
+};
+)cpp",
+                     "  extern V *vp;\n  float v[2] = {};\n"
+                     "  (void)(*vp)(v, 2);\n  delete vp;\n"
+                     "  extern Leaf *leaf;\n  delete leaf;\n");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  GlobalIndex index;
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions(), &index));
+  // operator() and ~V are called through the vtable. Leaf is final, so
+  // deleting it calls ~Leaf directly, and ~Leaf does not reset the vtable
+  // pointer, so Leaf's vtable (and the inherited operator()) is not
+  // emitted by it either.
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl == "Leaf::~Leaf()");
+}
+
+TEST_CASE("isa-leak emits variable template instantiations with dynamic "
+          "initializers",
+          "[CheckIsaLeak]") {
+  // scaled<int> is instantiated by a reference from an inline function
+  // nothing calls; its initializer still runs in every TU.
+  IsaFixture fixture(R"cpp(
+inline float grow(unsigned long n) {
+  float s = 1;
+  for (unsigned long i = 0; i < n; ++i) s *= 1.5f;
+  return s;
+}
+template <typename T> inline float scaled = grow(sizeof(T));
+inline float unusedRef() { return scaled<int>; }
+)cpp");
+  fixture.database({"-mavx2"}, {});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 1);
+  CHECK(result[0].resolvedDecl == "grow(unsigned long)");
+}
+
+TEST_CASE("isa-leak compares bit-manipulation features for bit builtins",
+          "[CheckIsaLeak]") {
+  IsaFixture fixture(R"cpp(
+inline int parity(unsigned x) { return __builtin_parity(x); }
+inline int first(unsigned x) { return __builtin_ffs(static_cast<int>(x)); }
+inline unsigned plain(unsigned x) { return x ^ 1u; }
+)cpp",
+                     "  (void)parity(3);\n  (void)first(8);\n  (void)plain(1);\n");
+  fixture.database({"-mpopcnt", "-mbmi"}, {});
+  auto db = fixture.db();
+  auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
+  REQUIRE(result.size() == 2);
+  for (const auto &d : result) {
+    CHECK(d.resolvedDecl.find("plain") == std::string::npos);
+    CHECK(mentions(d, "bit-manipulation builtins"));
+  }
+}
+
+TEST_CASE("isa-leak orders groups one file witnesses by content",
+          "[CheckIsaLeak]") {
+  // a.cpp built twice (a SIMD library and a plain one) witnesses both
+  // groups: the message must not depend on which build came first.
+  auto run = [](bool avxFirst) {
+    GlobalIndex index;
+    IsaLeakFacts &facts = index.mutableIsaLeakFacts();
+    const CodegenProfile avx = x86Profile({"avx", "sse2"});
+    const CodegenProfile base = x86Profile({"sse2"});
+    if (avxFirst) {
+      facts.addTu("/p/a.cpp", facts.addProfile(avx), {loopFunction()});
+      facts.addTu("/p/a.cpp", facts.addProfile(base), {loopFunction()});
+    } else {
+      facts.addTu("/p/a.cpp", facts.addProfile(base), {loopFunction()});
+      facts.addTu("/p/a.cpp", facts.addProfile(avx), {loopFunction()});
+    }
+    return analyze(index);
+  };
+  const auto first = run(true);
+  REQUIRE(first.size() == 1);
+  CHECK(run(false) == first);
 }

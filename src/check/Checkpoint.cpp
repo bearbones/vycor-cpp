@@ -718,8 +718,12 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     CodegenProfile cp;
     cp.triple = r.str();
     uint32_t nFeatures = r.u32();
-    for (uint32_t k = 0; k < nFeatures && r.ok; ++k)
+    for (uint32_t k = 0; k < nFeatures && r.ok; ++k) {
       cp.features.push_back(r.str());
+      // The analysis intersects feature lists: sorted and unique.
+      if (k > 0 && !(cp.features[k - 1] < cp.features[k]))
+        r.ok = false;
+    }
     cp.fp = r.str();
     cp.exceptions = r.u8() != 0;
     cp.signedOverflow = r.u8();
