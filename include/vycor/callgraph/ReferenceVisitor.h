@@ -42,8 +42,8 @@ namespace vycor {
 // allocated per occurrence. USRs, names, files and attributes are computed
 // once per entity when the TU is lowered into the index (run()).
 //
-// The code as written is read first. Then, unless the visitor was built
-// with `implicitCode` false, what the compiler writes on its own:
+// The code as written is read first, then what the compiler writes on its
+// own:
 //
 //   - The body of every template instantiation the TU uses whose pattern is
 //     a recorded symbol. Its references are attributed to the pattern (a
@@ -69,7 +69,7 @@ class ReferenceVisitor : public clang::RecursiveASTVisitor<ReferenceVisitor> {
 
 public:
   ReferenceVisitor(ReferenceIndex &index, clang::SourceManager &sm,
-                   const std::string &tuPath, bool implicitCode = true);
+                   const std::string &tuPath);
 
   // Traverse the TU and register its facts with the index under tuPath.
   void run(clang::ASTContext &ctx);
@@ -263,7 +263,6 @@ private:
   clang::ASTContext *ctx_ = nullptr;
   std::string tuPath_;
   UsrCache usrs_;
-  bool implicitCode_ = true;
   Mode mode_ = Mode::AsWritten;
 
   std::vector<Frame> frames_;
@@ -281,7 +280,7 @@ private:
   // (referrer slot << 35) | (target slot << 3) | role.
   llvm::DenseMap<uint64_t, RefAcc> refs_;
 
-  // Implicit code (implicitCode_). Referenced decl -> functionTarget().
+  // Implicit code. Referenced decl -> functionTarget().
   llvm::DenseMap<const clang::Decl *, uint32_t> funcSlot_;
   llvm::DenseMap<const clang::Decl *, uint32_t> transparentSlot_;
   llvm::DenseSet<const clang::Decl *> scheduled_;

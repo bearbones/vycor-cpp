@@ -180,9 +180,8 @@ attributeFlags(const clang::NamedDecl *decl,
 
 ReferenceVisitor::ReferenceVisitor(ReferenceIndex &index,
                                    clang::SourceManager &sm,
-                                   const std::string &tuPath,
-                                   bool implicitCode)
-    : index_(index), sm_(sm), tuPath_(tuPath), implicitCode_(implicitCode) {}
+                                   const std::string &tuPath)
+    : index_(index), sm_(sm), tuPath_(tuPath) {}
 
 void ReferenceVisitor::run(clang::ASTContext &ctx) {
   ctx_ = &ctx;
@@ -240,7 +239,7 @@ bool ReferenceVisitor::traverseFunction(clang::FunctionDecl *fn) {
   if (definition)
     noteFunctionDefinition(fn);
   const bool ok = Base::TraverseDecl(fn);
-  if (ok && definition && implicitCode_ && !fn->isInvalidDecl()) {
+  if (ok && definition && !fn->isInvalidDecl()) {
     // What the compiler writes into this function: member and base
     // initializers not written, the body of a defaulted function (the
     // traversal skips both), the destruction of members and bases.
@@ -353,6 +352,12 @@ void ReferenceVisitor::noteClass(const clang::CXXRecordDecl *cls) {
         entities_[slot].flags |= kSymExplicitInstantiation;
         entities_[slot].emit = true;
       }
+      // The TU emits every member: read their bodies.
+      if (spec->hasDefinition())
+        for (const clang::CXXMethodDecl *method :
+             spec->getDefinition()->methods())
+          if (!method->isImplicit())
+            functionTarget(method);
       return;
     }
   }
@@ -379,6 +384,7 @@ void ReferenceVisitor::noteExplicitInstantiations(
       entities_[slot].flags |= kSymExplicitInstantiation;
       entities_[slot].emit = true;
     }
+    functionTarget(spec); // the TU emits it: read its body
   }
 }
 
@@ -454,10 +460,10 @@ bool ReferenceVisitor::TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc) {
 
 // A default member initializer used by a constructor or an aggregate
 // initialization runs there; the traversal visits it only with implicit
-// code (and not at all before LLVM 17).
+// code (and not at all in older releases).
 bool ReferenceVisitor::TraverseCXXDefaultInitExpr(
     clang::CXXDefaultInitExpr *expr) {
-  if (implicitCode_ && !frames_.empty())
+  if (!frames_.empty())
     return TraverseStmt(expr->getExpr());
   return true;
 }
@@ -731,9 +737,8 @@ bool ReferenceVisitor::VisitBindingDecl(clang::BindingDecl *decl) {
 bool ReferenceVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   if (unevaluated_ > 0)
     return true;
-  if (implicitCode_)
-    if (const clang::FunctionDecl *dealloc = expr->getOperatorDelete())
-      addRef(functionTarget(dealloc), RefRole::Call, expr->getBeginLoc());
+  if (const clang::FunctionDecl *dealloc = expr->getOperatorDelete())
+    addRef(functionTarget(dealloc), RefRole::Call, expr->getBeginLoc());
   clang::QualType type = expr->getDestroyedType();
   if (type.isNull())
     return true;
@@ -752,7 +757,7 @@ bool ReferenceVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
 // construct-expression below it. The matching deallocation function runs if
 // the constructor throws.
 bool ReferenceVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
-  if (unevaluated_ > 0 || !implicitCode_)
+  if (unevaluated_ > 0)
     return true;
   if (const clang::FunctionDecl *alloc = expr->getOperatorNew())
     addRef(functionTarget(alloc), RefRole::Call, expr->getBeginLoc());
@@ -765,7 +770,7 @@ bool ReferenceVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
 // end of the full-expression (or of the reference it is bound to).
 bool ReferenceVisitor::VisitCXXBindTemporaryExpr(
     clang::CXXBindTemporaryExpr *expr) {
-  if (unevaluated_ > 0 || !implicitCode_)
+  if (unevaluated_ > 0)
     return true;
   if (const clang::CXXTemporary *temp = expr->getTemporary())
     if (const clang::CXXDestructorDecl *dtor = temp->getDestructor())
@@ -997,8 +1002,12 @@ bool ReferenceVisitor::VisitCXXDynamicCastExpr(
 bool ReferenceVisitor::VisitCXXThrowExpr(clang::CXXThrowExpr *expr) {
   if (unevaluated_ > 0)
     return true;
-  if (const clang::Expr *thrown = expr->getSubExpr())
+  if (const clang::Expr *thrown = expr->getSubExpr()) {
     noteTypeinfoUse(thrown->getType(), expr->getThrowLoc());
+    // The runtime destroys the exception object.
+    if (!thrown->isTypeDependent())
+      noteDestructorOf(thrown->getType(), expr->getThrowLoc());
+  }
   return true;
 }
 
@@ -1059,8 +1068,6 @@ readableDefinition(const clang::FunctionDecl *fn) {
 } // namespace
 
 uint32_t ReferenceVisitor::functionTarget(const clang::FunctionDecl *fn) {
-  if (!implicitCode_)
-    return targetSlot(fn);
   auto found = funcSlot_.find(fn);
   if (found != funcSlot_.end())
     return found->second;
@@ -1222,7 +1229,7 @@ void ReferenceVisitor::noteDestructorOf(clang::QualType type,
 // by its initialization. A parameter is destroyed by the caller, whose
 // argument is a temporary there.
 void ReferenceVisitor::noteVariableDestruction(const clang::VarDecl *var) {
-  if (!implicitCode_ || unevaluated_ > 0 || llvm::isa<clang::ParmVarDecl>(var) ||
+  if (unevaluated_ > 0 || llvm::isa<clang::ParmVarDecl>(var) ||
       var->isInvalidDecl() || var->getType().isNull() ||
       var->isThisDeclarationADefinition() == clang::VarDecl::DeclarationOnly)
     return;
@@ -1245,8 +1252,6 @@ void ReferenceVisitor::noteVtableUse(const clang::CXXRecordDecl *cls,
                                      clang::SourceLocation site) {
   const uint32_t slot = targetSlot(cls);
   addRef(slot, RefRole::VtableUse, site);
-  if (!implicitCode_)
-    return;
   const clang::CXXRecordDecl *def = cls->getDefinition();
   if (!def || def->isInvalidDecl() || def->isDependentContext())
     return;

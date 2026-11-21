@@ -861,9 +861,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   LinkFacts lf;
   lf.edgeSource = "references";
   // docs/dependency-audit.md, "Completeness".
-  lf.invisible = {"implicit-special-member-calls",
-                  "template-instantiation-bodies",
-                  "name-based-lookup",
+  lf.invisible = {"name-based-lookup",
                   "qualified-virtual-calls",
                   "same-basename-internal-symbols",
                   "other-build-configurations"};
