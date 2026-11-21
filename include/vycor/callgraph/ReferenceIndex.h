@@ -306,13 +306,15 @@ public:
       if (s.refs != 0)
         fn(s.rec, s.refs, s.minTu);
   }
-  //   fn(const ReferenceRecord &, uint32_t tuCount, Id minTu)
+  // A reference record also carries its largest contributing TU: every
+  // contributor lies between minTu and maxTu in path order.
+  //   fn(const ReferenceRecord &, uint32_t tuCount, Id minTu, Id maxTu)
   template <typename Fn> void forEachReferenceRecord(Fn &&fn) const {
     std::lock_guard<std::mutex> lock(mutex_);
     ensureMinTu();
     for (const StoredReference &r : references_)
       if (r.refs != 0)
-        fn(r.rec, r.refs, r.minTu);
+        fn(r.rec, r.refs, r.minTu, r.maxTu);
   }
   // The table every record id resolves through. Valid while the index is
   // not mutated.
@@ -354,6 +356,7 @@ private:
     ReferenceRecord rec;
     uint32_t refs = 0;
     mutable Id minTu = kNoId;
+    mutable Id maxTu = kNoId; // largest contributing TU, derived alike
   };
   struct TuContribution {
     std::vector<uint32_t> symbols;    // indices into symbols_
@@ -403,7 +406,8 @@ private:
     lookupValid_ = false;
     minTuValid_ = false;
   }
-  // Recompute every live record's minTu from the contributor lists.
+  // Recompute every live record's minTu (and a reference's maxTu) from the
+  // contributor lists.
   void ensureMinTu() const;
   void ensureLookup() const;
   size_t removeTUsLocked(const std::vector<std::string> &tuPaths);

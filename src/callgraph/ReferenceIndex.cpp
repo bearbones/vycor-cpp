@@ -547,7 +547,7 @@ void ReferenceIndex::ensureMinTu() const {
   if (minTuValid_)
     return;
   // Visit the TUs in ascending path order: the first one to list a record
-  // is its smallest contributor.
+  // is its smallest contributor, the last its largest.
   std::vector<Id> tus;
   tus.reserve(byTu_.size());
   for (const auto &entry : byTu_)
@@ -559,15 +559,17 @@ void ReferenceIndex::ensureMinTu() const {
   for (const auto &s : symbols)
     s.minTu = kNoId;
   for (const auto &r : references)
-    r.minTu = kNoId;
+    r.minTu = r.maxTu = kNoId;
   for (Id tu : tus) {
     const TuContribution &contribution = byTu_.find(tu)->second;
     for (uint32_t idx : contribution.symbols)
       if (symbols[idx].minTu == kNoId)
         symbols[idx].minTu = tu;
-    for (uint32_t idx : contribution.references)
+    for (uint32_t idx : contribution.references) {
       if (references[idx].minTu == kNoId)
         references[idx].minTu = tu;
+      references[idx].maxTu = tu;
+    }
   }
   minTuValid_ = true;
 }
@@ -1131,7 +1133,7 @@ void ReferenceIndex::encode(std::string &out) const {
   struct Ref {
     ReferenceRecord rec;
     uint32_t refs;
-    Id minTu;
+    Id minTu, maxTu;
     uint32_t from;
   };
   const auto symKey = [](const SymbolRecord &r) {
@@ -1186,7 +1188,8 @@ void ReferenceIndex::encode(std::string &out) const {
     const StoredReference &r = references_[i];
     if (r.refs == 0)
       continue;
-    Ref e{r.rec, r.refs, rankOfTu(r.minTu), static_cast<uint32_t>(i)};
+    Ref e{r.rec, r.refs, rankOfTu(r.minTu), rankOfTu(r.maxTu),
+          static_cast<uint32_t>(i)};
     e.rec.referrer = rank[r.rec.referrer];
     e.rec.target = rank[r.rec.target];
     e.rec.file = rank[r.rec.file];
@@ -1211,6 +1214,7 @@ void ReferenceIndex::encode(std::string &out) const {
     putVarint(out, e.rec.count);
     putVarint(out, e.refs);
     putVarint(out, e.minTu);
+    putVarint(out, e.maxTu);
   }
   refs = {};
 
@@ -1343,9 +1347,13 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
     ref.rec.count = r.varint();
     ref.refs = r.varint();
     ref.minTu = r.varint();
+    ref.maxTu = r.varint();
+    // Ids are ranks in path order: the largest contributor sorts last.
     if (!r.ok || referrer >= stringCount || ref.rec.target >= stringCount ||
         ref.rec.file >= stringCount || ref.minTu >= stringCount ||
-        ref.refs == 0 || ref.rec.count == 0 || role >= kRefRoleCount)
+        ref.maxTu >= stringCount || ref.maxTu < ref.minTu ||
+        (ref.refs == 1) != (ref.maxTu == ref.minTu) || ref.refs == 0 ||
+        ref.rec.count == 0 || role >= kRefRoleCount)
       return false;
     ref.rec.referrer = static_cast<Id>(referrer);
     ref.rec.role = static_cast<RefRole>(role);
@@ -1378,16 +1386,20 @@ bool ReferenceIndex::decode(const char *begin, const char *end,
           !r.runs(referenceCount, contribution.references))
         return false;
       // TUs come in ascending order: the first to list a record is its
-      // smallest contributor.
+      // smallest contributor, the one that completes its count its largest.
       for (uint32_t idx : contribution.symbols)
         if (symbolSeen[idx]++ == 0 ? symbols[idx].minTu != tu
                                    : symbolSeen[idx] > symbols[idx].refs)
           return false;
-      for (uint32_t idx : contribution.references)
+      for (uint32_t idx : contribution.references) {
         if (referenceSeen[idx]++ == 0
                 ? references[idx].minTu != tu
                 : referenceSeen[idx] > references[idx].refs)
           return false;
+        if ((referenceSeen[idx] == references[idx].refs) !=
+            (references[idx].maxTu == tu))
+          return false;
+      }
     }
     if (r.p != r.end)
       return false;

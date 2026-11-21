@@ -174,6 +174,7 @@ llvm::json::Value completenessJson(const AuditAnalysis &a,
     refs["overloadCandidates"] =
         static_cast<int64_t>(c.overloadCandidateRefs);
     refs["siteAnchored"] = static_cast<int64_t>(c.siteAnchoredRefs);
+    refs["tuScoped"] = static_cast<int64_t>(c.tuScopedRefs);
     symbols["undefinedInCoveredOwner"] =
         static_cast<int64_t>(c.undefinedInCoveredOwner);
     symbols["emittedEverywhere"] = static_cast<int64_t>(c.emittedDefinitions);

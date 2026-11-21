@@ -153,6 +153,12 @@ struct LinkFacts {
   /// The target set whose objects hold this reference, or 0 when it sits
   /// in an inline body and so belongs to whichever target uses that body.
   std::vector<uint32_t> refAnchor;
+  /// For a reference an inline body holds that one TU alone recorded (what
+  /// one instantiation of a template references, usually): that TU's
+  /// target set. A walk through the body takes the reference only for a
+  /// target in it. 0 for every other reference; empty without reference
+  /// facts.
+  std::vector<uint32_t> refScope;
   /// Order key of the reference site: file rank (by path), line, column.
   std::vector<uint64_t> refKey;
   std::vector<StringInterner::Id> refSite; // "file:line:col"
@@ -215,6 +221,9 @@ struct LinkFacts {
     /// USR two targets' code share, such as `main`) charged to the target
     /// set of the site, or of the one TU that recorded them.
     uint64_t siteAnchoredRefs = 0;
+    /// References of an inline body scoped to the one TU that recorded
+    /// them (refScope).
+    uint64_t tuScopedRefs = 0;
   } counts;
   /// Whether per-TU outcomes and opened-file tables were available.
   bool hasIndexMeta = false;

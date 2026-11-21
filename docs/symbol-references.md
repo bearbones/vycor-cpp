@@ -268,7 +268,12 @@ function in a header that 900 TUs include is one record with 900
 contributors (stored as runs). That list is what makes a warm refresh
 exact — re-indexing a TU removes its contributions and nothing else —
 and what `megascope merge` uses to combine per-TU shards, dropping the
-duplicate of a TU that two inputs both hold.
+duplicate of a TU that two inputs both hold. Each record also stores its
+contributor count and its smallest contributor by path, and a reference
+its largest too, so a load that skips the lists still knows them: the
+dependency audit scopes an inline body's reference to one target set
+when every TU between those two belongs to it
+(`docs/dependency-audit.md`, "Inline bodies and the closure").
 
 The section is written in a canonical order, so two indexes holding the
 same facts are byte-identical in it whatever order their TUs were baked
@@ -309,7 +314,16 @@ interleaving measured +2.3% wall and +2.2% CPU, and one TU parsed and
 traversed in process, best of seven, +1.8%. Loading and saving the
 finished index costs the same CPU with and without the section.
 
-The section holds 54,524 symbols and 239,018 references. A one-shot
+Reading instantiation bodies and the code the compiler writes is part
+of that traversal, always on. Measured the same way (without it, with,
+with, without), it adds no cost the host's noise lets one see: wall
+371.8 s and 329.0 s without, 317.5 s and 318.7 s with; CPU 1339 s and
+1190 s without, 1137 s and 1138 s with; peak RSS 2.727 GB against
+2.735 GB (+0.3%); index 573.5 MB against 575.2 MB (+0.3%). One TU
+(`lib/Analysis/ScalarEvolution.cpp`), interleaved, best of five: 3.83 s
+without, 3.70 s with. It adds 22% references and 4% symbols.
+
+The section holds about 56,700 symbols and 291,000 references. A one-shot
 `lookup-symbol` or `get-references` over that index takes about 60 ms and
 66 MB (process start, header and checksum, the references section
 alone); graph queries cost what they did.

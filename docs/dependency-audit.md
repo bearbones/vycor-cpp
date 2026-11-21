@@ -283,9 +283,21 @@ condition removes, or never emitted a body nobody called; the audit
 does not know. That over-counts the references an inline body carries.
 A template's references are those of its pattern, which holds what
 every instantiation the index read references
-(`docs/symbol-references.md`, "Code the compiler writes"): a consumer
-that uses `make<A>()` walks through what `make<B>()` builds too. That
-over-counts as well, by the other instantiations' references.
+(`docs/symbol-references.md`, "Code the compiler writes"). The walk
+narrows them by who recorded them: an inline body's reference that only
+TUs of one target set recorded is *scoped* to that set
+(`references.tuScoped`), and a consumer's walk, or a closure's for a
+provider, takes it only when the consumer (the provider) is in the set.
+So a consumer that uses `make<A>()` does not walk through what another
+target's `make<B>()` builds. The index keeps, per reference, the number
+of TUs that recorded it and the first and last of them by path; the
+contributors are all of one set when every TU the index meta lists
+between those two is, which is how sources of one target sort. A
+reference recorded by TUs of several sets, or with TUs of another set
+between its first and last, travels with the body unscoped; so does
+every reference when the index has no meta. Within one target set the
+union stays: a consumer that uses `make<A>()` walks through what its
+own `make<B>()` builds, and through what TUs of two targets both build.
 
 ### Registration seeds
 
@@ -469,7 +481,7 @@ Every payload of both tools carries `completeness`:
 | `targets` | `total`, `withSources`, `covered` |
 | `sources` | `mapped` (distinct sources in the map), `indexed` (parsed cleanly), `failed`, `notIndexed`, `unmappedTus` |
 | `symbols` | `defined`, `presumed`, `inline`, `unattributed`; with reference facts also `undefinedInCoveredOwner` (declared in a header whose owners are all fully indexed, defined by no indexed TU) and `emittedEverywhere` (weak or `used` header definitions held by every includer) |
-| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
+| `references` | `anchored` (held by a target's objects), `inlineBody` (travel with an inline body), `virtualDispatchSkipped` (dispatched virtual calls, soft), `deferredSkipped` (call-edge fallback: function-pointer returns), `unmappedBody` (made by code of an indexed source no target lists), `unresolvedSite` (the site's file matched no known file); with reference facts also `overloadCandidates` (soft), `siteAnchored`, `tuScoped` (inline-body references only TUs of one target set recorded, taken only for that set), `vtableEntries`, `baseClasses`, `inheritedVirtuals`, `baseClassesUnseen`, `fileScopeDropped` |
 
 `invisible` with reference facts:
 
@@ -488,9 +500,11 @@ Known ways an answer is wrong, beyond what the tags say:
   time. Every gain column of such a row is too large;
   `registrationSeeds` and reading the closure are the checks.
 - **The closure is too large through a template.** A template's
-  references are the union of every instantiation the index read, so a
-  closure through `make<T>()` includes what the other `T`s' constructors
-  need.
+  references are the union of every instantiation the index read,
+  narrowed only to the target set of the TUs that recorded them ("Inline
+  bodies and the closure"), so a closure through `make<T>()` includes
+  what the other `T`s' constructors need when TUs of the same target, or
+  of several, instantiate them.
 - **Compiler-written code is read, with the approximations
   `docs/symbol-references.md` lists under "Limits"** (an exception path
   judged from the form of the code, instantiations a TU names but does

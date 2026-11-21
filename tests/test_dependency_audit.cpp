@@ -2137,6 +2137,81 @@ TEST_CASE("dependency audit from references: a split helps the executables "
   CHECK(audit.find(tExe1, tBig) == kNoIndex);
 }
 
+TEST_CASE("dependency audit from references: what one target's "
+          "instantiations of a template reference stays with that target",
+          "[dependency-audit]") {
+  TargetMap map;
+  std::string error;
+  REQUIRE(parseMap(R"({"schema": 1, "root": "/r", "targets": [
+      {"name": "a", "kind": "static_library",
+       "sources": ["a/a1.cpp", "a/a2.cpp"], "deps": ["c", "e"]},
+      {"name": "b", "kind": "static_library",
+       "sources": ["b/b1.cpp", "b/b2.cpp"], "deps": ["d", "e"]},
+      {"name": "c", "kind": "static_library", "sources": ["c/c.cpp"]},
+      {"name": "d", "kind": "static_library", "sources": ["d/d.cpp"]},
+      {"name": "e", "kind": "static_library", "sources": ["e/e.cpp"]}]})",
+                   map, error, "/r"));
+  enum : uint32_t { tA = 0, tB = 1, tC = 2, tD = 3, tE = 4 };
+  ReferenceIndex refs;
+  // make<T> in a shared header: its pattern holds what every
+  // instantiation references. a's TUs instantiate it on c's type, b's on
+  // d's; e's function is referenced by an a TU and a b TU alike.
+  addSym(refs, "c:@FT@>1#Tmake#v#", "make", "/r/u/u.h", 1, kD | kH,
+         {"/r/a/a1.cpp", "/r/a/a2.cpp", "/r/b/b1.cpp", "/r/b/b2.cpp"}, kFn,
+         kVague);
+  addSym(refs, "c:@F@a_fn", "a_fn", "/r/a/a1.cpp", 1, kD, {"/r/a/a1.cpp"});
+  addSym(refs, "c:@F@b_fn", "b_fn", "/r/b/b1.cpp", 1, kD, {"/r/b/b1.cpp"});
+  addSym(refs, "c:@F@c_fn", "c_fn", "/r/c/c.cpp", 1, kD, {"/r/c/c.cpp"});
+  addSym(refs, "c:@F@d_fn", "d_fn", "/r/d/d.cpp", 1, kD, {"/r/d/d.cpp"});
+  addSym(refs, "c:@F@e_fn", "e_fn", "/r/e/e.cpp", 1, kD, {"/r/e/e.cpp"});
+  addRef(refs, "c:@F@a_fn", "c:@FT@>1#Tmake#v#", RefRole::Call,
+         "/r/a/a1.cpp", 2, 3, "/r/a/a1.cpp");
+  addRef(refs, "c:@F@b_fn", "c:@FT@>1#Tmake#v#", RefRole::Call,
+         "/r/b/b1.cpp", 2, 3, "/r/b/b1.cpp");
+  for (const char *tu : {"/r/a/a1.cpp", "/r/a/a2.cpp"})
+    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@c_fn", RefRole::Call, "/r/u/u.h",
+           2, 3, tu);
+  for (const char *tu : {"/r/b/b1.cpp", "/r/b/b2.cpp"})
+    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@d_fn", RefRole::Call, "/r/u/u.h",
+           2, 3, tu);
+  for (const char *tu : {"/r/a/a2.cpp", "/r/b/b1.cpp"})
+    addRef(refs, "c:@FT@>1#Tmake#v#", "c:@F@e_fn", RefRole::Call, "/r/u/u.h",
+           3, 3, tu);
+  SnapshotMeta meta = metaOf({{"/r/a/a1.cpp", {"/r/u/u.h"}},
+                              {"/r/a/a2.cpp", {"/r/u/u.h"}},
+                              {"/r/b/b1.cpp", {"/r/u/u.h"}},
+                              {"/r/b/b2.cpp", {"/r/u/u.h"}},
+                              {"/r/c/c.cpp", {}},
+                              {"/r/d/d.cpp", {}},
+                              {"/r/e/e.cpp", {}}});
+  auto symbolsOf = [](const DependencyAudit &audit, uint32_t consumer,
+                      uint32_t provider) -> uint32_t {
+    const uint32_t row = audit.find(consumer, provider);
+    return row == kNoIndex ? 0 : audit.rows[row].symbols;
+  };
+
+  const LinkFacts lf = linkFactsFromReferences(refs, nullptr, map, &meta);
+  const DependencyAudit audit = auditDependencies(lf, map);
+  // c_fn's and d_fn's references are each scoped to one target's TUs;
+  // e_fn's contributors span two targets and travel with the body.
+  CHECK(lf.counts.tuScopedRefs == 2);
+  CHECK(symbolsOf(audit, tA, tC) == 1);
+  CHECK(symbolsOf(audit, tA, tD) == 0);
+  CHECK(symbolsOf(audit, tB, tD) == 1);
+  CHECK(symbolsOf(audit, tB, tC) == 0);
+  CHECK(symbolsOf(audit, tA, tE) == 1);
+  CHECK(symbolsOf(audit, tB, tE) == 1);
+
+  // Without the index meta the TUs between two contributors are unknown:
+  // only a one-TU record could scope, and every consumer of the body takes
+  // all three.
+  const LinkFacts bare = linkFactsFromReferences(refs, nullptr, map, nullptr);
+  const DependencyAudit bareAudit = auditDependencies(bare, map);
+  CHECK(bare.counts.tuScopedRefs == 0);
+  CHECK(symbolsOf(bareAudit, tA, tD) == 1);
+  CHECK(symbolsOf(bareAudit, tB, tC) == 1);
+}
+
 TEST_CASE("dependency audit from references: a library that supplies main "
           "is not unused",
           "[dependency-audit]") {

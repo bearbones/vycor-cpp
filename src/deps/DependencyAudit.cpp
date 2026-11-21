@@ -847,7 +847,7 @@ struct RawRef {
   SId siteFile;     // the site's path in the reference index, or kNoId
   uint32_t line, col;
   uint32_t tus;     // contributing TUs (stored records), else 0
-  SId minTu;
+  SId minTu, maxTu; // smallest and largest contributor by path, or kNoId
   uint8_t kind;
 };
 
@@ -894,12 +894,12 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   struct RefRec {
     ReferenceIndex::ReferenceRecord rec;
     uint32_t tus;
-    SId minTu;
+    SId minTu, maxTu;
   };
   std::vector<RefRec> rrec;
   refs.forEachReferenceRecord([&](const ReferenceIndex::ReferenceRecord &r,
-                                  uint32_t tus, SId minTu) {
-    rrec.push_back({r, tus, minTu});
+                                  uint32_t tus, SId minTu, SId maxTu) {
+    rrec.push_back({r, tus, minTu, maxTu});
   });
 
   // --- Symbols, in USR order -----------------------------------------------
@@ -1254,7 +1254,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       ++lf.counts.skippedVirtualCalls;
     }
     raw.push_back({from, to, fileOf(r.rec.file), r.rec.file, r.rec.line,
-                   r.rec.col, r.tus, r.minTu,
+                   r.rec.col, r.tus, r.minTu, r.maxTu,
                    static_cast<uint8_t>(r.rec.role)});
     rawSoft.push_back(soft);
   }
@@ -1266,7 +1266,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   auto addSynthesized = [&](uint32_t from, uint32_t to, uint8_t kind,
                             uint32_t siteOf) {
     raw.push_back({from, to, lf.symDeclFile[siteOf], declSiteFile[siteOf],
-                   lf.symDeclLine[siteOf], 0, 0, kNoId, kind});
+                   lf.symDeclLine[siteOf], 0, 0, kNoId, kNoId, kind});
     rawSoft.push_back(0);
   };
   std::vector<std::pair<uint32_t, uint32_t>> ownVirtual; // (class, function)
@@ -1547,7 +1547,8 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         addSynthesized(l.derived, to, kind, l.derived);
       } else {
         // Held where the vtable is emitted: the site is the home TU.
-        raw.push_back({l.derived, to, l.file, l.path, 0, 0, 1, l.path, kind});
+        raw.push_back(
+            {l.derived, to, l.file, l.path, 0, 0, 1, l.path, l.path, kind});
         rawSoft.push_back(0);
       }
     };
@@ -1733,11 +1734,67 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       byFrom[cursor[raw[i].from]++] = static_cast<uint32_t>(i);
   }
 
+  // --- Scopes ------------------------------------------------------------
+  // An inline body's reference that only TUs of one target set recorded:
+  // what those TUs' instantiations of a template reference, held by their
+  // objects, not by every user of the body (another target's instantiation
+  // holds its own). A record keeps its contributor count and its smallest
+  // and largest contributor by path, not the list: the contributors are
+  // all of one set when every indexed TU between those two, in path order,
+  // is (a run). The TUs come from the index meta; without it, or when a
+  // record names a TU the meta does not list, only one-TU records scope.
+  std::vector<uint32_t> tuRun(idCount, kNoIndex), runSet(1, 0);
+  std::vector<uint32_t> tuPos(idCount, kNoIndex);
+  bool runsKnown = false;
+  if (meta && !meta->files.empty()) {
+    std::vector<std::pair<SId, uint32_t>> tus; // (TU path id, its set)
+    tus.reserve(meta->files.size());
+    for (size_t i = 0; i < meta->files.size(); ++i)
+      if (auto id = rs.find(meta->files[i].path))
+        tus.emplace_back(*id, i < fa.metaTuFile.size()
+                                  ? fa.tuSet(fa.metaTuFile[i])
+                                  : 0);
+    std::sort(tus.begin(), tus.end(), [&](const auto &a, const auto &b) {
+      return rs.resolve(a.first) < rs.resolve(b.first);
+    });
+    for (uint32_t i = 0; i < tus.size(); ++i) {
+      const uint32_t set = tus[i].second;
+      if (set == 0 || i == 0 || set != tus[i - 1].second)
+        runSet.push_back(set);
+      tuRun[tus[i].first] = static_cast<uint32_t>(runSet.size() - 1);
+      tuPos[tus[i].first] = i;
+    }
+    runsKnown = true;
+    for (const RawRef &r : raw)
+      if (r.tus > 1 && (tuPos[r.minTu] == kNoIndex ||
+                        tuPos[r.maxTu] == kNoIndex)) {
+        runsKnown = false;
+        break;
+      }
+  }
+  auto scopeOf = [&](const RawRef &r, uint32_t anchor) -> uint32_t {
+    if (anchor != 0 || lf.symClass[r.from] != SymbolClass::Inline ||
+        r.tus == 0 || r.minTu == kNoId)
+      return 0;
+    if (r.tus == 1) {
+      const uint32_t tuFile = fileOf(r.minTu);
+      return tuFile == kNoIndex ? 0 : fa.tuSet(tuFile);
+    }
+    if (!runsKnown || r.maxTu == kNoId)
+      return 0;
+    const uint32_t run = tuRun[r.minTu];
+    if (run != tuRun[r.maxTu] || tuPos[r.maxTu] < tuPos[r.minTu] ||
+        tuPos[r.maxTu] - tuPos[r.minTu] + 1 < r.tus)
+      return 0;
+    return runSet[run];
+  };
+
   struct Kept {
     uint32_t to, anchor;
     uint64_t key;
     uint8_t kind;
     uint32_t raw;
+    uint32_t scope;
   };
   std::vector<Kept> hard;
   std::vector<std::pair<uint32_t, uint32_t>> softPairs; // (to, anchor)
@@ -1745,6 +1802,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
   lf.softBegin.assign(symbolCount + 1, 0);
   lf.refTo.reserve(rawCount);
   lf.refAnchor.reserve(rawCount);
+  lf.refScope.reserve(rawCount);
   lf.refKey.reserve(rawCount);
   lf.refSite.reserve(rawCount);
   lf.refKind.reserve(rawCount);
@@ -1762,7 +1820,7 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         continue;
       }
       hard.push_back({r.to, anchor, siteKey(rankOf(r.file), r.line, r.col),
-                      r.kind, byFrom[i]});
+                      r.kind, byFrom[i], scopeOf(r, anchor)});
     }
     std::sort(softPairs.begin(), softPairs.end());
     softPairs.erase(std::unique(softPairs.begin(), softPairs.end()),
@@ -1782,11 +1840,32 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         return a.key < b.key;
       return a.kind < b.kind;
     });
-    hard.erase(std::unique(hard.begin(), hard.end(),
-                           [](const Kept &a, const Kept &b) {
-                             return a.to == b.to && a.anchor == b.anchor;
-                           }),
-               hard.end());
+    // One reference per target and anchor, the first by site, except that
+    // references of distinct scopes stay apart (each for its own targets)
+    // and an unscoped one subsumes them all.
+    {
+      size_t kept = 0, run = 0;
+      for (size_t i = 0; i < hard.size(); ++i) {
+        if (kept != 0 && hard[run].to == hard[i].to &&
+            hard[run].anchor == hard[i].anchor) {
+          bool absorbed = false;
+          for (size_t k = run; k < kept && !absorbed; ++k)
+            absorbed = hard[k].scope == 0 || hard[k].scope == hard[i].scope;
+          if (absorbed)
+            continue;
+          if (hard[i].scope == 0) {
+            hard[run].scope = 0; // keeps the first site
+            kept = run + 1;
+            continue;
+          }
+          hard[kept++] = hard[i];
+          continue;
+        }
+        run = kept;
+        hard[kept++] = hard[i];
+      }
+      hard.resize(kept);
+    }
     // Symbol order is USR order, so `to` breaks ties by USR.
     std::sort(hard.begin(), hard.end(), [](const Kept &a, const Kept &b) {
       if (a.key != b.key)
@@ -1795,7 +1874,9 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         return a.kind < b.kind;
       if (a.to != b.to)
         return a.to < b.to;
-      return a.anchor < b.anchor;
+      if (a.anchor != b.anchor)
+        return a.anchor < b.anchor;
+      return a.scope < b.scope;
     });
     for (const Kept &k : hard) {
       const RawRef &r = raw[k.raw];
@@ -1808,6 +1889,9 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
       site += std::to_string(r.col);
       lf.refTo.push_back(k.to);
       lf.refAnchor.push_back(k.anchor);
+      lf.refScope.push_back(k.scope);
+      if (k.scope != 0)
+        ++lf.counts.tuScopedRefs;
       lf.refKey.push_back(k.key);
       lf.refSite.push_back(out.intern(site));
       lf.refKind.push_back(k.kind);
@@ -2094,10 +2178,13 @@ ClosureCounts closureOf(const LinkFacts &lf, uint32_t provider,
   auto provided = [&](uint32_t anchor) noexcept {
     return anchor == 0 || lf.setHas(anchor, provider);
   };
+  const bool scoped = !lf.refScope.empty();
   while (head < tail) {
     const uint32_t s = ws.queue[head++];
     for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
-      if (provided(lf.refAnchor[r]))
+      if (provided(lf.refAnchor[r]) &&
+          (!scoped || lf.refScope[r] == 0 ||
+           lf.setHas(lf.refScope[r], provider)))
         visit(lf.refTo[r]);
     // A soft reference may be needed (an overload candidate, a call
     // through a vtable slot): the closure takes its target when the
@@ -2340,11 +2427,14 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
     };
     for (uint32_t i = heldBegin[consumer]; i < heldBegin[consumer + 1]; ++i)
       visit(lf.refTo[held[i].ref], held[i].ref, held[i].ref, false);
+    const bool scoped = !lf.refScope.empty();
     while (head < tail) {
       const uint32_t s = ws.queue[head];
       const uint32_t root = ws.queueRoot[head++];
       for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
-        visit(lf.refTo[r], r, root, true);
+        if (!scoped || lf.refScope[r] == 0 ||
+            lf.setHas(lf.refScope[r], consumer))
+          visit(lf.refTo[r], r, root, true);
     }
     // Indirect uses: symbols of another target the consumer's code touches
     // without a reference counted above — the inline bodies it walked
