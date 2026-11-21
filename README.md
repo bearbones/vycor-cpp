@@ -399,7 +399,7 @@ batch on one loaded index).
 ./build/vycor-cpp megascope find-call-chain --to Foo::bar --format ndjson
 ./build/vycor-cpp megascope search-functions --query Foo --format tsv | cut -f4
 ./build/vycor-cpp megascope info            # what the index holds
-./build/vycor-cpp megascope tools           # the 29 tools
+./build/vycor-cpp megascope tools           # the 30 tools
 
 # Many queries, one load: NDJSON requests in, one response per line out.
 printf '{"id":1,"tool":"get_callers","args":{"name":"Foo::bar"}}\n' | \
@@ -450,7 +450,7 @@ line after a `{"_summary":...}` line — or as one JSON document with
 `--format json`; the stream never holds the materialized index, so it
 scales to the largest indexes.
 
-**29 tools**: `search_functions`, `lookup_function`, `get_callees`,
+**30 tools**: `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -460,7 +460,8 @@ scales to the largest indexes.
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
 `impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`,
-`lookup_symbol`, `get_references`.
+`lookup_symbol`, `get_references`,
+`query_path_effects`.
 See `docs/megascope-usage.md`. `megascope diff --before A --after B` compares
 two saved indexes (`docs/change-impact.md`). `audit_dependencies` and
 `explain_dependency` compare the build's declared link dependencies with

@@ -283,9 +283,16 @@ std::vector<CallGraph::SId> CallGraph::transitiveClosure(
 std::vector<CallGraph::EdgeRef>
 CallGraph::calleeRefsOf(StringInterner::Id caller) const {
   std::vector<EdgeRef> result;
+  calleeRefsOf(caller, result);
+  return result;
+}
+
+void CallGraph::calleeRefsOf(StringInterner::Id caller,
+                             std::vector<EdgeRef> &result) const {
+  result.clear();
   auto it = outEdges_.find(caller);
   if (it == outEdges_.end())
-    return result;
+    return;
 
   result.reserve(it->second.size());
 
@@ -352,7 +359,6 @@ CallGraph::calleeRefsOf(StringInterner::Id caller) const {
       }
     }
   }
-  return result;
 }
 
 std::vector<CallGraphEdge>

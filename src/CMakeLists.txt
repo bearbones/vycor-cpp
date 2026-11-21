@@ -2,6 +2,7 @@ add_library(vycor_lib
   check/GlobalIndex.cpp
   check/Indexer.cpp
   check/Analyzer.cpp
+  check/HotPathEffects.cpp
   check/AbiLayout.cpp
   check/CallbackUnderLock.cpp
   check/CouldBeInternal.cpp
@@ -25,7 +26,9 @@ add_library(vycor_lib
   callgraph/ControlFlowContextVisitor.cpp
   callgraph/ChannelIndex.cpp
   callgraph/ControlFlowOracle.cpp
+  callgraph/CoverageProfile.cpp
   callgraph/Effects.cpp
+  callgraph/HotPath.cpp
   callgraph/InputFingerprint.cpp
   callgraph/MegascopeBridge.cpp
   callgraph/PathSearch.cpp
@@ -51,6 +54,7 @@ add_library(vycor_lib
   deps/TargetMap.cpp
   deps/DependencyAudit.cpp
   query/MetricsTools.cpp
+  query/EffectTools.cpp
   metrics/Metric.cpp
   metrics/MetricSet.cpp
   metrics/StaticInitCost.cpp

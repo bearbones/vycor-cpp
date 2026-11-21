@@ -88,6 +88,7 @@ public:
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *expr);
   bool VisitCXXNewExpr(clang::CXXNewExpr *expr);
   bool VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr);
+  bool VisitCXXThrowExpr(clang::CXXThrowExpr *expr);
   bool VisitVarDecl(clang::VarDecl *decl);
   bool VisitDeclRefExpr(clang::DeclRefExpr *expr);
 
@@ -119,6 +120,9 @@ private:
 
   // Callee decls whose node this visitor registered (see identForCallee).
   llvm::DenseSet<const clang::FunctionDecl *> auxNodes_;
+  // Whether this TU has registered the node of the throw / rethrow entry
+  // point (throwCalleeIdent), indexed by `rethrow`.
+  bool throwNodes_[2] = {false, false};
 
   std::string getFilePath(clang::SourceLocation loc) const;
   std::string formatLocation(clang::SourceLocation loc) const;

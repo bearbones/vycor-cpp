@@ -445,6 +445,28 @@ built objects.
 
 ---
 
+## Effects on hot paths
+
+`query-path-effects` lists the allocations, lock acquisitions, I/O and
+throws reachable from hot roots, one record per effect call with a
+witness path from a hot root (the nearest one, or with a profile the
+root of the heaviest path):
+
+```bash
+vycor-cpp megascope query-path-effects --roots 'myorg::Solver::step' \
+    --effects allocation --effects lock --format ndjson
+
+# With a coverage profile (llvm-cov export JSON) of a real run: paths are
+# weighted by their rarest call, observed ones first, latent ones last;
+# --min-count takes every function entered that often as a root.
+vycor-cpp megascope query-path-effects --profile run.json --min-count 10000
+```
+
+Roots and accepted functions also come from the org config's `hotPaths`
+key. The same analysis runs as the `hot-path-effects` check. Reference,
+including the profile join and what a count does and does not prove:
+[checks/hot-path-effects.md](checks/hot-path-effects.md).
+
 ## Known gotchas
 
 **Function names are exact-match only.** Partial names, namespaces
@@ -474,6 +496,11 @@ candidate list gives each one's. `c:@F@operator new#l#` is the plain
 form on a 64-bit Linux or macOS target, the one ending `#*v#` the
 placement form. A `new` whose type depends on a template parameter has
 no edge in the template's definition.
+
+**A `throw` is a call.** Each `throw` expression is a `DirectCall`
+edge to `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`) at the
+expression, so `get-callers --name __cxa_throw` lists every function
+that throws, and the effect tools see throws as they see allocations.
 
 **List tools are paged.** `get_callers`, `get_callees`,
 `list_callback_sites`, `list_concurrency_entry_points`, and the other

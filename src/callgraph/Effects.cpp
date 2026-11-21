@@ -26,6 +26,8 @@ llvm::StringRef effectKindName(EffectKind kind) {
     return "lock";
   case EffectKind::Io:
     return "io";
+  case EffectKind::Throw:
+    return "throw";
   }
   return "allocation";
 }
@@ -251,7 +253,20 @@ EffectTable EffectTable::builtin() {
       "std::basic_fstream::open",
       "std::basic_filebuf::open",
   };
+  // The throw expression itself (an edge the call graph builder records)
+  // and the library functions that raise (std::rethrow_if_nested only
+  // when its argument holds a nested exception).
+  static const char *const kThrow[] = {
+      kThrowFunction,
+      kRethrowFunction,
+      "_CxxThrowException",
+      "std::rethrow_exception",
+      "std::rethrow_if_nested",
+      "std::throw_with_nested",
+  };
   EffectTable table;
+  for (const char *name : kThrow)
+    table.add(EffectKind::Throw, name);
   for (const char *name : kAllocation)
     table.add(EffectKind::Allocation, name);
   for (const char *name : kLock)

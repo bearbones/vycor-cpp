@@ -24,6 +24,7 @@
   query-exception-safety         Determine whether a function is protected by try/catch on its call paths from entry points.
   query-locks-held               For each entry point, enumerate call paths reaching `function` via reverse-walking the call graph, and report Lock-kind RAII locals live on any edge of each path.
   query-nearest-catches          For each call path into a function, the nearest enclosing try/catch walking up the callers: the handler scope, how many frames up it sits, and the path segment between.
+  query-path-effects             Allocation, lock acquisition, I/O and throws reachable from hot roots (named, matched by pattern, or taken from a profile).
   query-raii-scopes-at-callsite  List RAII-capable locals (non-trivial-destructor) live at a call site.
   query-same-lock                Compute the intersection of locks held across paths reaching fn_a and fn_b.
   query-throw-propagation        If a function throws the given exception type, is it caught before unwinding to an entry point? Reports the protection verdict (see query_exception_safety) plus every call path with its exact hops (call sites), try/catch scopes, guards, and outcome: caught (where and by which handler), uncaught (escapes the entry point), terminates (noexcept or thread boundary), or unknown (no context indexed, async boundary).

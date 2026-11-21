@@ -70,6 +70,7 @@ initial seeding and may evolve. Organizations can define their own groups
 | [noexcept-candidate](noexcept-candidate.md) | off | note | compute-heavy | Functions proven unable to throw across TUs that are not declared noexcept |
 | [noexcept-candidate-move](noexcept-candidate.md#the-sub-kinds) | off | note | compute-heavy | The same proof for move constructors and move assignment operators |
 | [noexcept-candidate-virtual](noexcept-candidate.md#the-sub-kinds) | off | note | compute-heavy | The same proof for virtual functions (noexcept there constrains every override) |
+| [hot-path-effects](hot-path-effects.md) | off | warning (latent: note) | compute-heavy | Allocation, locks, I/O and throws reachable from hot roots (configured, or from a coverage profile) |
 
 Severity is the SARIF `level` and what `--fail-on` compares against:
 `error` for ill-formed programs (IFNDR, ODR), `warning` for proven

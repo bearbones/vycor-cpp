@@ -1,0 +1,489 @@
+{
+ "schema": 1,
+ "title": "Allocation, locks, I/O and throws reachable from hot roots: configured, pattern and profile roots, a real llvm-cov profile telling observed paths from latent ones (a virtual call's unexecuted override included), the allow list, and the check",
+ "sources": [
+  "sim.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "profile-roots-observed-before-latent",
+   "argv": [
+    "query-path-effects",
+    "--profile",
+    "{case}/profile.json",
+    "--min-count",
+    "1000"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "roots": {
+      "total": 4,
+      "profile": 4,
+      "config": 0,
+      "minCount": 1000,
+      "unmatched": []
+     },
+     "summary": {
+      "observed": {
+       "allocation": 1,
+       "lock": 1,
+       "io": 0,
+       "throw": 0
+      },
+      "latent": {
+       "allocation": 1,
+       "lock": 0,
+       "io": 1,
+       "throw": 1
+      },
+      "unprofiled": {
+       "allocation": 0,
+       "lock": 0,
+       "io": 0,
+       "throw": 0
+      }
+     },
+     "verdict": "effects",
+     "exhaustive": true
+    },
+    "count": {
+     "findings": 5
+    },
+    "witnesses": [
+     {
+      "in": "findings",
+      "match": {
+       "effect": "allocation",
+       "evidence": "observed",
+       "weight": 2000,
+       "function": "pool_acquire",
+       "callee": "malloc",
+       "rootSources": [
+        "profile"
+       ],
+       "rootCount": 2000
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "effect": "lock",
+       "evidence": "observed",
+       "weight": 2000,
+       "function": "count_step",
+       "callee": "std::lock_guard<std::mutex>::lock_guard"
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "effect": "allocation",
+       "evidence": "latent",
+       "weight": 0,
+       "function": "Verlet::apply",
+       "callee": "operator new[]",
+       "root": "step",
+       "path": [
+        {
+         "caller": "step",
+         "callee": "Verlet::apply",
+         "kind": "VirtualDispatch",
+         "count": 2000,
+         "calleeCount": 0
+        },
+        {
+         "caller": "Verlet::apply",
+         "callee": "operator new[]",
+         "count": 0
+        }
+       ]
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "effect": "throw",
+       "evidence": "latent",
+       "function": "bad_count",
+       "callee": "__cxa_throw",
+       "root": "step"
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "effect": "io",
+       "evidence": "latent",
+       "function": "warn_slow",
+       "callee": "fprintf",
+       "root": "step"
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "findings",
+      "match": {
+       "callee": "printf"
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "evidence": "unprofiled"
+      }
+     }
+    ],
+    "sequence": [
+     {
+      "in": "findings",
+      "match": [
+       {
+        "evidence": "observed"
+       },
+       {
+        "evidence": "observed"
+       },
+       {
+        "evidence": "latent"
+       },
+       {
+        "evidence": "latent"
+       },
+       {
+        "evidence": "latent"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "profile-join-hit-rate",
+   "argv": [
+    "query-path-effects",
+    "--profile",
+    "{case}/profile.json",
+    "--min-count",
+    "1000"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "profile": {
+      "files": 3,
+      "functions": 11,
+      "executedFunctions": 8,
+      "join": {
+       "callSites": 19,
+       "callSitesInProfile": 19,
+       "callSitesCounted": 19,
+       "functions": 9,
+       "functionsCounted": 9
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "config-root-with-allow-list",
+   "argv": [
+    "query-path-effects",
+    "--roots",
+    "main",
+    "--profile",
+    "{case}/profile.json",
+    "--allow",
+    "pool_acquire"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "roots": {
+      "total": 1,
+      "config": 1,
+      "profile": 0
+     },
+     "allow": {
+      "functions": 1,
+      "calls": 1
+     }
+    },
+    "count": {
+     "findings": 5
+    },
+    "witnesses": [
+     {
+      "in": "findings",
+      "match": {
+       "effect": "io",
+       "evidence": "observed",
+       "weight": 1,
+       "function": "report",
+       "callee": "printf",
+       "root": "main",
+       "rootSources": [
+        "config"
+       ],
+       "rootCount": 1
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "effect": "lock",
+       "evidence": "observed",
+       "weight": 2000,
+       "root": "main",
+       "depth": 3
+      }
+     }
+    ],
+    "negatives": [
+     {
+      "in": "findings",
+      "match": {
+       "callee": "malloc"
+      }
+     }
+    ],
+    "sequence": [
+     {
+      "in": "findings",
+      "match": [
+       {
+        "effect": "lock",
+        "weight": 2000
+       },
+       {
+        "effect": "io",
+        "weight": 1
+       },
+       {
+        "evidence": "latent"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "no-profile-is-unprofiled",
+   "argv": [
+    "query-path-effects",
+    "--roots",
+    "step"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "profile": null,
+     "summary": {
+      "unprofiled": {
+       "allocation": 2,
+       "lock": 1,
+       "io": 1,
+       "throw": 1
+      }
+     }
+    },
+    "count": {
+     "findings": 5
+    },
+    "negatives": [
+     {
+      "in": "findings",
+      "match": {
+       "evidence": "observed"
+      }
+     },
+     {
+      "in": "findings",
+      "match": {
+       "evidence": "latent"
+      }
+     }
+    ],
+    "witnesses": [
+     {
+      "in": "findings",
+      "match": {
+       "effect": "allocation",
+       "function": "pool_acquire",
+       "callee": "malloc",
+       "weight": null,
+       "count": null
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "root-pattern-and-effect-filter",
+   "argv": [
+    "query-path-effects",
+    "--root-patterns",
+    "^Verlet::",
+    "--effects",
+    "allocation",
+    "--profile",
+    "{case}/profile.json"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "effects": [
+      "allocation"
+     ],
+     "roots": {
+      "total": 1,
+      "unmatched": []
+     }
+    },
+    "count": {
+     "findings": 1
+    },
+    "witnesses": [
+     {
+      "in": "findings",
+      "match": {
+       "root": "Verlet::apply",
+       "callee": "operator new[]",
+       "evidence": "latent",
+       "depth": 1
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "throw-filter",
+   "argv": [
+    "query-path-effects",
+    "--roots",
+    "step",
+    "--effects",
+    "throw"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "count": {
+     "findings": 1
+    },
+    "witnesses": [
+     {
+      "in": "findings",
+      "match": {
+       "effect": "throw",
+       "callee": "__cxa_throw",
+       "function": "bad_count",
+       "path": [
+        {
+         "caller": "step",
+         "callee": "bad_count"
+        },
+        {
+         "caller": "bad_count",
+         "callee": "__cxa_throw",
+         "kind": "DirectCall",
+         "confidence": "Proven"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "clean-root",
+   "argv": [
+    "query-path-effects",
+    "--roots",
+    "Euler::apply",
+    "--profile",
+    "{case}/profile.json"
+   ],
+   "expect": {
+    "exit": 1,
+    "status": "ok",
+    "fields": {
+     "verdict": "clean"
+    },
+    "count": {
+     "findings": 0
+    }
+   }
+  },
+  {
+   "id": "unmatched-root-is-reported",
+   "argv": [
+    "query-path-effects",
+    "--roots",
+    "step",
+    "--roots",
+    "no_such_function",
+    "--effects",
+    "lock"
+   ],
+   "expect": {
+    "exit": 0,
+    "status": "ok",
+    "fields": {
+     "roots": {
+      "total": 1,
+      "unmatched": [
+       "no_such_function"
+      ]
+     }
+    },
+    "count": {
+     "findings": 1
+    }
+   }
+  },
+  {
+   "id": "profile-without-roots-is-usage",
+   "argv": [
+    "query-path-effects",
+    "--profile",
+    "{case}/profile.json"
+   ],
+   "expect": {
+    "exit": 2,
+    "status": "usage_error"
+   }
+  },
+  {
+   "id": "check-latent-and-observed",
+   "argv": [
+    "check",
+    "--checks=-all,hot-path-effects",
+    "--hot-profile",
+    "{case}/profile.json",
+    "--hot-min-count",
+    "1000"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "sim\\.cpp:15:48: \\[hot-path-effects\\] allocation reachable from hot root 'pool_acquire': pool_acquire -> malloc \\(observed, the rarest call on the path ran 2000 times",
+      "sim\\.cpp:31:21: \\[hot-path-effects\\] allocation reachable from hot root 'step': step -> Verlet::apply -> operator new\\[\\] \\(latent: a call on the path never ran",
+      "sim\\.cpp:13:24: \\[hot-path-effects\\] throw reachable from hot root 'step'"
+     ],
+     "absent": [
+      " -> printf "
+     ]
+    }
+   }
+  }
+ ]
+}

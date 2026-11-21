@@ -56,7 +56,14 @@ loudly — see `include/vycor/ext/OrgConfig.h`):
   "effects": {
     "allocation": ["myorg::Arena::grow"],
     "lock": ["myorg::SpinLock::acquire"],
-    "io": ["myorg::log"]
+    "io": ["myorg::log"],
+    "throw": ["myorg::raise"]
+  },
+  "hotPaths": {
+    "roots": ["myorg::Solver::step"],
+    "rootPatterns": ["^myorg::kernels::"],
+    "allow": ["myorg::Pool::acquire"],
+    "minCount": 10000
   }
 }
 ```
@@ -72,13 +79,29 @@ Also registrable in code: `registry.addStaticInitHazards({...})`.
 
 Qualified function names added to the effect table
 (`include/vycor/callgraph/Effects.h`): the functions that allocate,
-acquire a lock, or do I/O. The table is one shared answer to "does this
-call path have that effect"; the
-[static-init-cost](metrics/static-init-cost.md) metric reads it today.
-Keys are `allocation`, `lock` and `io`; an unknown kind is an error.
+acquire a lock, do I/O, or throw. The table is one shared answer to
+"does this call path have that effect"; the
+[static-init-cost](metrics/static-init-cost.md) metric (allocation, lock,
+I/O) and the [hot-path-effects](checks/hot-path-effects.md) check and
+`query_path_effects` tool (all four) read it.
+Keys are `allocation`, `lock`, `io` and `throw`; an unknown kind is an
+error.
 Names match whatever their template arguments and inline namespaces.
 Read at query time, so changing it never invalidates an index. Also
 registrable in code: `registry.addEffectFunctions(kind, {...})`.
+
+### `hotPaths`
+
+Hot roots and accepted functions for the
+[hot-path-effects](checks/hot-path-effects.md) check and the
+`query_path_effects` tool: `roots` (qualified names, every overload and
+instantiation, or USRs), `rootPatterns` (extended regexes searched in
+qualified names; an invalid one is an error at load), `allow` (functions
+whose calls are neither reported nor followed), and `minCount` (with a
+profile, every function entered at least that often is a root). The
+profile itself is per run (`--hot-profile`, the tool's `profile`). The
+tool and the check's `--hot-root` add to these lists. Unknown keys are an
+error. Also registrable in code: `registry.addHotPathConfig({...})`.
 
 ### `lockTypes`
 

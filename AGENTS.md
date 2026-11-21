@@ -149,6 +149,13 @@ sources and none is stale, else bakes once with `bakeIndexes` and shares
 the graph with `dead-code` / `static-init-hazards`. See
 `docs/checks/could-be-internal.md` and `tests/test_could_be_internal.cpp`.
 
+`hot-path-effects` is an opt-in graph-backed check
+(`check/HotPathEffects.cpp`, run in main.cpp's graph block beside
+`dead-code` and `static-init-hazards`): `analyzeHotPaths` over the call
+graph with roots from `--hot-root`, `hotPaths` in the org config, or
+`--hot-profile` + `--hot-min-count`; latent findings set
+`Diagnostic::note` (Note severity). See `docs/checks/hot-path-effects.md`.
+
 `callback-under-lock` is an opt-in TU-local AST check in
 `check/CallbackUnderLock.cpp`: lexical standard mutex guard ownership plus
 cycle-safe helper/virtual-override paths to application callbacks. It emits named
@@ -210,7 +217,9 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
-| `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, or do I/O, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`); given the USR as well, a placement `operator new` (`isPlacementNewUsr`) is not an allocation. One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
+| `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, do I/O, or throw, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`); given the USR as well, a placement `operator new` (`isPlacementNewUsr`) is not an allocation. One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
+| `CoverageProfile.h/.cpp` | `llvm-cov export` JSON read into flat per-file tables once: `countAt(file, line, col)` (the count of the last segment at or before a location), `functionAt` (the innermost function body, entry counts summed over records sharing a body), `fileFor` (path-suffix match, ambiguity is no match) |
+| `HotPath.h/.cpp` | `analyzeHotPaths`: roots (names, USRs, regexes, profile entry counts ≥ `minCount`), one label-setting widest-path search over flat arrays sized once by the interner (weight = smallest call-site or entry count; fewest calls among equals; canonical parent on ties: Proven first, then caller USR, site, kind; profile files bound two-sided), effect functions end a path, allow list skips; reached template instantiations with no recorded call counted as `templateLeaves` (#106); findings per effect call with a witness, `observed` / `unprofiled` / `latent`, canonical order (`docs/checks/hot-path-effects.md`) |
 | `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location). Held in memory only (`BakedIndexes::staticInits`), not in the snapshot |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
@@ -246,6 +255,11 @@ have one node at that implicit declaration (file `<unknown>`, line 0),
 whether or not a TU includes `<new>` and even where a program defines a
 replacement; the forms only `<new>` declares (`nothrow`, placement) sit
 in that header.
+
+**Throw edges**: a `throw` expression is a Proven `DirectCall` edge to
+`__cxa_throw` (a bare `throw;` to `__cxa_rethrow`), whose node sits at
+file `<unknown>`, line 0, like the compiler-declared `operator new`; the
+control-flow index records the site's context as for any call.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)
@@ -298,6 +312,7 @@ directly.
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
 | `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the call edges, run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
 | `MetricsTools.cpp` | the `metrics` tool: metric selection, roll-up level, target map, paging, and the `--list-metrics` listing over the `metrics/` module |
+| `EffectTools.cpp` | `query_path_effects`: roots, patterns, profile, `min_count`, effect subset and allow list over `HotPath.h`; the profile join and verdict in the payload (`clean` needs no `templateLeaves`) |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
 | `Schema.h` | JSON Schema property builders shared by the registrations |
 | `Limits.h/.cpp` | `readLimit`/`readLimitAs`: every user-supplied search limit is clamped to a documented maximum (`kMaxSearchDepth`, ...) before it is narrowed; `docs/path-analysis.md` "Limits" |
@@ -483,7 +498,7 @@ appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
 
-**29 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
+**30 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -493,7 +508,8 @@ failure mode.
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
 `impact_of_change`, `audit_dependencies`, `explain_dependency`, `metrics`,
-`lookup_symbol`, `get_references`.
+`lookup_symbol`, `get_references`,
+`query_path_effects`.
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops

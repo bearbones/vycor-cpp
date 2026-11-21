@@ -125,6 +125,10 @@ std::vector<Call> battery() {
       {"get_references",
        O{{"name", "Pipeline::runAsync"}, {"direction", "from"},
          {"roles", llvm::json::Array{"address_of", "vtable_use"}}}},
+      // Effects on hot paths (docs/checks/hot-path-effects.md).
+      {"query_path_effects", O{{"roots", llvm::json::Array{"main"}}}},
+      {"query_path_effects",
+       O{{"root_patterns", llvm::json::Array{"."}}, {"limit", 2}}},
   };
 }
 
@@ -190,6 +194,9 @@ TEST_CASE("every tool answers the same over any bake of the same sources",
         "get_references {\"direction\":\"from\",\"name\":\"runChainC\"}");
     CHECK(from.find("\"role\":\"address_of\"") != std::string::npos);
     CHECK(from.find("\"role\":\"call\"") != std::string::npos);
+    const std::string &effects =
+        reference.at("query_path_effects {\"roots\":[\"main\"]}");
+    CHECK(effects.find("\"verdict\":\"effects\"") != std::string::npos);
   }
 
   SECTION("four threads") {
