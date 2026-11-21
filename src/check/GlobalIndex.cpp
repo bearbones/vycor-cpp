@@ -216,6 +216,7 @@ void GlobalIndex::absorb(const GlobalIndex &shard) {
       [this](const HeaderStaticEntry &e) { addHeaderStatic(e); });
   shard.forEachExceptionSpec(
       [this](const ExceptionSpecEntry &e) { addExceptionSpec(e); });
+  isaLeak_.absorb(shard.isaLeak_);
   types_.absorb(shard.types_);
 }
 

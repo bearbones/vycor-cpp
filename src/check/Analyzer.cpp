@@ -1505,13 +1505,15 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
   // about code that no longer exists.
   const bool journalUnusable = opts.enableCallbackUnderLockDiag ||
                                opts.enableAbiLayoutDiag ||
+                               opts.enableIsaLeakDiag ||
                                opts.collectNoexceptFacts();
   if (!opts.checkpointPath.empty() && journalUnusable) {
     // Say so: the flag is usually there for crash resume, and none of it
     // happens on this run.
     llvm::errs() << "check: --checkpoint is not used on this run: an enabled "
-                    "check (abi-layout-divergence, callback-under-lock, or "
-                    "noexcept-candidate) reads facts the journal cannot "
+                    "check (abi-layout-divergence, callback-under-lock, "
+                    "isa-leak, or noexcept-candidate) reads facts the "
+                    "journal cannot "
                     "revalidate, so no TU is journaled or replayed\n";
   } else if (!opts.checkpointPath.empty()) {
     ckpt = CheckCheckpoint::open(opts.checkpointPath,
@@ -1671,7 +1673,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                                      opts.enableStaticInitOrderDiag ||
                                          opts.enableExceptionEscapeDiag,
                                      opts.enableAbiLayoutDiag,
-                                     opts.collectNoexceptFacts());
+                                     opts.collectNoexceptFacts(),
+                                     opts.enableIsaLeakDiag);
         TuOutcome outcome = outcomeForToolStatus(tool.run(&factory));
         noteOutcome(file, outcome);
         ckpt->recordPhase1(file, *st, shard, outcome);
@@ -1682,7 +1685,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
                                      opts.enableStaticInitOrderDiag ||
                                          opts.enableExceptionEscapeDiag,
                                      opts.enableAbiLayoutDiag,
-                                     opts.collectNoexceptFacts());
+                                     opts.collectNoexceptFacts(),
+                                     opts.enableIsaLeakDiag);
         noteOutcome(file, outcomeForToolStatus(tool.run(&factory)));
       }
     });
@@ -1717,6 +1721,8 @@ runAnalysis(const clang::tooling::CompilationDatabase &compDb,
     analyzeOdrViolations(index, diagnostics);
   if (opts.enableAbiLayoutDiag)
     analyzeAbiLayoutDivergence(index, diagnostics);
+  if (opts.enableIsaLeakDiag)
+    analyzeIsaLeaks(index, opts.isaLeakFacets, diagnostics);
   if (opts.enableDefaultArgDiag)
     analyzeDefaultArgDivergence(index, diagnostics);
   if (opts.enableStaticInitOrderDiag)

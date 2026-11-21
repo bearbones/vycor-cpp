@@ -226,6 +226,10 @@ const char *diagnosticKindName(Diagnostic::Kind kind) {
     return "Noexcept_CandidateMove";
   case Diagnostic::Noexcept_CandidateVirtual:
     return "Noexcept_CandidateVirtual";
+  case Diagnostic::IsaLeak_Divergent:
+    return "IsaLeak_Divergent";
+  case Diagnostic::IsaLeak_Inlined:
+    return "IsaLeak_Inlined";
   case Diagnostic::Custom:
     return "Custom";
   }
@@ -279,6 +283,9 @@ std::string checkNameOf(const Diagnostic &diag) {
     return "noexcept-candidate-move";
   case Diagnostic::Noexcept_CandidateVirtual:
     return "noexcept-candidate-virtual";
+  case Diagnostic::IsaLeak_Divergent:
+  case Diagnostic::IsaLeak_Inlined:
+    return "isa-leak";
   case Diagnostic::Custom:
     return diag.checkName.empty() ? "custom" : diag.checkName;
   }
@@ -308,6 +315,7 @@ Severity checkSeverity(const std::string &check) {
       {"noexcept-candidate-move", Severity::Note},
       {"noexcept-candidate-virtual", Severity::Note},
       {"hot-path-effects", Severity::Warning},
+      {"isa-leak", Severity::Warning},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;
@@ -318,7 +326,8 @@ Severity diagnosticSeverity(const Diagnostic &diag) {
       diag.kind == Diagnostic::DeadCode_Optimistic ||
       diag.kind == Diagnostic::Internal_DeclaredInHeader ||
       diag.kind == Diagnostic::Internal_TestOnly ||
-      diag.kind == Diagnostic::Internal_Unproven)
+      diag.kind == Diagnostic::Internal_Unproven ||
+      diag.kind == Diagnostic::IsaLeak_Inlined)
     return Severity::Note;
   return checkSeverity(checkNameOf(diag));
 }

@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/check/Indexer.h"
+#include "vycor/check/IsaLeak.h"
 #include "vycor/check/NoexceptFacts.h"
 #include "vycor/check/TypeNormalize.h"
 #include "vycor/compat/ClangVersion.h"
@@ -973,10 +974,12 @@ std::string IndexerVisitor::getFilePath(clang::SourceLocation loc) const {
 IndexerConsumer::IndexerConsumer(GlobalIndex &index, clang::SourceManager &sm,
                                  bool collectOdr, bool collectSummaries,
                                  bool collectAbiLayouts,
-                                 bool collectNoexceptFacts)
+                                 bool collectNoexceptFacts,
+                                 bool collectIsaLeakFacts)
     : index_(index),
       visitor_(index, sm, collectOdr, collectSummaries, collectAbiLayouts),
-      collectNoexceptFacts_(collectNoexceptFacts) {}
+      collectNoexceptFacts_(collectNoexceptFacts),
+      collectIsaLeakFacts_(collectIsaLeakFacts) {}
 
 void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   visitor_.setASTContext(&context);
@@ -985,17 +988,21 @@ void IndexerConsumer::HandleTranslationUnit(clang::ASTContext &context) {
   // which the collector needs: it folds instantiated bodies into callers.
   if (collectNoexceptFacts_)
     collectNoexceptFacts(context, index_);
+  if (collectIsaLeakFacts_)
+    collectIsaLeakFacts(context, index_);
 }
 
 // --- IndexerAction ---
 
 IndexerAction::IndexerAction(GlobalIndex &index, bool collectOdr,
                              bool collectSummaries, bool collectAbiLayouts,
-                             bool collectNoexceptFacts)
+                             bool collectNoexceptFacts,
+                             bool collectIsaLeakFacts)
     : index_(index), collectOdr_(collectOdr),
       collectSummaries_(collectSummaries),
       collectAbiLayouts_(collectAbiLayouts),
-      collectNoexceptFacts_(collectNoexceptFacts) {}
+      collectNoexceptFacts_(collectNoexceptFacts),
+      collectIsaLeakFacts_(collectIsaLeakFacts) {}
 
 std::unique_ptr<clang::ASTConsumer>
 IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
@@ -1003,7 +1010,8 @@ IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
   return std::make_unique<IndexerConsumer>(index_, ci.getSourceManager(),
                                            collectOdr_, collectSummaries_,
                                            collectAbiLayouts_,
-                                           collectNoexceptFacts_);
+                                           collectNoexceptFacts_,
+                                           collectIsaLeakFacts_);
 }
 
 // --- IndexerActionFactory ---
@@ -1011,16 +1019,19 @@ IndexerAction::CreateASTConsumer(clang::CompilerInstance &ci,
 IndexerActionFactory::IndexerActionFactory(GlobalIndex &index, bool collectOdr,
                                            bool collectSummaries,
                                            bool collectAbiLayouts,
-                                           bool collectNoexceptFacts)
+                                           bool collectNoexceptFacts,
+                             bool collectIsaLeakFacts)
     : index_(index), collectOdr_(collectOdr),
       collectSummaries_(collectSummaries),
       collectAbiLayouts_(collectAbiLayouts),
-      collectNoexceptFacts_(collectNoexceptFacts) {}
+      collectNoexceptFacts_(collectNoexceptFacts),
+      collectIsaLeakFacts_(collectIsaLeakFacts) {}
 
 std::unique_ptr<clang::FrontendAction> IndexerActionFactory::create() {
   return std::make_unique<IndexerAction>(index_, collectOdr_, collectSummaries_,
                                          collectAbiLayouts_,
-                                         collectNoexceptFacts_);
+                                         collectNoexceptFacts_,
+                                         collectIsaLeakFacts_);
 }
 
 } // namespace vycor
