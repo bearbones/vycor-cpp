@@ -668,27 +668,33 @@ private:
 
     case clang::Stmt::CXXTryStmtClass: {
       const auto *t = llvm::cast<clang::CXXTryStmt>(s);
-      const clang::CXXCatchStmt *catchAll = nullptr;
-      bool typedHandler = false;
-      for (unsigned i = 0; i < t->getNumHandlers(); ++i) {
-        if (!t->getHandler(i)->getExceptionDecl())
-          catchAll = t->getHandler(i);
-        else
-          typedHandler = true;
-      }
       // Only catch (...) stops everything; a typed handler would need the
-      // thrown types. Handlers run outside the try they belong to. A
-      // constructor's or destructor's function-try-block rethrows, and so
-      // does `catch (...) { cleanup(); throw; }` (the standard library's
-      // containers are full of it): every exception of the try block
-      // leaves, but for what a typed handler before it catches.
+      // thrown types. Handlers run outside the try they belong to, so what
+      // a handler rethrows (`catch (...) { cleanup(); throw; }`, which the
+      // standard library's containers are full of) leaves the try: such a
+      // handler passes on what it catches and stops nothing, and its
+      // `throw;` raises nothing the try block did not. A constructor's or
+      // destructor's function-try-block rethrows at the end of every
+      // handler and stops nothing at all.
+      bool catchAll = false, catchAllRethrows = false;
+      bool typedStops = false, typedRethrows = false;
+      for (unsigned i = 0; i < t->getNumHandlers(); ++i) {
+        const clang::CXXCatchStmt *h = t->getHandler(i);
+        const bool rethrows = noteRethrows(h->getHandlerBlock());
+        if (!h->getExceptionDecl()) {
+          catchAll = true;
+          catchAllRethrows = rethrows;
+        } else if (rethrows) {
+          typedRethrows = true;
+        } else {
+          typedStops = true;
+        }
+      }
       uint8_t inner = guard;
       if (t != functionTry_) {
-        if (!catchAll)
-          inner = std::max(guard, kGuardTyped);
-        else if (!noteRethrows(catchAll->getHandlerBlock()))
-          inner = kGuardAll;
-        else if (typedHandler)
+        if (catchAll && !catchAllRethrows)
+          inner = typedRethrows ? std::max(guard, kGuardTyped) : kGuardAll;
+        else if (typedStops)
           inner = std::max(guard, kGuardTyped);
       }
       push(t->getTryBlock(), inner);

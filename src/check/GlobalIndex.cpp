@@ -439,8 +439,10 @@ std::string noexceptFactKey(const NoexceptFactEntry &e) {
 // Union of two sorted callee lists, bits OR-ed. Only reached when two
 // sightings of one definition disagree (a preprocessor-dependent body), so
 // the merged vectors are built fresh.
-void mergeNoexceptCallees(NoexceptFactEntry &into,
-                          const NoexceptFactEntry &from) {
+// Facts and boundary entries both carry a sorted callee list with one
+// bit set per callee.
+template <typename Entry>
+void mergeNoexceptCallees(Entry &into, const Entry &from) {
   std::vector<std::string> names;
   std::vector<uint8_t> bits;
   names.reserve(into.callees.size() + from.callees.size());
@@ -466,7 +468,7 @@ void mergeNoexceptCallees(NoexceptFactEntry &into,
   into.calleeBits = std::move(bits);
 }
 
-void normalizeNoexceptCallees(NoexceptFactEntry &e) {
+template <typename Entry> void normalizeNoexceptCallees(Entry &e) {
   e.calleeBits.resize(e.callees.size(),
                       NoexceptFactEntry::AllCalleeBits);
   if (std::adjacent_find(e.callees.begin(), e.callees.end(),
@@ -554,8 +556,43 @@ void GlobalIndex::addExceptionBoundaries(
     key += entry.target;
     key += '\n';
     key += entry.apiSite;
-    if (exceptionBoundaryKeys_.insert(std::move(key)).second)
+    normalizeNoexceptCallees(entry);
+    auto [it, inserted] = exceptionBoundaryKeys_.try_emplace(
+        std::move(key), exceptionBoundaries_.size());
+    if (inserted) {
       exceptionBoundaries_.push_back(std::move(entry));
+      continue;
+    }
+    // The same hand-over seen from another TU, whose view of the code it
+    // folds in place may differ: merged as facts are, so the result does
+    // not depend on which TU finished first.
+    auto &existing = exceptionBoundaries_[it->second];
+    if (std::tie(entry.qualifiedName, entry.filePath, entry.line,
+                 entry.column, entry.api, entry.receiver) <
+        std::tie(existing.qualifiedName, existing.filePath, existing.line,
+                 existing.column, existing.api, existing.receiver)) {
+      existing.qualifiedName = std::move(entry.qualifiedName);
+      existing.filePath = std::move(entry.filePath);
+      existing.line = entry.line;
+      existing.column = entry.column;
+      existing.api = std::move(entry.api);
+      existing.receiver = std::move(entry.receiver);
+    }
+    const unsigned rankNew = NoexceptFactEntry::reasonRank(entry.reasons);
+    const unsigned rankOld = NoexceptFactEntry::reasonRank(existing.reasons);
+    if (rankNew < rankOld ||
+        (rankNew == rankOld &&
+         std::tie(entry.reasonSite, entry.reasonFunction) <
+             std::tie(existing.reasonSite, existing.reasonFunction))) {
+      existing.reasonSite = std::move(entry.reasonSite);
+      existing.reasonFunction = std::move(entry.reasonFunction);
+    }
+    existing.reasons |= entry.reasons;
+    if (existing.callees != entry.callees)
+      mergeNoexceptCallees(existing, entry);
+    else
+      for (size_t i = 0; i < existing.calleeBits.size(); ++i)
+        existing.calleeBits[i] |= entry.calleeBits[i];
   }
 }
 

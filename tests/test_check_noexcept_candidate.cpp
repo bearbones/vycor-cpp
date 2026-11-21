@@ -576,6 +576,10 @@ void typedThenRethrow() {
 void nestedRethrow() {
   try { quiet(1); } catch (...) { try { throw; } catch (int) {} }
 }
+// What the typed handler catches leaves through its rethrow.
+void typedRethrowsFirst() {
+  try { thrower(); } catch (int) { throw; } catch (...) {}
+}
 )cpp");
   // nestedRethrow's `throw;` is in a try of its own, so the outer catch
   // (...) is not taken to let anything out, and that rethrow is a throw.

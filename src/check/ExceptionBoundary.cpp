@@ -61,15 +61,18 @@ enum Kind : uint8_t {
 constexpr uint32_t kUnset = UINT32_MAX;
 
 // The callee bits an edge needs to carry an exception of each class: the
-// first two and the last travel only over calls no try encloses.
+// first two travel only over calls no try encloses. An unknown one
+// travels over any call: a try with typed handlers does not make an
+// unknown callee any less unknown, and a boundary it reaches is not
+// counted as having no path to a throw.
 constexpr uint8_t kBareMask = F::Exit | F::Bare;
 constexpr std::array<uint8_t, kClassCount> kEdgeMask = {kBareMask, kBareMask,
-                                                        F::Exit, kBareMask};
+                                                        F::Exit, F::Exit};
 
 constexpr std::array<uint8_t, kClassCount> kSourceReasons = {
     F::ThrowBare, F::LibraryThrowBare,
     F::ThrowBare | F::LibraryThrowBare | F::ThrowTyped,
-    F::DynamicBare | F::OtherBare};
+    F::DynamicBare | F::OtherBare | F::OpaqueTyped};
 
 // A callee nothing defines: a C++ function (Itanium-mangled key, or a USR
 // for one with internal linkage) is unknown; a C function is taken not to
@@ -241,7 +244,8 @@ public:
     if (f.first == kUnset && f.firstKey.empty()) {
       tail = sourceText(f.cls, f.node, f.entry);
     } else if (f.first == kUnset) {
-      names.push_back(displayKey(f.firstKey));
+      if (f.firstKey != entries_[f.entry]->target)
+        names.push_back(displayKey(f.firstKey));
       tail = "'" + names.back() + "' has no definition in the index";
     } else {
       uint32_t v = f.first;
@@ -311,6 +315,15 @@ private:
     }
     // The stored site is that of the most telling reason, which for a
     // function with a typed throw too is not this one.
+    if (!(reasons & (F::DynamicBare | F::OtherBare)) &&
+        (reasons & F::OpaqueTyped)) {
+      if (F::reasonRank(reasons) < F::reasonRank(F::OpaqueTyped))
+        at.clear();
+      return "'" + name +
+             "' makes a call the analysis cannot resolve or see into, in a "
+             "try whose handlers are all typed" +
+             at;
+    }
     if (F::reasonRank(reasons) < F::reasonRank(F::DynamicBare))
       at.clear();
     if (reasons & F::DynamicBare)
@@ -437,8 +450,7 @@ void analyzeExceptionBoundaries(const GlobalIndex &index,
           std::tie(c, len) = search.classOf(v, bits);
           if (k == 0 && e.callees.size() == 1 && e.callees[0] == e.target)
             handedOver[v] = 1;
-        } else if ((bits & kBareMask) == kBareMask &&
-                   unknownWhenUndefined(e.callees[k])) {
+        } else if ((bits & F::Exit) && unknownWhenUndefined(e.callees[k])) {
           c = kUnknown;
         }
         if (c == kNone)
@@ -458,12 +470,18 @@ void analyzeExceptionBoundaries(const GlobalIndex &index,
     if (f.sites == 0)
       continue;
     // A target with a fact of its own: the witness starts at that node,
-    // whose name the entry repeats.
+    // whose name the entry repeats. A target nothing defines (declared
+    // here, defined in a TU the run did not index) is the whole witness.
     if (f.first != kUnset && f.length > 0 &&
         graph.keyOfNode[f.first] == entries[f.entry]->target) {
-      f.node = f.first;
-      f.first = search.next(f.cls, f.node);
-      --f.length;
+      if (f.first < definedCount) {
+        f.node = f.first;
+        f.first = search.next(f.cls, f.node);
+        --f.length;
+      } else {
+        f.firstKey = graph.keyOfNode[f.first];
+        f.first = kUnset;
+      }
     }
     consider(std::move(f));
   }
@@ -500,16 +518,22 @@ void analyzeExceptionBoundaries(const GlobalIndex &index,
   }
   {
     // One finding per frame: its best call into code with exceptions.
-    std::vector<Finding> best(definedCount);
+    // Frames without exceptions are few; each gets a slot on first sight.
+    std::vector<uint32_t> slot(definedCount, kUnset);
+    std::vector<Finding> best;
     for (uint64_t edge : graph.edges) {
       const uint32_t u = edgeCaller(edge);
       const uint32_t v = edgeCallee(edge);
       if (!noEh(u) || search.terminal(u) || v >= definedCount ||
           !(flags[v] & F::CompiledWithExceptions) || (flags[v] & F::ExternC))
         continue;
-      Finding &f = best[u];
-      f.kind = kNoExceptionsFrame;
-      f.node = u;
+      if (slot[u] == kUnset) {
+        slot[u] = static_cast<uint32_t>(best.size());
+        best.emplace_back();
+        best.back().kind = kNoExceptionsFrame;
+        best.back().node = u;
+      }
+      Finding &f = best[slot[u]];
       auto [c, len] = search.classOf(v, edgeBits(edge));
       if (c == kNone)
         continue;
@@ -521,8 +545,7 @@ void analyzeExceptionBoundaries(const GlobalIndex &index,
       }
     }
     for (Finding &f : best)
-      if (f.node != kUnset)
-        consider(std::move(f));
+      consider(std::move(f));
   }
 
   for (Finding &f : findings) {

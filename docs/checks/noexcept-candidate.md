@@ -151,12 +151,13 @@ an `offsetof` are evaluated.
 Only a handler that catches everything. A `try` whose handlers are all
 typed does not discharge a call, because handler types are not matched
 against what the callee throws. The handlers themselves run outside the
-`try`, so a throwing call inside `catch (...)` counts. A `throw;` there
-(not inside a nested `try` or lambda) passes on what reached the handler:
-the `try` then discharges nothing (only its typed handlers, if any,
-remain), and the `throw;` itself raises nothing new, so
-`try { f(); } catch (...) { cleanup(); throw; }` is proven exactly when
-`f` and `cleanup` are. The
+`try`, so a throwing call inside `catch (...)` counts. A handler with a
+`throw;` in it (not inside a nested `try` or lambda) passes on what it
+catches: it discharges nothing, and its `throw;` raises nothing the `try`
+block did not. So `try { f(); } catch (...) { cleanup(); throw; }` is
+proven exactly when `f` and `cleanup` are, and a `catch (...)` after a
+typed handler that rethrows no longer discharges the `try` (what the
+typed handler catches leaves). The
 function-try-block of a constructor or destructor discharges nothing: it
 rethrows when the handler ends.
 

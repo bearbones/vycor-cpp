@@ -426,6 +426,164 @@ TEST_CASE("exception boundary escape: a callee with no definition is an "
                  "makes a virtual or indirect call that may throw"));
 }
 
+TEST_CASE("exception boundary escape: a handed-over function nothing "
+          "defines is its own witness",
+          "[CheckExceptionBoundary]") {
+  // flushA is also called directly, so it is a node of the graph with no
+  // fact; flushB is known only from the hand-over.
+  auto found = run({
+      {"a.cpp", "#include <thread>\n"
+                "void flushA();\n"
+                "void flushB();\n"
+                "void direct() { flushA(); }\n"
+                "void go() {\n"
+                "  std::thread a(flushA), b(flushB);\n"
+                "  a.join(); b.join();\n"
+                "}\n"},
+  });
+  CHECK(keysOf(found) == std::set<std::string>{"thread-entry flushA",
+                                               "thread-entry flushB"});
+  for (const char *name : {"flushA", "flushB"}) {
+    const Diagnostic &d = found.at(std::string("thread-entry ") + name);
+    CHECK(d.note);
+    CHECK(contains(d.message, std::string("Witness: '") + name + "'; '" +
+                                  name + "' has no definition in the "
+                                         "index."));
+    CHECK(contains(d.message, "Confidence: unknown"));
+  }
+}
+
+TEST_CASE("exception boundary escape: a handler that rethrows stops nothing "
+          "and raises nothing new",
+          "[CheckExceptionBoundary]") {
+  auto found = run({
+      {"t.h", kThrower},
+      {"a.cpp", "#include \"t.h\"\n"
+                "#include <thread>\n"
+                "void quiet() {}\n"
+                "void typedQuiet() {\n"
+                "  try { quiet(); } catch (const std::exception &) { throw; }\n"
+                "}\n"
+                "void typedLoud() {\n"
+                "  try { parse(1); } catch (const std::exception &) { throw; }\n"
+                "}\n"
+                "void typedBeforeAll() {\n"
+                "  try { parse(1); }\n"
+                "  catch (const std::logic_error &) { throw; }\n"
+                "  catch (...) {}\n"
+                "}\n"
+                "struct Ctor {\n"
+                "  int v;\n"
+                "  Ctor() try : v(1) {} catch (...) { throw; }\n"
+                "};\n"
+                "void makes() { Ctor c; (void)c; }\n"
+                "void go() {\n"
+                "  std::thread a(typedQuiet), b(typedLoud), c(typedBeforeAll),\n"
+                "      d(makes);\n"
+                "  a.join(); b.join(); c.join(); d.join();\n"
+                "}\n"},
+  });
+  CHECK(keysOf(found) ==
+        std::set<std::string>{"thread-entry typedLoud",
+                              "thread-entry typedBeforeAll"});
+  const Diagnostic &loud = found.at("thread-entry typedLoud");
+  CHECK_FALSE(loud.note);
+  CHECK(contains(loud.message, "'typedLoud' -> 'parse'"));
+  const Diagnostic &before = found.at("thread-entry typedBeforeAll");
+  CHECK(before.note);
+  CHECK(contains(before.message, "Confidence: typed-handlers"));
+}
+
+TEST_CASE("exception boundary escape: library throws, and unknown calls "
+          "behind typed handlers",
+          "[CheckExceptionBoundary]") {
+  auto found = run({
+      {"a.cpp", "#include <stdexcept>\n"
+                "#include <thread>\n"
+                "#include <vector>\n"
+                "int third(std::vector<int> *v) { return v->at(3); }\n"
+                "struct Base { virtual void run(); };\n"
+                "void guarded(Base *b) {\n"
+                "  try { b->run(); } catch (const std::exception &) {}\n"
+                "}\n"
+                "void elsewhere();\n"
+                "void guardedCall() {\n"
+                "  try { elsewhere(); } catch (int) {}\n"
+                "}\n"
+                "void go(std::vector<int> *v, Base *b) {\n"
+                "  std::thread x(third, v), y(guarded, b), z(guardedCall);\n"
+                "  x.join(); y.join(); z.join();\n"
+                "}\n"},
+  });
+  CHECK(keysOf(found) ==
+        std::set<std::string>{"thread-entry third", "thread-entry guarded",
+                              "thread-entry guardedCall"});
+  const Diagnostic &lib = found.at("thread-entry third");
+  CHECK(lib.note);
+  CHECK(contains(lib.message, "reaches a throw in the standard library"));
+  CHECK(contains(lib.message, "Confidence: library"));
+  const Diagnostic &virt = found.at("thread-entry guarded");
+  CHECK(contains(virt.message, "in a try whose handlers are all typed"));
+  CHECK(contains(virt.message, "Confidence: unknown"));
+  const Diagnostic &call = found.at("thread-entry guardedCall");
+  CHECK(contains(call.message, "'elsewhere()' has no definition"));
+  CHECK(contains(call.message, "Confidence: unknown"));
+  // Ranked by class first: library before unknown.
+  CHECK(lib.rank < virt.rank);
+  CHECK(lib.rank < call.rank);
+}
+
+TEST_CASE("exception boundary escape: one hand-over seen from two TUs "
+          "merges the same in either order",
+          "[CheckExceptionBoundary]") {
+  ExceptionBoundaryEntry a;
+  a.kind = ExceptionBoundaryEntry::ThreadEntry;
+  a.target = "u:lambda";
+  a.qualifiedName = "lambda in 'go'";
+  a.filePath = "/p/h.h";
+  a.line = 3;
+  a.column = 5;
+  a.api = "std::thread";
+  a.apiSite = "/p/h.h:3:5";
+  a.reasons = NoexceptFactEntry::OtherBare;
+  a.reasonSite = "/p/h.h:4";
+  a.callees = {"m:_Z1fv"};
+  a.calleeBits = {NoexceptFactEntry::Exit | NoexceptFactEntry::Bare};
+  ExceptionBoundaryEntry b = a;
+  b.reasons = NoexceptFactEntry::ThrowBare;
+  b.reasonSite = "/p/h.h:6";
+  b.callees = {"m:_Z1fv", "m:_Z1gv"};
+  b.calleeBits = {NoexceptFactEntry::Call, NoexceptFactEntry::Exit};
+  auto merged = [](std::vector<ExceptionBoundaryEntry> order) {
+    GlobalIndex index;
+    for (auto &e : order) {
+      std::vector<ExceptionBoundaryEntry> one;
+      one.push_back(std::move(e));
+      index.addExceptionBoundaries(std::move(one));
+    }
+    std::vector<ExceptionBoundaryEntry> out;
+    index.forEachExceptionBoundary(
+        [&](const ExceptionBoundaryEntry &e) { out.push_back(e); });
+    return out;
+  };
+  const auto ab = merged({a, b});
+  const auto ba = merged({b, a});
+  REQUIRE(ab.size() == 1);
+  REQUIRE(ba.size() == 1);
+  for (const auto *e : {&ab[0], &ba[0]}) {
+    CHECK(e->reasons ==
+          (NoexceptFactEntry::OtherBare | NoexceptFactEntry::ThrowBare));
+    CHECK(e->reasonSite == "/p/h.h:6");
+    CHECK(e->callees == std::vector<std::string>{"m:_Z1fv", "m:_Z1gv"});
+    CHECK(e->calleeBits ==
+          std::vector<uint8_t>{static_cast<uint8_t>(
+                                   NoexceptFactEntry::Exit |
+                                   NoexceptFactEntry::Bare |
+                                   NoexceptFactEntry::Call),
+                               NoexceptFactEntry::Exit});
+  }
+}
+
 TEST_CASE("exception boundary escape: findings survive absorb and worker "
           "shards",
           "[CheckExceptionBoundary]") {

@@ -714,7 +714,7 @@ private:
   std::vector<NoexceptFactEntry> noexceptFacts_;
   std::unordered_map<std::string, size_t> noexceptFactByKey_;
   std::vector<ExceptionBoundaryEntry> exceptionBoundaries_;
-  std::unordered_set<std::string> exceptionBoundaryKeys_;
+  std::unordered_map<std::string, size_t> exceptionBoundaryKeys_;
   IsaLeakFacts isaLeak_;
   std::vector<OdrEntry> odrEntries_;
   std::unordered_map<std::string, size_t> odrByKey_; // full-identity dedup keys

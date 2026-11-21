@@ -81,10 +81,14 @@ system-header inlines, and records per definition:
 - **callees** it can unwind through, each marked by whether a `try`
   with only typed handlers encloses every call to it, or no `try`
   encloses some call. A call inside a `try` with a `catch (...)` is not
-  recorded, unless that handler rethrows (`catch (...) { cleanup();
-  throw; }`): such a handler passes on whatever reached it, so the
-  `try` counts as one with only its typed handlers (or none), and the
-  `throw;` adds nothing of its own.
+  recorded. A handler with a `throw;` in it (outside a nested `try` or
+  lambda), typed or `catch (...)`, passes on what it catches: it stops
+  nothing, its `throw;` raises nothing the `try` block did not, and the
+  `try` counts by its other handlers. `catch (...) { cleanup(); throw; }`
+  alone leaves the calls as if no `try` were there; a typed handler that
+  rethrows before a `catch (...)` that does not leaves them behind typed
+  handlers. A constructor's or destructor's function-try-block stops
+  nothing.
 
 The same pass records each hand-over site with the function handed
 over (summarized in place when it has no fact of its own, like a
@@ -104,7 +108,7 @@ the shortest path.
 | `proven` | a `throw` in project code, no `try` around any call on the path | warning |
 | `library` | a standard library throw (`vector::at`, `std::stoi`, `map::at`, ...), no `try` on the path | note |
 | `typed-handlers` | a throw, but every path found runs through a `try` whose handlers are all typed: it escapes only if none matches | note |
-| `unknown` | a virtual or indirect call that may throw, something the walk does not model, or a C++ callee with no definition in the index | note |
+| `unknown` | a virtual or indirect call that may throw, something the walk does not model, or a C++ callee with no definition in the index, with or without a `try` with typed handlers around it | note |
 
 A throwing `operator new` (`std::bad_alloc`) is not a witness on its
 own: nearly every function allocates, and a check that reported every
@@ -115,9 +119,10 @@ library's own allocation and size failures (`std::__throw_bad_alloc`,
 allocation too; its other throw helpers are `library` witnesses. A callee with C
 linkage and no definition in the index is taken not to throw (it is C).
 
-The order is the report order (`Diagnostic::rank`): proven witnesses
-first, then by kind (thread entry, C callback, `extern "C"`, frame
-without exceptions), then by function name.
+The table's order is the report order (`Diagnostic::rank`): by class
+(proven, library, typed-handlers, unknown), then by kind (thread entry,
+C callback, `extern "C"`, frame without exceptions), then by function
+name.
 
 ## Completeness of the index
 
