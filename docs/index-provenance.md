@@ -314,7 +314,10 @@ reference records (the lock sets each reference was made under, and
 whether it was made in a loop); every other section is unchanged.
 Format v18 adds the lock acquisition records (`lock`, `lock_shared`)
 and their recursion flags to that section; every other section is
-unchanged. A
+unchanged. Format v19 keeps v18's layout, but the graph holds the calls
+of template instantiations and of compiler-written code, and a node
+flag (`hasBody`) says some TU read the node's body: a v18 index lacks
+both, so it is rebuilt rather than refreshed. A
 warm refresh removes and re-adds a dirty TU's reference facts exactly as
 it does its edges.
 
