@@ -65,6 +65,32 @@ enum class RefRole : uint8_t {
 };
 constexpr unsigned kRefRoleCount = 6;
 
+// ReferenceRecord::flags: facts OR-ed over the occurrences a record counts.
+enum RefFlag : uint8_t {
+  kRefInLoop = 1u << 0, // some occurrence is inside a loop body
+  // On a write: some occurrence changes the object for certain. A write
+  // record without it only calls non-const members that have a const
+  // overload and return by value (a non-const map's find or begin): the
+  // object may be changed later through what they return, but the call
+  // itself does not change it.
+  kRefMutates = 1u << 1,
+};
+constexpr uint8_t kRefFlagMask = (1u << 2) - 1;
+
+// The lock facts of a reference (ReferenceRecord::locks), as index text:
+// one line per distinct set of locks its occurrences were made under, in
+// first-occurrence order, each `line:col` of the first such occurrence
+// followed by the locks, each a tab, the lock's identity, a tab and its
+// display name. A line with no locks is an occurrence made under none.
+// Identities: the USR of the mutex variable or member (a member names
+// every object's mutex), "?" for a mutex the bake cannot name (reached
+// through a pointer, a reference parameter or a call), or "once:" plus a
+// USR for code that runs once under that guard (std::call_once, the
+// initializer of a function-local static). A reference made under no
+// lock at all carries no lock text (kNoId).
+constexpr char kLockUnknownIdentity[] = "?";
+constexpr char kLockOncePrefix[] = "once:";
+
 enum class SymbolKind : uint8_t {
   Function = 0,
   Variable = 1,
@@ -111,8 +137,11 @@ enum SymbolFlag : uint32_t {
   kSymLambda = 1u << 18,     // lambda call operator (synthetic identity)
   kSymSystemHeader = 1u << 19, // this declaration is in a system header
   kSymSpecialization = 1u << 20, // explicit specialization of a template
+  kSymSyncPrimitive = 1u << 21,  // variable of a mutex, condition variable,
+                                 // once flag or other synchronization type
+  kSymInLoop = 1u << 22,         // lambda written inside a loop body
 };
-constexpr uint32_t kSymbolFlagMask = (1u << 21) - 1;
+constexpr uint32_t kSymbolFlagMask = (1u << 23) - 1;
 constexpr uint32_t kSymbolPerDeclFlags =
     kSymDefinition | kSymInHeader | kSymSystemHeader;
 
@@ -147,6 +176,8 @@ struct ReferenceFact {
   std::string file;   // witness site
   uint32_t line = 0;
   uint32_t col = 0;
+  std::string locks;  // lock facts (see kLockUnknownIdentity); "" = none
+  uint8_t flags = 0;  // RefFlag bits
 };
 
 // One declaration of a symbol in the merged view.
@@ -194,6 +225,8 @@ struct ReferenceInfo {
   uint32_t col = 0;
   uint32_t tuCount = 0; // TUs that contributed the reference
   std::string firstTu;  // the smallest of them
+  std::string locks;    // lock facts of the witness record ("" = none)
+  uint8_t flags = 0;    // RefFlag bits, OR-ed over the records
 };
 
 class ReferenceIndex {
@@ -220,6 +253,8 @@ public:
     uint32_t col = 0;
     uint32_t count = 0;
     RefRole role = RefRole::Call;
+    Id locks = kNoId; // lock facts (see kLockUnknownIdentity); kNoId = none
+    uint8_t flags = 0; // RefFlag bits
   };
 
   ReferenceIndex() = default;
@@ -321,9 +356,12 @@ public:
   [[nodiscard]] const StringInterner &strings() const noexcept {
     return strings_;
   }
+  // The text of an id from a record above (textOf(kNoId) is invalid).
+  // Takes no lock: safe inside the scans.
+  [[nodiscard]] const std::string &textOf(Id id) const { return text(id); }
 
   // ---- persistence ------------------------------------------------------
-  // The snapshot's references section (Snapshot.h, format v16). The bytes
+  // The snapshot's references section (Snapshot.h, format v17). The bytes
   // are canonical: strings, records and contributor lists are written in
   // sorted order, so two indexes holding the same facts encode alike
   // whatever order their TUs were baked or absorbed in.

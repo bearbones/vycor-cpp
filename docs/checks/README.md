@@ -73,13 +73,15 @@ initial seeding and may evolve. Organizations can define their own groups
 | [noexcept-candidate-virtual](noexcept-candidate.md#the-sub-kinds) | off | note | compute-heavy | The same proof for virtual functions (noexcept there constrains every override) |
 | [exception-boundary-escape](exception-boundary-escape.md) | off | warning (not proven: note) | noisy | Exceptions that can reach a thread entry, a callback handed to C, an `extern "C"` function, or a frame compiled without exceptions |
 | [hot-path-effects](hot-path-effects.md) | off | warning (latent: note) | compute-heavy | Allocation, locks, I/O and throws reachable from hot roots (configured, or from a coverage profile) |
+| [unsynchronized-shared-global](unsynchronized-shared-global.md) | off | warning | noisy, compute-heavy | Globals written in one thread and accessed in another with no common lock |
 
 Severity is the SARIF `level` and what `--fail-on` compares against:
 `error` for ill-formed programs (IFNDR, ODR), `warning` for proven
-hazards, `note` for leads that need triage. Some kinds are notes
+hazards, `note` for leads that need triage. These kinds are notes
 whatever their check: `ADL_SameScore` (`--warn-same-score`),
-`DeadCode_Optimistic`, `IsaLeak_Inlined`, and every could-be-internal kind
-but `Internal_Unreferenced`. Organization checks are warnings.
+`DeadCode_Optimistic`, `IsaLeak_Inlined`, every could-be-internal kind
+but `Internal_Unreferenced`, and every unsynchronized-shared-global kind
+but `SharedGlobal_Race`. Organization checks are warnings.
 
 ## Organization checks
 

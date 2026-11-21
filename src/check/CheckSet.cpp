@@ -125,6 +125,11 @@ const std::vector<CheckInfo> &builtinChecks() {
        "(configured, or from a coverage profile)",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"unsynchronized-shared-global",
+       "Globals written in one thread and accessed in another with no "
+       "common lock",
+       /*defaultOn=*/false,
+       {"noisy", "compute-heavy"}},
   };
   return checks;
 }

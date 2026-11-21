@@ -309,8 +309,11 @@ its own table entry and checksum, and two counts (`symbols`,
 `references`) to the header summary (`kHeaderBytes` 193, was 152); the
 other four sections are unchanged. Format v16 adds each reference
 record's largest contributing TU to that section; the header and the
-other sections are unchanged. A warm refresh removes and re-adds a
-dirty TU's reference facts exactly as it does its edges.
+other sections are unchanged. Format v17 adds lock facts to the
+reference records (the lock sets each reference was made under, and
+whether it was made in a loop); every other section is unchanged. A
+warm refresh removes and re-adds a dirty TU's reference facts exactly as
+it does its edges.
 
 ## Write integrity (format v13)
 
