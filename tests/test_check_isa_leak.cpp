@@ -1232,19 +1232,20 @@ inline float call(const Fin *f, const float *a) { return f->sum(a, 2); }
 TEST_CASE("isa-leak compares move-only bodies on the vector class off x86-64",
           "[CheckIsaLeak]") {
   // On i386 an FP value moves through x87 or SSE registers, so SSE
-  // matters even to a body that only loads and returns a float. (Clang's
-  // i686 Linux default CPU, pentium4, has SSE2; -mno-sse turns it off.)
+  // matters even to a body that only loads and returns a float. The CPU
+  // is pinned: the default i686 CPU differs between Clang releases.
   IsaFixture fixture(R"cpp(
 inline float pass(const float *p) { return *p; }
 )cpp",
                      "  float v = 1;\n  (void)pass(&v);\n");
-  fixture.database({"--target=i686-unknown-linux-gnu"},
-                   {"--target=i686-unknown-linux-gnu", "-mno-sse"});
+  fixture.database({"--target=i686-unknown-linux-gnu", "-march=pentium4"},
+                   {"--target=i686-unknown-linux-gnu", "-march=pentium4",
+                    "-mno-sse"});
   auto db = fixture.db();
   auto result = isaOnly(runAnalysis(*db, fixture.files(), isaOptions()));
   REQUIRE(result.size() == 1);
   CHECK(result[0].resolvedDecl == "pass(const float *)");
-  CHECK(mentions(result[0], "+sse2"));
+  CHECK(mentions(result[0], "+sse"));
   CHECK(mentions(result[0], "floating-point values"));
 }
 
