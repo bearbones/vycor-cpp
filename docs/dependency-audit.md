@@ -441,7 +441,7 @@ shared library no longer reached).
 | `linkTargetMembers` | that target's members of which no code is loaded after the split: neither the member, nor its rest, nor its part |
 | `linkTargetsHelped` | how many final link targets gain anything |
 | `fanInPct` | `closureFanIn` as a percentage of the provider's `defined` symbols outside the closure, 0–100: how much of what stays behind still calls into what moved |
-| `splitGain` | `linkTargetGain × (100 − fanInPct) / 100`: the gain, discounted by that share |
+| `splitGain` | `linkTargetGain × (rest − fanIn) / rest`, rounded down, where `rest` is the provider's `defined` symbols outside the closure and `fanIn` is `closureFanIn`: the gain, discounted by the share of what stays behind that still calls into what moved (`linkTargetGain` itself when nothing stays behind) |
 
 **Fan-in.** A closure the rest of the provider references heavily is a
 cut through the middle of the provider: after the split the rest depends
