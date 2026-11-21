@@ -242,7 +242,7 @@ struct LinkFacts {
     /// References of an inline body scoped to the target set of the TUs
     /// that recorded them (refScope).
     uint64_t tuScopedRefs = 0;
-    /// Symbols whose declarations only some targets' TUs open (symSeenBy
+    /// Attributed symbols whose declarations only some targets' TUs open (symSeenBy
     /// not 0).
     uint64_t seenBySymbols = 0;
   } counts;

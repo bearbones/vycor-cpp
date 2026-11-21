@@ -1829,6 +1829,9 @@ LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
         openedBegin[f + 1] += openedBegin[f];
       std::vector<uint32_t> seen;
       for (uint32_t s = 0; s < symbolCount; ++s) {
+        // The audit ignores a symbol no target owns (the system's code).
+        if (lf.symClass[s] == SymbolClass::Unattributed)
+          continue;
         const uint32_t rb = recBegin[s], re = recBegin[s + 1];
         bool known = rb != re;
         seen.clear();
