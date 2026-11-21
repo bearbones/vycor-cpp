@@ -174,6 +174,19 @@ The table lists functions whose effect is unconditional. `push_back`
 allocates only past capacity and is not listed; the `operator new` it
 calls is.
 
+A new-expression is a call of its allocation function, at any depth:
+`new T` reaches `operator new`, `new T[n]` reaches `operator new[]`,
+and both are allocations, as are their aligned and `nothrow` forms. Two
+kinds of `new` are not, by themselves:
+
+- **placement new.** `new (buf) T` reaches the placement overload,
+  which constructs in storage the caller already has. The same holds
+  for a placement overload of your own (`operator new(size_t, Arena &)`):
+  it is ordinary code, an allocation when what it calls is one.
+- **a class's own `operator new`.** `new Pooled` reaches
+  `Pooled::operator new`, which is an allocation when its body reaches a
+  listed function (or when you list it).
+
 Add your organization's allocators, lock wrappers and logging sinks in
 the org config (`--org-config`):
 
@@ -224,11 +237,6 @@ before `main` at all.
   work inside standard containers and smart pointers is mostly unseen,
   so `std::vector<int> v = build();` reports what `build` reaches, and
   an allocation only if a listed function is reached by name.
-- **`new` expressions outside the initializer are not edges.** A `new`
-  written in the initializer itself is seen. One written in a function
-  the initializer calls is not, because the call graph records no edge
-  from a new-expression to `operator new`. `malloc`, explicit
-  `operator new` calls and `std::make_unique` are seen at any depth.
 - **Lambdas are taken as called.** A lambda written in an initializer
   counts as called by it, whether it is invoked there or stored.
 - **A lambda in a header is one function per spelling of the header's
@@ -241,7 +249,9 @@ before `main` at all.
   That covers defaulted constructors and constructors inherited with
   `using Base::Base;`.
 - **The effect table matches names.** A function of your own called
-  `::read` or `::send` is taken for the POSIX one.
+  `::read` or `::send` is taken for the POSIX one. The one place the
+  parameters are read is `operator new`, to tell the placement forms
+  from the allocating ones.
 - **Destructors are out of scope.** What runs at exit, including the
   `atexit` registration a non-trivially-destructible global implies, is
   not measured.

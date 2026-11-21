@@ -171,7 +171,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
-| `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, or do I/O, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`). One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
+| `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, or do I/O, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`); given the USR as well, a placement `operator new` (`isPlacementNewUsr`) is not an allocation. One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
 | `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location). Held in memory only (`BakedIndexes::staticInits`), not in the snapshot |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
@@ -193,6 +193,16 @@ static target per call site. `CallGraph::calleesOf`/`callersOf` expand it
 through the transitive override map at query time, so overrides indexed
 later (other TUs, warm refreshes) are visible to existing call sites.
 Proven `VirtualDispatch` edges (concrete type known) are never expanded.
+
+**Allocation edges**: a new-expression and a delete-expression each add
+a `DirectCall` edge to the allocation or deallocation function overload
+resolution selected (`operator new`, `operator new[]`, a placement
+overload, a class's own), at the expression. `Proven`, except a `delete`
+through a virtual destructor, where the function is the dynamic type's
+and the edge is `Plausible`. A type-dependent `new` in a template's
+definition resolves nothing and adds no edge. The global `operator new`
+and `operator delete` nodes are the compiler's implicit declarations
+(file `<unknown>`, line 0) whether or not a TU includes `<new>`.
 
 **Edge collapse**: When `collapsePaths` is non-empty, edges where BOTH caller and callee
 are in collapsed paths are skipped. Boundary edges (non-collapsed caller → collapsed callee)

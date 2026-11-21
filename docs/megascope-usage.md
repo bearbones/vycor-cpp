@@ -447,6 +447,20 @@ appear multiple times with different `callSite` values. Pass
 `distinct: true` (`--distinct`) when you only need unique caller/callee
 relationships: one record per function, with `siteCount`.
 
+**`new` and `delete` are calls.** A new-expression is an edge to the
+allocation function it selects (`operator new`, `operator new[]`, a
+placement overload, a class's own), a delete-expression to the
+deallocation function, each at the expression (`kind: DirectCall`). So
+`operator new` has callers, and its call sites carry the try scopes
+around them: `query-throw-propagation --usr 'c:@F@operator new#l#'
+--exception-type std::bad_alloc` answers where an allocation failure
+would be caught. Ask by `usr`: the name `operator new` is nearly always
+`ambiguous` (every overload `<new>` declares shares it), and the
+candidate list gives each one's. `c:@F@operator new#l#` is the plain
+form on a 64-bit Linux or macOS target, the one ending `#*v#` the
+placement form. A `new` whose type depends on a template parameter has
+no edge in the template's definition.
+
 **List tools are paged.** `get_callers`, `get_callees`,
 `list_callback_sites`, `list_concurrency_entry_points`, and the other
 list tools return at most their default `limit` (200 for callers and

@@ -108,6 +108,30 @@ std::string effectLookupName(llvm::StringRef displayName) {
   return out;
 }
 
+bool isPlacementNewUsr(llvm::StringRef usr) {
+  // "c:@F@operator new#<size>#<param>#...": each parameter type is
+  // followed by '#'.
+  if (!usr.consume_front("c:@F@operator new"))
+    return false;
+  usr.consume_front("[]");
+  if (!usr.consume_front("#"))
+    return false;
+  size_t sizeEnd = usr.find('#');
+  if (sizeEnd == llvm::StringRef::npos)
+    return false;
+  usr = usr.substr(sizeEnd + 1);
+  while (!usr.empty()) {
+    size_t end = usr.find('#');
+    llvm::StringRef param = usr.substr(0, end);
+    if (param != "$@N@std@E@align_val_t" && param != "&1$@N@std@S@nothrow_t")
+      return true;
+    if (end == llvm::StringRef::npos)
+      break;
+    usr = usr.substr(end + 1);
+  }
+  return false;
+}
+
 void EffectTable::add(EffectKind kind, llvm::StringRef name) {
   std::string key = effectLookupName(name);
   if (key.empty())
@@ -120,6 +144,14 @@ uint8_t EffectTable::effectsOf(llvm::StringRef displayName) const {
     return 0;
   auto it = byName_.find(effectLookupName(displayName));
   return it == byName_.end() ? 0 : it->second;
+}
+
+uint8_t EffectTable::effectsOf(llvm::StringRef displayName,
+                               llvm::StringRef usr) const {
+  uint8_t mask = effectsOf(displayName);
+  if ((mask & effectBit(EffectKind::Allocation)) && isPlacementNewUsr(usr))
+    mask &= static_cast<uint8_t>(~effectBit(EffectKind::Allocation));
+  return mask;
 }
 
 std::vector<std::string> EffectTable::names(EffectKind kind) const {

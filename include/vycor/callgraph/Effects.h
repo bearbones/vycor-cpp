@@ -34,6 +34,11 @@
 // unconditional; an organization adds its own wrappers through
 // ExtensionRegistry::addEffectFunctions or the org config's `effects` key
 // (docs/EXTENDING.md).
+//
+// One refinement needs the identity as well as the name: every global
+// `operator new` overload displays as `operator new`, and the placement
+// forms do not allocate (isPlacementNewUsr). Callers that have a USR pass
+// it to effectsOf.
 
 namespace vycor {
 
@@ -61,6 +66,16 @@ constexpr uint8_t effectBit(EffectKind kind) {
 /// their spelling (`operator<`, `operator new`).
 std::string effectLookupName(llvm::StringRef displayName);
 
+/// Whether `usr` is a global `operator new` / `operator new[]` taking
+/// placement arguments: anything past the size other than
+/// `std::align_val_t` and `const std::nothrow_t &`. Those are not the
+/// replaceable allocation functions. `new (buf) T` constructs in storage
+/// the caller already has, and an overload a program writes
+/// (`operator new(size_t, Arena &)`) is ordinary code, which allocates
+/// when what it calls does. False for a USR that is not a Clang USR of a
+/// global `operator new`.
+bool isPlacementNewUsr(llvm::StringRef usr);
+
 class EffectTable {
 public:
   /// The built-in entries alone.
@@ -73,6 +88,11 @@ public:
   /// Effect mask (effectBit) of a function by display name; 0 when it
   /// carries none.
   uint8_t effectsOf(llvm::StringRef displayName) const;
+
+  /// The same for a function whose identity is known: a placement
+  /// `operator new` (isPlacementNewUsr) does not carry the allocation
+  /// effect its display name has.
+  uint8_t effectsOf(llvm::StringRef displayName, llvm::StringRef usr) const;
 
   /// The entries of `kind`, sorted.
   std::vector<std::string> names(EffectKind kind) const;

@@ -494,14 +494,23 @@ Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
   // specialization set), so such a callee has no node yet; register one
   // here so the display-name index can resolve its edges. Redundant
   // registration is a no-op (addNode unions).
-  if ((decl->isImplicit() ||
+  //
+  // A function the compiler declares before any header does (the global
+  // `operator new` and `operator delete`) is implicit only in its first
+  // declaration; once <new> redeclares it, lookup finds the redeclaration,
+  // which the indexer skipped as one. The node is then the implicit
+  // declaration's, so it reads the same in a TU that includes <new> and
+  // one that does not.
+  const clang::FunctionDecl *first = decl->getFirstDecl();
+  const clang::FunctionDecl *where = first->isImplicit() ? first : decl;
+  if ((where->isImplicit() ||
        decl->getTemplateSpecializationKind() != clang::TSK_Undeclared) &&
       auxNodes_.insert(decl).second) {
     CallGraphNode node;
     node.usr = id.usr;
     node.qualifiedName = id.display;
-    node.file = getFilePath(decl->getLocation());
-    node.line = sm_.getSpellingLineNumber(decl->getLocation());
+    node.file = getFilePath(where->getLocation());
+    node.line = sm_.getSpellingLineNumber(where->getLocation());
     if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl)) {
       node.isVirtual = method->isVirtual();
       if (auto *parent =
@@ -823,6 +832,52 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   graph_.addEdge({caller.usr, ctorId.usr, EdgeKind::ConstructorCall,
                   Confidence::Proven, formatLocation(expr->getBeginLoc()), 0}, tuPath_);
 
+  return true;
+}
+
+void CallGraphEdgeVisitor::addAllocationEdge(const clang::FunctionDecl *fn,
+                                             clang::SourceLocation loc,
+                                             Confidence confidence) {
+  if (!fn)
+    return; // unresolved: the type or the operand is dependent
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
+    return;
+  if (!isInUserCode(loc))
+    return;
+  if (!funcStack_.empty() &&
+      isCollapsedEdge(funcStack_.back()->getLocation(), fn->getLocation()))
+    return;
+  graph_.addEdge({caller.usr, identForCallee(fn).usr, EdgeKind::DirectCall,
+                  confidence, formatLocation(loc), 0}, tuPath_);
+}
+
+// `new T(args)` calls two functions: the allocation function, then the
+// constructor (VisitCXXConstructExpr sees that one). The allocation call is
+// as direct as a written one: overload resolution picked the function at
+// compile time, so the edge is a Proven DirectCall at the expression. The
+// deallocation function a new-expression also names runs only when the
+// constructor throws, and is not recorded.
+bool CallGraphEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
+  addAllocationEdge(expr->getOperatorNew(), expr->getBeginLoc(),
+                    Confidence::Proven);
+  return true;
+}
+
+// `delete p` calls the destructor (not recorded: #113) and then the
+// deallocation function. With a virtual destructor the function is the one
+// looked up at the *dynamic* type's destructor, so the statically resolved
+// one is the likely callee rather than the certain one.
+bool CallGraphEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
+  Confidence confidence = Confidence::Proven;
+  clang::QualType destroyed = expr->getDestroyedType();
+  if (!destroyed.isNull())
+    if (const clang::CXXRecordDecl *record = destroyed->getAsCXXRecordDecl())
+      if (record->hasDefinition())
+        if (const clang::CXXDestructorDecl *dtor = record->getDestructor())
+          if (dtor->isVirtual())
+            confidence = Confidence::Plausible;
+  addAllocationEdge(expr->getOperatorDelete(), expr->getBeginLoc(), confidence);
   return true;
 }
 

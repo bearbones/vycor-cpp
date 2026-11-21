@@ -42,6 +42,10 @@ namespace vycor {
 static bool isSystemPath(llvm::StringRef path) {
   if (path.empty())
     return false;
+  // "<unknown>", "<built-in>": a function the compiler declares (the global
+  // `operator new` and `operator delete`) has no source to delete.
+  if (path.starts_with("<"))
+    return true;
   static constexpr llvm::StringLiteral prefixes[] = {
       "/usr/include/",       "/usr/lib/",
       "/usr/local/include/", "/usr/local/lib/",

@@ -86,6 +86,8 @@ public:
 
   bool VisitCallExpr(clang::CallExpr *expr);
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *expr);
+  bool VisitCXXNewExpr(clang::CXXNewExpr *expr);
+  bool VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr);
   bool VisitVarDecl(clang::VarDecl *decl);
   bool VisitDeclRefExpr(clang::DeclRefExpr *expr);
 
@@ -130,6 +132,11 @@ private:
   bool isInUserCode(clang::SourceLocation loc) const;
   bool isCollapsedEdge(clang::SourceLocation callerLoc,
                        clang::SourceLocation calleeLoc) const;
+
+  // The call a new- or delete-expression makes to its allocation or
+  // deallocation function, which no CallExpr spells.
+  void addAllocationEdge(const clang::FunctionDecl *fn,
+                         clang::SourceLocation loc, Confidence confidence);
 
   void handleVirtualDispatch(const std::string &callerUsr,
                              clang::CXXMethodDecl *method,
