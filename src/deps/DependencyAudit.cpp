@@ -16,10 +16,13 @@
 #include "vycor/deps/DependencyAudit.h"
 
 #include "vycor/callgraph/CallGraph.h"
+#include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/Snapshot.h"
 #include "vycor/callgraph/Utf8.h"
 #include "vycor/query/Serialize.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/Path.h"
@@ -234,10 +237,217 @@ const char *callEdgeKindName(uint8_t kind) {
   return edgeKindToString(static_cast<EdgeKind>(kind));
 }
 
+// ---------------------------------------------------------------------------
+// File attribution, shared by both producers
+// ---------------------------------------------------------------------------
+
+/// What the map and the index meta say about each file.
+struct FileAttrs {
+  /// The target set whose objects hold code written in the file, or 0 when
+  /// it is compiled into whoever includes it.
+  std::vector<uint32_t> fileSet;
+  /// The target set a shared header belongs to, for declarations without a
+  /// visible definition: listed, else voted, else by stem (0 none).
+  std::vector<uint32_t> headerOwner;
+  /// The one target set with a source named like the header that includes
+  /// it (0 none seen, kNoIndex several).
+  std::vector<uint32_t> stemOwner;
+  std::vector<uint8_t> isSource;   // a source the map lists
+  /// 0 not in the index, 1 parsed cleanly, 2 parse not clean.
+  std::vector<uint8_t> fileStatus;
+  std::vector<uint8_t> unmappedTu; // an indexed TU no target lists
+
+  void grow(size_t n) {
+    fileSet.resize(n, 0);
+    headerOwner.resize(n, 0);
+    stemOwner.resize(n, 0);
+    isSource.resize(n, 0);
+    fileStatus.resize(n, 0);
+    unmappedTu.resize(n, 0);
+  }
+  /// The target set a translation unit's objects belong to, or 0.
+  [[nodiscard]] uint32_t tuSet(uint32_t f) const noexcept {
+    return f < isSource.size() && isSource[f] ? fileSet[f] : 0;
+  }
+};
+
+/// Files the map names (sources anchor, headers carry ownership), then the
+/// index meta: per-TU outcomes, headers private to one target set, stem
+/// affinity. Fills the coverage planes and source counts of `lf`.
+void attributeFiles(const TargetMap &map, const SnapshotMeta *meta,
+                    SetTable &sets, FileTable &files, FileAttrs &fa,
+                    LinkFacts &lf) {
+  const uint32_t targetCount = map.size();
+  std::vector<uint32_t> scratchSet;
+  auto assignListed = [&](bool sourcesNotHeaders, std::vector<uint32_t> &attr) {
+    std::vector<std::pair<uint32_t, uint32_t>> listed; // (file, target)
+    for (uint32_t t = 0; t < targetCount; ++t)
+      for (const std::string &p :
+           sourcesNotHeaders ? map.sourcesOf(t) : map.headersOf(t))
+        listed.emplace_back(files.add(p), t);
+    fa.grow(files.paths.size());
+    std::sort(listed.begin(), listed.end());
+    for (size_t i = 0; i < listed.size();) {
+      size_t j = i;
+      scratchSet.clear();
+      for (; j < listed.size() && listed[j].first == listed[i].first; ++j)
+        scratchSet.push_back(listed[j].second);
+      attr[listed[i].first] = sets.intern(scratchSet);
+      i = j;
+    }
+  };
+  assignListed(true, fa.fileSet);
+  for (uint32_t f = 0; f < fa.fileSet.size(); ++f)
+    fa.isSource[f] = fa.fileSet[f] != 0;
+  assignListed(false, fa.headerOwner);
+
+  if (meta) {
+    const size_t tuCount = meta->files.size();
+    std::vector<uint32_t> tuFile(tuCount), depFile(meta->deps.size());
+    for (size_t i = 0; i < tuCount; ++i)
+      tuFile[i] = files.add(
+          normalizeAuditPath(toIndexText(meta->files[i].path), ""));
+    for (size_t j = 0; j < depFile.size(); ++j)
+      depFile[j] = files.add(
+          normalizeAuditPath(toIndexText(meta->deps[j].path), ""));
+    fa.grow(files.paths.size());
+
+    constexpr uint32_t kUnset = kNoIndex;
+    std::vector<uint32_t> depSet(depFile.size(), kUnset);
+    std::vector<uint8_t> depClean(depFile.size(), 1);
+    for (size_t i = 0; i < tuCount; ++i) {
+      const bool clean = i < meta->outcomes.size() &&
+                         meta->outcomes[i].status == TuStatus::Indexed;
+      const uint32_t tuSet = fa.tuSet(tuFile[i]);
+      if (tuSet == 0) {
+        ++lf.counts.unmappedTus;
+        fa.unmappedTu[tuFile[i]] = 1;
+      }
+      fa.fileStatus[tuFile[i]] = clean ? 1 : 2;
+      if (i >= meta->tuDeps.size())
+        continue;
+      for (uint32_t j : meta->tuDeps[i]) {
+        if (j >= depSet.size())
+          continue;
+        if (depSet[j] == kUnset)
+          depSet[j] = tuSet;
+        else if (depSet[j] != tuSet)
+          depSet[j] = 0;
+        if (!clean)
+          depClean[j] = 0;
+      }
+    }
+    for (size_t j = 0; j < depFile.size(); ++j) {
+      const uint32_t f = depFile[j];
+      if (depSet[j] == kUnset)
+        continue;
+      if (fa.isSource[f]) {
+        // A mapped source that is not a TU of its own but is included by
+        // one (a unity build): as covered as its includers.
+        if (fa.fileStatus[f] == 0)
+          fa.fileStatus[f] = depClean[j] ? 1 : 2;
+      } else if (depSet[j] != 0 && map.underRoots(files.paths[f])) {
+        // Opened only by TUs of one target set, and the build's own: its
+        // code is compiled into that set's objects and nowhere else.
+        fa.fileSet[f] = depSet[j];
+      }
+    }
+
+    // Stem affinity: a shared header named like a source that includes it
+    // (tokenizer.hpp and tokenizer.cpp) most likely declares what that
+    // source defines. Used only when nothing better names an owner.
+    std::vector<uint64_t> stem(files.paths.size());
+    for (size_t f = 0; f < stem.size(); ++f)
+      stem[f] = llvm::xxh3_64bits(llvm::sys::path::stem(files.paths[f]));
+    for (size_t i = 0; i < tuCount && i < meta->tuDeps.size(); ++i) {
+      const uint32_t tuSet = fa.tuSet(tuFile[i]);
+      if (tuSet == 0)
+        continue;
+      for (uint32_t j : meta->tuDeps[i]) {
+        if (j >= depFile.size())
+          continue;
+        const uint32_t f = depFile[j];
+        if (fa.isSource[f] || stem[f] != stem[tuFile[i]])
+          continue;
+        if (fa.stemOwner[f] == 0)
+          fa.stemOwner[f] = tuSet;
+        else if (fa.stemOwner[f] != tuSet)
+          fa.stemOwner[f] = kNoIndex;
+      }
+    }
+  }
+
+  lf.targetSources.assign(targetCount, 0);
+  lf.targetIndexed.assign(targetCount, 0);
+  lf.targetCovered.assign(targetCount, 0);
+  for (uint32_t t = 0; t < targetCount; ++t) {
+    for (const std::string &p : map.sourcesOf(t)) {
+      ++lf.targetSources[t];
+      if (fa.fileStatus[files.byPath.lookup(p)] == 1)
+        ++lf.targetIndexed[t];
+    }
+    lf.targetCovered[t] = meta && lf.targetSources[t] != 0 &&
+                          lf.targetIndexed[t] == lf.targetSources[t];
+  }
+  for (uint32_t f = 0; f < fa.isSource.size(); ++f) {
+    if (!fa.isSource[f])
+      continue;
+    ++lf.counts.mappedSources;
+    lf.counts.indexedSources += fa.fileStatus[f] == 1;
+    lf.counts.failedSources += fa.fileStatus[f] == 2;
+  }
+}
+
+/// Header affinity: a shared header nobody lists belongs, for the symbols
+/// it declares without a visible definition, to the target set that
+/// defines the most of the symbols it declares (`votes`: (header, owner
+/// set) per defined symbol); failing that, to the one whose source shares
+/// its name.
+void settleHeaderOwners(std::vector<std::pair<uint32_t, uint32_t>> &votes,
+                        SetTable &sets, const FileTable &files,
+                        const TargetMap &map, FileAttrs &fa) {
+  std::vector<uint32_t> scratchSet;
+  std::sort(votes.begin(), votes.end());
+  for (size_t i = 0; i < votes.size();) {
+    const uint32_t header = votes[i].first;
+    const size_t first = i;
+    size_t bestCount = 0;
+    while (i < votes.size() && votes[i].first == header) {
+      size_t j = i;
+      while (j < votes.size() && votes[j] == votes[i])
+        ++j;
+      bestCount = std::max(bestCount, j - i);
+      i = j;
+    }
+    // Every set with the most votes: one winner owns the header; on a tie
+    // nothing tells the tied sets apart, so the header is presumed to
+    // belong to all of them.
+    scratchSet.clear();
+    for (size_t k = first; k < i;) {
+      size_t j = k;
+      while (j < i && votes[j] == votes[k])
+        ++j;
+      if (j - k == bestCount)
+        for (uint32_t t : sets.of(votes[k].second))
+          scratchSet.push_back(t);
+      k = j;
+    }
+    std::sort(scratchSet.begin(), scratchSet.end());
+    scratchSet.erase(std::unique(scratchSet.begin(), scratchSet.end()),
+                     scratchSet.end());
+    fa.headerOwner[header] = sets.intern(scratchSet);
+  }
+  for (uint32_t f = 0; f < fa.headerOwner.size(); ++f)
+    if (fa.headerOwner[f] == 0 && fa.fileSet[f] == 0 &&
+        fa.stemOwner[f] != 0 && fa.stemOwner[f] != kNoIndex &&
+        map.underRoots(files.paths[f]))
+      fa.headerOwner[f] = fa.stemOwner[f];
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Stage-1 producer: call edges -> link facts
+// Call edges -> link facts (an index without reference facts)
 // ---------------------------------------------------------------------------
 
 LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
@@ -264,143 +474,11 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
   lf.targetCount = targetCount;
   SetTable sets(targetCount);
   FileTable files;
+  FileAttrs fa;
+  attributeFiles(map, meta, sets, files, fa, lf);
+  std::vector<uint32_t> &fileSet = fa.fileSet, &headerOwner = fa.headerOwner;
+  std::vector<uint8_t> &unmappedTu = fa.unmappedTu;
   std::vector<uint32_t> scratchSet;
-
-  // --- Files the map names: sources anchor, headers carry ownership -------
-  // fileSet[f]: the target set whose objects hold code written in f, or 0
-  // when f is compiled into whoever includes it.
-  // stemOwner[f]: the one target set with a source named like header f
-  // that includes it (0 none seen, kNoIndex several).
-  std::vector<uint32_t> fileSet, headerOwner, stemOwner;
-  std::vector<uint8_t> isSource;
-  auto growFileAttrs = [&] {
-    fileSet.resize(files.paths.size(), 0);
-    headerOwner.resize(files.paths.size(), 0);
-    stemOwner.resize(files.paths.size(), 0);
-    isSource.resize(files.paths.size(), 0);
-  };
-  auto assignListed = [&](bool sourcesNotHeaders, std::vector<uint32_t> &attr) {
-    std::vector<std::pair<uint32_t, uint32_t>> listed; // (file, target)
-    for (uint32_t t = 0; t < targetCount; ++t)
-      for (const std::string &p :
-           sourcesNotHeaders ? map.sourcesOf(t) : map.headersOf(t))
-        listed.emplace_back(files.add(p), t);
-    growFileAttrs();
-    std::sort(listed.begin(), listed.end());
-    for (size_t i = 0; i < listed.size();) {
-      size_t j = i;
-      scratchSet.clear();
-      for (; j < listed.size() && listed[j].first == listed[i].first; ++j)
-        scratchSet.push_back(listed[j].second);
-      attr[listed[i].first] = sets.intern(scratchSet);
-      i = j;
-    }
-  };
-  assignListed(true, fileSet);
-  for (uint32_t f = 0; f < fileSet.size(); ++f)
-    isSource[f] = fileSet[f] != 0;
-  assignListed(false, headerOwner);
-
-  // --- Index meta: per-TU outcomes, and headers private to one target set -
-  // fileStatus: 0 not in the index, 1 parsed cleanly, 2 parse not clean.
-  // unmappedTu: an indexed translation unit no target lists.
-  std::vector<uint8_t> fileStatus, unmappedTu;
-  if (meta) {
-    const size_t tuCount = meta->files.size();
-    std::vector<uint32_t> tuFile(tuCount), depFile(meta->deps.size());
-    for (size_t i = 0; i < tuCount; ++i)
-      tuFile[i] = files.add(normalizeAuditPath(toIndexText(meta->files[i].path), ""));
-    for (size_t j = 0; j < depFile.size(); ++j)
-      depFile[j] = files.add(normalizeAuditPath(toIndexText(meta->deps[j].path), ""));
-    growFileAttrs();
-    fileStatus.assign(files.paths.size(), 0);
-    unmappedTu.assign(files.paths.size(), 0);
-
-    constexpr uint32_t kUnset = kNoIndex;
-    std::vector<uint32_t> depSet(depFile.size(), kUnset);
-    std::vector<uint8_t> depClean(depFile.size(), 1);
-    for (size_t i = 0; i < tuCount; ++i) {
-      const bool clean = i < meta->outcomes.size() &&
-                         meta->outcomes[i].status == TuStatus::Indexed;
-      const uint32_t tuSet = isSource[tuFile[i]] ? fileSet[tuFile[i]] : 0;
-      if (tuSet == 0) {
-        ++lf.counts.unmappedTus;
-        unmappedTu[tuFile[i]] = 1;
-      }
-      fileStatus[tuFile[i]] = clean ? 1 : 2;
-      if (i >= meta->tuDeps.size())
-        continue;
-      for (uint32_t j : meta->tuDeps[i]) {
-        if (j >= depSet.size())
-          continue;
-        if (depSet[j] == kUnset)
-          depSet[j] = tuSet;
-        else if (depSet[j] != tuSet)
-          depSet[j] = 0;
-        if (!clean)
-          depClean[j] = 0;
-      }
-    }
-    for (size_t j = 0; j < depFile.size(); ++j) {
-      const uint32_t f = depFile[j];
-      if (depSet[j] == kUnset)
-        continue;
-      if (isSource[f]) {
-        // A mapped source that is not a TU of its own but is included by
-        // one (a unity build): as covered as its includers.
-        if (fileStatus[f] == 0)
-          fileStatus[f] = depClean[j] ? 1 : 2;
-      } else if (depSet[j] != 0 && map.underRoots(files.paths[f])) {
-        // Opened only by TUs of one target set, and the build's own: its
-        // code is compiled into that set's objects and nowhere else.
-        fileSet[f] = depSet[j];
-      }
-    }
-
-    // Stem affinity: a shared header named like a source that includes it
-    // (tokenizer.hpp and tokenizer.cpp) most likely declares what that
-    // source defines. Used only when nothing better names an owner.
-    std::vector<uint64_t> stem(files.paths.size());
-    for (size_t f = 0; f < stem.size(); ++f)
-      stem[f] = llvm::xxh3_64bits(llvm::sys::path::stem(files.paths[f]));
-    for (size_t i = 0; i < tuCount && i < meta->tuDeps.size(); ++i) {
-      const uint32_t tuSet = isSource[tuFile[i]] ? fileSet[tuFile[i]] : 0;
-      if (tuSet == 0)
-        continue;
-      for (uint32_t j : meta->tuDeps[i]) {
-        if (j >= depFile.size())
-          continue;
-        const uint32_t f = depFile[j];
-        if (isSource[f] || stem[f] != stem[tuFile[i]])
-          continue;
-        if (stemOwner[f] == 0)
-          stemOwner[f] = tuSet;
-        else if (stemOwner[f] != tuSet)
-          stemOwner[f] = kNoIndex;
-      }
-    }
-  }
-  fileStatus.resize(files.paths.size(), 0);
-
-  lf.targetSources.assign(targetCount, 0);
-  lf.targetIndexed.assign(targetCount, 0);
-  lf.targetCovered.assign(targetCount, 0);
-  for (uint32_t t = 0; t < targetCount; ++t) {
-    for (const std::string &p : map.sourcesOf(t)) {
-      ++lf.targetSources[t];
-      if (fileStatus[files.byPath.lookup(p)] == 1)
-        ++lf.targetIndexed[t];
-    }
-    lf.targetCovered[t] = meta && lf.targetSources[t] != 0 &&
-                          lf.targetIndexed[t] == lf.targetSources[t];
-  }
-  for (uint32_t f = 0; f < isSource.size(); ++f) {
-    if (!isSource[f])
-      continue;
-    ++lf.counts.mappedSources;
-    lf.counts.indexedSources += fileStatus[f] == 1;
-    lf.counts.failedSources += fileStatus[f] == 2;
-  }
 
   FileResolver resolver(files);
   resolver.freezeKnown();
@@ -484,7 +562,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
     if (lf.symNode[s])
       declFile[s] = resolver.resolve(lf.symNode[s]->file);
 
-  growFileAttrs();
+  fa.grow(files.paths.size());
   const uint32_t fileCount = static_cast<uint32_t>(files.paths.size());
   std::vector<uint32_t> fileRank(fileCount);
   {
@@ -580,44 +658,7 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
     }
   }
 
-  // Header affinity: a shared header nobody lists belongs, for the
-  // functions it declares without a visible body, to the target set that
-  // defines the most of the functions it declares; failing that, to the
-  // one whose source shares its name.
-  std::sort(votes.begin(), votes.end());
-  for (size_t i = 0; i < votes.size();) {
-    const uint32_t header = votes[i].first;
-    const size_t first = i;
-    size_t bestCount = 0;
-    while (i < votes.size() && votes[i].first == header) {
-      size_t j = i;
-      while (j < votes.size() && votes[j] == votes[i])
-        ++j;
-      bestCount = std::max(bestCount, j - i);
-      i = j;
-    }
-    // Every set with the most votes: one winner owns the header; on a tie
-    // nothing tells the tied sets apart, so the header is presumed to
-    // belong to all of them.
-    scratchSet.clear();
-    for (size_t k = first; k < i;) {
-      size_t j = k;
-      while (j < i && votes[j] == votes[k])
-        ++j;
-      if (j - k == bestCount)
-        for (uint32_t t : sets.of(votes[k].second))
-          scratchSet.push_back(t);
-      k = j;
-    }
-    std::sort(scratchSet.begin(), scratchSet.end());
-    scratchSet.erase(std::unique(scratchSet.begin(), scratchSet.end()),
-                     scratchSet.end());
-    headerOwner[header] = sets.intern(scratchSet);
-  }
-  for (uint32_t f = 0; f < headerOwner.size(); ++f)
-    if (headerOwner[f] == 0 && fileSet[f] == 0 && stemOwner[f] != 0 &&
-        stemOwner[f] != kNoIndex && map.underRoots(files.paths[f]))
-      headerOwner[f] = stemOwner[f];
+  settleHeaderOwners(votes, sets, files, map, fa);
 
   // 3. Calls only at shared sites: an inline body. 4. No calls at all:
   //    template code is inline; otherwise the declaring header's owner is
@@ -747,6 +788,720 @@ LinkFacts linkFactsFromCallEdges(const CallGraph &graph, const TargetMap &map,
     lf.refBegin[s + 1] = static_cast<uint32_t>(lf.refTo.size());
   }
 
+  lf.symDeclFile = std::move(declFile);
+  lf.symFlags.assign(symbolCount, 0);
+  lf.files = std::move(files.paths);
+  lf.setBegin = std::move(sets.begin);
+  lf.setTargets = std::move(sets.targets);
+  return lf;
+}
+
+// ---------------------------------------------------------------------------
+// Reference facts -> link facts
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Reference kinds the producer adds, numbered after the RefRole values.
+constexpr uint8_t kRefVtableEntry = kRefRoleCount; // vtable -> virtual function
+constexpr uint8_t kRefBaseClass = kRefRoleCount + 1; // vtable -> base's vtable
+constexpr uint8_t kRefEnclosed = kRefRoleCount + 2;  // function -> its lambda
+
+const char *referenceKindName(uint8_t kind) {
+  if (kind < kRefRoleCount)
+    return refRoleName(static_cast<RefRole>(kind));
+  switch (kind) {
+  case kRefVtableEntry:
+    return "vtable_entry";
+  case kRefBaseClass:
+    return "base_class";
+  case kRefEnclosed:
+    return "enclosed_lambda";
+  default:
+    return "unknown";
+  }
+}
+
+/// One stored symbol record, flattened.
+struct SymRec {
+  SId usr, name, file, minTu;
+  uint32_t line, flags, tus;
+  SymbolKind kind;
+  LinkageClass linkage;
+};
+
+/// One reference before anchoring: a stored record or one the producer adds.
+struct RawRef {
+  uint32_t from, to;
+  uint32_t file;    // file id, kNoIndex unknown
+  SId siteFile;     // the site's path in the reference index, or kNoId
+  uint32_t line, col;
+  uint32_t tus;     // contributing TUs (stored records), else 0
+  SId minTu;
+  uint8_t kind;
+};
+
+} // namespace
+
+LinkFacts linkFactsFromReferences(const ReferenceIndex &refs,
+                                  const CallGraph *graph,
+                                  const TargetMap &map,
+                                  const SnapshotMeta *meta) {
+  constexpr SId kNoId = ReferenceIndex::kNoId;
+  LinkFacts lf;
+  lf.edgeSource = "references";
+  // docs/dependency-audit.md, "Completeness".
+  lf.invisible = {"implicit-special-member-calls",
+                  "template-instantiation-bodies",
+                  "name-based-lookup",
+                  "qualified-virtual-calls",
+                  "same-basename-internal-symbols",
+                  "other-build-configurations"};
+  lf.refKindName = referenceKindName;
+  lf.ownedStrings = std::make_unique<StringInterner>();
+  StringInterner &out = *lf.ownedStrings;
+  lf.strings = &out;
+  lf.hasIndexMeta = meta != nullptr;
+  // The reference facts are recorded whatever --collapse-paths says.
+  lf.edgesCollapsed = false;
+  const StringInterner &rs = refs.strings();
+
+  const uint32_t targetCount = map.size();
+  lf.targetCount = targetCount;
+  SetTable sets(targetCount);
+  FileTable files;
+  FileAttrs fa;
+  attributeFiles(map, meta, sets, files, fa, lf);
+  FileResolver resolver(files);
+  resolver.freezeKnown();
+
+  // --- Records, flattened --------------------------------------------------
+  std::vector<SymRec> srec;
+  srec.reserve(refs.symbolRecordCount());
+  refs.forEachSymbolRecord([&](const ReferenceIndex::SymbolRecord &r,
+                               uint32_t tus, SId minTu) {
+    srec.push_back({r.usr, r.name, r.file, minTu, r.line, r.flags, tus,
+                    r.kind, r.linkage});
+  });
+  struct RefRec {
+    ReferenceIndex::ReferenceRecord rec;
+    uint32_t tus;
+    SId minTu;
+  };
+  std::vector<RefRec> rrec;
+  refs.forEachReferenceRecord([&](const ReferenceIndex::ReferenceRecord &r,
+                                  uint32_t tus, SId minTu) {
+    rrec.push_back({r, tus, minTu});
+  });
+
+  // --- Symbols, in USR order -----------------------------------------------
+  // Ordering the symbols by USR once makes every later tie-break by symbol
+  // index a tie-break by USR, whatever order the records were stored in.
+  const size_t idCount = rs.size();
+  std::vector<uint32_t> symOfId(idCount, kNoIndex);
+  std::vector<SId> usrs;
+  auto note = [&](SId usr) {
+    if (symOfId[usr] == kNoIndex) {
+      symOfId[usr] = 0;
+      usrs.push_back(usr);
+    }
+  };
+  for (const SymRec &r : srec)
+    note(r.usr);
+  for (const RefRec &r : rrec) {
+    note(r.rec.referrer);
+    note(r.rec.target);
+  }
+  std::sort(usrs.begin(), usrs.end(), [&](SId a, SId b) {
+    return rs.resolve(a) < rs.resolve(b);
+  });
+  const auto symbolCount = static_cast<uint32_t>(usrs.size());
+  for (uint32_t i = 0; i < symbolCount; ++i)
+    symOfId[usrs[i]] = i;
+
+  // Records grouped by symbol (counting sort).
+  std::vector<uint32_t> recBegin(symbolCount + 1, 0), recOrder(srec.size());
+  for (const SymRec &r : srec)
+    ++recBegin[symOfId[r.usr] + 1];
+  for (uint32_t s = 0; s < symbolCount; ++s)
+    recBegin[s + 1] += recBegin[s];
+  {
+    std::vector<uint32_t> cursor(recBegin.begin(), recBegin.end() - 1);
+    for (uint32_t i = 0; i < srec.size(); ++i)
+      recOrder[cursor[symOfId[srec[i].usr]]++] = i;
+  }
+
+  // --- Files: every path a record names, resolved once ----------------------
+  constexpr uint32_t kNotYet = kNoIndex - 1;
+  std::vector<uint32_t> fileOfId(idCount, kNotYet);
+  auto fileOf = [&](SId id) {
+    if (id == kNoId)
+      return kNoIndex;
+    uint32_t &f = fileOfId[id];
+    if (f == kNotYet)
+      f = resolver.resolve(rs.resolve(id));
+    return f;
+  };
+  for (const SymRec &r : srec) {
+    fileOf(r.file);
+    fileOf(r.minTu);
+  }
+  for (const RefRec &r : rrec) {
+    fileOf(r.rec.file);
+    fileOf(r.minTu);
+  }
+  fa.grow(files.paths.size());
+  const auto fileCount = static_cast<uint32_t>(files.paths.size());
+  std::vector<uint32_t> fileRank(fileCount);
+  {
+    std::vector<uint32_t> order(fileCount);
+    std::iota(order.begin(), order.end(), 0u);
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+      return files.paths[a] < files.paths[b];
+    });
+    for (uint32_t r = 0; r < fileCount; ++r)
+      fileRank[order[r]] = r;
+  }
+  auto rankOf = [&](uint32_t f) { return f == kNoIndex ? 0u : fileRank[f]; };
+  /// Who owns a header's declarations: listed or voted, else the target
+  /// set it is private to.
+  auto headerOwnerOf = [&](uint32_t f) -> uint32_t {
+    if (f == kNoIndex || fa.isSource[f])
+      return 0;
+    return fa.headerOwner[f] != 0 ? fa.headerOwner[f] : fa.fileSet[f];
+  };
+  auto allCovered = [&](uint32_t set) {
+    for (uint32_t t : sets.of(set))
+      if (!lf.targetCovered[t])
+        return false;
+    return true;
+  };
+
+  // --- Per symbol: merge the records ----------------------------------------
+  lf.symUsr.resize(symbolCount);
+  lf.symName.resize(symbolCount);
+  lf.symNode.assign(symbolCount, nullptr);
+  lf.symClass.assign(symbolCount, SymbolClass::Unattributed);
+  lf.symOwner.assign(symbolCount, 0);
+  lf.symFile.assign(symbolCount, kNoIndex);
+  lf.symUnplaced.assign(symbolCount, 0);
+  lf.symDeclFile.assign(symbolCount, kNoIndex);
+  lf.symDeclLine.assign(symbolCount, 0);
+  lf.symFlags.assign(symbolCount, 0);
+  lf.symKind.assign(symbolCount, static_cast<uint8_t>(SymbolKind::Function));
+  std::vector<uint32_t> flagsOf(symbolCount, 0);
+  std::vector<SId> declSiteFile(symbolCount, kNoId); // in the reference index
+  // Undecided after the first pass: 0 decided, 1 no definition seen,
+  // 2 inline, 3 defined only in a TU no target lists.
+  enum : uint8_t { kDecided = 0, kUndefined = 1, kInline = 2, kUnmapped = 3 };
+  std::vector<uint8_t> pending(symbolCount, kDecided);
+  std::vector<uint8_t> unmappedBody(symbolCount, 0);
+  std::vector<std::pair<uint32_t, uint32_t>> votes; // (header, owner set)
+  std::vector<uint32_t> scratchSet;
+  for (uint32_t s = 0; s < symbolCount; ++s) {
+    lf.symUsr[s] = out.intern(rs.resolve(usrs[s]));
+    const uint32_t rb = recBegin[s], re = recBegin[s + 1];
+    if (rb == re) {
+      // Named by a reference only (no record survived): an identity, no
+      // more.
+      lf.symName[s] = lf.symUsr[s];
+      continue;
+    }
+    const std::string *name = nullptr;
+    uint8_t kind = UINT8_MAX, linkage = UINT8_MAX, defLinkage = UINT8_MAX;
+    uint32_t flags = 0;
+    bool allSystem = true, anyDef = false, multiHeaderDef = false;
+    bool unmappedDef = false, mainFileDef = false, unmappedHome = false;
+    // The declaration to show: one in a header that is no definition, then
+    // any other declaration, then a definition; by path and line within.
+    uint32_t declPref = 3, declRank = 0, declLine = 0, declFile = kNoIndex;
+    SId declPath = kNoId;
+    uint32_t bodyFile = kNoIndex, homeFile = kNoIndex;
+    scratchSet.clear();
+    std::vector<uint32_t> homeTargets; // rarely more than one
+    for (uint32_t i = rb; i < re; ++i) {
+      const SymRec &r = srec[recOrder[i]];
+      const std::string &recName = rs.resolve(r.name);
+      if (!name || recName < *name)
+        name = &recName;
+      kind = std::min(kind, static_cast<uint8_t>(r.kind));
+      linkage = std::min(linkage, static_cast<uint8_t>(r.linkage));
+      flags |= r.flags & ~kSymbolPerDeclFlags;
+      allSystem &= (r.flags & kSymSystemHeader) != 0;
+      const bool definition = (r.flags & kSymDefinition) != 0;
+      const bool inHeader = (r.flags & kSymInHeader) != 0;
+      const uint32_t f = fileOf(r.file);
+      const uint32_t pref = !definition ? (inHeader ? 0u : 1u) : 2u;
+      const uint32_t rank = rankOf(f);
+      if (pref < declPref || (pref == declPref && rank < declRank) ||
+          (pref == declPref && rank == declRank && r.line < declLine)) {
+        declPref = pref;
+        declRank = rank;
+        declLine = r.line;
+        declFile = f;
+        declPath = r.file;
+      }
+      if (r.flags & kSymVtableHome) {
+        const uint32_t tuFile = fileOf(r.minTu);
+        const uint32_t set = tuFile == kNoIndex ? 0 : fa.tuSet(tuFile);
+        if (set != 0) {
+          for (uint32_t t : sets.of(set))
+            homeTargets.push_back(t);
+          if (homeFile == kNoIndex || rankOf(tuFile) < rankOf(homeFile))
+            homeFile = tuFile;
+        } else {
+          unmappedHome = true;
+        }
+      }
+      if (!definition)
+        continue;
+      anyDef = true;
+      defLinkage = std::min(defLinkage, static_cast<uint8_t>(r.linkage));
+      uint32_t tuFile;
+      if (!inHeader) {
+        tuFile = f;
+        mainFileDef = true;
+      } else if (r.tus == 1 && r.minTu != kNoId) {
+        tuFile = fileOf(r.minTu); // a textually included .inc, one TU
+      } else {
+        multiHeaderDef = true;
+        continue;
+      }
+      const uint32_t set = tuFile == kNoIndex ? 0 : fa.tuSet(tuFile);
+      if (set == 0) {
+        unmappedDef = true;
+        continue;
+      }
+      for (uint32_t t : sets.of(set))
+        scratchSet.push_back(t);
+      if (bodyFile == kNoIndex || rankOf(f) < rankOf(bodyFile))
+        bodyFile = f;
+    }
+    lf.symName[s] = out.intern(*name);
+    lf.symKind[s] = kind;
+    lf.symDeclFile[s] = declFile;
+    lf.symDeclLine[s] = declLine;
+    declSiteFile[s] = declPath;
+    flagsOf[s] = flags;
+    const auto skind = static_cast<SymbolKind>(kind);
+    const auto link = static_cast<LinkageClass>(
+        defLinkage != UINT8_MAX ? defLinkage : linkage);
+    auto internSet = [&](std::vector<uint32_t> &targets) {
+      std::sort(targets.begin(), targets.end());
+      targets.erase(std::unique(targets.begin(), targets.end()),
+                    targets.end());
+      return sets.intern(targets);
+    };
+
+    if (skind == SymbolKind::File || allSystem ||
+        link == LinkageClass::None)
+      continue; // Unattributed: a file scope, or the system's code
+    if (flags & kSymLambda) {
+      // Never a target; what it references is held where it is written.
+      pending[s] = kInline;
+      continue;
+    }
+    if (skind == SymbolKind::Class) {
+      if (!homeTargets.empty()) {
+        lf.symClass[s] = SymbolClass::Defined;
+        lf.symOwner[s] = internSet(homeTargets);
+        lf.symFile[s] = homeFile;
+      } else if (unmappedHome) {
+        pending[s] = kUnmapped;
+      } else if (link == LinkageClass::External) {
+        pending[s] = kUndefined; // a key function no indexed TU defines
+      } else {
+        pending[s] = kInline;
+      }
+      continue;
+    }
+    // A function or a variable.
+    const bool strong =
+        link == LinkageClass::External ||
+        (link == LinkageClass::Internal && mainFileDef) ||
+        ((flags & kSymExplicitInstantiation) && mainFileDef);
+    if (!strong && anyDef) {
+      pending[s] = kInline; // inline, template, or internal to a header
+    } else if (!scratchSet.empty()) {
+      lf.symClass[s] = SymbolClass::Defined;
+      lf.symOwner[s] = internSet(scratchSet);
+      lf.symFile[s] = bodyFile;
+      if (declFile != kNoIndex && fa.fileSet[declFile] == 0 &&
+          fa.headerOwner[declFile] == 0 && !fa.isSource[declFile] &&
+          map.underRoots(files.paths[declFile]))
+        votes.emplace_back(declFile, lf.symOwner[s]);
+    } else if (unmappedDef) {
+      pending[s] = kUnmapped;
+    } else if (multiHeaderDef) {
+      pending[s] = kInline; // one strong body in several TUs' headers
+    } else if (link != LinkageClass::External ||
+               templateLikeUsr(rs.resolve(usrs[s]))) {
+      pending[s] = kInline;
+    } else {
+      pending[s] = kUndefined;
+    }
+  }
+  settleHeaderOwners(votes, sets, files, map, fa);
+
+  for (uint32_t s = 0; s < symbolCount; ++s) {
+    const uint32_t decl = lf.symDeclFile[s];
+    switch (pending[s]) {
+    case kDecided:
+      if (lf.symClass[s] == SymbolClass::Defined)
+        ++lf.counts.defined;
+      else
+        ++lf.counts.unattributed;
+      break;
+    case kInline:
+      lf.symClass[s] = SymbolClass::Inline;
+      lf.symOwner[s] = headerOwnerOf(decl); // whose code, for indirect uses
+      ++lf.counts.inlined;
+      break;
+    case kUnmapped:
+      // Code of a source no target compiles: neither a provider's symbol
+      // nor a carrier of references.
+      unmappedBody[s] = 1;
+      ++lf.counts.unattributed;
+      break;
+    case kUndefined: {
+      const uint32_t owner = headerOwnerOf(decl);
+      if (owner != 0 && !allCovered(owner)) {
+        // Its owner's sources are not all indexed: the definition may be
+        // in one that is not.
+        lf.symClass[s] = SymbolClass::Presumed;
+        lf.symOwner[s] = owner;
+        ++lf.counts.presumed;
+      } else {
+        ++lf.counts.unattributed;
+        if (owner != 0)
+          ++lf.counts.undefinedInCoveredOwner;
+        else
+          lf.symUnplaced[s] = decl != kNoIndex && !(flagsOf[s] & kSymVirtual) &&
+                              !resolver.unresolved(decl) &&
+                              !fa.unmappedTu[decl] &&
+                              map.underRoots(files.paths[decl]);
+      }
+      break;
+    }
+    }
+  }
+
+  // --- Raw references --------------------------------------------------------
+  // Soft: a call of a virtual function the compiler dispatches through the
+  // vtable. The call graph tells a dispatched call from one bound
+  // statically (an object of known type); without it every call of a
+  // virtual function is taken as dispatched.
+  auto isVirtual = [&](uint32_t s) { return (flagsOf[s] & kSymVirtual) != 0; };
+  llvm::DenseMap<uint64_t, uint8_t> boundCall; // (caller, callee) graph ids
+  if (graph) {
+    const StringInterner &gi = graph->interner();
+    auto pairKey = [](SId a, SId b) {
+      return (static_cast<uint64_t>(a) << 32) | b;
+    };
+    for (const RefRec &r : rrec) {
+      if (r.rec.role != RefRole::Call || !isVirtual(symOfId[r.rec.target]))
+        continue;
+      auto caller = gi.find(rs.resolve(r.rec.referrer));
+      auto callee = gi.find(rs.resolve(r.rec.target));
+      if (caller && callee)
+        boundCall.try_emplace(pairKey(*caller, *callee), 0);
+    }
+    if (!boundCall.empty())
+      graph->forEachStoredEdge([&](const CallGraph::EdgeRef &e) {
+        if (e.kind == EdgeKind::VirtualDispatch &&
+            e.confidence != Confidence::Proven)
+          return;
+        auto it = boundCall.find(pairKey(e.caller, e.callee));
+        if (it != boundCall.end())
+          it->second = 1;
+      });
+    // Rekey by symbol pair for the pass below.
+    llvm::DenseMap<uint64_t, uint8_t> bySym;
+    for (const RefRec &r : rrec) {
+      if (r.rec.role != RefRole::Call || !isVirtual(symOfId[r.rec.target]))
+        continue;
+      auto caller = gi.find(rs.resolve(r.rec.referrer));
+      auto callee = gi.find(rs.resolve(r.rec.target));
+      if (!caller || !callee)
+        continue;
+      auto it = boundCall.find(pairKey(*caller, *callee));
+      if (it != boundCall.end() && it->second)
+        bySym[pairKey(symOfId[r.rec.referrer], symOfId[r.rec.target])] = 1;
+    }
+    boundCall = std::move(bySym);
+  }
+
+  std::vector<RawRef> raw;
+  std::vector<uint8_t> rawSoft;
+  raw.reserve(rrec.size());
+  rawSoft.reserve(rrec.size());
+  for (const RefRec &r : rrec) {
+    const uint32_t from = symOfId[r.rec.referrer], to = symOfId[r.rec.target];
+    if (from == to)
+      continue;
+    uint8_t soft = 0;
+    if (r.rec.role == RefRole::Call && isVirtual(to) &&
+        boundCall.lookup((static_cast<uint64_t>(from) << 32) | to) == 0) {
+      soft = 1;
+      ++lf.counts.skippedVirtualCalls;
+    }
+    raw.push_back({from, to, fileOf(r.rec.file), r.rec.file, r.rec.line,
+                   r.rec.col, r.tus, r.minTu,
+                   static_cast<uint8_t>(r.rec.role)});
+    rawSoft.push_back(soft);
+  }
+
+  // What a vtable holds: the class's virtual functions (a member's USR
+  // extends its class's with "@F@"), and its bases' vtables.
+  auto addSynthesized = [&](uint32_t from, uint32_t to, uint8_t kind,
+                            uint32_t siteOf) {
+    raw.push_back({from, to, lf.symDeclFile[siteOf], declSiteFile[siteOf],
+                   lf.symDeclLine[siteOf], 0, 0, kNoId, kind});
+    rawSoft.push_back(0);
+  };
+  for (uint32_t s = 0; s < symbolCount; ++s) {
+    if (!isVirtual(s) ||
+        lf.symKind[s] != static_cast<uint8_t>(SymbolKind::Function))
+      continue;
+    llvm::StringRef usr = rs.resolve(usrs[s]);
+    const size_t at = usr.find("@F@");
+    if (at == llvm::StringRef::npos)
+      continue;
+    auto cls = rs.find(usr.substr(0, at));
+    if (!cls || symOfId[*cls] == kNoIndex)
+      continue;
+    addSynthesized(symOfId[*cls], s, kRefVtableEntry, s);
+    ++lf.counts.vtableEntryRefs;
+  }
+  if (graph) {
+    llvm::StringMap<llvm::SmallVector<uint32_t, 1>> classNamed;
+    for (uint32_t s = 0; s < symbolCount; ++s)
+      if (lf.symKind[s] == static_cast<uint8_t>(SymbolKind::Class) &&
+          (flagsOf[s] & kSymDynamicClass))
+        classNamed[out.resolve(lf.symName[s])].push_back(s);
+    std::vector<std::pair<uint32_t, uint32_t>> bases; // (derived, base)
+    for (const auto &entry : classNamed)
+      for (const std::string &derived :
+           graph->getDerivedClasses(entry.getKey().str())) {
+        auto it = classNamed.find(derived);
+        if (it == classNamed.end())
+          continue;
+        for (uint32_t d : it->second)
+          for (uint32_t b : entry.getValue())
+            if (d != b)
+              bases.emplace_back(d, b);
+      }
+    std::sort(bases.begin(), bases.end());
+    bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
+    for (const auto &db : bases) {
+      addSynthesized(db.first, db.second, kRefBaseClass, db.first);
+      ++lf.counts.baseClassRefs;
+    }
+    // A lambda is never named by a reference; the call graph knows which
+    // function calls it, and that function carries it.
+    const StringInterner &gi = graph->interner();
+    for (uint32_t s = 0; s < symbolCount; ++s) {
+      if (!(flagsOf[s] & kSymLambda))
+        continue;
+      auto id = gi.find(rs.resolve(usrs[s]));
+      if (!id)
+        continue;
+      for (const CallGraph::EdgeRef &e : graph->callerRefsOf(*id)) {
+        auto caller = rs.find(gi.resolve(e.caller));
+        if (caller && symOfId[*caller] != kNoIndex &&
+            symOfId[*caller] != s)
+          addSynthesized(symOfId[*caller], s, kRefEnclosed, s);
+      }
+    }
+  }
+
+  // --- Anchors -----------------------------------------------------------
+  // The target set whose objects hold a reference, 0 for one that travels
+  // with an inline body, kNoIndex for one no target holds.
+  auto anchorOf = [&](const RawRef &r) -> uint32_t {
+    const uint32_t from = r.from;
+    const uint32_t siteSet = r.file == kNoIndex ? 0 : fa.fileSet[r.file];
+    if (flagsOf[from] & kSymLambda)
+      return siteSet;
+    if (lf.symKind[from] == static_cast<uint8_t>(SymbolKind::File)) {
+      if (siteSet != 0)
+        return siteSet;
+      if (r.tus == 1 && r.minTu != kNoId) {
+        const uint32_t tuFile = fileOf(r.minTu);
+        if (tuFile != kNoIndex && fa.tuSet(tuFile) != 0)
+          return fa.tuSet(tuFile);
+      }
+      ++lf.counts.fileScopeDropped;
+      return kNoIndex;
+    }
+    switch (lf.symClass[from]) {
+    case SymbolClass::Defined:
+      return lf.symOwner[from];
+    case SymbolClass::Inline:
+      return 0;
+    default:
+      if (unmappedBody[from])
+        ++lf.counts.unmappedBodyRefs;
+      return kNoIndex;
+    }
+  };
+
+  // --- Grouped by referencing symbol (counting sort) -------------------------
+  const size_t rawCount = raw.size();
+  std::vector<uint32_t> rawBegin(symbolCount + 1, 0);
+  for (const RawRef &r : raw)
+    ++rawBegin[r.from + 1];
+  for (uint32_t s = 0; s < symbolCount; ++s)
+    rawBegin[s + 1] += rawBegin[s];
+  std::vector<uint32_t> byFrom(rawCount);
+  {
+    std::vector<uint32_t> cursor(rawBegin.begin(), rawBegin.end() - 1);
+    for (size_t i = 0; i < rawCount; ++i)
+      byFrom[cursor[raw[i].from]++] = static_cast<uint32_t>(i);
+  }
+
+  struct Kept {
+    uint32_t to, anchor;
+    uint64_t key;
+    uint8_t kind;
+    uint32_t raw;
+  };
+  std::vector<Kept> hard;
+  std::vector<std::pair<uint32_t, uint32_t>> softPairs; // (to, anchor)
+  lf.refBegin.assign(symbolCount + 1, 0);
+  lf.softBegin.assign(symbolCount + 1, 0);
+  lf.refTo.reserve(rawCount);
+  lf.refAnchor.reserve(rawCount);
+  lf.refKey.reserve(rawCount);
+  lf.refSite.reserve(rawCount);
+  lf.refKind.reserve(rawCount);
+  std::string site;
+  for (uint32_t s = 0; s < symbolCount; ++s) {
+    hard.clear();
+    softPairs.clear();
+    for (uint32_t i = rawBegin[s]; i < rawBegin[s + 1]; ++i) {
+      const RawRef &r = raw[byFrom[i]];
+      const uint32_t anchor = anchorOf(r);
+      if (anchor == kNoIndex)
+        continue;
+      if (rawSoft[byFrom[i]]) {
+        softPairs.emplace_back(r.to, anchor);
+        continue;
+      }
+      hard.push_back({r.to, anchor, siteKey(rankOf(r.file), r.line, r.col),
+                      r.kind, byFrom[i]});
+    }
+    std::sort(softPairs.begin(), softPairs.end());
+    softPairs.erase(std::unique(softPairs.begin(), softPairs.end()),
+                    softPairs.end());
+    for (const auto &p : softPairs) {
+      lf.softTo.push_back(p.first);
+      lf.softAnchor.push_back(p.second);
+    }
+    lf.softBegin[s + 1] = static_cast<uint32_t>(lf.softTo.size());
+    // One reference per (to, anchor): the first site, in site order.
+    std::sort(hard.begin(), hard.end(), [](const Kept &a, const Kept &b) {
+      if (a.to != b.to)
+        return a.to < b.to;
+      if (a.anchor != b.anchor)
+        return a.anchor < b.anchor;
+      if (a.key != b.key)
+        return a.key < b.key;
+      return a.kind < b.kind;
+    });
+    hard.erase(std::unique(hard.begin(), hard.end(),
+                           [](const Kept &a, const Kept &b) {
+                             return a.to == b.to && a.anchor == b.anchor;
+                           }),
+               hard.end());
+    // Symbol order is USR order, so `to` breaks ties by USR.
+    std::sort(hard.begin(), hard.end(), [](const Kept &a, const Kept &b) {
+      if (a.key != b.key)
+        return a.key < b.key;
+      if (a.kind != b.kind)
+        return a.kind < b.kind;
+      if (a.to != b.to)
+        return a.to < b.to;
+      return a.anchor < b.anchor;
+    });
+    for (const Kept &k : hard) {
+      const RawRef &r = raw[k.raw];
+      site.clear();
+      if (r.siteFile != kNoId)
+        site = rs.resolve(r.siteFile);
+      site += ':';
+      site += std::to_string(r.line);
+      site += ':';
+      site += std::to_string(r.col);
+      lf.refTo.push_back(k.to);
+      lf.refAnchor.push_back(k.anchor);
+      lf.refKey.push_back(k.key);
+      lf.refSite.push_back(out.intern(site));
+      lf.refKind.push_back(k.kind);
+      if (k.anchor != 0)
+        ++lf.counts.anchoredRefs;
+      else
+        ++lf.counts.inlineBodyRefs;
+      if (r.file == kNoIndex || resolver.unresolved(r.file))
+        ++lf.counts.unresolvedSites;
+    }
+    lf.refBegin[s + 1] = static_cast<uint32_t>(lf.refTo.size());
+  }
+
+  // --- Registration and static initializers ----------------------------------
+  // A registering symbol takes the address of a template's function in its
+  // own body or in an inline body it reaches.
+  {
+    std::vector<uint32_t> revBegin(symbolCount + 1, 0), revFrom(lf.refTo.size());
+    for (uint32_t to : lf.refTo)
+      ++revBegin[to + 1];
+    for (uint32_t s = 0; s < symbolCount; ++s)
+      revBegin[s + 1] += revBegin[s];
+    {
+      std::vector<uint32_t> cursor(revBegin.begin(), revBegin.end() - 1);
+      for (uint32_t s = 0; s < symbolCount; ++s)
+        for (uint32_t r = lf.refBegin[s]; r < lf.refBegin[s + 1]; ++r)
+          revFrom[cursor[lf.refTo[r]]++] = s;
+    }
+    std::vector<uint32_t> queue;
+    queue.reserve(symbolCount);
+    for (uint32_t s = 0; s < symbolCount; ++s) {
+      bool registers = false, initializes = false;
+      for (uint32_t r = lf.refBegin[s]; r < lf.refBegin[s + 1]; ++r) {
+        const uint32_t to = lf.refTo[r];
+        const uint8_t kind = lf.refKind[r];
+        if (kind == static_cast<uint8_t>(RefRole::AddressOf) &&
+            lf.symKind[to] == static_cast<uint8_t>(SymbolKind::Function) &&
+            !(flagsOf[to] & kSymLambda) &&
+            templateLikeUsr(out.resolve(lf.symUsr[to])))
+          registers = true;
+        if (kind == static_cast<uint8_t>(RefRole::Call))
+          initializes = true;
+      }
+      if (registers) {
+        lf.symFlags[s] |= kSymFlagRegisters;
+        queue.push_back(s);
+      }
+      if (initializes &&
+          lf.symKind[s] == static_cast<uint8_t>(SymbolKind::Variable) &&
+          lf.symClass[s] == SymbolClass::Defined)
+        lf.symFlags[s] |= kSymFlagStaticInit;
+    }
+    // Whoever uses a registering inline body registers too.
+    for (size_t head = 0; head < queue.size(); ++head) {
+      const uint32_t y = queue[head];
+      if (lf.symClass[y] != SymbolClass::Inline)
+        continue;
+      for (uint32_t i = revBegin[y]; i < revBegin[y + 1]; ++i) {
+        const uint32_t x = revFrom[i];
+        if (lf.symFlags[x] & kSymFlagRegisters)
+          continue;
+        lf.symFlags[x] |= kSymFlagRegisters;
+        queue.push_back(x);
+      }
+    }
+  }
+
   lf.files = std::move(files.paths);
   lf.setBegin = std::move(sets.begin);
   lf.setTargets = std::move(sets.targets);
@@ -811,14 +1566,80 @@ struct Workspace {
   std::vector<uint32_t> fileStamp;   // per file
   std::vector<uint32_t> targetStamp; // per target
   std::vector<uint32_t> needScratch; // per target: needs of one closure
+  std::vector<uint32_t> collect;     // per symbol: the closure's symbols
   uint32_t epoch = 0;
 
   Workspace(uint32_t symbols, uint32_t files, uint32_t targets)
       : symStamp(symbols, 0), useStamp(symbols, 0), softStamp(symbols, 0),
         queue(symbols),
         queueRoot(symbols), fileStamp(files, 0), targetStamp(targets, 0),
-        needScratch(targets) {}
+        needScratch(targets), collect(symbols) {}
 };
+
+/// Who references each symbol: the transpose of LinkFacts' references.
+struct Referrers {
+  std::vector<uint32_t> begin; // per symbol, size = symbols + 1
+  std::vector<uint32_t> from;
+
+  explicit Referrers(const LinkFacts &lf) {
+    const uint32_t n = lf.symbolCount();
+    begin.assign(n + 1, 0);
+    from.resize(lf.refTo.size());
+    for (uint32_t to : lf.refTo)
+      ++begin[to + 1];
+    for (uint32_t s = 0; s < n; ++s)
+      begin[s + 1] += begin[s];
+    std::vector<uint32_t> cursor(begin.begin(), begin.end() - 1);
+    for (uint32_t s = 0; s < n; ++s)
+      for (uint32_t r = lf.refBegin[s], e = lf.refBegin[s + 1]; r < e; ++r)
+        from[cursor[lf.refTo[r]]++] = s;
+  }
+};
+
+struct FanInCounts {
+  uint32_t symbols = 0;
+  uint32_t files = 0;
+};
+
+/// The provider's Defined symbols outside the closure `closure` that
+/// reference into it, directly or through inline bodies (walked up to
+/// whoever uses them). `collect`, when non-null, receives them (room for
+/// every symbol).
+FanInCounts fanInOf(const LinkFacts &lf, const Referrers &rev,
+                    uint32_t provider, llvm::ArrayRef<uint32_t> closure,
+                    Workspace &ws, uint32_t *collect) noexcept {
+  const uint32_t epoch = ++ws.epoch;
+  FanInCounts out;
+  uint32_t head = 0, tail = 0;
+  for (uint32_t k : closure) {
+    ws.symStamp[k] = epoch;
+    ws.queue[tail++] = k;
+  }
+  while (head < tail) {
+    const uint32_t s = ws.queue[head++];
+    for (uint32_t i = rev.begin[s], e = rev.begin[s + 1]; i < e; ++i) {
+      const uint32_t f = rev.from[i];
+      if (ws.symStamp[f] == epoch)
+        continue;
+      ws.symStamp[f] = epoch;
+      const SymbolClass cls = lf.symClass[f];
+      if (cls == SymbolClass::Inline) {
+        ws.queue[tail++] = f;
+      } else if (cls == SymbolClass::Defined &&
+                 lf.setHas(lf.symOwner[f], provider)) {
+        if (collect)
+          collect[out.symbols] = f;
+        ++out.symbols;
+        const uint32_t file = lf.symFile[f];
+        if (file != kNoIndex && ws.fileStamp[file] != epoch) {
+          ws.fileStamp[file] = epoch;
+          ++out.files;
+        }
+      }
+    }
+  }
+  return out;
+}
 
 struct ClosureCounts {
   uint32_t symbols = 0;
@@ -953,13 +1774,16 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
   audit.providerSymbols.assign(targetCount, 0);
   audit.providerFiles.assign(targetCount, 0);
   audit.presumedSymbols.assign(targetCount, 0);
+  audit.providerStaticInits.assign(targetCount, 0);
   audit.unplacedUses.assign(targetCount, 0);
   {
     std::vector<std::pair<uint32_t, uint32_t>> bodies; // (target, file)
     for (uint32_t s = 0; s < symbolCount; ++s) {
       if (lf.symClass[s] == SymbolClass::Defined) {
+        const bool staticInit = (lf.symFlags[s] & kSymFlagStaticInit) != 0;
         for (uint32_t t : lf.targetsOf(lf.symOwner[s])) {
           ++audit.providerSymbols[t];
+          audit.providerStaticInits[t] += staticInit;
           if (lf.symFile[s] != kNoIndex)
             bodies.emplace_back(t, lf.symFile[s]);
         }
@@ -1061,6 +1885,7 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
 
   Workspace ws(symbolCount, static_cast<uint32_t>(lf.files.size()),
                targetCount);
+  const Referrers rev(lf);
   std::vector<Use> uses;
   std::vector<uint32_t> softUses; // providers, one entry per indirect use
   std::vector<uint32_t> seedScratch;
@@ -1077,7 +1902,8 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       ws.useStamp[sym] = epoch;
       const uint8_t flags =
           (via ? kSeedViaInline : 0) |
-          (lf.symClass[sym] == SymbolClass::Presumed ? kSeedUncertain : 0);
+          (lf.symClass[sym] == SymbolClass::Presumed ? kSeedUncertain : 0) |
+          ((lf.symFlags[sym] & kSymFlagRegisters) ? kSeedRegistration : 0);
       auto owners = lf.targetsOf(lf.symOwner[sym]);
       bool anyDeclared = false;
       for (uint32_t t : owners)
@@ -1139,11 +1965,12 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
     }
     std::sort(softUses.begin(), softUses.end());
 
+    constexpr uint8_t kOrderFlags = kSeedViaInline | kSeedUncertain;
     std::sort(uses.begin(), uses.end(), [&](const Use &a, const Use &b) {
       if (a.provider != b.provider)
         return a.provider < b.provider;
-      if (a.flags != b.flags)
-        return a.flags < b.flags;
+      if ((a.flags & kOrderFlags) != (b.flags & kOrderFlags))
+        return (a.flags & kOrderFlags) < (b.flags & kOrderFlags);
       if (lf.refKey[a.ref] != lf.refKey[b.ref])
         return lf.refKey[a.ref] < lf.refKey[b.ref];
       if (lf.refKind[a.ref] != lf.refKind[b.ref])
@@ -1194,10 +2021,34 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
         } else {
           ++row.symbols;
           row.viaInline += (u.flags & kSeedViaInline) != 0;
+          row.registrationSeeds += (u.flags & kSeedRegistration) != 0;
           seedScratch.push_back(u.sym);
         }
       }
       row.seedEnd = static_cast<uint32_t>(audit.seedSym.size());
+      // Undeclared, and only through inline bodies the consumer reaches in
+      // a target it does declare: whose header carries the dependency.
+      if (row.symbols != 0 && row.viaInline == row.symbols &&
+          (row.declared == DeclaredForm::Transitive ||
+           row.declared == DeclaredForm::None)) {
+        uint32_t first = kNoIndex;
+        bool allThrough = true;
+        for (uint32_t i = row.seedBegin; i < row.seedEnd && allThrough; ++i) {
+          if (audit.seedFlags[i] & kSeedUncertain)
+            continue;
+          const uint32_t root = audit.seedRoot[i];
+          const uint32_t home = lf.symOwner[lf.refTo[root]];
+          bool declared = false;
+          for (uint32_t t : lf.targetsOf(home))
+            declared |= t != provider &&
+                        ((consumerReach[t >> 6] >> (t & 63)) & 1u);
+          allThrough = declared;
+          if (first == kNoIndex)
+            first = root;
+        }
+        if (allThrough)
+          row.throughInlineRef = first;
+      }
       {
         const auto range =
             std::equal_range(softUses.begin(), softUses.end(), provider);
@@ -1208,12 +2059,19 @@ DependencyAudit auditDependencies(const LinkFacts &lf, const TargetMap &map) {
       row.needBegin = static_cast<uint32_t>(audit.needs.size());
       if (!seedScratch.empty()) {
         const ClosureCounts c = closureOf(lf, provider, reach.row(provider),
-                                          seedScratch, ws, nullptr);
+                                          seedScratch, ws, ws.collect.data());
         row.closureSymbols = c.symbols;
         row.closureFiles = c.files;
         audit.needs.insert(audit.needs.end(), ws.needScratch.begin(),
                            ws.needScratch.begin() + c.needs);
         std::sort(audit.needs.begin() + row.needBegin, audit.needs.end());
+        // fanInOf reuses the queue; the closure stays in `collect`.
+        const FanInCounts f = fanInOf(
+            lf, rev, provider,
+            llvm::ArrayRef<uint32_t>(ws.collect.data(), c.symbols), ws,
+            nullptr);
+        row.closureFanIn = f.symbols;
+        row.closureFanInFiles = f.files;
       }
       row.needEnd = static_cast<uint32_t>(audit.needs.size());
       audit.rows.push_back(row);
@@ -1314,6 +2172,21 @@ unsigned rowFindings(const DependencyAudit &audit, const LinkFacts &facts,
       closure * 100 <= thresholds.maxClosurePercent * providerTotal)
     findings |= kFindingThin;
   return findings;
+}
+
+void closureFanInOf(const LinkFacts &lf, const DependencyAudit &audit,
+                    const AuditRow &row, std::vector<uint32_t> &out) {
+  std::vector<uint32_t> closure;
+  closureSymbolsOf(lf, audit, row, closure);
+  out.clear();
+  if (closure.empty())
+    return;
+  const Referrers rev(lf);
+  Workspace ws(lf.symbolCount(), static_cast<uint32_t>(lf.files.size()),
+               lf.targetCount);
+  out.resize(lf.symbolCount());
+  const FanInCounts f = fanInOf(lf, rev, row.provider, closure, ws, out.data());
+  out.resize(f.symbols);
 }
 
 void closureSymbolsOf(const LinkFacts &lf, const DependencyAudit &audit,

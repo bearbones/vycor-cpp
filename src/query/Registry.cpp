@@ -158,7 +158,8 @@ llvm::json::Value runTool(const ToolEntry &tool, const llvm::json::Object &args,
 // is named; the other stays in the ndjson _summary line.
 // Sections beyond the graph a tool reads (ToolEntry::needs). Exception
 // and lock tools walk call-site contexts; channel tools read the channel
-// index; everything else, graph_summary included (it reports the header
+// index; the dependency audit reads the references; everything else,
+// graph_summary included (it reports the header
 // counts), touches only the graph.
 static const std::map<std::string, unsigned> kExtraNeeds = {
     {"query_exception_safety", kSectionControlFlow},
@@ -173,6 +174,10 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"query_channel", kSectionChannels},
     {"query_channels_for_function", kSectionChannels},
     {"explain_ordering", kSectionChannels},
+    // The dependency audit reads the reference facts, and the graph for the
+    // class hierarchy and how each virtual call is bound.
+    {"audit_dependencies", kSectionReferences},
+    {"explain_dependency", kSectionReferences},
     // Which sections a metrics run reads depends on the metrics selected,
     // and an organization metric may read any of them.
     {"metrics", kSectionControlFlow | kSectionChannels},
