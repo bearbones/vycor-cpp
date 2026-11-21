@@ -496,7 +496,38 @@ would be caught. Ask by `usr`: the name `operator new` is nearly always
 candidate list gives each one's. `c:@F@operator new#l#` is the plain
 form on a 64-bit Linux or macOS target, the one ending `#*v#` the
 placement form. A `new` whose type depends on a template parameter has
-no edge in the template's definition.
+no edge in the template's definition; each instantiation has its own.
+
+**Template instantiations have their own calls.** The bake reads the
+body of every function template instantiation, member of a class
+template instantiation, and generic-lambda specialization a TU uses,
+system headers included, and records its calls under the
+instantiation's identity, with calls that depend on a template
+parameter resolved for it. So `get_callees` on `registerType<Codec>`
+answers from that instantiation's own edges, `T::name()` included,
+while `get_callees` on the template's definition answers with the calls
+written there that depend on no parameter. Display names drop a
+function template's arguments (`registerType`), so ask for an
+instantiation by `usr`. A call inside an instantiation is sited where
+the template spells it, often in a header; it carries no control-flow
+context, so the exception tools answer `unknown` for a path through one.
+
+**Calls the compiler writes are edges.** A constructor the compiler
+writes (default, copy, move, inherited) calls the member and base
+constructors and runs the default member initializers; a destructor,
+written or not, calls the member and base destructors after its body.
+A member the compiler constructs is sited at the member's declaration
+(a base, at the constructor).
+A local's destructor is a `DestructorCall` sited at its declaration, a
+temporary's at the expression that creates it, and a
+delete-expression's at the expression (`VirtualDispatch`, Plausible,
+through a virtual destructor). An implicit trivial constructor and a
+trivial destructor run no code and have no edge. A lambda's closure has
+no identity of its own besides its call operator: copying or destroying
+one is the copy or destruction of its captures, at that site, and a
+capture's initializer runs in the function that creates the closure.
+A lambda written in a function template is one node whose edges are
+every instantiation's calls; a generic lambda's specializations share it.
 
 **A `throw` is a call.** Each `throw` expression is a `DirectCall`
 edge to `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`) at the

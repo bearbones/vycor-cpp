@@ -184,6 +184,9 @@ EffectTable EffectTable::builtin() {
   static const char *const kAllocation[] = {
       "operator new",
       "operator new[]",
+      // What a standard library compiled by Clang calls for `operator new`
+      // (libstdc++'s allocator): the replaceable function, by another name.
+      "__builtin_operator_new",
       "malloc",
       "calloc",
       "realloc",

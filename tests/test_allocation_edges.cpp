@@ -270,8 +270,8 @@ TEST_CASE("allocation edges belong to the function that evaluates the "
   )");
 
   // Stored edges into `operator new`, by the caller's identity: a
-  // template's definition has edges but no node of its own (#106), so it
-  // is not found by name.
+  // template's definition has edges but no node of its own, so it is not
+  // found by name.
   auto newCalledFrom = [&graph](llvm::StringRef callerUsrPart) {
     unsigned count = 0;
     graph.forEachStoredEdge([&](const CallGraph::EdgeRef &edge) {
@@ -288,10 +288,10 @@ TEST_CASE("allocation edges belong to the function that evaluates the "
     CHECK(newCalledFrom("vycor-lambda:") == 1);
   }
 
-  SECTION("a dependent new has no resolved allocation function") {
-    // The template's definition is where the edge would be written; with
-    // `T` unknown there is nothing to call yet.
-    CHECK(newCalledFrom("makeDependent") == 0);
+  SECTION("a dependent new is resolved in the instantiation") {
+    // With `T` unknown the template's definition calls nothing yet; the
+    // body of makeDependent<Widget> calls the allocation function.
+    CHECK(newCalledFrom("makeDependent") == 1);
   }
 
   SECTION("a non-dependent new in a template is resolved in its "

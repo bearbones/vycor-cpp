@@ -640,3 +640,48 @@ TEST_CASE("identical edges from multiple TUs are deduplicated",
     CHECK(g.edgeCount() == 0);
   }
 }
+
+TEST_CASE("a base constructed as a member of a derived class is constructed",
+          "[dead_code][builder][virtual]") {
+  // The constructor written, and the one the compiler writes: its base
+  // and member construction are both sited at the class otherwise.
+  // A default argument's temporary wraps the construction in cleanups.
+  struct Variant {
+    const char *shapeCtor;
+    const char *groupCtor;
+  };
+  const Variant variants[] = {
+      {"Shape(); };\n    Shape::Shape() {}", "Group() : Shape(), inner() {}"},
+      {"Shape(); };\n    Shape::Shape() {}", "Group() {}"},
+      {"Shape(); };\n    Shape::Shape() {}", ""},
+      {"Shape(const Tmp & = Tmp()); };\n    Shape::Shape(const Tmp &) {}", ""},
+  };
+  for (const Variant &variant : variants) {
+    const char *ctor = variant.groupCtor;
+    std::string code = R"(
+    struct Tmp { Tmp(); ~Tmp(); };
+    struct Shape { virtual void draw(); )" + std::string(variant.shapeCtor) + R"(
+    void Shape::draw() {}
+    struct Group : Shape {
+      Shape inner;
+      )" + std::string(ctor) + R"(
+      void draw() override {}
+    };
+    struct Only : Shape { void draw() override {} };
+    void paint(Shape &s) { s.draw(); }
+    int main() { Group g; paint(g); }
+  )";
+    CAPTURE(variant.shapeCtor, ctor);
+    CallGraph graph;
+    CallGraphBuilderFactory factory(graph);
+    REQUIRE(clang::tooling::runToolOnCodeWithArgs(factory.create(), code,
+                                                  {"-std=c++17"}, "test.cpp"));
+    DeadCodeAnalyzer analyzer(graph, {"main"});
+    analyzer.analyzePessimistic();
+    analyzer.analyzeOptimistic();
+    auto results = analyzer.getResults();
+    // Group's member is a complete Shape: Shape::draw is a dispatch target.
+    REQUIRE(results.count("Shape::draw") == 1);
+    CHECK(results["Shape::draw"] != Liveness::Dead);
+  }
+}

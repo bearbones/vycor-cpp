@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/ReferenceVisitor.h"
+#include "vycor/callgraph/CompilerWritten.h"
 
 #include "vycor/callgraph/LockFacts.h"
 
@@ -450,19 +451,14 @@ void ReferenceVisitor::noteClass(const clang::CXXRecordDecl *cls) {
 // the enclosing context, only an entry in the template's specializations.
 void ReferenceVisitor::noteExplicitInstantiations(
     clang::FunctionTemplateDecl *tmpl) {
-  if (tmpl != tmpl->getCanonicalDecl())
-    return;
-  for (const clang::FunctionDecl *spec : tmpl->specializations()) {
-    if (spec->getTemplateSpecializationKind() !=
-        clang::TSK_ExplicitInstantiationDefinition)
-      continue;
+  forEachExplicitInstantiation(tmpl, [&](const clang::FunctionDecl *spec) {
     const uint32_t slot = targetSlot(spec);
     if (slot != kDropped) {
       entities_[slot].flags |= kSymExplicitInstantiation;
       entities_[slot].emit = true;
     }
     functionTarget(spec); // the TU emits it: read its body
-  }
+  });
 }
 
 // An explicit instantiation of a member (`template void Box<A>::fill();`)
@@ -471,48 +467,15 @@ void ReferenceVisitor::noteExplicitInstantiations(
 // member's specialization kind in the template's specializations.
 void ReferenceVisitor::noteExplicitInstantiations(
     clang::ClassTemplateDecl *tmpl) {
-  if (tmpl != tmpl->getCanonicalDecl())
-    return;
-  for (const clang::ClassTemplateSpecializationDecl *spec :
-       tmpl->specializations())
-    if (const clang::CXXRecordDecl *def = spec->getDefinition())
-      noteExplicitMembers(def);
+  forEachExplicitInstantiation(
+      tmpl, [&](const clang::FunctionDecl *fn) { functionTarget(fn); });
 }
 
 // The members of `cls` and of its nested classes the TU emits as explicit
 // instantiation definitions: their bodies are read.
 void ReferenceVisitor::noteExplicitMembers(const clang::CXXRecordDecl *cls) {
-  if (cls->isInvalidDecl() || cls->isDependentContext())
-    return;
-  for (const clang::Decl *member : cls->decls()) {
-    if (const auto *nested = llvm::dyn_cast<clang::CXXRecordDecl>(member)) {
-      if (!nested->isInjectedClassName() &&
-          nested->isThisDeclarationADefinition())
-        noteExplicitMembers(nested);
-      continue;
-    }
-    // Member templates: `template void Box<A>::put<int>(int);`,
-    // `template void Outer<A>::In<int>::f();`.
-    if (const auto *tmpl = llvm::dyn_cast<clang::FunctionTemplateDecl>(member)) {
-      for (const clang::FunctionDecl *spec : tmpl->specializations())
-        if (spec->getTemplateSpecializationKind() ==
-            clang::TSK_ExplicitInstantiationDefinition)
-          functionTarget(spec);
-      continue;
-    }
-    if (const auto *tmpl = llvm::dyn_cast<clang::ClassTemplateDecl>(member)) {
-      for (const clang::ClassTemplateSpecializationDecl *spec :
-           tmpl->specializations())
-        if (const clang::CXXRecordDecl *def = spec->getDefinition())
-          noteExplicitMembers(def);
-      continue;
-    }
-    const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(member);
-    if (method && !method->isImplicit() &&
-        method->getTemplateSpecializationKind() ==
-            clang::TSK_ExplicitInstantiationDefinition)
-      functionTarget(method);
-  }
+  auto read = [&](const clang::FunctionDecl *fn) { functionTarget(fn); };
+  detail::forEachExplicitMember(cls, read);
 }
 
 bool ReferenceVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
@@ -2423,41 +2386,6 @@ std::string ReferenceVisitor::lockText(
 // Implicit code
 // ============================================================================
 
-namespace {
-
-// A special member the compiler defines: implicit, or defaulted on its
-// first declaration.
-[[nodiscard]] bool isCompilerWrittenSpecialMember(const clang::FunctionDecl *fn) {
-  // The operator== a defaulted operator<=> declares, member or friend.
-  if (fn->isImplicit() && fn->isDefaulted())
-    return true;
-  // `using Base::Base;` declares derived constructors the compiler writes.
-  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
-    if (ctor->isImplicit() && ctor->isInheritingConstructor())
-      return true;
-  const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
-  if (!method || method->isUserProvided())
-    return false;
-  if (llvm::isa<clang::CXXConstructorDecl>(method) ||
-      llvm::isa<clang::CXXDestructorDecl>(method))
-    return true;
-  return method->isCopyAssignmentOperator() ||
-         method->isMoveAssignmentOperator();
-}
-
-// The definition whose body an instantiation or implicit member holds, or
-// null when there is none to read.
-[[nodiscard]] const clang::FunctionDecl *
-readableDefinition(const clang::FunctionDecl *fn) {
-  const clang::FunctionDecl *def = nullptr;
-  if (!fn->isDefined(def) || !def || def->isInvalidDecl() ||
-      def->isDependentContext() || def->isDeleted())
-    return nullptr;
-  return def;
-}
-
-} // namespace
-
 uint32_t ReferenceVisitor::functionTarget(const clang::FunctionDecl *fn) {
   auto found = funcSlot_.find(fn);
   if (found != funcSlot_.end())
@@ -2734,20 +2662,11 @@ void ReferenceVisitor::noteConstructorCleanup(
 // deleting form calls the class's deallocation function.
 void ReferenceVisitor::noteImplicitDestruction(
     const clang::CXXDestructorDecl *dtor) {
-  const clang::CXXRecordDecl *cls = dtor->getParent();
-  if (!cls->hasDefinition())
-    return;
-  cls = cls->getDefinition();
-  if (cls->isInvalidDecl() || cls->isDependentContext() || cls->isUnion())
-    return;
   const clang::SourceLocation site = dtor->getLocation();
-  for (const clang::FieldDecl *field : cls->fields())
-    noteDestructorOf(field->getType(), site);
-  for (const clang::CXXBaseSpecifier &base : cls->bases())
-    if (!base.isVirtual())
-      noteDestructorOf(base.getType(), site);
-  for (const clang::CXXBaseSpecifier &base : cls->vbases())
-    noteDestructorOf(base.getType(), site);
+  if (!forEachDestroyedSubobject(dtor, [&](clang::QualType type) {
+        noteDestructorOf(type, site);
+      }))
+    return;
   if (dtor->isVirtual())
     if (const clang::FunctionDecl *dealloc = dtor->getOperatorDelete())
       addRef(functionTarget(dealloc), RefRole::Call, site);
@@ -2755,19 +2674,7 @@ void ReferenceVisitor::noteImplicitDestruction(
 
 void ReferenceVisitor::noteDestructorOf(clang::QualType type,
                                         clang::SourceLocation site) {
-  if (type.isNull() || type->isReferenceType() ||
-      type->isInstantiationDependentType())
-    return;
-  const clang::CXXRecordDecl *cls =
-      ctx_->getBaseElementType(type)->getAsCXXRecordDecl();
-  if (!cls || !cls->hasDefinition())
-    return;
-  cls = cls->getDefinition();
-  if (cls->isInvalidDecl() || cls->isDependentContext() ||
-      cls->hasTrivialDestructor())
-    return;
-  const clang::CXXDestructorDecl *dtor = cls->getDestructor();
-  if (dtor && !dtor->isDeleted())
+  if (const clang::CXXDestructorDecl *dtor = destructorRunFor(*ctx_, type))
     addRef(functionTarget(dtor), RefRole::Call, site);
 }
 

@@ -50,7 +50,8 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // keep a refuted function's Exit callees; exception-boundary entries.
 // v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
 // v18: the lock-order-inversion Diagnostic kinds renumber Custom.
-constexpr uint32_t kVersion = 18;
+// v19: staticInits carry calledUsrs.
+constexpr uint32_t kVersion = 19;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -487,6 +488,7 @@ void encodeIndexPayload(std::string &out, const CheckIndexPayload &p) {
     putU32(out, static_cast<uint32_t>(e.calledFunctions.size()));
     for (const auto &f : e.calledFunctions)
       putStr(out, f);
+    putStringPairs(out, e.calledUsrs);
   }
   putU32(out, static_cast<uint32_t>(p.functionSummaries.size()));
   for (const auto &e : p.functionSummaries) {
@@ -692,6 +694,7 @@ bool decodeIndexPayload(Reader &r, CheckIndexPayload &p) {
     uint32_t nCall = r.u32();
     for (uint32_t j = 0; j < nCall && r.ok; ++j)
       e.calledFunctions.push_back(r.str());
+    e.calledUsrs = readStringPairs(r);
     p.staticInits.push_back(std::move(e));
   }
   uint32_t nSum = r.u32();
@@ -1227,7 +1230,8 @@ namespace {
 // and keep a refuted function's Exit callees; exception-boundary entries.
 // v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
 // v18: the lock-order-inversion Diagnostic kinds renumber Custom.
-constexpr uint32_t kShardVersion = 18;
+// v19: staticInits carry calledUsrs.
+constexpr uint32_t kShardVersion = 19;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

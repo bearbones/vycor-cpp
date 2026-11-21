@@ -152,7 +152,7 @@ public:
   // not walked here; the captures' initializers are.
   bool TraverseLambdaExpr(clang::LambdaExpr *expr) {
     Ident id = initializerLambdaIdent(sm_, expr->getBeginLoc(), enclosing_);
-    out_.push_back({std::move(id.usr), std::move(id.display), {}});
+    out_.push_back({std::move(id.usr), std::move(id.display)});
     for (clang::Expr *init : expr->capture_inits())
       if (init && !TraverseStmt(init))
         return false;
@@ -191,12 +191,7 @@ private:
       if (ii->getName().starts_with("__builtin_"))
         return;
     const Ident &id = usrs_.identFor(callee);
-    StaticInitCallee rec{id.usr, id.display, {}};
-    if (const clang::FunctionDecl *pattern =
-            callee->getTemplateInstantiationPattern())
-      if (pattern != callee)
-        rec.pattern = usrs_.identFor(pattern).usr;
-    out_.push_back(std::move(rec));
+    out_.push_back(StaticInitCallee{id.usr, id.display});
   }
 
   const clang::SourceManager &sm_;
@@ -343,7 +338,7 @@ void normalizeLists(StaticInitRoot &root) {
   sortUnique(
       root.callees,
       [](const StaticInitCallee &a, const StaticInitCallee &b) {
-        return std::tie(a.usr, a.pattern) < std::tie(b.usr, b.pattern);
+        return a.usr < b.usr;
       },
       [](const StaticInitCallee &a, const StaticInitCallee &b) {
         return a.usr == b.usr;
@@ -368,7 +363,6 @@ void collectStaticInits(clang::ASTContext &ctx, const std::string &tuPath,
     for (auto &callee : root.callees) {
       makeIndexText(callee.usr);
       makeIndexText(callee.display);
-      makeIndexText(callee.pattern);
     }
   }
   out.collected = true;

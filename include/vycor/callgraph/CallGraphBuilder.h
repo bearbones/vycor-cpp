@@ -18,6 +18,7 @@
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CollapseFilter.h"
 #include "vycor/callgraph/UsrIdent.h"
+#include "vycor/compat/ClangVersion.h"
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -43,6 +44,7 @@ public:
 
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl);
+  bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
   bool TraverseFunctionDecl(clang::FunctionDecl *decl);
   bool TraverseCXXMethodDecl(clang::CXXMethodDecl *decl);
   bool TraverseCXXConstructorDecl(clang::CXXConstructorDecl *decl);
@@ -65,6 +67,7 @@ private:
   std::string formatLocation(clang::SourceLocation loc) const;
   Ident getCurrentFunction() const;
   void computeEffectiveImpls(const clang::CXXRecordDecl *cls);
+  void recordClass(const clang::CXXRecordDecl *decl);
 };
 
 // Phase 2 visitor: builds call edges.
@@ -83,14 +86,39 @@ public:
   bool TraverseCXXDestructorDecl(clang::CXXDestructorDecl *decl);
   bool TraverseCXXConversionDecl(clang::CXXConversionDecl *decl);
   bool TraverseLambdaExpr(clang::LambdaExpr *expr);
+  // The TU as written, then the bodies it reaches that no written
+  // definition holds (drainBodies).
+  bool TraverseTranslationUnitDecl(clang::TranslationUnitDecl *decl);
+  bool TraverseCXXDefaultInitExpr(clang::CXXDefaultInitExpr *expr);
+  bool TraverseInitListExpr(clang::InitListExpr *expr);
+  bool TraverseLambdaCapture(clang::LambdaExpr *expr,
+                             const clang::LambdaCapture *capture,
+                             clang::Expr *init);
+  // Operands that are never evaluated call nothing: not traversed.
+  bool TraverseUnaryExprOrTypeTraitExpr(clang::UnaryExprOrTypeTraitExpr *expr);
+  bool TraverseCXXNoexceptExpr(clang::CXXNoexceptExpr *expr);
+  bool TraverseRequiresExpr(clang::RequiresExpr *expr);
+  bool TraverseConceptDecl(clang::ConceptDecl *decl);
+#if VYCOR_LLVM_AT_LEAST(22)
+  bool TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc, bool qualifier);
+  bool TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc, bool qualifier);
+#else
+  bool TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc loc);
+  bool TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc loc);
+#endif
 
   bool VisitCallExpr(clang::CallExpr *expr);
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *expr);
+  bool VisitCXXInheritedCtorInitExpr(clang::CXXInheritedCtorInitExpr *expr);
+  bool VisitCXXBindTemporaryExpr(clang::CXXBindTemporaryExpr *expr);
   bool VisitCXXNewExpr(clang::CXXNewExpr *expr);
   bool VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr);
   bool VisitCXXThrowExpr(clang::CXXThrowExpr *expr);
   bool VisitVarDecl(clang::VarDecl *decl);
   bool VisitDeclRefExpr(clang::DeclRefExpr *expr);
+  // Explicit instantiation definitions: the TU emits their bodies.
+  bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
+  bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
 
 private:
   CallGraph &graph_;
@@ -120,6 +148,26 @@ private:
 
   // Callee decls whose node this visitor registered (see identForCallee).
   llvm::DenseSet<const clang::FunctionDecl *> auxNodes_;
+
+  // Bodies to read after the TU as written: template instantiations and
+  // compiler-written special members the TU's code reaches (scheduleBody).
+  // Each is read once per TU, under its own identity; reading one may
+  // schedule others. Keyed by the definition read.
+  std::vector<const clang::FunctionDecl *> work_;
+  llvm::DenseSet<const clang::FunctionDecl *> scheduled_;
+  // The bodies already read, a subset of scheduled_.
+  llvm::DenseSet<const clang::FunctionDecl *> read_;
+  // True while drainBodies reads a scheduled body: its calls are recorded
+  // wherever they are spelled, a system header included.
+  bool inCompilerCode_ = false;
+  // Depth of default member initializers being read where they run (a
+  // constructor, an aggregate initialization): a lambda in one was read
+  // where it is written.
+  unsigned inDefaultInit_ = 0;
+  // The member initializer the compiler wrote that is being read, and the
+  // member it is sited at (traverseInitializer).
+  const clang::Expr *implicitInit_ = nullptr;
+  clang::SourceLocation implicitInitSite_;
   // Whether this TU has registered the node of the throw / rethrow entry
   // point (throwCalleeIdent), indexed by `rethrow`.
   bool throwNodes_[2] = {false, false};
@@ -130,17 +178,49 @@ private:
 
   // identFor + node registration for callees the indexer never visits
   // (implicit members, template instantiations — RecursiveASTVisitor skips
-  // instantiations), so display-name resolution can find their edges.
+  // instantiations), so display-name resolution can find their edges. A
+  // lambda's call operator answers the lambda's identity (lambdaIdentOf).
+  // Schedules the callee's body when no written definition holds it
+  // (scheduleBody).
   Ident identForCallee(const clang::FunctionDecl *decl);
+  // The node of a callee: its identity, declaration site, class.
+  CallGraphNode calleeNode(const clang::FunctionDecl *decl, const Ident &id);
+  // The identity the graph gives a lambda (lambdaQualifiedName), named by
+  // the function its closure is declared in.
+  Ident lambdaIdentOf(const clang::CXXRecordDecl *closure) const;
+  // The node of a lambda whose body this visitor reads.
+  void addLambdaNode(const clang::CXXRecordDecl *closure, const Ident &id,
+                     llvm::StringRef enclosing);
 
   bool isInUserCode(clang::SourceLocation loc) const;
+  // Whether a call spelled at `loc` is recorded: in user code, or anywhere
+  // inside a scheduled body.
+  bool recordsCallAt(clang::SourceLocation loc) const {
+    return inCompilerCode_ || isInUserCode(loc);
+  }
+
+  // Worklist of bodies (see work_).
+  void scheduleBody(const clang::FunctionDecl *fn);
+  void scheduleOutsideFunctions(const clang::FunctionDecl *fn,
+                                clang::SourceLocation loc);
+  void drainBodies();
+  void readBody(const clang::FunctionDecl *fn);
+  // The code the compiler writes into a function definition: member and
+  // base initializers not written, a defaulted body, and the destruction
+  // of members and bases after a destructor's body.
+  void readCompilerWritten(clang::FunctionDecl *fn);
+  void traverseInitializer(const clang::CXXCtorInitializer *init);
+  void addMemberDestruction(const clang::CXXDestructorDecl *dtor);
+  // A DestructorCall edge to the destructor of `type` (an array's element
+  // type) when it is not trivial.
+  void addDestructorEdge(clang::QualType type, clang::SourceLocation site);
+  // An edge for a call no CallExpr spells (a constructor, destructor,
+  // allocation or deallocation function), from the current function.
+  void addImplicitCall(const clang::FunctionDecl *fn, EdgeKind kind,
+                       Confidence confidence, clang::SourceLocation loc);
   bool isCollapsedEdge(clang::SourceLocation callerLoc,
                        clang::SourceLocation calleeLoc) const;
 
-  // The call a new- or delete-expression makes to its allocation or
-  // deallocation function, which no CallExpr spells.
-  void addAllocationEdge(const clang::FunctionDecl *fn,
-                         clang::SourceLocation loc, Confidence confidence);
 
   void handleVirtualDispatch(const std::string &callerUsr,
                              clang::CXXMethodDecl *method,
@@ -163,6 +243,7 @@ private:
   // Resolve the enclosing non-lambda function's qualified name (for synthetic
   // lambda naming).
   std::string enclosingNonLambdaName() const;
+
 };
 
 // Consumer that runs both phases per TU (for single-TU tests).

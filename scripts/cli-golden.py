@@ -245,6 +245,7 @@ VOLATILE_KEYS = {
     # reference of the index, the standard library's included.
     "inline", "unattributed", "references",
 }
+EFFECT_SUMMARY = {"observed", "unprofiled", "latent"}
 PATH_RE = re.compile(r'"/[^"]*"')
 # Standard-library USRs spell out template signatures that shift between
 # standard-library versions; display names do not. Records that name a
@@ -279,6 +280,14 @@ def scrub(v):
             # audit's count object of the same name: keep it.
             if k in VOLATILE_KEYS and not (
                     k == "references" and isinstance(x, list)):
+                continue
+            # query_path_effects reads the standard library's
+            # instantiations: its finding counts and whether a template
+            # leaf was reached (`exhaustive`) vary with the host's
+            # standard library, as the dropped findings do.
+            if k == "summary" and isinstance(x, dict) and set(x) == EFFECT_SUMMARY:
+                continue
+            if k == "exhaustive" and "collapsed" in v:
                 continue
             if k == "didYouMean" and isinstance(x, list):
                 x = [

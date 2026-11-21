@@ -256,7 +256,13 @@ public:
   ///     kRefNonRecursive. Read by the lock-order-inversion check. A v17
   ///     index has none and would answer that no lock is ever acquired:
   ///     it is rebuilt. The other sections are unchanged from v17.
-  static constexpr uint32_t kFormatVersion = 18;
+  /// v19: the graph holds the calls of template instantiations and of
+  ///     code the compiler writes, and node flags gain value 4
+  ///     (`hasBody`: some TU read the node's body). The layout is v18's;
+  ///     a v18 graph has neither, so its instantiations would read as
+  ///     leaves and a warm refresh would mix the two graphs: it is
+  ///     rebuilt.
+  static constexpr uint32_t kFormatVersion = 19;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
   /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).

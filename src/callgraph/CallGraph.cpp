@@ -150,6 +150,8 @@ void CallGraph::addNode(CallGraphNode node, const std::string &tuPath) {
       it->second.isEntryPoint = true;
     if (node.isVirtual)
       it->second.isVirtual = true;
+    if (node.hasBody)
+      it->second.hasBody = true;
     if (!node.enclosingClass.empty())
       it->second.enclosingClass = std::move(node.enclosingClass);
   }
@@ -169,6 +171,11 @@ const std::string &CallGraph::displayFor(SId usrId) const {
 
 const std::string &CallGraph::displayNameOf(SId usrId) const {
   return displayFor(usrId);
+}
+
+const CallGraphNode *CallGraph::findNodeById(SId usrId) const {
+  auto it = nodes_.find(usrId);
+  return it == nodes_.end() ? nullptr : &it->second;
 }
 
 CallGraph::SId CallGraph::internRaw(const std::string &s) {
@@ -766,6 +773,8 @@ void CallGraph::absorb(const CallGraph &shard) {
         it->second.isEntryPoint = true;
       if (node.isVirtual)
         it->second.isVirtual = true;
+      if (node.hasBody)
+        it->second.hasBody = true;
       if (!node.enclosingClass.empty())
         it->second.enclosingClass = node.enclosingClass;
     }

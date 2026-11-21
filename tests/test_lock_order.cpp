@@ -863,3 +863,23 @@ void z() { std::lock_guard<std::mutex> g(m3); use1(); use2(); }
     CHECK(one[i].entities == two[i].entities);
   }
 }
+
+TEST_CASE("lock-order: the closure walks through an instantiation's calls",
+          "[lock-order]") {
+  Project p;
+  p.tu("t.cpp", R"cpp(
+#include <mutex>
+std::mutex c, d;
+void takeD() { std::lock_guard<std::mutex> g(d); }
+template <class T> void call(T) { takeD(); }
+void plainCall() { call(1); }
+void h() { std::lock_guard<std::mutex> g(c); plainCall(); }
+void k() { std::lock_guard<std::mutex> g(d); std::lock_guard<std::mutex> l(c); }
+)cpp");
+  auto baked = p.bake();
+  auto diags = runCheck(baked);
+  INFO(allMessages(diags));
+  REQUIRE(diags.size() == 1);
+  CHECK(contains(diags[0], "'c' -> 'd' -> 'c'"));
+  CHECK(contains(diags[0], "h calls plainCall -> call -> takeD"));
+}

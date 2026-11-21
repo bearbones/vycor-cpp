@@ -292,7 +292,27 @@ public:
     return result;
   }
 
+  // A capture's initializer runs where the closure is created, in the
+  // enclosing function and its context, as the edge builder records it:
+  // the captures are read before the body's context replaces it.
+  bool TraverseLambdaCapture(clang::LambdaExpr *expr,
+                             const clang::LambdaCapture *capture,
+                             clang::Expr *init) {
+    if (expr == capturesRead_)
+      return true;
+    return RecursiveASTVisitor::TraverseLambdaCapture(expr, capture, init);
+  }
+
   bool TraverseLambdaExpr(clang::LambdaExpr *expr) {
+    for (unsigned i = 0, n = expr->capture_size(); i != n; ++i) {
+      const clang::LambdaCapture *capture = expr->capture_begin() + i;
+      if (capture->isExplicit() || shouldVisitImplicitCode())
+        if (!RecursiveASTVisitor::TraverseLambdaCapture(
+                expr, capture, expr->capture_init_begin()[i]))
+          return false;
+    }
+    clang::LambdaExpr *const savedCaptures = capturesRead_;
+    capturesRead_ = expr;
     auto *op = expr->getCallOperator();
     if (op)
       funcStack_.push_back(op);
@@ -314,6 +334,7 @@ public:
     insideCatchBlock_ = savedInsideCatch;
     if (op)
       funcStack_.pop_back();
+    capturesRead_ = savedCaptures;
     return result;
   }
 
@@ -420,7 +441,9 @@ public:
   bool VisitVarDecl(clang::VarDecl *decl) {
     if (scopeStack_.empty())
       return true;
-    if (!decl->isLocalVarDecl())
+    // An init-capture is a member of the closure, not a local of the
+    // function that creates it.
+    if (!decl->isLocalVarDecl() || decl->isInitCapture())
       return true;
     LockTypeConfig emptyCfg;
     const auto &cfg = lockCfg_ ? *lockCfg_ : emptyCfg;
@@ -610,6 +633,8 @@ private:
   ChannelIndex *channelIndex_ = nullptr;
 
   std::vector<clang::FunctionDecl *> funcStack_;
+  // The lambda whose captures TraverseLambdaExpr has read already.
+  clang::LambdaExpr *capturesRead_ = nullptr;
   // Per-scope stack of RAII locals declared inside the current lexical
   // CompoundStmt. Outer scope at the front, innermost scope at the back.
   std::vector<std::vector<RaiiLocal>> scopeStack_;

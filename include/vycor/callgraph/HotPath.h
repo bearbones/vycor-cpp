@@ -138,10 +138,10 @@ struct HotPathReport {
   size_t reachedFunctions = 0;
   // Calls of an allowed function met on the way.
   size_t allowedCalls = 0;
-  // Reached template instantiations with no recorded call. The graph
-  // holds a template's calls under the template, not its instantiations
-  // (#106), so what such a function does is not seen: the search was not
-  // exhaustive when this is nonzero.
+  // Reached template instantiations whose body no TU of the bake read (an
+  // `extern template` member defined in prebuilt code, an index baked
+  // before instantiations were read): what such a function does is not
+  // seen, so the search was not exhaustive when this is nonzero.
   size_t templateLeaves = 0;
   // Findings by evidence, then effect kind.
   std::array<std::array<size_t, kEffectKindCount>, kHotEvidenceCount> counts{};
@@ -156,8 +156,8 @@ struct HotPathReport {
 /// Run the analysis. `effectMask` selects the kinds reported (effectBit);
 /// `profile` may be null. False with `error` set when a root pattern is
 /// not a valid regex. Every function reachable from a root through the
-/// graph is visited; `templateLeaves` counts those whose calls the graph
-/// does not hold.
+/// graph is visited; `templateLeaves` counts the instantiations among them
+/// whose body the bake did not read.
 bool analyzeHotPaths(const CallGraph &graph, const EffectTable &effects,
                      const HotPathConfig &config,
                      const CoverageProfile *profile, uint8_t effectMask,

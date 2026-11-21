@@ -70,6 +70,44 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
   // wasn't yet constructed. Re-checked when new classes are constructed.
   std::vector<SId> deferredVirtualTargets;
 
+  // A derived class's constructor constructing its base: the object is
+  // the derived class's, so the base's own overrides are no dispatch
+  // target on its account. A derived constructor initializes each base
+  // once, so a second construction of the base's type there (a member, a
+  // local, a new-expression) is a complete object.
+  auto constructsBaseSubobject = [&](SId callerId,
+                                     const std::string &calleeClass) {
+    const CallGraphNode *caller = graph_.findNodeById(callerId);
+    if (!caller || caller->enclosingClass.empty() ||
+        caller->enclosingClass == calleeClass)
+      return false;
+    const llvm::StringRef cls = caller->enclosingClass;
+    const llvm::StringRef name = caller->qualifiedName;
+    const size_t sep = cls.rfind("::");
+    const llvm::StringRef simple =
+        sep == llvm::StringRef::npos ? cls : cls.substr(sep + 2);
+    if (!name.starts_with(cls) || !name.ends_with(simple) ||
+        name.size() != cls.size() + 2 + simple.size())
+      return false; // not one of the caller class's constructors
+    bool derives = false;
+    for (const std::string &derived : graph_.getDerivedClasses(calleeClass))
+      if (derived == caller->enclosingClass) {
+        derives = true;
+        break;
+      }
+    if (!derives)
+      return false;
+    unsigned constructions = 0;
+    for (const auto &edge : graph_.calleeRefsOf(callerId)) {
+      if (edge.kind != EdgeKind::ConstructorCall)
+        continue;
+      const CallGraphNode *ctor = graph_.findNodeById(edge.callee);
+      if (ctor && ctor->enclosingClass == calleeClass && ++constructions > 1)
+        return false;
+    }
+    return true;
+  };
+
   auto isTargetClassConstructed = [&](SId calleeId) -> bool {
     const std::string &calleeUsr = interner.resolve(calleeId);
     for (const auto &cls : graph_.getClassesForImpl(calleeUsr)) {
@@ -109,7 +147,8 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
         if (edge.kind == EdgeKind::ConstructorCall) {
           const auto *calleeNode =
               graph_.findNode(interner.resolve(edge.callee));
-          if (calleeNode && !calleeNode->enclosingClass.empty()) {
+          if (calleeNode && !calleeNode->enclosingClass.empty() &&
+              !constructsBaseSubobject(current, calleeNode->enclosingClass)) {
             if (constructedClasses.insert(calleeNode->enclosingClass).second)
               changed = true;
           }
@@ -177,6 +216,26 @@ DeadCodeAnalyzer::getResults() const {
   return results;
 }
 
+bool isSystemPath(llvm::StringRef path) {
+  if (path.empty())
+    return false;
+  static constexpr llvm::StringLiteral prefixes[] = {
+      "/usr/include/",       "/usr/lib/",
+      "/usr/local/include/", "/usr/local/lib/",
+      "/Library/Developer/", "/Applications/Xcode",
+      "/opt/homebrew/",
+  };
+  for (auto p : prefixes) {
+    if (path.starts_with(p))
+      return true;
+  }
+  // Compiler-internal and SDK include directories, e.g. /opt/llvm-20/lib/clang/20/include.
+  if (path.contains("/lib/clang/") || path.contains("/lib/gcc/") ||
+      path.contains(".sdk/usr/include/") || path.contains("/include/c++/"))
+    return true;
+  return false;
+}
+
 std::vector<Diagnostic> DeadCodeAnalyzer::getDiagnostics() const {
   std::vector<Diagnostic> diags;
   auto results = getResults();
@@ -186,8 +245,9 @@ std::vector<Diagnostic> DeadCodeAnalyzer::getDiagnostics() const {
     if (!node)
       continue;
 
-    // Skip system/library functions.
-    if (node->file.find("<") == 0)
+    // Skip system/library functions (a standard-library instantiation
+    // reached only from dead code is the user's dead code, reported there).
+    if (node->file.find("<") == 0 || isSystemPath(node->file))
       continue;
 
     if (kv.second == Liveness::Dead) {

@@ -196,7 +196,7 @@ whole list, not the page.
 
 | Tool | Paged list | Default `limit` | Notes |
 |---|---|---|---|
-| `get_callers`, `get_callees` | `callers`, `callees` | 200 | `distinct: true` (CLI `--distinct`) keeps one record per function at the other end, the first site in canonical order, with `siteCount`; `callerCount` / `calleeCount` and `total` then count functions, and the payload carries `distinct: true` |
+| `get_callers`, `get_callees` | `callers`, `callees` | 200 | `distinct: true` (CLI `--distinct`) keeps one record per function at the other end, the first site in canonical order, with `siteCount`; `callerCount` / `calleeCount` and `total` then count functions, and the payload carries `distinct: true`. On a template instantiation the answer is direct: the instantiation's own edges, read from its body, not its template's |
 | `search_functions` | `matches` | 25 | `offset` is new; `limit` below 1 was clamped to 1 and is now a usage error |
 | `list_callback_sites` | `targets` | 100 | each target lists at most `site_limit` sites (default 50) in canonical edge order; `siteCount` is the full count and `sitesTruncated` says whether the list was cut; `siteLimit` echoes the cap |
 | `list_concurrency_entry_points` | `entries` | 200 | |

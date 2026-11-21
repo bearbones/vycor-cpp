@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/check/Indexer.h"
+#include "vycor/callgraph/UsrIdent.h"
 #include "vycor/check/IsaLeak.h"
 #include "vycor/check/NoexceptFacts.h"
 #include "vycor/check/TypeNormalize.h"
@@ -332,10 +333,14 @@ namespace {
 // checks' seeds and the exception-escape summaries in one walk.
 class BodyCollector : public clang::RecursiveASTVisitor<BodyCollector> {
 public:
-  explicit BodyCollector(const clang::SourceManager *sm = nullptr) : sm_(sm) {}
+  explicit BodyCollector(const clang::SourceManager *sm = nullptr,
+                         UsrCache *usrs = nullptr)
+      : sm_(sm), usrs_(usrs) {}
 
   std::vector<std::string> referencedGlobals;
   std::vector<std::string> calledFunctions;
+  // With a UsrCache: each call's (call-graph USR, qualified name).
+  std::vector<std::pair<std::string, std::string>> calledUsrs;
   std::vector<std::string> unguardedCalls;
   std::vector<std::pair<std::string, std::string>> unguardedCallSites;
   std::string uncaughtThrowSite;
@@ -352,14 +357,18 @@ public:
   }
 
   bool VisitCallExpr(clang::CallExpr *call) {
-    if (const auto *callee = call->getDirectCallee())
+    if (const auto *callee = call->getDirectCallee()) {
       recordCall(callee->getQualifiedNameAsString(), call->getBeginLoc());
+      recordUsr(callee);
+    }
     return true;
   }
 
   bool VisitCXXConstructExpr(clang::CXXConstructExpr *construct) {
-    if (const auto *ctor = construct->getConstructor())
+    if (const auto *ctor = construct->getConstructor()) {
       recordCall(ctor->getQualifiedNameAsString(), construct->getBeginLoc());
+      recordUsr(ctor);
+    }
     return true;
   }
 
@@ -420,7 +429,27 @@ private:
     if (std::find(into.begin(), into.end(), name) == into.end())
       into.push_back(std::move(name));
   }
+  // The identity the call graph gives the callee; a lambda's is its
+  // closure's.
+  void recordUsr(const clang::FunctionDecl *callee) {
+    if (!usrs_ || !sm_)
+      return;
+    Ident id;
+    const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
+    if (method && method->getParent()->isLambda() &&
+        method->getOverloadedOperator() == clang::OO_Call)
+      id = lambdaClosureIdentOf(const_cast<clang::SourceManager &>(*sm_),
+                                method->getParent());
+    else
+      id = usrs_->identFor(callee);
+    std::pair<std::string, std::string> entry{std::move(id.usr),
+                                              callee->getQualifiedNameAsString()};
+    if (std::find(calledUsrs.begin(), calledUsrs.end(), entry) ==
+        calledUsrs.end())
+      calledUsrs.push_back(std::move(entry));
+  }
   const clang::SourceManager *sm_ = nullptr;
+  UsrCache *usrs_ = nullptr;
   unsigned tryDepth_ = 0;
 };
 
@@ -615,10 +644,12 @@ bool IndexerVisitor::VisitVarDecl(clang::VarDecl *decl) {
       !decl->getInit()->isConstantInitializer(
           *astContext_, decl->getType()->isReferenceType());
   if (entry.dynamicInit) {
-    BodyCollector collector;
+    UsrCache usrs;
+    BodyCollector collector(&sm_, &usrs);
     collector.TraverseStmt(decl->getInit());
     entry.referencedGlobals = std::move(collector.referencedGlobals);
     entry.calledFunctions = std::move(collector.calledFunctions);
+    entry.calledUsrs = std::move(collector.calledUsrs);
   }
   index_.addStaticInit(entry);
   return true;

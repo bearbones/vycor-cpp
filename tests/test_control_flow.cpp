@@ -661,3 +661,56 @@ TEST_CASE("ControlFlowIndex::removeTUs deduplicates TU paths",
   CHECK(index.size() == 0);
 }
 
+
+TEST_CASE("a lambda capture's initializer has the enclosing function's context",
+          "[prism][visitor][lambda]") {
+  llvm::SmallString<128> tmpPath;
+  REQUIRE(!llvm::sys::fs::createTemporaryFile("vycor-capture-ctx", "cpp",
+                                              tmpPath));
+  std::string srcPath = std::string(tmpPath.str());
+  {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(srcPath, ec);
+    REQUIRE(!ec);
+    os << R"cpp(
+      int seed();
+      void body();
+      void after();
+      struct Res { ~Res(); };
+      template <class F> void submit(F f) { f(); }
+      void outer() {
+        try {
+          auto l = [v = seed()] { try { body(); } catch (...) {} };
+          l();
+        } catch (int) {}
+      }
+      void handOff() {
+        submit([r = Res()] {});
+        after();
+      }
+    )cpp";
+  }
+
+  clang::tooling::FixedCompilationDatabase compDb(".", {"-std=c++17"});
+  auto baked = bakeIndexes(compDb, {srcPath}, {}, 1);
+  llvm::sys::fs::remove(srcPath);
+
+  auto callers = baked.graph.callersOf("seed");
+  REQUIRE(callers.size() == 1);
+  CHECK(callers[0].callerName == "outer");
+
+  auto seedCtxs = baked.cfIndex.contextsForCallee("seed");
+  REQUIRE(seedCtxs.size() == 1);
+  CHECK(seedCtxs[0].callerName == "outer");
+  REQUIRE(seedCtxs[0].enclosingTryCatches.size() == 1);
+
+  // The body keeps its own context, not the enclosing function's.
+  auto bodyCtxs = baked.cfIndex.contextsForCallee("body");
+  REQUIRE(bodyCtxs.size() == 1);
+  CHECK(bodyCtxs[0].enclosingTryCatches.size() == 1);
+
+  // An init-capture is the closure's member, not a local of handOff.
+  auto afterCtxs = baked.cfIndex.contextsForCallee("after");
+  REQUIRE(afterCtxs.size() == 1);
+  CHECK(afterCtxs[0].liveRaiiLocals.empty());
+}

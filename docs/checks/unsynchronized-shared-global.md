@@ -267,19 +267,19 @@ stays silent or reports a note.
 - **Indirect calls.** A call through a function pointer or
   `std::function` reaches only the targets the call graph resolved
   (plausible, so a note); an unresolved indirect call is a dead end.
-- **Template instantiations.** The call graph holds a call of a
-  function template, or of a class template's member, as an edge to the
-  instantiation, and that node has no edges of its own: the calls in the
-  body are the pattern's
-  ([#106](https://github.com/bearbones/vycor-cpp/issues/106)). The
-  search stops there, so accesses reached only through a template are
-  missing. The reference facts themselves are on the pattern: an access
-  the pattern holds keeps the pattern's lock sets; one only
-  instantiations reveal carries the lock sets of every instantiation
-  (two that guard it differently look like one function that does
-  both). Code the compiler writes (an implicit special member,
-  a default member initializer it runs) is read as part of its user,
-  under the locks of the use.
+- **Template instantiations.** The search walks into an instantiation
+  and on through the calls its body makes, but the reference facts are
+  the pattern's, under the template's own identity: an access written
+  in the instantiation's body is not found there, and a call it makes
+  has no call reference, so it adds `unknown`. An access reached through
+  a function the instantiation calls is found, under `unknown` for the
+  locks the body holds: reported against an access that holds no lock,
+  silent against one that holds any. An access only instantiations
+  reveal carries the lock sets of every instantiation (two that guard
+  it differently look like one function that does both). Code the
+  compiler writes (an implicit special member, a default member
+  initializer it runs) is read as part of its user, under the locks of
+  the use.
 - **Writes through a returned iterator.** `table.find(k)->second = v`
   changes `table` through the iterator `find` returns; the reference
   to `table` is a `find` call, counted as a read, so the write is not
