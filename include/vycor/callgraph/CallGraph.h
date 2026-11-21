@@ -209,6 +209,25 @@ public:
   [[nodiscard]] size_t edgeCount() const noexcept;
 
   std::vector<const CallGraphNode *> allNodes() const;
+
+  // Whole-graph scans in id space, for analyses that build their own flat
+  // tables (deps/DependencyAudit). Storage order: it follows TU and
+  // insertion order, so a consumer must not let it reach its output. No
+  // virtual-dispatch expansion and no function-return join — exactly the
+  // stored records. Like every read, valid only on a finished index.
+  //   fn(StringInterner::Id usr, const CallGraphNode &node)
+  template <typename Fn> void forEachNode(Fn &&fn) const {
+    for (const auto &entry : nodes_)
+      fn(entry.first, entry.second);
+  }
+  //   fn(const EdgeRef &edge)
+  template <typename Fn> void forEachStoredEdge(Fn &&fn) const {
+    for (const StoredEdge &se : edges_)
+      if (se.refs != 0)
+        fn(EdgeRef{se.caller, se.callee, se.callSite, se.kind, se.confidence,
+                   se.execContext, se.indirectionDepth});
+  }
+
   // Accepts a usr or a display name. Ambiguous display names resolve to the
   // candidate with the smallest usr string (deterministic; PR C surfaces
   // ambiguity through the disambiguation contract — findNode is used by

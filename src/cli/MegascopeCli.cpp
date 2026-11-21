@@ -1973,6 +1973,7 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
   ctx.facts = IndexFacts::of(snap->meta, common->ephemeral()
                                              ? IndexFreshness::Baked
                                              : IndexFreshness::Unchecked);
+  ctx.meta = &snap->meta;
 
   if (verb == "batch")
     return runBatch(tools, ctx, in, out);

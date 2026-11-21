@@ -40,6 +40,9 @@ add_library(vycor_lib
   query/Registry.cpp
   query/Limits.cpp
   query/ImpactTools.cpp
+  query/DependencyTools.cpp
+  deps/TargetMap.cpp
+  deps/DependencyAudit.cpp
   impact/SemanticDiff.cpp
   impact/ImpactSearch.cpp
   impact/PatchMapping.cpp

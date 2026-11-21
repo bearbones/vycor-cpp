@@ -158,6 +158,18 @@ QUERIES: list[tuple[str, list[str], str | None, bool]] = [
     ("diff-self",
      ["diff", "--before", "{index}", "--after", "{index}", "--impact"],
      None, True),
+    # The dependency audit over the fixture's hand-written target map.
+    ("audit-dependencies",
+     ["audit-dependencies", "--target-map", "{fixture}/targets.json"],
+     None, True),
+    ("audit-dependencies-findings",
+     ["audit-dependencies", "--target-map", "{fixture}/targets.json",
+      "--finding", "any", "--sort", "gain", "--format", "ndjson"],
+     None, True),
+    ("explain-dependency",
+     ["explain-dependency", "--target-map", "{fixture}/targets.json",
+      "--consumer", "stages", "--provider", "plugins"], None, True),
+    ("audit-dependencies-no-map", ["audit-dependencies"], None, True),
 ]
 
 # Keys whose values depend on the host, the run, or the scratch location
@@ -170,6 +182,9 @@ VOLATILE_KEYS = {
     # headers included; those vary with the host standard library.
     "functionsBefore", "functionsAfter", "relationshipsBefore",
     "relationshipsAfter",
+    # The dependency audit's completeness counts cover every symbol and
+    # reference of the index, the standard library's included.
+    "inline", "unattributed", "references",
 }
 PATH_RE = re.compile(r'"/[^"]*"')
 # Standard-library USRs spell out template signatures that shift between

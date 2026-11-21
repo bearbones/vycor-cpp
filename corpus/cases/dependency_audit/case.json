@@ -1,0 +1,844 @@
+{
+ "schema": 1,
+ "title": "Six link targets with a hand-written target map: which declared dependencies the call edges use, through which symbols (a shared inline body's call is charged to the target that uses it), what those symbols need inside the provider, and what goes unreported \u2014 a library referenced only from a static initializer shows as unused on call-edge evidence, never as a universal verdict, and an uncovered target withholds the finding",
+ "sources": [
+  "app/main.cpp",
+  "core/core.cpp",
+  "core/core_big.cpp",
+  "extra/extra.cpp",
+  "plugin/plugin.cpp",
+  "shared/shared.cpp",
+  "tool/tool.cpp",
+  "util/util.cpp"
+ ],
+ "phases": [
+  {
+   "name": "full",
+   "index": {
+    "mode": "cold",
+    "indexed": 8
+   },
+   "queries": [
+    {
+     "id": "audit-all",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "completeness": {
+        "edgeSource": "call-edges",
+        "unusedIsUniversal": false,
+        "invisible": [
+         "variable-references",
+         "vtable-and-typeinfo-references",
+         "static-initializer-calls",
+         "implicit-destructor-calls",
+         "calls-in-template-bodies",
+         "definitions-without-calls",
+         "name-based-lookup",
+         "other-build-configurations"
+        ],
+        "coverageStated": true,
+        "depsForm": "direct",
+        "targets": {
+         "total": 6,
+         "withSources": 6,
+         "covered": 6
+        },
+        "sources": {
+         "mapped": 8,
+         "indexed": 8,
+         "failed": 0,
+         "notIndexed": 0,
+         "unmappedTus": 0
+        },
+        "symbols": {
+         "defined": 33,
+         "presumed": 3,
+         "inline": 1,
+         "unattributed": 0
+        },
+        "references": {
+         "virtualDispatchSkipped": 1
+        }
+       },
+       "findingCounts": {
+        "unused-link-dependency": 2,
+        "undeclared-link-dependency": 1,
+        "thin-dependency": 2
+       },
+       "unusedWithheld": 0,
+       "total": 7,
+       "truncated": false
+      },
+      "count": {
+       "edges": 7
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "app",
+          "provider": "core"
+         },
+         {
+          "consumer": "app",
+          "provider": "extra"
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin"
+         },
+         {
+          "consumer": "plugin",
+          "provider": "core"
+         },
+         {
+          "consumer": "tool",
+          "provider": "core"
+         },
+         {
+          "consumer": "tool",
+          "provider": "util"
+         },
+         {
+          "consumer": "util",
+          "provider": "core"
+         }
+        ]
+       }
+      ],
+      "witnesses": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "core",
+         "declared": "direct",
+         "symbols": 1,
+         "viaInline": 1,
+         "closureSymbols": 2,
+         "providerSymbols": 22,
+         "closureFiles": 1,
+         "providerFiles": 2,
+         "providerDroppable": false,
+         "findings": [
+          {
+           "id": "thin-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ],
+         "witness": {
+          "from": "twice",
+          "to": "core_scale",
+          "kind": "DirectCall"
+         }
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "util",
+         "provider": "core",
+         "symbols": 2,
+         "viaInline": 1,
+         "closureSymbols": 3,
+         "onlyViaEdge": 1,
+         "droppableTargets": [
+          "core"
+         ],
+         "droppableSymbols": 19,
+         "providerDroppable": true,
+         "findings": []
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "tool",
+         "provider": "util",
+         "declared": "direct",
+         "symbols": 1,
+         "closureSymbols": 2,
+         "closureNeeds": [
+          "core"
+         ],
+         "separabilityPct": 0,
+         "findings": []
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "tool",
+         "provider": "core",
+         "declared": "transitive",
+         "symbols": 1,
+         "uncertainSymbols": 1,
+         "findings": [
+          {
+           "id": "undeclared-link-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "plugin",
+         "provider": "core",
+         "symbols": 0,
+         "uncertainSymbols": 1,
+         "findings": [
+          {
+           "id": "thin-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "util"
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "core",
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "plugin",
+         "provider": "core",
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "unused-is-call-edge-evidence-only",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--finding",
+      "unused-link-dependency"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "completeness": {
+        "unusedIsUniversal": false,
+        "edgeSource": "call-edges"
+       },
+       "total": 2
+      },
+      "count": {
+       "edges": 2
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "app",
+          "provider": "extra",
+          "symbols": 0,
+          "uncertainSymbols": 0,
+          "droppableTargets": [
+           "extra"
+          ],
+          "findings": [
+           {
+            "id": "unused-link-dependency",
+            "evidence": "call-edges",
+            "universal": false
+           }
+          ]
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin",
+          "providerKind": "shared_library",
+          "symbols": 0,
+          "findings": [
+           {
+            "id": "unused-link-dependency",
+            "evidence": "call-edges",
+            "universal": false
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "provider": "core"
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "universal": true
+          }
+         ]
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "thin",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--finding",
+      "thin-dependency"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "edges": 2
+      },
+      "fields": {
+       "thinThresholds": {
+        "maxSymbols": 5,
+        "maxClosurePct": 10
+       }
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "app",
+          "provider": "core"
+         },
+         {
+          "consumer": "plugin",
+          "provider": "core"
+         }
+        ]
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "util",
+         "provider": "core"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "thin-looser-threshold",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--finding",
+      "thin-dependency",
+      "--thin-max-closure-pct",
+      "15"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "edges": 3
+      },
+      "witnesses": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "util",
+         "provider": "core",
+         "findings": [
+          {
+           "id": "thin-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "tool",
+         "provider": "util"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "by-gain",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--sort",
+      "gain"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "sort": "gain"
+      },
+      "count": {
+       "edges": 7
+      },
+      "sequence": [
+       {
+        "in": "edges",
+        "match": [
+         {
+          "consumer": "plugin",
+          "provider": "core",
+          "droppableSymbols": 22
+         },
+         {
+          "consumer": "util",
+          "provider": "core",
+          "droppableSymbols": 19
+         },
+         {
+          "consumer": "app",
+          "provider": "extra",
+          "droppableSymbols": 2
+         },
+         {
+          "consumer": "app",
+          "provider": "plugin",
+          "droppableSymbols": 1
+         },
+         {
+          "consumer": "app",
+          "provider": "core",
+          "droppableSymbols": 0
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "id": "one-consumer",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "tool"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "count": {
+       "edges": 2
+      },
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app"
+        }
+       }
+      ],
+      "witnesses": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "tool",
+         "provider": "util"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "explain-through-inline",
+     "argv": [
+      "explain-dependency",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "app",
+      "--provider",
+      "core"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "completeness": {
+        "edgeSource": "call-edges",
+        "unusedIsUniversal": false
+       },
+       "edge": {
+        "consumer": "app",
+        "provider": "core",
+        "symbols": 1,
+        "closureSymbols": 2,
+        "findings": [
+         {
+          "id": "thin-dependency",
+          "evidence": "call-edges",
+          "universal": false
+         }
+        ]
+       },
+       "closureTotal": 2,
+       "closureTruncated": false,
+       "total": 1
+      },
+      "count": {
+       "seeds": 1,
+       "closure": 2
+      },
+      "witnesses": [
+       {
+        "in": "seeds",
+        "match": {
+         "symbol": {
+          "name": "core_scale"
+         },
+         "owner": "defined",
+         "via": "inline",
+         "from": {
+          "name": "twice"
+         },
+         "through": {
+          "from": "app_run",
+          "to": "twice"
+         }
+        }
+       },
+       {
+        "in": "closure",
+        "match": {
+         "name": "clamp"
+        }
+       },
+       {
+        "in": "closure",
+        "match": {
+         "name": "core_scale"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "closure",
+        "match": {
+         "name": "big_entry"
+        }
+       },
+       {
+        "in": "closure",
+        "match": {
+         "name": "core_sum"
+        }
+       },
+       {
+        "in": "seeds",
+        "match": {
+         "symbol": {
+          "name": "Shape::area"
+         }
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "explain-closure-leaves-provider",
+     "argv": [
+      "explain-dependency",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "tool",
+      "--provider",
+      "util"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "edge": {
+        "closureNeeds": [
+         "core"
+        ],
+        "symbols": 1,
+        "closureSymbols": 2
+       },
+       "closureTotal": 2
+      },
+      "witnesses": [
+       {
+        "in": "seeds",
+        "match": {
+         "symbol": {
+          "name": "util_trim"
+         },
+         "via": "direct",
+         "from": {
+          "name": "tool_run"
+         }
+        }
+       },
+       {
+        "in": "closure",
+        "match": {
+         "name": "util_format"
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "closure",
+        "match": {
+         "name": "core_sum"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "explain-presumed-owner",
+     "argv": [
+      "explain-dependency",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "plugin",
+      "--provider",
+      "core"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "edge": {
+        "symbols": 0,
+        "uncertainSymbols": 1
+       },
+       "closureTotal": 0
+      },
+      "count": {
+       "seeds": 1
+      },
+      "witnesses": [
+       {
+        "in": "seeds",
+        "match": {
+         "symbol": {
+          "name": "core_log"
+         },
+         "owner": "presumed",
+         "via": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "id": "explain-no-relationship",
+     "argv": [
+      "explain-dependency",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "extra",
+      "--provider",
+      "core"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "ok",
+      "fields": {
+       "edge": {
+        "declared": "none",
+        "symbols": 0,
+        "findings": []
+       },
+       "total": 0
+      },
+      "count": {
+       "seeds": 0
+      }
+     }
+    },
+    {
+     "id": "unknown-target",
+     "argv": [
+      "explain-dependency",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "app",
+      "--provider",
+      "nope"
+     ],
+     "expect": {
+      "exit": 1,
+      "status": "not_found",
+      "regex": {
+       "error": "no target named 'nope'"
+      }
+     }
+    },
+    {
+     "id": "missing-map",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/no-such-map.json"
+     ],
+     "expect": {
+      "exit": 2,
+      "status": "usage_error",
+      "regex": {
+       "error": "cannot read target map"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "extra-not-indexed",
+   "sources": [
+    "app/main.cpp",
+    "core/core.cpp",
+    "core/core_big.cpp",
+    "plugin/plugin.cpp",
+    "shared/shared.cpp",
+    "tool/tool.cpp",
+    "util/util.cpp"
+   ],
+   "queries": [
+    {
+     "id": "uncovered-provider-fails-closed",
+     "argv": [
+      "audit-dependencies",
+      "--target-map",
+      "{dir}/targets.json",
+      "--consumer",
+      "app"
+     ],
+     "expect": {
+      "exit": 0,
+      "status": "ok",
+      "fields": {
+       "completeness": {
+        "targets": {
+         "total": 6,
+         "covered": 5
+        },
+        "sources": {
+         "mapped": 8,
+         "indexed": 7,
+         "notIndexed": 1
+        }
+       },
+       "findingCounts": {
+        "unused-link-dependency": 1
+       },
+       "unusedWithheld": 1
+      },
+      "witnesses": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "extra",
+         "providerCovered": false,
+         "symbols": 0,
+         "findings": []
+        }
+       },
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "plugin",
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       }
+      ],
+      "negatives": [
+       {
+        "in": "edges",
+        "match": {
+         "consumer": "app",
+         "provider": "extra",
+         "findings": [
+          {
+           "id": "unused-link-dependency",
+           "evidence": "call-edges",
+           "universal": false
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

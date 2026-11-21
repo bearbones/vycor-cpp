@@ -1,0 +1,20 @@
+{
+ "schema": 1,
+ "generator": "hand-written",
+ "depsForm": "direct",
+ "targets": [
+  {"name": "core", "kind": "static_library",
+   "sources": ["core/core.cpp", "core/core_big.cpp"], "deps": []},
+  {"name": "util", "kind": "static_library",
+   "sources": ["util/util.cpp"], "deps": ["core"]},
+  {"name": "extra", "kind": "static_library",
+   "sources": ["extra/extra.cpp"], "deps": []},
+  {"name": "plugin", "kind": "shared_library",
+   "sources": ["plugin/plugin.cpp"], "deps": ["core"]},
+  {"name": "app", "kind": "executable",
+   "sources": ["app/main.cpp", "shared/shared.cpp"],
+   "deps": ["core", "extra", "plugin"]},
+  {"name": "tool", "kind": "executable",
+   "sources": ["tool/tool.cpp", "shared/shared.cpp"], "deps": ["util"]}
+ ]
+}

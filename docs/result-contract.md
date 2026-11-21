@@ -206,6 +206,8 @@ whole list, not the page.
 | `query_channels_for_function` | `sites` | 200 | |
 | `query_channel` | `producers`, `consumers` | 200 | one window pages both lists: `producerTotal` and `consumerTotal` replace `total` and `returned`, and `truncated` is set when either list continues |
 | `analyze_dead_code` | `dead`, `optimisticallyAlive` | 500 | already paged (`totalDead`, `deadCount`, `offset`, `limit`); the same window now pages `optimisticallyAlive` too (`optimisticTotal`, `optimisticTruncated`). `total` and `returned` describe `dead`; `truncated` and `nextOffset` cover both lists, so following `nextOffset` reaches every record of either. Its `limit` keeps its historical range: 0 is counts only, which returns no records and no `nextOffset` (`truncated` still says whether records exist) |
+| `audit_dependencies` | `edges` | 200 | `findingCounts` and `unusedWithheld` count every edge the `consumer` / `provider` filters keep, not the page (`docs/dependency-audit.md`) |
+| `explain_dependency` | `seeds` | 200 | `closure` is bounded by `closure_limit` (default 50, 0 lists none); `closureTotal` is the full count and `closureTruncated` says whether the list was cut |
 
 Not paged, because another argument bounds them: the path tools
 (`find_call_chain`, the exception path tools, `query_locks_held`,

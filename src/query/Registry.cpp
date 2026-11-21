@@ -194,6 +194,8 @@ static const std::map<std::string, std::string> kRecordsKeys = {
     {"list_channels", "channels"},
     {"query_channels_for_function", "sites"},
     {"impact_of_change", "affected"},
+    {"audit_dependencies", "edges"},
+    {"explain_dependency", "seeds"},
 };
 
 std::vector<std::string> sectionNames(unsigned needs) {
@@ -215,6 +217,7 @@ std::vector<ToolEntry> getRegisteredTools() {
   registerDeadCodeTools(tools);
   registerChannelTools(tools);
   registerImpactTools(tools);
+  registerDependencyTools(tools);
   for (auto &tool : tools) {
     auto it = kRecordsKeys.find(tool.name);
     if (it != kRecordsKeys.end())

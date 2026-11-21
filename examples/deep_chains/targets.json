@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "generator": "hand-written",
+  "depsForm": "direct",
+  "targets": [
+    {"name": "pipeline", "kind": "executable",
+     "sources": ["main.cpp", "pipeline.cpp"],
+     "deps": ["async", "callbacks", "runtime", "stages", "text"]},
+    {"name": "stages", "kind": "static_library",
+     "sources": ["stage1_ingest.cpp", "stage2_parse.cpp",
+                 "stage3_transform.cpp", "stage4_dispatch.cpp",
+                 "stage5_sink.cpp"],
+     "deps": ["callbacks", "plugins", "text"]},
+    {"name": "runtime", "kind": "static_library",
+     "sources": ["scheduler.cpp", "workers.cpp"],
+     "deps": ["callbacks"]},
+    {"name": "callbacks", "kind": "static_library",
+     "sources": ["callbacks.cpp", "lambda_callbacks.cpp"]},
+    {"name": "plugins", "kind": "static_library",
+     "sources": ["plugins.cpp"]},
+    {"name": "text", "kind": "static_library",
+     "sources": ["tokenizer.cpp"]},
+    {"name": "async", "kind": "static_library",
+     "sources": ["async_workers.cpp"]}
+  ]
+}
