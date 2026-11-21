@@ -381,7 +381,7 @@ public:
   [[nodiscard]] const std::string &textOf(Id id) const { return text(id); }
 
   // ---- persistence ------------------------------------------------------
-  // The snapshot's references section (Snapshot.h, format v17). The bytes
+  // The snapshot's references section (Snapshot.h, format v18). The bytes
   // are canonical: strings, records and contributor lists are written in
   // sorted order, so two indexes holding the same facts encode alike
   // whatever order their TUs were baked or absorbed in.

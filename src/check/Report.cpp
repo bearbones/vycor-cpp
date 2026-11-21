@@ -240,6 +240,14 @@ const char *diagnosticKindName(Diagnostic::Kind kind) {
     return "SharedGlobal_Plausible";
   case Diagnostic::SharedGlobal_InitThenPublish:
     return "SharedGlobal_InitThenPublish";
+  case Diagnostic::LockOrder_Inversion:
+    return "LockOrder_Inversion";
+  case Diagnostic::LockOrder_Unproven:
+    return "LockOrder_Unproven";
+  case Diagnostic::LockOrder_Plausible:
+    return "LockOrder_Plausible";
+  case Diagnostic::LockOrder_Shared:
+    return "LockOrder_Shared";
   }
   return "Unknown";
 }
@@ -301,6 +309,11 @@ std::string checkNameOf(const Diagnostic &diag) {
   case Diagnostic::SharedGlobal_Plausible:
   case Diagnostic::SharedGlobal_InitThenPublish:
     return "unsynchronized-shared-global";
+  case Diagnostic::LockOrder_Inversion:
+  case Diagnostic::LockOrder_Unproven:
+  case Diagnostic::LockOrder_Plausible:
+  case Diagnostic::LockOrder_Shared:
+    return "lock-order-inversion";
   }
   return "custom";
 }
@@ -331,6 +344,7 @@ Severity checkSeverity(const std::string &check) {
       {"hot-path-effects", Severity::Warning},
       {"isa-leak", Severity::Warning},
       {"unsynchronized-shared-global", Severity::Warning},
+      {"lock-order-inversion", Severity::Warning},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;
@@ -345,7 +359,10 @@ Severity diagnosticSeverity(const Diagnostic &diag) {
       diag.kind == Diagnostic::IsaLeak_Inlined ||
       diag.kind == Diagnostic::SharedGlobal_Unproven ||
       diag.kind == Diagnostic::SharedGlobal_Plausible ||
-      diag.kind == Diagnostic::SharedGlobal_InitThenPublish)
+      diag.kind == Diagnostic::SharedGlobal_InitThenPublish ||
+      diag.kind == Diagnostic::LockOrder_Unproven ||
+      diag.kind == Diagnostic::LockOrder_Plausible ||
+      diag.kind == Diagnostic::LockOrder_Shared)
     return Severity::Note;
   return checkSeverity(checkNameOf(diag));
 }

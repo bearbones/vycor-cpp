@@ -49,7 +49,8 @@ constexpr char kMagic[4] = {'V', 'Y', 'C', 'J'};
 // IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons and
 // keep a refuted function's Exit callees; exception-boundary entries.
 // v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
-constexpr uint32_t kVersion = 17;
+// v18: the lock-order-inversion Diagnostic kinds renumber Custom.
+constexpr uint32_t kVersion = 18;
 constexpr size_t kHeaderSize = 4 + 4 + 8;
 
 constexpr uint8_t kKindAttempt = 1;
@@ -1225,7 +1226,8 @@ namespace {
 // and IsaLeak_Inlined precede Custom. v16: noexcept facts carry reasons
 // and keep a refuted function's Exit callees; exception-boundary entries.
 // v17: the unsynchronized-shared-global Diagnostic kinds renumber Custom.
-constexpr uint32_t kShardVersion = 17;
+// v18: the lock-order-inversion Diagnostic kinds renumber Custom.
+constexpr uint32_t kShardVersion = 18;
 
 bool writeShardFile(const std::string &path, const char magic[4],
                     const std::vector<std::pair<std::string, std::string>>

@@ -17,6 +17,7 @@
 #include "vycor/check/CheckSet.h"
 #include "vycor/check/Checkpoint.h"
 #include "vycor/check/CouldBeInternal.h"
+#include "vycor/check/LockOrderInversion.h"
 #include "vycor/check/UnsynchronizedSharedGlobal.h"
 #include "vycor/check/DeadCodeAnalyzer.h"
 #include "vycor/check/HotPathEffects.h"
@@ -1288,7 +1289,12 @@ int main(int argc, const char **argv) {
     const bool wantInternal = enabledChecks.count("could-be-internal") > 0;
     const bool wantShared =
         enabledChecks.count("unsynchronized-shared-global") > 0;
-    const bool wantRefs = wantInternal || wantShared;
+    const bool wantLockOrder =
+        enabledChecks.count("lock-order-inversion") > 0;
+    // The two lock checks read the lock facts, which depend on the lock
+    // types the bake treats as guards.
+    const bool wantLocks = wantShared || wantLockOrder;
+    const bool wantRefs = wantInternal || wantLocks;
     bool hasInitHazardRoots = false;
     if (wantInitHazards) {
       mergedIndex.forEachStaticInit([&](const vycor::StaticInitEntry &e) {
@@ -1297,7 +1303,7 @@ int main(int argc, const char **argv) {
       });
     }
     const bool wantGraph =
-        wantDeadCode || hasInitHazardRoots || wantHotPaths || wantShared;
+        wantDeadCode || hasInitHazardRoots || wantHotPaths || wantLocks;
     if (wantGraph || wantRefs) {
       // The lock types the bake treats as guards (org config included);
       // an index baked with others does not answer the shared-global check.
@@ -1333,16 +1339,16 @@ int main(int argc, const char **argv) {
             llvm::errs() << "check: not reading the index " << snapPath
                          << ": it was baked with --collapse-paths, which "
                             "hot-path-effects cannot use\n";
-          // The shared-global check needs the lock types it was baked with.
+          // The lock checks need the lock types it was baked with.
           const bool sameLocks =
-              !wantShared ||
+              !wantLocks ||
               (snap->meta.lockAllowlist == lockCfg.userAllowlist &&
                snap->meta.lockBuiltins == lockCfg.useBuiltins);
           if (!sameLocks && CheckVerbose)
             llvm::errs() << "check: not reading the index " << snapPath
                          << ": it was baked with other lock types than "
-                            "unsynchronized-shared-global uses (org config "
-                            "lock types only)\n";
+                            "the lock checks use (org config lock types "
+                            "only)\n";
           if (sameLocks &&
               (!(wantDeadCode || wantRefs) ||
                snap->meta.files.size() == files.size()) &&
@@ -1536,6 +1542,39 @@ int main(int argc, const char **argv) {
           for (const std::string &name : sharedStats.boundedNames)
             llvm::errs() << "check: unsynchronized-shared-global: bounded: "
                          << name << "\n";
+      }
+
+      if (wantLockOrder) {
+        vycor::LockOrderOptions lockOpts;
+        lockOpts.coverageGap = coverageGap;
+        vycor::LockOrderStats lockStats;
+        for (auto &diag : vycor::findLockOrderInversions(graph, references,
+                                                          lockOpts, &lockStats))
+          diagnostics.push_back(std::move(diag));
+        if (CheckVerbose)
+          llvm::errs()
+              << "check: lock-order-inversion: " << lockStats.acquisitions
+              << " acquisition(s) in " << lockStats.acquiringFunctions
+              << " function(s), " << lockStats.locks << " named lock(s) ("
+              << lockStats.unknownAcquisitions
+              << " acquisition(s) of an unnamed lock), "
+              << lockStats.holdingCallers
+              << " function(s) calling under a lock, closures of "
+              << lockStats.closureFunctions << " function(s) ("
+              << lockStats.distinctClosures << " distinct"
+              << (lockStats.closureBounded ? ", bound reached" : "") << "), "
+              << lockStats.orderEdges << " order edge(s), "
+              << lockStats.lockGroups << " cyclic lock group(s), "
+              << lockStats.cycles << " cycle(s) (" << lockStats.gatedCycles
+              << " under a common lock), " << lockStats.selfDeadlocks
+              << " self-deadlock(s), " << lockStats.memberSelfEdges
+              << " member mutex(es) acquired while one is held (not "
+                 "reported)"
+              << (lockStats.boundedGroups
+                      ? ", " + std::to_string(lockStats.boundedGroups) +
+                            " group(s) hit the enumeration bound"
+                      : std::string())
+              << "\n";
       }
     }
 

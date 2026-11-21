@@ -71,6 +71,7 @@ add_executable(vycor_tests
   test_coverage_diag.cpp
   test_could_be_internal.cpp
   test_shared_global.cpp
+  test_lock_order.cpp
   test_dead_code.cpp
   test_deferred_edges.cpp
   test_allocation_edges.cpp
