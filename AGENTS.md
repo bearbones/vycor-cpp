@@ -295,7 +295,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 |---|---|
 | `AtomicFile.h/.cpp` | `writeFileAtomically` (unique temp, fsync, rename, directory fsync — every index, journal header, and shard write), `IndexWriteLock` (`flock` on `<index>.lock` for `index`), stale temp cleanup |
 | `CallGraph.h/.cpp` | Graph data structure: nodes (functions), edges (calls), class hierarchy, virtual overrides |
-| `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges |
+| `CallGraphBuilder.h/.cpp` | Two-phase AST visitor: Phase 1 indexes nodes/hierarchy, Phase 2 builds edges; after the code as written the edge visitor drains a worklist of the instantiation and compiler-written bodies the TU uses (see "Instantiation and compiler-written edges") |
+| `CompilerWritten.h` | The compiler-written code both bake visitors enumerate: which special members the compiler defines, the definition to read, the destructor a type's destruction runs, a destructor's subobjects, explicit instantiation definitions |
 | `CollapseFilter.h/.cpp` | Path-based edge collapse — skips internal edges in specified directories |
 | `ControlFlowIndex.h/.cpp` | Per-call-site record of enclosing try/catch scopes, conditional guards, and live RAII locals; resident (deduplicated records, set tables, hash maps) for bakes, `batch`, and ephemeral queries, or mapped over a v12 snapshot for the one-shot query verbs (`docs/control-flow-access.md`) |
 | `ControlFlowContextVisitor.cpp` | Phase 3 AST visitor: snapshots exception/guard context at each call site |
@@ -309,7 +310,7 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
 | `Effects.h/.cpp` | `EffectTable`: the functions that allocate, acquire a lock, do I/O, or throw, matched by qualified name with template arguments and inline namespaces dropped (`effectLookupName`); given the USR as well, a placement `operator new` (`isPlacementNewUsr`) is not an allocation. One table for every analysis that asks whether a call path has an effect; extended by the org config's `effects` key and `registry.addEffectFunctions` |
 | `CoverageProfile.h/.cpp` | `llvm-cov export` JSON read into flat per-file tables once: `countAt(file, line, col)` (the count of the last segment at or before a location), `functionAt` (the innermost function body, entry counts summed over records sharing a body), `fileFor` (path-suffix match, ambiguity is no match) |
-| `HotPath.h/.cpp` | `analyzeHotPaths`: roots (names, USRs, regexes, profile entry counts ≥ `minCount`), one label-setting widest-path search over flat arrays sized once by the interner (weight = smallest call-site or entry count; fewest calls among equals; canonical parent on ties: Proven first, then caller USR, site, kind; profile files bound two-sided), effect functions end a path, allow list skips; reached template instantiations with no recorded call counted as `templateLeaves` (#106); findings per effect call with a witness, `observed` / `unprofiled` / `latent`, canonical order (`docs/checks/hot-path-effects.md`) |
+| `HotPath.h/.cpp` | `analyzeHotPaths`: roots (names, USRs, regexes, profile entry counts ≥ `minCount`), one label-setting widest-path search over flat arrays sized once by the interner (weight = smallest call-site or entry count; fewest calls among equals; canonical parent on ties: Proven first, then caller USR, site, kind; profile files bound two-sided), effect functions end a path, allow list skips; reached template instantiations whose body no TU read counted as `templateLeaves`; findings per effect call with a witness, `observed` / `unprofiled` / `latent`, canonical order (`docs/checks/hot-path-effects.md`) |
 | `StaticInit.h/.cpp` | `StaticInitFacts`: the dynamic initializers and `__attribute__((constructor))` functions of each TU, with the functions each initializer calls directly. Collected by the bake's parse (`collectStaticInits`), merged across TUs by `canonicalize` (a root is its usr at its location). Held in memory only (`BakedIndexes::staticInits`), not in the snapshot |
 | `RetainUntilExit.h/.cpp` | `retainUntilExit(p)`: the one way to leak on purpose (a one-shot query's index, a crashed parse's TU-local indexes). The pointer is kept reachable from a global, so LeakSanitizer reports only unintended leaks |
 | `Utf8.h` | Index text: every string an index holds is valid UTF-8, converted from raw bytes by an exact escape (a byte outside a valid sequence becomes U+10FF00+byte; a literal U+10FF80..U+10FFFF is escaped byte by byte), so distinct raw strings stay distinct (`fromIndexText` inverts it). Producers (`CallGraph::add*`, `addCallSiteContext`, `ChannelIndex::addSite`) and `removeTUs` convert raw bytes; absorb, the loader and the diff copy text; lookups use `lookupText` (valid UTF-8 as is, else converted). The `StringInterner` stores bytes and never converts (check shares it, raw). The snapshot meta keeps TU paths raw (warm start stats them); its JSON sinks (`info`, `diff`, `index`'s summary, `--stats-json`) convert with `toIndexText`. Contract: `docs/result-contract.md` "Strings that are not UTF-8" |
@@ -339,12 +340,35 @@ overload, a class's own), at the expression. `Proven`, except a plain
 `delete p` through a virtual destructor, where the function is the
 dynamic type's and the edge is `Plausible` (`delete[]`, `::delete` and a
 destroying `operator delete` stay `Proven`). A type-dependent `new` in a
-template's definition resolves nothing and adds no edge. The global
+template's definition resolves nothing and adds no edge (each
+instantiation's body has its own). The global
 `operator new` / `operator delete` forms the compiler declares on its own
 have one node at that implicit declaration (file `<unknown>`, line 0),
 whether or not a TU includes `<new>` and even where a program defines a
 replacement; the forms only `<new>` declares (`nothrow`, placement) sit
 in that header.
+
+**Instantiation and compiler-written edges**: after the code as written,
+`CallGraphEdgeVisitor` drains a worklist (LIFO, each body once per TU) of
+the bodies the TU uses that no written definition holds: function and
+member instantiations (system headers included; `extern template` ones
+have no body), generic-lambda specializations, explicit instantiation
+definitions, and compiler-written special members (`CompilerWritten.h`,
+shared with `ReferenceVisitor`). Their calls are edges under the
+instantiation's own USR, with dependent calls resolved; the node is
+marked `hasBody` (snapshot node flag bit 4, OR-merged across TUs), which
+is how `templateLeaves` tells an instantiation that calls nothing from
+one no TU instantiated. Written definitions also get what the compiler
+adds to them: non-written member/base initializers, default member
+initializers, a defaulted body, member/base destruction after a
+destructor's body. Destructor edges: a local at its declaration, a
+temporary at its expression, `delete` (`VirtualDispatch` Plausible
+through a virtual destructor). Trivial members add nothing; a closure's
+special members are transparent (its captures' constructors and
+destructors at the use). Unevaluated operands (`sizeof`, `noexcept`,
+`decltype`, requires-expressions) add nothing. Nodes are located at the
+first declaration so every TU agrees. The control-flow index reads only
+the code as written: these edges have no context of their own.
 
 **Throw edges**: a `throw` expression is a Proven `DirectCall` edge to
 `__cxa_throw` (a bare `throw;` to `__cxa_rethrow`), whose node sits at

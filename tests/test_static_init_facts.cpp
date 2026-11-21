@@ -217,7 +217,6 @@ int Registry::slot = compute();
     CHECK(root->line == 6);
     CHECK(root->tus == std::vector<std::string>{b.paths[0]});
     CHECK(calleeNames(*root) == std::vector<std::string>{"compute"});
-    CHECK(root->callees[0].pattern.empty());
   }
 
   SECTION("a constructor call is a callee") {
@@ -482,8 +481,7 @@ int use = seeded<short>;
                      {9, "use"}});
 }
 
-TEST_CASE("an instantiated callee names the template definition it came "
-          "from",
+TEST_CASE("an instantiated callee holds its own calls in the graph",
           "[metrics][static-init]") {
   Baked b = bake({R"cpp(
 int compute();
@@ -494,12 +492,11 @@ int made = make<int>();
   REQUIRE(root != nullptr);
   REQUIRE(root->callees.size() == 1);
   const StaticInitCallee &callee = root->callees[0];
-  CHECK_FALSE(callee.pattern.empty());
-  CHECK(callee.pattern != callee.usr);
-  // The graph holds the calls written in the template under the
-  // definition's identity, and none under the instantiation's.
-  CHECK(b.ix.graph.calleesOf(callee.pattern).size() == 1);
-  CHECK(b.ix.graph.calleesOf(callee.usr).empty());
+  // The bake reads the instantiation's body: make<int> calls compute
+  // under its own identity.
+  const auto callees = b.ix.graph.calleesOf(callee.usr);
+  REQUIRE(callees.size() == 1);
+  CHECK(callees[0].calleeName == "compute");
 }
 
 TEST_CASE("an initializer in a header is one root listing every TU that "
@@ -537,7 +534,7 @@ TEST_CASE("canonicalize merges and orders whatever order TUs arrived in",
     root.file = file;
     root.line = line;
     root.tus = {tu};
-    root.callees.push_back({std::string("c:@F@") + callee, callee, ""});
+    root.callees.push_back({std::string("c:@F@") + callee, callee});
     return root;
   };
   StaticInitFacts forward;

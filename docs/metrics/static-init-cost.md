@@ -231,16 +231,16 @@ before `main` at all.
 
 ## Limitations
 
-- **Template instantiations are leaves in the graph.** The call graph
-  holds the calls written in a template's *definition* and none under
-  its instantiations. The metric bridges one level: an instantiation
-  the initializer calls directly continues through its template's
-  definition, where only calls that do not depend on a template
-  parameter are edges. Deeper instantiations, and dependent calls,
-  count as one function and end the walk. The practical consequence:
-  work inside standard containers and smart pointers is mostly unseen,
-  so `std::vector<int> v = build();` reports what `build` reaches, and
-  an allocation only if a listed function is reached by name.
+- **An instantiation no TU instantiated is a leaf.** The bake reads the
+  body of every template instantiation a TU uses, at every depth, so a
+  dependent call is an edge to the function it resolved to and the work
+  inside standard containers and smart pointers is reached:
+  `std::vector<int> v = build();` reports the vector's allocation
+  through `std::allocator`. What stays a leaf is an instantiation whose
+  body no indexed TU holds, chiefly one declared `extern template` (the
+  standard library does this for `std::string`'s members), and a
+  function a system header defines that is not a template, like any
+  prebuilt code.
 - **Lambdas are taken as called.** A lambda written in an initializer
   counts as called by it, whether it is invoked there or stored.
 - **A lambda in a header is one function per spelling of the header's
@@ -248,10 +248,6 @@ before `main` at all.
   under, so a header reached as `inc/h.hpp` from one TU and
   `../lib/inc/h.hpp` from another holds two lambdas, and an initializer
   in that header reaches both.
-- **Default member initializers are not edges.** `struct S { int *p =
-  new int(3); S(); };` runs the `new` in whichever constructor leaves
-  `p` out of its initializer list, and the call graph records it from
-  none of them (#120). The same holds for a plain call written there.
 - **Compiler-generated constructors are looked through** to the member
   and base constructors they run; they are not counted as functions.
   That covers defaulted constructors and constructors inherited with

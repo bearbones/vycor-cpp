@@ -151,7 +151,11 @@ target outward, in propagation order:
 2. The hop's control-flow context is joined on the exact (call site,
    caller USR), preferring the context recorded for the hop's callee
    (`ControlFlowIndex::contextForEdge`). No context indexed: `unknown`
-   ("no call-site context indexed for ..."), never "unprotected".
+   ("no call-site context indexed for ..."), never "unprotected". The
+   control-flow index reads the code as written: a call inside a
+   template instantiation's body, or one the compiler writes (a
+   destructor at a scope's end, a member's constructor in an implicit
+   one), has an edge but no context of its own.
 3. The caller's try scopes enclosing the call, innermost first. Within a
    scope the first handler in source order that matches decides: a
    catch-all matches anything; an empty query type matches any handler;

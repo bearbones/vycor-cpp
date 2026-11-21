@@ -35,10 +35,6 @@ namespace vycor {
 namespace {
 
 constexpr uint32_t kNone = std::numeric_limits<uint32_t>::max();
-// Set on a parent link when the node stands in for its parent (a template
-// definition walked on behalf of an instantiation): not a function of its
-// own, so neither counted nor shown in a witness chain.
-constexpr uint32_t kStandInBit = 0x80000000u;
 // Parent link of a constructor function's own node: where the walk starts,
 // which is the measured entity rather than something it reaches.
 constexpr uint32_t kSelf = kNone - 1;
@@ -55,7 +51,6 @@ public:
         graphIds_(static_cast<uint32_t>(graph.interner().size())) {
     bindRoots(facts);
     const size_t nodes = graphIds_ + extraNames_.size();
-    assert(nodes < kStandInBit && "node ids must leave the stand-in bit free");
     adjBegin_.assign(graphIds_, kNone);
     adjCount_.assign(graphIds_, 0);
     effect_.assign(nodes, 0);
@@ -101,11 +96,6 @@ private:
     bool constructorFunction = false;
   };
 
-  struct Seed {
-    uint32_t node = kNone;
-    uint32_t pattern = kNone; // template definition to walk for `node`
-  };
-
   struct Reach {
     int64_t functions = 0;
     // The first function of each effect kind in walk order (breadth
@@ -140,15 +130,8 @@ private:
           if (*id < graphIds_)
             root.self = *id;
       }
-      for (const StaticInitCallee &callee : fact.callees) {
-        Seed seed;
-        seed.node = nodeFor(callee.usr, callee.display);
-        if (!callee.pattern.empty())
-          if (auto id = graph_.interner().find(callee.pattern))
-            if (*id < graphIds_ && *id != seed.node)
-              seed.pattern = *id;
-        seeds_.push_back(seed);
-      }
+      for (const StaticInitCallee &callee : fact.callees)
+        seeds_.push_back(nodeFor(callee.usr, callee.display));
       root.seedEnd = static_cast<uint32_t>(seeds_.size());
       roots_.push_back(root);
     }
@@ -228,12 +211,8 @@ private:
       const Root &root = roots_[member];
       if (root.self != kNone)
         walkThrough(root.self, kSelf);
-      for (uint32_t s = root.seedBegin; s < root.seedEnd; ++s) {
-        const Seed &seed = seeds_[s];
-        reachFunction(seed.node, kNone, reach);
-        if (seed.pattern != kNone)
-          walkThrough(seed.pattern, seed.node | kStandInBit);
-      }
+      for (uint32_t s = root.seedBegin; s < root.seedEnd; ++s)
+        reachFunction(seeds_[s], kNone, reach);
     }
     for (size_t head = 0; head < queue_.size(); ++head) {
       const uint32_t node = queue_[head];
@@ -256,10 +235,8 @@ private:
       const uint32_t link = parent_[at];
       if (link == kSelf)
         break;
-      const bool standIn = link != kNone && (link & kStandInBit);
-      if (!standIn)
-        chain_.push_back(at);
-      at = link == kNone ? kNone : (link & ~kStandInBit);
+      chain_.push_back(at);
+      at = link;
     }
     llvm::json::Array out;
     for (auto it = chain_.rbegin(); it != chain_.rend(); ++it)
@@ -322,7 +299,7 @@ private:
   const uint32_t graphIds_;
 
   std::vector<Root> roots_;
-  std::vector<Seed> seeds_;
+  std::vector<uint32_t> seeds_; // node of each callee an initializer calls
   llvm::StringMap<uint32_t> extraByUsr_;
   std::vector<std::string> extraNames_;
   std::vector<std::string> extraUsrs_;

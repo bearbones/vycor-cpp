@@ -633,29 +633,33 @@ TEST_CASE("A virtual target the profile never entered is latent",
   CHECK(report.findings[1].confidence == Confidence::Plausible);
 }
 
-TEST_CASE("Reached template instantiations without calls are counted",
+TEST_CASE("Reached template instantiations without a body are counted",
           "[hot-path][templates]") {
-  // The graph holds Box::put's calls under the template, not under
-  // Box<int>::put (#106): the lock is not seen, and the report says that
-  // two reached functions hide their calls. A function whose parameter is
-  // a specialization, a local class's member inside one, and operator<
-  // are not instantiations.
+  // The bake reads Box<int>::put's body, so its lock is found, and
+  // twice<int> is read and calls nothing. Store<int>::put and scale<int>
+  // are defined in no TU of the bake: the report says that two reached
+  // functions hide their calls. A function whose parameter is a
+  // specialization, a local class's member inside one, and operator< are
+  // not instantiations.
   CallGraph graph;
   build(graph, R"(std::mutex mu;
 template <class T> struct Box { void put(T) { mu.lock(); } };
+template <class T> struct Store { void put(T); };
 template <class T> T twice(T x) { return x + x; }
+template <class T> T scale(T x);
 struct A {};
 bool operator<(A, A);
 void takes(Box<int> &) {}
 int process(Box<int> &) { struct Local { static int f() { return 3; } };
   return Local::f(); }
 void hot() { Box<int> b; b.put(1); twice(2); takes(b); A x, y; (void)(x < y);
-  process(b); }
+  process(b); Store<int> s; s.put(1); scale(3); }
 )");
   HotPathConfig config;
   config.roots = {"hot"};
   HotPathReport report = analyze(graph, config);
-  CHECK(report.findings.empty());
+  REQUIRE(report.findings.size() == 1);
+  CHECK(report.findings[0].effect == EffectKind::Lock);
   CHECK(report.templateLeaves == 2);
 
   ControlFlowIndex cfIndex;
@@ -675,7 +679,7 @@ void hot() { Box<int> b; b.put(1); twice(2); takes(b); A x, y; (void)(x < y);
   REQUIRE(out);
   CHECK(out->getInteger("templateLeaves").value_or(-1) == 2);
   CHECK(out->getBoolean("exhaustive") == std::optional<bool>(false));
-  CHECK(out->getString("verdict").value_or("") == "unknown");
+  CHECK(out->getString("verdict").value_or("") == "effects");
 }
 
 TEST_CASE("Findings do not depend on the order TUs are read in",

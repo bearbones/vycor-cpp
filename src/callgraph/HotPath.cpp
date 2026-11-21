@@ -486,9 +486,17 @@ private:
           setParent(callee, edge);
         }
       }
-      if (refs_.empty() && isInstantiation(node))
+      if (refs_.empty() && isInstantiation(node) && !bodyRead(node)) {
         ++out_.templateLeaves;
+      }
     }
+  }
+
+  // Whether some TU of the bake read the function's body: an
+  // instantiation with no call there calls nothing.
+  bool bodyRead(Id id) const {
+    const CallGraphNode *node = graph_.findNodeById(id);
+    return node && node->hasBody;
   }
 
   // Whether a function is a template instantiation: a member of a class

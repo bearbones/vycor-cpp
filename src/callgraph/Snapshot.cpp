@@ -487,7 +487,8 @@ bool SnapshotIO::save(const std::string &path, const CallGraph &graph,
       putU32(data, displayId ? *displayId : nameId);
       putLenStr(data, node.file);
       putU32(data, node.line);
-      uint8_t flags = (node.isEntryPoint ? 1 : 0) | (node.isVirtual ? 2 : 0);
+      uint8_t flags = (node.isEntryPoint ? 1 : 0) | (node.isVirtual ? 2 : 0) |
+                      (node.hasBody ? 4 : 0);
       putU8(data, flags);
       putLenStr(data, node.enclosingClass);
       auto cit = graph.nodeContributors_.find(nameId);
@@ -1006,6 +1007,7 @@ std::optional<SnapshotData> SnapshotIO::load(const std::string &path,
         uint8_t flags = r.u8();
         node.isEntryPoint = (flags & 1) != 0;
         node.isVirtual = (flags & 2) != 0;
+        node.hasBody = (flags & 4) != 0;
         node.enclosingClass = r.text();
         uint32_t contribCount = r.count();
         if (!r.ok)

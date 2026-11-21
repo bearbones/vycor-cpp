@@ -141,29 +141,20 @@ may be in one of them. A run on a subset of a build's TUs is not
 detected: a function defined only in an omitted TU is an `unknown`
 callee, and a boundary whose only throw is there is missed.
 
-### The call-graph gaps
+### Relation to the call graph
 
-The megascope call graph has three known gaps that matter for exception
-analysis. This check does not read the call graph, so they apply
-differently:
-
-- **Calls under template instantiations (#106).** The call graph has no
-  edges for what an instantiation calls. The facts are collected from
-  the instantiated bodies themselves (folded into the function that
-  instantiates them), so a throw inside a template is found, and calls
-  that depend on a template parameter resolve to what that
-  instantiation calls. Not affected.
-- **Qualified calls to virtual methods (#112).** The call graph records
-  `Base::run()` as virtual dispatch. The fact collector treats a
-  qualified call as the direct call it is, and devirtualizes where the
-  object's dynamic type is known; only a real dispatch is a virtual call
-  (`unknown` when nothing else is found). Not affected.
-- **Implicit destructor calls (#113).** The call graph has no edge for a
-  destructor the compiler calls. The fact walk does: locals and
-  temporaries going out of scope, members and bases from a destructor,
-  `delete`. A destructor not declared `noexcept(false)` is non-throwing
-  by default and stops the search, as in the language; one that can
-  throw is on the path like any call. Not affected.
+This check does not read the megascope call graph; its facts come from
+the bodies themselves. Calls inside template instantiations are
+collected from the instantiated bodies (folded into the function that
+instantiates them), so a call that depends on a template parameter
+resolves to what that instantiation calls. A qualified call
+(`Base::run()`) is the direct call it is, and a virtual call is
+devirtualized where the object's dynamic type is known. Destructors the
+compiler calls are on the path: locals and temporaries going out of
+scope, members and bases from a destructor, `delete`. A destructor not
+declared `noexcept(false)` is non-throwing by default and stops the
+search, as in the language; one that can throw is on the path like any
+call.
 
 ## Other limits
 

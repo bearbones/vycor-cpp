@@ -70,6 +70,29 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
   // wasn't yet constructed. Re-checked when new classes are constructed.
   std::vector<SId> deferredVirtualTargets;
 
+  // A derived class's constructor constructing its base: the object is
+  // the derived class's, so the base's own overrides are no dispatch
+  // target on its account.
+  auto constructsBaseSubobject = [&](SId callerId,
+                                     const std::string &calleeClass) {
+    const CallGraphNode *caller = graph_.findNodeById(callerId);
+    if (!caller || caller->enclosingClass.empty() ||
+        caller->enclosingClass == calleeClass)
+      return false;
+    const llvm::StringRef cls = caller->enclosingClass;
+    const llvm::StringRef name = caller->qualifiedName;
+    const size_t sep = cls.rfind("::");
+    const llvm::StringRef simple =
+        sep == llvm::StringRef::npos ? cls : cls.substr(sep + 2);
+    if (!name.starts_with(cls) || !name.ends_with(simple) ||
+        name.size() != cls.size() + 2 + simple.size())
+      return false; // not one of the caller class's constructors
+    for (const std::string &derived : graph_.getDerivedClasses(calleeClass))
+      if (derived == caller->enclosingClass)
+        return true;
+    return false;
+  };
+
   auto isTargetClassConstructed = [&](SId calleeId) -> bool {
     const std::string &calleeUsr = interner.resolve(calleeId);
     for (const auto &cls : graph_.getClassesForImpl(calleeUsr)) {
@@ -109,7 +132,8 @@ void DeadCodeAnalyzer::bfs(bool includeVirtualPlausible,
         if (edge.kind == EdgeKind::ConstructorCall) {
           const auto *calleeNode =
               graph_.findNode(interner.resolve(edge.callee));
-          if (calleeNode && !calleeNode->enclosingClass.empty()) {
+          if (calleeNode && !calleeNode->enclosingClass.empty() &&
+              !constructsBaseSubobject(current, calleeNode->enclosingClass)) {
             if (constructedClasses.insert(calleeNode->enclosingClass).second)
               changed = true;
           }

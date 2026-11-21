@@ -261,9 +261,9 @@ Payload:
 | `profile` | `null`, or `{path, files, functions, executedFunctions, join}`. |
 | `allow` | `functions` (entries), `calls` (calls skipped). |
 | `reachedFunctions` | Functions visited from the roots, roots included. |
-| `templateLeaves` | Reached template instantiations with no recorded call: functions whose calls the graph does not hold (#106, below). |
+| `templateLeaves` | Reached template instantiations whose body no indexed TU holds (an `extern template` member nothing instantiated, prebuilt code): their calls are unknown, not absent (below). An instantiation whose body was read and calls nothing is no leaf. |
 | `collapsed` | True when the index was baked with `--collapse-paths`: the edges inside those paths are missing, so the search cannot see everything the program reaches. |
-| `exhaustive` | True when `templateLeaves` is 0 and the index is not `collapsed`. The search has no depth or fan-out limit; what it cannot see is inside instantiations. |
+| `exhaustive` | True when `templateLeaves` is 0 and the index is not `collapsed`. The search has no depth or fan-out limit; what it cannot see is inside instantiations without a body. |
 | `verdict` | `effects`; `clean` when there were roots, every configured root matched, no finding, an exhaustive search (no template leaf, not `collapsed`), and the index states complete coverage of what was requested; otherwise `unknown`. |
 
 Usage errors (exit 2): no root from any source; `min_count` without a
@@ -276,37 +276,35 @@ run with no finding exits 1.
 The search visits everything reachable in the call graph, so what it
 misses is what the graph misses:
 
-- **Calls under template instantiations** (#106). The graph records the
-  calls written in a template's body under the template, not under its
-  instantiations, and calls that depend on a template parameter not at
-  all, so a forward walk stops at the first instantiation it meets. An
-  allocation inside a project's own templated helper or container,
-  called from a hot root, is missed. A call of a listed function is
-  still found (`std::make_unique<T>(...)` is itself the effect). The
-  tool counts the instantiations it reached that have no recorded call
+- **Instantiations without a body.** The graph holds each template
+  instantiation's own calls, the ones that depend on a template
+  parameter resolved, standard-library instantiations included: a
+  `std::vector::push_back` that grows its buffer reaches
+  `__builtin_operator_new` (libstdc++) or `operator new` through the
+  container's allocator, so container growth is an allocation without
+  listing the container's operations. What stays a leaf is an
+  instantiation no indexed TU instantiated (an `extern template`
+  member whose body is not inline, such as libstdc++'s
+  `std::basic_string<char>` out-of-line members): the tool counts those
   (`templateLeaves`) and does not answer `clean` while there are any;
-  the check prints the count as a warning. In template-heavy code this
-  is most of what a root reaches (vycor-cpp's own `main` reaches 4,172
-  functions, 2,401 of them such leaves, mostly standard-library
-  instantiations), and a root that is itself an instantiation reaches
-  nothing: name the non-template functions it calls instead.
-- **Qualified calls to a virtual function** (#112) are recorded as
-  virtual dispatch, so `Base::f()` written explicitly also reaches every
-  override of `f`: possible false findings, never missed ones. With a
-  profile, an override that never ran is latent.
-- **Implicit destructor calls** (#113) have no edge: a destructor that
-  frees or locks, run at the end of a scope, is not reached (`delete p`
-  is, through its `operator delete` edge).
-- **Default member initializers** (#120): a call or `new` written in a
-  member's default initializer has no edge from the constructors that
-  run it.
-- **Standard-library internals.** Edges inside system headers are not
-  recorded, so the standard library's own functions are leaves: a
-  `std::vector::push_back` that grows its buffer, `std::string`
-  concatenation, or `std::cout <<` is not an effect unless the function
-  called is in the effect table. Add the container operations your
-  policy bans (`std::vector::push_back`, `std::vector::resize`, ...) to
-  `effects.allocation`.
+  the check prints the count as a warning. vycor-cpp's own `main`
+  reaches 36,791 functions, 60 of them such leaves.
+- **Non-template functions of a system header** are leaves, whether
+  the header defines them inline or the prebuilt library does
+  (`std::__throw_length_error`, `std::thread::_M_start_thread`): a call
+  of one is still found when it is in the effect table. They are not
+  counted in `templateLeaves`.
+- **Effects inside system headers are unprofiled.** An effect reached
+  through the standard library's own code (container growth, a
+  `throw;` in a container's cleanup handler) has its call site in a
+  system header, which the program's coverage profile does not cover:
+  with a profile such findings are `unprofiled`, never `observed` or
+  `latent`, whatever the hot caller's count.
+- **Rethrows in standard-library handlers.** A container operation's
+  `catch (...) { ...; throw; }` cleanup is a `throw` effect
+  (`__cxa_rethrow`) on every path through it, though it runs only when
+  the operation already threw. Put the container functions on the allow
+  list, or filter `effects`, when that is noise.
 - **Function pointers and callbacks** follow the graph's Plausible-edge
   semantics; an effect reached only through an unresolved pointer is
   missed.

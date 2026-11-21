@@ -597,12 +597,12 @@ TEST_CASE("static-init-cost measures each initializer of the fixture",
     CHECK(chain(*onLoad, "io") == Chain{"reg::announce", "puts"});
   }
 
-  SECTION("an instantiated callee continues through its template's "
-          "definition") {
+  SECTION("an instantiated callee is walked through its own calls") {
     const llvm::json::Object *codec = recordNamed(payload, "codecSlot");
     REQUIRE(codec != nullptr);
-    // registerType<Codec> itself, plus everything registerPlugin reaches.
-    CHECK(codec->getInteger("value") == 7);
+    // registerType<Codec> itself, the Codec::name its dependent call
+    // resolves to, and everything registerPlugin reaches.
+    CHECK(codec->getInteger("value") == 8);
     CHECK(chain(*codec, "lock") == Chain{"reg::registerType",
                                          "reg::registerPlugin",
                                          "pthread_mutex_lock"});
@@ -631,7 +631,7 @@ TEST_CASE("static-init-cost measures each initializer of the fixture",
   SECTION("largest reach first, ties by location") {
     std::vector<std::string> order = names(payload);
     CHECK(order == std::vector<std::string>{
-                       "codecSlot",       // 7
+                       "codecSlot",       // 8
                        "reg::coreSlot",   // 6, core/registry.cpp
                        "reg::headerSlot", // 6, core/registry.hpp
                        "greeted",         // 3, plugins.cpp:21
@@ -653,9 +653,9 @@ TEST_CASE("static-init-cost measures each initializer of the fixture",
     CHECK(summary.getInteger("records") == 8);
     const llvm::json::Object *overall = summary.getObject("overall");
     REQUIRE(overall != nullptr);
-    // Twelve distinct functions, though the per-initializer reaches sum
-    // to 29: most initializers reach the same registry code.
-    CHECK(overall->getInteger("value") == 12);
+    // Thirteen distinct functions, though the per-initializer reaches sum
+    // to 30: most initializers reach the same registry code.
+    CHECK(overall->getInteger("value") == 13);
     CHECK(component(*overall, "dynamicInitializers") == 7);
     CHECK(component(*overall, "constructorFunctions") == 1);
     CHECK(component(*overall, "entities") == 8);
@@ -678,7 +678,7 @@ TEST_CASE("static-init-cost rolls up by TU and directory and target",
                                    fixture("plugins/codecs.cpp"),
                                    fixture("core/registry.cpp")});
     CHECK(valueOf(payload, "plugins/plugins.cpp") == 11);
-    CHECK(valueOf(payload, "plugins/codecs.cpp") == 7);
+    CHECK(valueOf(payload, "plugins/codecs.cpp") == 8);
     CHECK(valueOf(payload, "core/registry.cpp") == 6);
 
     const llvm::json::Object *plugins =
@@ -697,14 +697,14 @@ TEST_CASE("static-init-cost rolls up by TU and directory and target",
     llvm::json::Object payload = surface.run({{"rollup", "file"}});
     CHECK(payload.getInteger("total") == 4);
     CHECK(valueOf(payload, "core/registry.hpp") == 6);
-    CHECK(valueOf(payload, "plugins/codecs.cpp") == 7);
+    CHECK(valueOf(payload, "plugins/codecs.cpp") == 8);
   }
 
   SECTION("directory") {
     llvm::json::Object payload = surface.run({{"rollup", "directory"}});
     CHECK(names(payload) ==
           std::vector<std::string>{fixture("plugins"), fixture("core")});
-    CHECK(valueOf(payload, "examples/static_init/plugins") == 12);
+    CHECK(valueOf(payload, "examples/static_init/plugins") == 13);
     CHECK(valueOf(payload, "examples/static_init/core") == 6);
   }
 
@@ -713,7 +713,7 @@ TEST_CASE("static-init-cost rolls up by TU and directory and target",
         {{"rollup", "target"}, {"target_map", fixture("targets.json")}});
     CHECK(payload.getString("status") == "ok");
     CHECK(names(payload) == std::vector<std::string>{"plugins", "core"});
-    CHECK(valueOf(payload, "plugins") == 12);
+    CHECK(valueOf(payload, "plugins") == 13);
     CHECK(valueOf(payload, "core") == 6);
     const llvm::json::Object *core = recordNamed(payload, "core");
     CHECK(core->getObject("entity")->getString("kind") == "target");
@@ -810,6 +810,73 @@ Name names[] = {"a", "b"};
     CHECK(parts->getInteger("dynamicInitializers") == 3);
     CHECK(parts->getInteger("constructorFunctions") == 2);
   }
+}
+
+TEST_CASE("static-init-cost reaches an allocation through instantiations "
+          "and a dependent call",
+          "[metrics][static-init]") {
+  // The allocation is only reachable through two template levels and the
+  // dependent call `T::make()`: the template definitions call nothing
+  // that allocates, the instantiations do.
+  std::string path;
+  {
+    llvm::SmallString<128> tmp;
+    int fd = -1;
+    REQUIRE_FALSE(
+        llvm::sys::fs::createTemporaryFile("vycor_metrics", "cpp", fd, tmp));
+    ::close(fd);
+    path = std::string(tmp.str());
+    std::ofstream out(path);
+    out << R"cpp(
+struct Payload { static int *make() { return new int(7); } };
+template <class T> int *inner() { return T::make(); }
+template <class T> int *outer() { return inner<T>(); }
+int *registered = outer<Payload>();
+)cpp";
+  }
+  BakedIndexes ix = bakeFiles({path});
+  llvm::sys::fs::remove(path);
+  Surface surface(ix);
+  llvm::json::Object payload = surface.run();
+  REQUIRE(payload.getString("status") == "ok");
+  const llvm::json::Object *registered = recordNamed(payload, "registered");
+  REQUIRE(registered != nullptr);
+  // outer<Payload>, inner<Payload>, Payload::make and operator new.
+  CHECK(registered->getInteger("value") == 4);
+  CHECK(component(*registered, "allocation") == 1);
+  CHECK(chain(*registered, "allocation") ==
+        std::vector<std::string>{"outer", "inner", "Payload::make",
+                                 "operator new"});
+}
+
+TEST_CASE("static-init-cost reaches an allocation in a default member "
+          "initializer",
+          "[metrics][static-init]") {
+  std::string path;
+  {
+    llvm::SmallString<128> tmp;
+    int fd = -1;
+    REQUIRE_FALSE(
+        llvm::sys::fs::createTemporaryFile("vycor_metrics", "cpp", fd, tmp));
+    ::close(fd);
+    path = std::string(tmp.str());
+    std::ofstream out(path);
+    out << R"cpp(
+struct Dmi { int *p = new int(3); Dmi(); };
+Dmi::Dmi() {}
+Dmi dmi;
+)cpp";
+  }
+  BakedIndexes ix = bakeFiles({path});
+  llvm::sys::fs::remove(path);
+  Surface surface(ix);
+  llvm::json::Object payload = surface.run();
+  REQUIRE(payload.getString("status") == "ok");
+  const llvm::json::Object *dmi = recordNamed(payload, "dmi");
+  REQUIRE(dmi != nullptr);
+  CHECK(component(*dmi, "allocation") == 1);
+  CHECK(chain(*dmi, "allocation") ==
+        std::vector<std::string>{"Dmi::Dmi", "operator new"});
 }
 
 TEST_CASE("static-init-cost sees a new-expression at any depth and tells "
@@ -1215,7 +1282,7 @@ TEST_CASE("metrics verb: an in-memory bake answers and a saved index is "
     REQUIRE(scope != nullptr);
     CHECK(scope->getString("freshness") == "baked");
     CHECK(scope->getBoolean("complete") == true);
-    CHECK(valueOf(payload, "codecSlot") == 7);
+    CHECK(valueOf(payload, "codecSlot") == 8);
   }
 
   SECTION("ndjson: a summary line then one record per line") {
@@ -1253,7 +1320,7 @@ TEST_CASE("metrics verb: an in-memory bake answers and a saved index is "
     INFO(r.out << r.err);
     REQUIRE(r.code == 0);
     llvm::json::Object payload = parseObject(r.out);
-    CHECK(valueOf(payload, "plugins") == 12);
+    CHECK(valueOf(payload, "plugins") == 13);
     CHECK(valueOf(payload, "core") == 6);
   }
 

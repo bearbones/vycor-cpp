@@ -52,10 +52,6 @@ struct StaticInitCallee {
   /// Graph identity (the call graph's node key) and display name.
   std::string usr;
   std::string display;
-  /// For a callee instantiated from a template, the identity of the
-  /// template definition it was instantiated from; empty otherwise. The
-  /// graph holds the definition's calls, not the instantiation's.
-  std::string pattern;
 };
 
 struct StaticInitRoot {

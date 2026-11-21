@@ -1,5 +1,5 @@
 # megascope metrics --rollup tu --source {static_init}/core/registry.cpp --source {static_init}/plugins/plugins.cpp --source {static_init}/plugins/codecs.cpp --threads 1 --format tsv -- -std=c++17 -> exit 0
 components	entity	metric	unit	value
 {"allocation":2,"constructorFunctions":0,"directCalls":2,"dynamicInitializers":2,"entities":2,"io":0,"lock":2}	{"file":"{static_init}/core/registry.cpp","kind":"tu","line":0,"name":"{static_init}/core/registry.cpp","usr":""}	static-init-cost	functions	6
-{"allocation":2,"constructorFunctions":0,"directCalls":2,"dynamicInitializers":2,"entities":2,"io":0,"lock":2}	{"file":"{static_init}/plugins/codecs.cpp","kind":"tu","line":0,"name":"{static_init}/plugins/codecs.cpp","usr":""}	static-init-cost	functions	7
+{"allocation":2,"constructorFunctions":0,"directCalls":2,"dynamicInitializers":2,"entities":2,"io":0,"lock":2}	{"file":"{static_init}/plugins/codecs.cpp","kind":"tu","line":0,"name":"{static_init}/plugins/codecs.cpp","usr":""}	static-init-cost	functions	8
 {"allocation":2,"constructorFunctions":1,"directCalls":6,"dynamicInitializers":5,"entities":6,"io":3,"lock":1}	{"file":"{static_init}/plugins/plugins.cpp","kind":"tu","line":0,"name":"{static_init}/plugins/plugins.cpp","usr":""}	static-init-cost	functions	11

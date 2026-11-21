@@ -1500,8 +1500,8 @@ int main(int argc, const char **argv) {
         }
         if (hotReport.templateLeaves != 0)
           llvm::errs() << "check: hot-path-effects: " << hotReport.templateLeaves
-                       << " reached template instantiation(s) have no recorded "
-                          "calls; effects inside them are not seen "
+                       << " reached template instantiation(s) have no body in "
+                          "the indexed TUs; effects inside them are not seen "
                           "(docs/checks/hot-path-effects.md, Limitations)\n";
         vycor::appendHotPathDiagnostics(
             graph, hotReport,

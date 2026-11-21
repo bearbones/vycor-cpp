@@ -1385,6 +1385,37 @@ void use() { both<S>(); both<S2>(); guarded<S2>(); }
   CHECK(lockSets(ix, "guarded", "Glob::count") == "{m}");
 }
 
+TEST_CASE("shared-global: the search walks through an instantiation's "
+          "calls",
+          "[shared-global]") {
+  Project p;
+  p.tu("tu.cpp", R"cpp(
+#include <mutex>
+#include <thread>
+int inBody = 0, beyond = 0;
+void touch() { ++beyond; }
+template <class T> void bump() { ++inBody; touch(); }
+void t1() { bump<int>(); }
+void t2() { ++inBody; ++beyond; }
+int main() {
+  std::thread x(t1), y(t2);
+  x.join();
+  y.join();
+}
+)cpp");
+  auto baked = p.bake();
+  auto diags = runCheck(baked);
+  INFO(allMessages(diags));
+  std::vector<std::string> raced;
+  for (const Diagnostic &d : diags)
+    if (d.kind == Diagnostic::SharedGlobal_Race)
+      raced.push_back(d.entities.at(0));
+  // touch is reached through bump<int>, under an unknown lock against
+  // none. The access in the instantiation's body is the pattern's fact,
+  // not found at the instantiation.
+  CHECK(raced == std::vector<std::string>{"c:@beyond"});
+}
+
 TEST_CASE("shared-global: an implicit constructor's accesses take its use's "
           "locks",
           "[shared-global]") {

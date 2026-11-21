@@ -83,10 +83,18 @@ struct CallGraphNode {
   bool isVirtual = false;
   std::string enclosingClass;
   // Canonical identity (Clang USR, or a vycor-lambda:/vycor-synth: fallback;
-  // see docs/design-f8-usr-identity.md). Kept LAST so pre-USR aggregate
-  // initializers stay valid; addNode falls back to qualifiedName when empty,
-  // which keeps hand-built (name-only) graphs working unchanged.
+  // see docs/design-f8-usr-identity.md). Kept after the fields above so
+  // pre-USR aggregate initializers stay valid; addNode falls back to
+  // qualifiedName when empty, which keeps hand-built (name-only) graphs
+  // working unchanged.
   std::string usr;
+  // Some TU of the bake read a definition of this function: a written
+  // body, a template instantiation's body, or the code the compiler writes
+  // for an implicit special member. False for a function the indexed TUs
+  // only declare (prebuilt code, an `extern template` member whose body
+  // was not instantiated): its calls are unknown, not absent. Last, like
+  // usr. Merged by OR across TUs.
+  bool hasBody = false;
 };
 
 struct CallGraphEdge {
@@ -206,6 +214,10 @@ public:
   // string-interner re-hashing.
   [[nodiscard]] const std::string &
   displayNameOf(StringInterner::Id usrId) const;
+
+  // The node registered under a USR id, or null. O(1).
+  [[nodiscard]] const CallGraphNode *
+  findNodeById(StringInterner::Id usrId) const;
 
   [[nodiscard]] size_t nodeCount() const noexcept;
   [[nodiscard]] size_t edgeCount() const noexcept;

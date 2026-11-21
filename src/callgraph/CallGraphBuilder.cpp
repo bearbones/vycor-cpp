@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/callgraph/CallGraphBuilder.h"
+#include "vycor/callgraph/CompilerWritten.h"
 #include "vycor/callgraph/CrashGuard.h"
 #include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/compat/CallLoc.h"
@@ -128,6 +129,32 @@ static Ident lambdaIdent(std::string name) {
 Ident lambdaClosureIdent(clang::SourceManager &sm, clang::SourceLocation loc,
                          const std::string &enclosing) {
   return lambdaIdent(lambdaQualifiedName(sm, loc, enclosing));
+}
+
+// The function a lambda's closure is declared in: the nearest enclosing
+// function that is not itself a lambda's call operator, through any local
+// class, or null at namespace or class scope. The function a traversal as
+// written has on its stack when it meets the lambda, for a closure met
+// without that stack (a call to a lambda, an instantiated body).
+static const clang::FunctionDecl *
+lambdaEnclosingFunction(const clang::CXXRecordDecl *closure) {
+  for (const clang::DeclContext *dc = closure->getDeclContext(); dc;
+       dc = dc->getParent()) {
+    const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(dc);
+    if (!fn)
+      continue;
+    if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
+      if (method->getParent()->isLambda())
+        continue;
+    return fn;
+  }
+  return nullptr;
+}
+
+static bool isLambdaCallOperator(const clang::FunctionDecl *fn) {
+  const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
+  return method && method->getParent()->isLambda() &&
+         method->getOverloadedOperator() == clang::OO_Call;
 }
 
 // Unwrap implicit/temporary/functional-cast wrappers and ask: does this
@@ -300,6 +327,12 @@ bool CallGraphIndexerVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   node.qualifiedName = id.display;
   node.file = getFilePath(decl->getLocation());
   node.line = sm_.getSpellingLineNumber(decl->getLocation());
+  // A body the edge visitor reads: written outside a system header (whose
+  // own code it skips). An instantiation's or implicit member's body is
+  // marked where the edge visitor reads it.
+  const clang::FunctionDecl *def = nullptr;
+  node.hasBody = decl->isDefined(def) && !def->isDeleted() &&
+                 !sm_.isInSystemHeader(def->getLocation());
 
   if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl)) {
     node.isVirtual = method->isVirtual();
@@ -425,6 +458,7 @@ bool CallGraphIndexerVisitor::VisitLambdaExpr(clang::LambdaExpr *expr) {
   node.file = getFilePath(expr->getBeginLoc());
   node.line = sm_.getSpellingLineNumber(expr->getBeginLoc());
   node.enclosingClass = enclosing;
+  node.hasBody = !sm_.isInSystemHeader(expr->getBeginLoc());
   graph_.addNode(std::move(node), tuPath_);
   return true;
 }
@@ -491,19 +525,14 @@ Ident CallGraphEdgeVisitor::getCurrentFunction() const {
   return usrs_.identFor(top);
 }
 
-static bool isAllocationOperator(const clang::FunctionDecl *decl) {
-  switch (decl->getOverloadedOperator()) {
-  case clang::OO_New:
-  case clang::OO_Array_New:
-  case clang::OO_Delete:
-  case clang::OO_Array_Delete:
-    return true;
-  default:
-    return false;
-  }
-}
-
 Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
+  // A call to a lambda reaches the body read under the lambda's identity:
+  // as written, or (a generic lambda's specialization, a closure in an
+  // instantiated body) where drainBodies reads it.
+  if (isLambdaCallOperator(decl)) {
+    scheduleBody(decl);
+    return lambdaIdentOf(llvm::cast<clang::CXXMethodDecl>(decl)->getParent());
+  }
   Ident id = usrs_.identFor(decl);
   // The indexer never visits implicit members, and RecursiveASTVisitor
   // does not walk template specializations (implicit instantiations or
@@ -519,26 +548,326 @@ Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
   // (`<unknown>`, line 0), so it reads the same in a TU that includes
   // <new> and one that does not. Only these operators: a C library builtin
   // is implicit in its first declaration too, and stays without a node.
-  const clang::FunctionDecl *where = decl;
-  if (isAllocationOperator(decl) && decl->getFirstDecl()->isImplicit())
-    where = decl->getFirstDecl();
-  if ((where->isImplicit() ||
-       decl->getTemplateSpecializationKind() != clang::TSK_Undeclared) &&
-      auxNodes_.insert(decl).second) {
-    CallGraphNode node;
-    node.usr = id.usr;
-    node.qualifiedName = id.display;
+  if (auxNodes_.insert(decl).second) {
+    CallGraphNode node = calleeNode(decl, id);
+    if (!node.usr.empty())
+      graph_.addNode(std::move(node), tuPath_);
+  }
+  scheduleBody(decl);
+  return id;
+}
+
+CallGraphNode CallGraphEdgeVisitor::calleeNode(const clang::FunctionDecl *decl,
+                                               const Ident &id) {
+  CallGraphNode node;
+  // Located at the first declaration, as the indexer locates a function:
+  // which redeclaration a call resolved to depends on where in the TU it
+  // was resolved, and every TU must give the node one location.
+  const clang::FunctionDecl *where = decl->getFirstDecl();
+  if (!where->isImplicit() &&
+      decl->getTemplateSpecializationKind() == clang::TSK_Undeclared)
+    return node; // the indexer's: usr left empty
+  node.usr = id.usr;
+  node.qualifiedName = id.display;
+  if (where->isImplicit() && decl->getBuiltinID() != 0) {
+    // Declared by the compiler where the TU first names it.
+    node.file = "<unknown>";
+  } else {
     node.file = getFilePath(where->getLocation());
     node.line = sm_.getSpellingLineNumber(where->getLocation());
-    if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl)) {
-      node.isVirtual = method->isVirtual();
-      if (auto *parent =
-              llvm::dyn_cast<clang::CXXRecordDecl>(method->getParent()))
-        node.enclosingClass = parent->getQualifiedNameAsString();
+  }
+  // A builtin the compiler expands itself (`std::move`, `std::forward`,
+  // `__builtin_operator_new`) has no body to read, and calls nothing the
+  // graph would hold: what it does is known.
+  node.hasBody = decl->getBuiltinID() != 0;
+  if (auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(decl)) {
+    node.isVirtual = method->isVirtual();
+    if (auto *parent =
+            llvm::dyn_cast<clang::CXXRecordDecl>(method->getParent()))
+      node.enclosingClass = parent->getQualifiedNameAsString();
+  }
+  return node;
+}
+
+Ident CallGraphEdgeVisitor::lambdaIdentOf(
+    const clang::CXXRecordDecl *closure) const {
+  const clang::FunctionDecl *fn = lambdaEnclosingFunction(closure);
+  return lambdaIdent(lambdaQualifiedName(
+      sm_, closure->getBeginLoc(),
+      fn ? fn->getQualifiedNameAsString() : std::string()));
+}
+
+void CallGraphEdgeVisitor::addLambdaNode(const clang::CXXRecordDecl *closure,
+                                         const Ident &id,
+                                         llvm::StringRef enclosing) {
+  CallGraphNode node;
+  node.usr = id.usr;
+  node.qualifiedName = id.display;
+  node.file = getFilePath(closure->getBeginLoc());
+  node.line = sm_.getSpellingLineNumber(closure->getBeginLoc());
+  node.enclosingClass = std::string(enclosing);
+  node.hasBody = true;
+  graph_.addNode(std::move(node), tuPath_);
+}
+
+// ----------------------------------------------------------------------------
+// Bodies no written definition holds
+// ----------------------------------------------------------------------------
+//
+// The traversal as written reads each function where its definition is
+// written. A template instantiation's body (implicit, or an explicit
+// instantiation definition), a generic lambda's specialization, and the
+// code the compiler writes for an implicit or defaulted special member
+// have no written definition of their own: the TU's code reaches them by
+// calling them, and they are read after the TU, once each, under their own
+// identity, so a forward walk continues through them. Inside one, calls
+// are recorded wherever they are spelled, a system header included: a
+// standard container's instantiated member reaches `operator new` there.
+// A system header's own non-template code stays unread.
+
+void CallGraphEdgeVisitor::scheduleBody(const clang::FunctionDecl *fn) {
+  if (llvm::isa<clang::CXXDeductionGuideDecl>(fn))
+    return;
+  // A closure's special members are read where they run (addImplicitCall,
+  // VisitCXXConstructExpr).
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn))
+    if (method->getParent()->isLambda() && !isLambdaCallOperator(fn) &&
+        (llvm::isa<clang::CXXConstructorDecl>(fn) ||
+         llvm::isa<clang::CXXDestructorDecl>(fn)))
+      return;
+  if (!fn->getTemplateInstantiationPattern() &&
+      !isCompilerWrittenSpecialMember(fn))
+    return;
+  const clang::FunctionDecl *def = readableDefinition(fn);
+  // A destructor destroys members and bases whether or not Sema defined it.
+  if (!def && !llvm::isa<clang::CXXDestructorDecl>(fn))
+    return;
+  // A member defaulted where it is declared, outside a system header, is
+  // read with its class (readCompilerWritten).
+  if (def && !def->isImplicit() && !fn->getTemplateInstantiationPattern() &&
+      isInUserCode(def->getLocation()))
+    return;
+  const clang::FunctionDecl *key = def ? def : fn->getCanonicalDecl();
+  if (scheduled_.insert(key).second)
+    work_.push_back(key);
+}
+
+// Code outside any function (a namespace-scope initializer) records no
+// edge, but what it calls runs: the static-initialization metric walks
+// from it.
+void CallGraphEdgeVisitor::scheduleOutsideFunctions(
+    const clang::FunctionDecl *fn, clang::SourceLocation loc) {
+  if (fn && isInUserCode(loc))
+    scheduleBody(fn);
+}
+
+bool CallGraphEdgeVisitor::TraverseTranslationUnitDecl(
+    clang::TranslationUnitDecl *decl) {
+  const bool ok = RecursiveASTVisitor::TraverseTranslationUnitDecl(decl);
+  drainBodies();
+  return ok;
+}
+
+void CallGraphEdgeVisitor::drainBodies() {
+  // Each body is read once; reading one may schedule others. LIFO keeps the
+  // order a function of the TU alone.
+  assert(funcStack_.empty());
+  inCompilerCode_ = true;
+  while (!work_.empty()) {
+    const clang::FunctionDecl *fn = work_.back();
+    work_.pop_back();
+    readBody(fn);
+  }
+  inCompilerCode_ = false;
+}
+
+void CallGraphEdgeVisitor::readBody(const clang::FunctionDecl *decl) {
+  auto *fn = const_cast<clang::FunctionDecl *>(decl);
+  const size_t frames = funcStack_.size();
+  if (isLambdaCallOperator(fn)) {
+    // Read under the lambda: getCurrentFunction names it by the function
+    // below it on the stack.
+    const auto *closure = llvm::cast<clang::CXXMethodDecl>(fn)->getParent();
+    const clang::FunctionDecl *outer = lambdaEnclosingFunction(closure);
+    if (outer)
+      funcStack_.push_back(const_cast<clang::FunctionDecl *>(outer));
+    funcStack_.push_back(fn);
+    addLambdaNode(closure, getCurrentFunction(),
+                  outer ? outer->getQualifiedNameAsString() : std::string());
+  } else {
+    funcStack_.push_back(fn);
+    const Ident &id = usrs_.identFor(fn);
+    CallGraphNode node = calleeNode(fn, id);
+    if (node.usr.empty()) {
+      node.usr = id.usr;
+      node.qualifiedName = id.display;
+      const clang::SourceLocation loc = fn->getFirstDecl()->getLocation();
+      node.file = getFilePath(loc);
+      node.line = sm_.getSpellingLineNumber(loc);
     }
+    node.hasBody = true;
     graph_.addNode(std::move(node), tuPath_);
   }
-  return id;
+  if (fn->doesThisDeclarationHaveABody() && !fn->isInvalidDecl() &&
+      !fn->isDependentContext()) {
+    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
+      for (const clang::CXXCtorInitializer *init : ctor->inits())
+        if (init->getInit())
+          TraverseStmt(init->getInit());
+    TraverseStmt(fn->getBody());
+  }
+  if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
+    addMemberDestruction(dtor);
+  funcStack_.resize(frames);
+}
+
+// What the compiler writes into a definition the traversal as written
+// reads (it skips all three): member and base initializers not written
+// (default construction, a default member initializer), the body of a
+// defaulted function, and the destruction of members and bases after a
+// destructor's body.
+void CallGraphEdgeVisitor::readCompilerWritten(clang::FunctionDecl *fn) {
+  if (!fn->isThisDeclarationADefinition() || fn->isDeleted() ||
+      fn->isInvalidDecl() || fn->isDependentContext())
+    return;
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn))
+    for (const clang::CXXCtorInitializer *init : ctor->inits())
+      if (!init->isWritten() && init->getInit())
+        TraverseStmt(init->getInit());
+  if (fn->isDefaulted() && fn->getBody())
+    TraverseStmt(fn->getBody());
+  if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
+    addMemberDestruction(dtor);
+}
+
+// After its body a destructor destroys the members, then the bases: each a
+// DestructorCall at the destructor's declaration.
+void CallGraphEdgeVisitor::addMemberDestruction(
+    const clang::CXXDestructorDecl *dtor) {
+  const clang::SourceLocation site = dtor->getLocation();
+  forEachDestroyedSubobject(
+      dtor, [&](clang::QualType type) { addDestructorEdge(type, site); });
+}
+
+void CallGraphEdgeVisitor::addDestructorEdge(clang::QualType type,
+                                             clang::SourceLocation site) {
+  if (const clang::CXXDestructorDecl *dtor = destructorRunFor(*ctx_, type))
+    addImplicitCall(dtor, EdgeKind::DestructorCall, Confidence::Proven, site);
+}
+
+void CallGraphEdgeVisitor::addImplicitCall(const clang::FunctionDecl *fn,
+                                           EdgeKind kind,
+                                           Confidence confidence,
+                                           clang::SourceLocation loc) {
+  if (!fn)
+    return; // unresolved: the type or the operand is dependent
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
+    return;
+  if (!recordsCallAt(loc))
+    return;
+  if (!funcStack_.empty() &&
+      isCollapsedEdge(funcStack_.back()->getLocation(), fn->getLocation()))
+    return;
+  if (const auto *dtor = llvm::dyn_cast<clang::CXXDestructorDecl>(fn))
+    if (dtor->getParent()->isLambda()) {
+      // A closure has no identity of its own beyond its call operator:
+      // destroying one destroys its captures, here.
+      forEachDestroyedSubobject(
+          dtor, [&](clang::QualType type) { addDestructorEdge(type, loc); });
+      return;
+    }
+  graph_.addEdge({caller.usr, identForCallee(fn).usr, kind, confidence,
+                  formatLocation(loc), 0},
+                 tuPath_);
+}
+
+// An explicit instantiation definition makes the TU emit the functions it
+// names, called or not.
+bool CallGraphEdgeVisitor::VisitFunctionTemplateDecl(
+    clang::FunctionTemplateDecl *decl) {
+  forEachExplicitInstantiation(
+      decl, [&](const clang::FunctionDecl *fn) { scheduleBody(fn); });
+  return true;
+}
+
+bool CallGraphEdgeVisitor::VisitClassTemplateDecl(
+    clang::ClassTemplateDecl *decl) {
+  forEachExplicitInstantiation(
+      decl, [&](const clang::FunctionDecl *fn) { scheduleBody(fn); });
+  return true;
+}
+
+// ----------------------------------------------------------------------------
+// Operands never evaluated
+// ----------------------------------------------------------------------------
+//
+// `sizeof(f())`, `noexcept(f())`, `decltype(f())`, a requires-expression
+// and a concept's constraint name what would be called without calling
+// it (the standard library's bodies are full of them). The traversal
+// skips them, so no edge comes from one.
+
+bool CallGraphEdgeVisitor::TraverseUnaryExprOrTypeTraitExpr(
+    clang::UnaryExprOrTypeTraitExpr *expr) {
+  // `sizeof` of a variable-length array evaluates its operand.
+  if (expr->getKind() == clang::UETT_SizeOf &&
+      expr->getTypeOfArgument()->isVariablyModifiedType())
+    return RecursiveASTVisitor::TraverseUnaryExprOrTypeTraitExpr(expr);
+  return true;
+}
+
+bool CallGraphEdgeVisitor::TraverseCXXNoexceptExpr(clang::CXXNoexceptExpr *) {
+  return true;
+}
+
+bool CallGraphEdgeVisitor::TraverseRequiresExpr(clang::RequiresExpr *) {
+  return true;
+}
+
+bool CallGraphEdgeVisitor::TraverseConceptDecl(clang::ConceptDecl *) {
+  return true;
+}
+
+#if VYCOR_LLVM_AT_LEAST(22)
+bool CallGraphEdgeVisitor::TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc,
+                                                   bool) {
+  return true;
+}
+bool CallGraphEdgeVisitor::TraverseTypeOfExprTypeLoc(clang::TypeOfExprTypeLoc,
+                                                     bool) {
+  return true;
+}
+#else
+bool CallGraphEdgeVisitor::TraverseDecltypeTypeLoc(clang::DecltypeTypeLoc) {
+  return true;
+}
+bool CallGraphEdgeVisitor::TraverseTypeOfExprTypeLoc(
+    clang::TypeOfExprTypeLoc) {
+  return true;
+}
+#endif
+
+// A braced initializer's semantic form holds what aggregate initialization
+// runs that the syntactic form leaves out: default member initializers and
+// the constructors of members the list omits. One form is read, so a call
+// in both is one edge.
+bool CallGraphEdgeVisitor::TraverseInitListExpr(clang::InitListExpr *expr) {
+  clang::InitListExpr *semantic =
+      expr->isSemanticForm() ? expr : expr->getSemanticForm();
+  return TraverseSynOrSemInitListExpr(semantic ? semantic : expr);
+}
+
+// A default member initializer runs in the constructor or aggregate
+// initialization that uses it; the traversal visits it only with implicit
+// code. A lambda in one is read where it is written.
+bool CallGraphEdgeVisitor::TraverseCXXDefaultInitExpr(
+    clang::CXXDefaultInitExpr *expr) {
+  if (funcStack_.empty())
+    return true;
+  ++inDefaultInit_;
+  const bool ok = TraverseStmt(expr->getExpr());
+  --inDefaultInit_;
+  return ok;
 }
 
 // A throw expression raises through the runtime: `throw x` allocates the
@@ -551,7 +880,7 @@ bool CallGraphEdgeVisitor::VisitCXXThrowExpr(clang::CXXThrowExpr *expr) {
   Ident caller = getCurrentFunction();
   if (caller.display.empty())
     return true;
-  if (!isInUserCode(expr->getThrowLoc()))
+  if (!recordsCallAt(expr->getThrowLoc()))
     return true;
   const bool rethrow = expr->getSubExpr() == nullptr;
   Ident callee = throwCalleeIdent(rethrow);
@@ -586,33 +915,61 @@ bool CallGraphEdgeVisitor::isCollapsedEdge(
          collapse_->isCollapsed(calleeFile);
 }
 
+// A function declared inside a body drainBodies reads (a local class's
+// member) runs only when called: the call schedules it as an
+// instantiation of its own.
 bool CallGraphEdgeVisitor::TraverseFunctionDecl(clang::FunctionDecl *decl) {
+  if (inCompilerCode_)
+    return true;
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseFunctionDecl(decl);
+  if (result)
+    readCompilerWritten(decl);
   funcStack_.pop_back();
   return result;
 }
 
 bool CallGraphEdgeVisitor::TraverseCXXMethodDecl(
     clang::CXXMethodDecl *decl) {
+  if (inCompilerCode_)
+    return true;
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseCXXMethodDecl(decl);
+  if (result)
+    readCompilerWritten(decl);
   funcStack_.pop_back();
   return result;
 }
 
 bool CallGraphEdgeVisitor::TraverseCXXConstructorDecl(
     clang::CXXConstructorDecl *decl) {
+  if (inCompilerCode_)
+    return true;
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseCXXConstructorDecl(decl);
+  if (result)
+    readCompilerWritten(decl);
   funcStack_.pop_back();
   return result;
 }
 
 bool CallGraphEdgeVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
+  // A lambda in a default member initializer was read where it is written.
+  if (inDefaultInit_ > 0)
+    return true;
   auto *op = expr->getCallOperator();
-  if (op)
+  if (op) {
     funcStack_.push_back(op);
+    if (inCompilerCode_) {
+      // A closure in a body drainBodies reads: read here, once, and given
+      // a node (an instantiated class template member's lambda is named
+      // by that member, not by the pattern the indexer saw).
+      if (const clang::FunctionDecl *def = readableDefinition(op))
+        scheduled_.insert(def);
+      addLambdaNode(op->getParent(), getCurrentFunction(),
+                    enclosingNonLambdaName());
+    }
+  }
   bool result = RecursiveASTVisitor::TraverseLambdaExpr(expr);
   if (op)
     funcStack_.pop_back();
@@ -621,14 +978,20 @@ bool CallGraphEdgeVisitor::TraverseLambdaExpr(clang::LambdaExpr *expr) {
 
 bool CallGraphEdgeVisitor::TraverseCXXDestructorDecl(
     clang::CXXDestructorDecl *decl) {
+  if (inCompilerCode_)
+    return true;
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseCXXDestructorDecl(decl);
+  if (result)
+    readCompilerWritten(decl);
   funcStack_.pop_back();
   return result;
 }
 
 bool CallGraphEdgeVisitor::TraverseCXXConversionDecl(
     clang::CXXConversionDecl *decl) {
+  if (inCompilerCode_)
+    return true;
   funcStack_.push_back(decl);
   bool result = RecursiveASTVisitor::TraverseCXXConversionDecl(decl);
   funcStack_.pop_back();
@@ -712,15 +1075,32 @@ void CallGraphEdgeVisitor::processCallableArgs(
 
 bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   Ident caller = getCurrentFunction();
-  if (caller.display.empty())
+  if (caller.display.empty()) {
+    scheduleOutsideFunctions(expr->getDirectCallee(), expr->getBeginLoc());
     return true;
+  }
 
-  // Skip calls from within system headers.
-  if (!isInUserCode(callBeginLoc(expr)))
+  // Skip calls from within system headers, outside a body drainBodies
+  // reads.
+  if (!recordsCallAt(callBeginLoc(expr)))
     return true;
 
   // Skip internal edges within collapsed paths (keep boundary edges).
   auto *directCallee = expr->getDirectCallee();
+
+  // `p->~T()`: a trivial destructor runs no code, a closure's destroys its
+  // captures (addImplicitCall).
+  if (const auto *dtor =
+          llvm::dyn_cast_or_null<clang::CXXDestructorDecl>(directCallee)) {
+    if (dtor->isTrivial())
+      return true;
+    if (dtor->getParent()->isLambda()) {
+      addImplicitCall(dtor, EdgeKind::DestructorCall, Confidence::Proven,
+                      callBeginLoc(expr));
+      return true;
+    }
+  }
+
   if (directCallee && !funcStack_.empty()) {
     if (isCollapsedEdge(funcStack_.back()->getLocation(),
                         directCallee->getLocation()))
@@ -750,10 +1130,15 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
   if (!callee)
     return true;
 
-  // Handle CXXMemberCallExpr for virtual dispatch.
+  // Handle CXXMemberCallExpr for virtual dispatch. A qualified call
+  // (`Base::run()`, `obj.Base::run()`) is bound statically to the method
+  // it names: a direct call.
   if (auto *memberCall = llvm::dyn_cast<clang::CXXMemberCallExpr>(expr)) {
     auto *methodDecl = memberCall->getMethodDecl();
-    if (methodDecl && methodDecl->isVirtual()) {
+    const auto *member = llvm::dyn_cast<clang::MemberExpr>(
+        memberCall->getCallee()->IgnoreParens());
+    if (methodDecl && methodDecl->isVirtual() &&
+        !(member && member->hasQualifier())) {
       handleVirtualDispatch(caller.usr, methodDecl,
                             callBeginLoc(expr));
       return true;
@@ -768,53 +1153,8 @@ bool CallGraphEdgeVisitor::VisitCallExpr(clang::CallExpr *expr) {
     return true;
   }
 
-  // Detect std::make_unique<T> / std::make_shared<T> as constructing T.
-  if (auto *specArgs = callee->getTemplateSpecializationArgs()) {
-    std::string calleeName = callee->getQualifiedNameAsString();
-    if (calleeName.find("make_unique") != std::string::npos ||
-        calleeName.find("make_shared") != std::string::npos) {
-      if (specArgs->size() > 0 &&
-          specArgs->get(0).getKind() == clang::TemplateArgument::Type) {
-        auto constructedType = specArgs->get(0).getAsType();
-        if (auto *recordDecl = constructedType->getAsCXXRecordDecl()) {
-          if (recordDecl->isThisDeclarationADefinition()) {
-            std::string typeName = recordDecl->getQualifiedNameAsString();
-            // Add a constructor edge for the constructed type.
-            for (auto *ctor : recordDecl->ctors()) {
-              if (!ctor->isImplicit() || ctor->isCopyOrMoveConstructor())
-                continue;
-              Ident ctorId = identForCallee(ctor);
-              CallGraphNode ctorNode;
-              ctorNode.usr = ctorId.usr;
-              ctorNode.qualifiedName = ctorId.display;
-              ctorNode.file = getFilePath(ctor->getLocation());
-              ctorNode.line = sm_.getSpellingLineNumber(ctor->getLocation());
-              ctorNode.enclosingClass = typeName;
-              graph_.addNode(std::move(ctorNode));
-              graph_.addEdge({caller.usr, ctorId.usr,
-                              EdgeKind::ConstructorCall, Confidence::Proven,
-                              formatLocation(callBeginLoc(expr)), 0}, tuPath_);
-            }
-            // Also just add a generic constructor node for the type. It is
-            // synthesized (no decl backs "Type::Type" as spelled), so it
-            // takes the vycor-synth: fallback identity.
-            std::string ctorName = typeName + "::" +
-                                   recordDecl->getNameAsString();
-            CallGraphNode synth;
-            synth.usr = "vycor-synth:" + ctorName;
-            synth.qualifiedName = ctorName;
-            synth.file = getFilePath(recordDecl->getLocation());
-            synth.line = sm_.getSpellingLineNumber(recordDecl->getLocation());
-            synth.enclosingClass = typeName;
-            graph_.addNode(std::move(synth), tuPath_);
-            graph_.addEdge({caller.usr, "vycor-synth:" + ctorName,
-                            EdgeKind::ConstructorCall, Confidence::Proven,
-                            formatLocation(callBeginLoc(expr)), 0}, tuPath_);
-          }
-        }
-      }
-    }
-  }
+  // `std::make_unique<T>(...)` and the like construct T in their
+  // instantiated bodies (drainBodies), with T's own constructor.
 
   // Regular direct call.
   graph_.addEdge({caller.usr, identForCallee(callee).usr,
@@ -842,15 +1182,31 @@ void CallGraphEdgeVisitor::handleVirtualDispatch(
 bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
     clang::CXXConstructExpr *expr) {
   Ident caller = getCurrentFunction();
-  if (caller.display.empty())
+  if (caller.display.empty()) {
+    scheduleOutsideFunctions(expr->getConstructor(), expr->getBeginLoc());
+    return true;
+  }
+
+  if (!recordsCallAt(expr->getBeginLoc()))
     return true;
 
-  if (!isInUserCode(expr->getBeginLoc()))
-    return true;
-
+  // An implicit constructor runs the code the compiler writes for it
+  // (member and base construction, default member initializers) unless it
+  // is trivial: then it runs none.
   auto *ctor = expr->getConstructor();
-  if (!ctor || ctor->isImplicit())
+  if (!ctor || (ctor->isImplicit() && ctor->isTrivial()))
     return true;
+
+  // Copying or moving a closure copies or moves its captures, here: the
+  // closure has no identity of its own beyond its call operator.
+  if (ctor->getParent()->isLambda()) {
+    if (const clang::FunctionDecl *def = readableDefinition(ctor))
+      for (const clang::CXXCtorInitializer *init :
+           llvm::cast<clang::CXXConstructorDecl>(def)->inits())
+        if (init->getInit())
+          TraverseStmt(init->getInit());
+    return true;
+  }
 
   // Skip internal edges within collapsed paths.
   if (!funcStack_.empty() &&
@@ -872,8 +1228,9 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   CallGraphNode ctorNode;
   ctorNode.usr = ctorId.usr;
   ctorNode.qualifiedName = ctorId.display;
-  ctorNode.file = getFilePath(ctor->getLocation());
-  ctorNode.line = sm_.getSpellingLineNumber(ctor->getLocation());
+  const clang::SourceLocation ctorLoc = ctor->getFirstDecl()->getLocation();
+  ctorNode.file = getFilePath(ctorLoc);
+  ctorNode.line = sm_.getSpellingLineNumber(ctorLoc);
   ctorNode.enclosingClass = ctor->getParent()->getQualifiedNameAsString();
   graph_.addNode(std::move(ctorNode), tuPath_);
   graph_.addEdge({caller.usr, ctorId.usr, EdgeKind::ConstructorCall,
@@ -882,21 +1239,24 @@ bool CallGraphEdgeVisitor::VisitCXXConstructExpr(
   return true;
 }
 
-void CallGraphEdgeVisitor::addAllocationEdge(const clang::FunctionDecl *fn,
-                                             clang::SourceLocation loc,
-                                             Confidence confidence) {
-  if (!fn)
-    return; // unresolved: the type or the operand is dependent
-  Ident caller = getCurrentFunction();
-  if (caller.display.empty())
-    return;
-  if (!isInUserCode(loc))
-    return;
-  if (!funcStack_.empty() &&
-      isCollapsedEdge(funcStack_.back()->getLocation(), fn->getLocation()))
-    return;
-  graph_.addEdge({caller.usr, identForCallee(fn).usr, EdgeKind::DirectCall,
-                  confidence, formatLocation(loc), 0}, tuPath_);
+// The base-class constructor an inheriting constructor (`using
+// Base::Base;`) runs, in the body the compiler writes for it.
+bool CallGraphEdgeVisitor::VisitCXXInheritedCtorInitExpr(
+    clang::CXXInheritedCtorInitExpr *expr) {
+  addImplicitCall(expr->getConstructor(), EdgeKind::ConstructorCall,
+                  Confidence::Proven, expr->getLocation());
+  return true;
+}
+
+// A temporary of a class with a non-trivial destructor is destroyed at the
+// end of the full-expression (or of the reference it is bound to): a
+// DestructorCall at the expression that creates it.
+bool CallGraphEdgeVisitor::VisitCXXBindTemporaryExpr(
+    clang::CXXBindTemporaryExpr *expr) {
+  if (const clang::CXXTemporary *temp = expr->getTemporary())
+    addImplicitCall(temp->getDestructor(), EdgeKind::DestructorCall,
+                    Confidence::Proven, expr->getBeginLoc());
+  return true;
 }
 
 // `new T(args)` calls two functions: the allocation function, then the
@@ -906,31 +1266,46 @@ void CallGraphEdgeVisitor::addAllocationEdge(const clang::FunctionDecl *fn,
 // deallocation function a new-expression also names runs only when the
 // constructor throws, and is not recorded.
 bool CallGraphEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
-  addAllocationEdge(expr->getOperatorNew(), expr->getBeginLoc(),
-                    Confidence::Proven);
+  addImplicitCall(expr->getOperatorNew(), EdgeKind::DirectCall,
+                  Confidence::Proven, expr->getBeginLoc());
   return true;
 }
 
-// `delete p` calls the destructor (not recorded: #113) and then the
-// deallocation function. When the destructor is virtual, a plain `delete p`
-// uses the function looked up at the *dynamic* type's destructor, so the
-// statically resolved one is the likely callee rather than the certain
-// one. The other forms are settled at compile time: `delete[] p` (the
-// static and dynamic types must agree), `::delete p` (the global function,
-// whatever the class declares) and a destroying `operator delete` (called
-// in place of the destructor, never through it).
+// `delete p` calls the destructor and then the deallocation function.
+// When the destructor is virtual, a plain `delete p` runs the *dynamic*
+// type's destructor, and uses the deallocation function looked up there:
+// the destructor is a Plausible VirtualDispatch to the static one
+// (expanded through the overrides at query time, unless the class is
+// final), and the deallocation function the likely callee rather than the
+// certain one. The other forms are settled at compile time: `delete[] p`
+// (the static and dynamic types must agree), `::delete p` (the global
+// function, whatever the class declares; the destructor is still virtual)
+// and a destroying `operator delete` (called in place of the destructor,
+// never through it).
 bool CallGraphEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   const clang::FunctionDecl *fn = expr->getOperatorDelete();
+  const bool destroying = fn && fn->isDestroyingOperatorDelete();
+  const clang::QualType destroyed = expr->getDestroyedType();
+  const clang::CXXDestructorDecl *dtor =
+      destroyed.isNull() || destroying ? nullptr
+                                       : destructorRunFor(*ctx_, destroyed);
+  const bool dispatched = dtor && dtor->isVirtual() && !expr->isArrayForm() &&
+                          !dtor->getParent()->isEffectivelyFinal();
+  if (dtor)
+    addImplicitCall(dtor,
+                    dispatched ? EdgeKind::VirtualDispatch
+                               : EdgeKind::DestructorCall,
+                    dispatched ? Confidence::Plausible : Confidence::Proven,
+                    expr->getBeginLoc());
   Confidence confidence = Confidence::Proven;
-  clang::QualType destroyed = expr->getDestroyedType();
-  if (fn && !expr->isArrayForm() && !expr->isGlobalDelete() &&
-      !fn->isDestroyingOperatorDelete() && !destroyed.isNull())
+  if (fn && !expr->isArrayForm() && !expr->isGlobalDelete() && !destroying &&
+      !destroyed.isNull())
     if (const clang::CXXRecordDecl *record = destroyed->getAsCXXRecordDecl())
       if (record->hasDefinition())
-        if (const clang::CXXDestructorDecl *dtor = record->getDestructor())
-          if (dtor->isVirtual())
+        if (const clang::CXXDestructorDecl *virt = record->getDestructor())
+          if (virt->isVirtual())
             confidence = Confidence::Plausible;
-  addAllocationEdge(fn, expr->getBeginLoc(), confidence);
+  addImplicitCall(fn, EdgeKind::DirectCall, confidence, expr->getBeginLoc());
   return true;
 }
 
@@ -941,6 +1316,12 @@ bool CallGraphEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   Ident caller = getCurrentFunction();
   if (caller.display.empty())
     return true;
+
+  // An automatic variable is destroyed when it leaves scope: a
+  // DestructorCall at its declaration (the stable site; the scope's end has
+  // none of its own). A static local is destroyed at exit, not here.
+  if (decl->hasLocalStorage() && !decl->isInvalidDecl())
+    addDestructorEdge(decl->getType(), decl->getLocation());
 
   // Track callable-typed variables initialized from a direct call. The
   // callee may return function pointers (recorded by the indexer visitor as
@@ -1025,8 +1406,10 @@ void CallGraphEdgeVisitor::addConcreteTypeEdges(
         CallGraphNode dtorNode;
         dtorNode.usr = dtorId.usr;
         dtorNode.qualifiedName = dtorId.display;
-        dtorNode.file = getFilePath(dtor->getLocation());
-        dtorNode.line = sm_.getSpellingLineNumber(dtor->getLocation());
+        const clang::SourceLocation dtorLoc =
+            dtor->getFirstDecl()->getLocation();
+        dtorNode.file = getFilePath(dtorLoc);
+        dtorNode.line = sm_.getSpellingLineNumber(dtorLoc);
         dtorNode.isVirtual = dtor->isVirtual();
         dtorNode.enclosingClass = current->getQualifiedNameAsString();
         graph_.addNode(std::move(dtorNode), tuPath_);
@@ -1053,10 +1436,12 @@ bool CallGraphEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *expr) {
     return true;
 
   Ident caller = getCurrentFunction();
-  if (caller.display.empty())
+  if (caller.display.empty()) {
+    scheduleOutsideFunctions(funcDecl, expr->getBeginLoc());
     return true;
+  }
 
-  if (!isInUserCode(expr->getBeginLoc()))
+  if (!recordsCallAt(expr->getBeginLoc()))
     return true;
 
   // Skip internal edges within collapsed paths.
