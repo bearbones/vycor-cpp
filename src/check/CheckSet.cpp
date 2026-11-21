@@ -110,6 +110,11 @@ const std::vector<CheckInfo> &builtinChecks() {
        "noexcept (constrains every override)",
        /*defaultOn=*/false,
        {"compute-heavy"}},
+      {"hot-path-effects",
+       "Allocation, locks, I/O and throws reachable from hot roots "
+       "(configured, or from a coverage profile)",
+       /*defaultOn=*/false,
+       {"compute-heavy"}},
   };
   return checks;
 }

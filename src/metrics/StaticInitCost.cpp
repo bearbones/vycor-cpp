@@ -43,6 +43,9 @@ constexpr uint32_t kStandInBit = 0x80000000u;
 // which is the measured entity rather than something it reaches.
 constexpr uint32_t kSelf = kNone - 1;
 constexpr uint8_t kEffectKnown = 0x80;
+// The effects this metric reports: allocation, lock and I/O, the first
+// three kinds. A throw is not start-up work.
+constexpr unsigned kCostedKinds = 3;
 
 class StaticInitCostRun final : public MetricRun {
 public:
@@ -70,18 +73,18 @@ public:
     out.value = reach.functions;
     out.components.clear();
     int64_t variables = 0, constructors = 0, direct = 0;
-    std::array<int64_t, kEffectKindCount> withEffect{};
+    std::array<int64_t, kCostedKinds> withEffect{};
     for (uint32_t member : members) {
       const Root &root = roots_[member];
       (root.constructorFunction ? constructors : variables) += 1;
       direct += root.directCalls;
-      for (unsigned k = 0; k < kEffectKindCount; ++k)
+      for (unsigned k = 0; k < kCostedKinds; ++k)
         withEffect[k] += (root.effects >> k) & 1u;
     }
     out.components.emplace_back("dynamicInitializers", variables);
     out.components.emplace_back("constructorFunctions", constructors);
     out.components.emplace_back("directCalls", direct);
-    for (unsigned k = 0; k < kEffectKindCount; ++k)
+    for (unsigned k = 0; k < kCostedKinds; ++k)
       out.components.emplace_back(effectKindName(kEffectKinds[k]).str(),
                                   withEffect[k]);
   }
@@ -107,7 +110,7 @@ private:
     int64_t functions = 0;
     // The first function of each effect kind in walk order (breadth
     // first, so a shallowest one), or kNone.
-    std::array<uint32_t, kEffectKindCount> first{kNone, kNone, kNone};
+    std::array<uint32_t, kCostedKinds> first{kNone, kNone, kNone};
   };
 
   // Node ids: [0, graphIds_) are the graph's interned ids; past that,
@@ -200,7 +203,7 @@ private:
     parent_[node] = parent;
     ++reach.functions;
     if (uint8_t mask = effectsOf(node))
-      for (unsigned k = 0; k < kEffectKindCount; ++k)
+      for (unsigned k = 0; k < kCostedKinds; ++k)
         if (((mask >> k) & 1u) && reach.first[k] == kNone)
           reach.first[k] = node;
     queue_.push_back(node);
@@ -297,7 +300,7 @@ private:
       sample.value = reach.functions;
       sample.components.emplace_back("directCalls", root.directCalls);
       llvm::json::Object witness;
-      for (unsigned k = 0; k < kEffectKindCount; ++k) {
+      for (unsigned k = 0; k < kCostedKinds; ++k) {
         const bool has = reach.first[k] != kNone;
         const std::string kind = effectKindName(kEffectKinds[k]).str();
         sample.components.emplace_back(kind, has ? 1 : 0);

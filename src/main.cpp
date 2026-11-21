@@ -18,6 +18,7 @@
 #include "vycor/check/Checkpoint.h"
 #include "vycor/check/CouldBeInternal.h"
 #include "vycor/check/DeadCodeAnalyzer.h"
+#include "vycor/check/HotPathEffects.h"
 #include "vycor/check/Indexer.h"
 #include "vycor/check/Report.h"
 #include "vycor/callgraph/BuildStats.h"
@@ -206,6 +207,27 @@ static llvm::cl::opt<std::string>
         llvm::cl::value_desc("regex"),
         llvm::cl::init(vycor::kDefaultTestPathPattern),
         llvm::cl::sub(CheckCmd));
+
+static llvm::cl::list<std::string>
+    CheckHotRoots("hot-root",
+                  llvm::cl::desc("hot-path-effects: a hot root (qualified "
+                                 "name or USR), added to the org config's "
+                                 "hotPaths.roots"),
+                  llvm::cl::value_desc("name"), llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<std::string>
+    CheckHotProfile("hot-profile",
+                    llvm::cl::desc("hot-path-effects: `llvm-cov export` "
+                                   "JSON of a profiled run"),
+                    llvm::cl::value_desc("file"), llvm::cl::sub(CheckCmd));
+
+static llvm::cl::opt<uint64_t>
+    CheckHotMinCount("hot-min-count",
+                     llvm::cl::desc("hot-path-effects: with --hot-profile, "
+                                    "every function entered at least this "
+                                    "often is a root (overrides "
+                                    "hotPaths.minCount)"),
+                     llvm::cl::value_desc("n"), llvm::cl::sub(CheckCmd));
 
 static llvm::cl::opt<bool>
     CheckWarnSameScore("warn-same-score",
@@ -959,6 +981,38 @@ int main(int argc, const char **argv) {
       }
     }
 
+    // hot-path-effects: its roots and profile are checked before any parse.
+    const bool wantHotPaths = enabledChecks.count("hot-path-effects") > 0;
+    vycor::HotPathConfig hotConfig =
+        vycor::ExtensionRegistry::instance().hotPathConfig();
+    std::optional<vycor::CoverageProfile> hotProfile;
+    if (wantHotPaths) {
+      hotConfig.roots.insert(hotConfig.roots.end(), CheckHotRoots.begin(),
+                             CheckHotRoots.end());
+      if (CheckHotMinCount.getNumOccurrences())
+        hotConfig.minCount = CheckHotMinCount;
+      if (!CheckHotProfile.empty()) {
+        hotProfile.emplace();
+        std::string err;
+        if (!vycor::CoverageProfile::load(CheckHotProfile, *hotProfile,
+                                          err)) {
+          llvm::errs() << "check: --hot-profile: " << err << "\n";
+          return kUsage;
+        }
+      } else if (hotConfig.minCount != 0) {
+        llvm::errs() << "check: hot-path-effects: a minimum count takes "
+                        "roots from a profile; pass --hot-profile\n";
+        return kUsage;
+      }
+      if (hotConfig.roots.empty() && hotConfig.rootPatterns.empty() &&
+          hotConfig.minCount == 0) {
+        llvm::errs() << "check: hot-path-effects has no hot roots: pass "
+                        "--hot-root, or --hot-profile with --hot-min-count, "
+                        "or set hotPaths in the org config\n";
+        return kUsage;
+      }
+    }
+
     vycor::AnalysisOptions opts;
     opts.enableAdlDiag = enabledChecks.count("adl-visibility") > 0;
     opts.enableCtadDiag = enabledChecks.count("ctad-visibility") > 0;
@@ -1205,7 +1259,8 @@ int main(int argc, const char **argv) {
           hasInitHazardRoots = true;
       });
     }
-    const bool wantGraph = wantDeadCode || hasInitHazardRoots;
+    const bool wantGraph =
+        wantDeadCode || hasInitHazardRoots || wantHotPaths;
     if (wantGraph || wantInternal) {
       vycor::CallGraph graph;
       vycor::ReferenceIndex references;
@@ -1323,6 +1378,29 @@ int main(int argc, const char **argv) {
         }
         for (auto &diag : internalDiags)
           diagnostics.push_back(std::move(diag));
+      }
+
+      if (wantHotPaths) {
+        vycor::HotPathReport hotReport;
+        std::string err;
+        if (!vycor::analyzeHotPaths(
+                graph, vycor::ExtensionRegistry::instance().effectTable(),
+                hotConfig, hotProfile ? &*hotProfile : nullptr, vycor::kAllEffects,
+                hotReport, err)) {
+          llvm::errs() << "check: hot-path-effects: " << err << "\n";
+          return kUsage;
+        }
+        for (const std::string &root : hotReport.unmatchedRoots)
+          llvm::errs() << "check: hot-path-effects: hot root '" << root
+                       << "' names no function in the call graph\n";
+        if (hotReport.templateLeaves != 0)
+          llvm::errs() << "check: hot-path-effects: " << hotReport.templateLeaves
+                       << " reached template instantiation(s) have no recorded "
+                          "calls; effects inside them are not seen "
+                          "(docs/checks/hot-path-effects.md, Limitations)\n";
+        vycor::appendHotPathDiagnostics(
+            graph, hotReport,
+            hotProfile ? CheckHotProfile.c_str() : nullptr, diagnostics);
       }
     }
 

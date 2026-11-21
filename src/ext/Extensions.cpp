@@ -85,6 +85,19 @@ void ExtensionRegistry::addEffectFunctions(
     effects_.add(kind, name);
 }
 
+void ExtensionRegistry::addHotPathConfig(const HotPathConfig &config) {
+  auto merge = [](std::vector<std::string> &into,
+                  const std::vector<std::string> &from) {
+    for (const std::string &entry : from)
+      if (std::find(into.begin(), into.end(), entry) == into.end())
+        into.push_back(entry);
+  };
+  merge(hotPaths_.roots, config.roots);
+  merge(hotPaths_.rootPatterns, config.rootPatterns);
+  merge(hotPaths_.allow, config.allow);
+  hotPaths_.minCount = std::max(hotPaths_.minCount, config.minCount);
+}
+
 bool ExtensionRegistry::addFeatureFlagPattern(const std::string &pattern,
                                               unsigned nameGroup) {
   auto regex = std::make_shared<llvm::Regex>(pattern);
@@ -165,6 +178,7 @@ void ExtensionRegistry::clear() {
   checkGroups_.clear();
   metrics_.clear();
   effects_ = EffectTable::builtin();
+  hotPaths_ = HotPathConfig();
 }
 
 std::optional<GuardAnnotation> classifyGuard(const ConditionalGuard &g) {

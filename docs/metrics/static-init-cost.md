@@ -165,6 +165,10 @@ any other analysis that asks the same question:
 - **io**: C stdio, POSIX descriptor, file and socket calls, and the
   file-stream constructors and `open`.
 
+The table also has a fourth kind, `throw`, which this metric does not
+report (a throw is not start-up work). A `throw` expression is a call of
+`__cxa_throw` in the graph, so it counts as one reached function.
+
 A function matches whatever its template arguments and whichever inline
 namespace the standard library puts it in:
 `std::__1::lock_guard<std::mutex>::lock_guard` matches

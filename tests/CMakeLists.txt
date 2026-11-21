@@ -73,6 +73,7 @@ add_executable(vycor_tests
   test_dead_code.cpp
   test_deferred_edges.cpp
   test_allocation_edges.cpp
+  test_hot_path_effects.cpp
   test_precision_identity.cpp
   test_disambiguation.cpp
   test_control_flow.cpp

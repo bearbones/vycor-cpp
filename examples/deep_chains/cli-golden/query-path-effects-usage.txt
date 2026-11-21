@@ -1,0 +1,2 @@
+# megascope query-path-effects -> exit 2
+{"error":"No hot roots: pass 'roots' or 'root_patterns', or 'profile' with 'min_count', or configure hotPaths in the org config (docs/checks/hot-path-effects.md)","indexScope":{"complete":true,"failed":0,"freshness":"unchecked","indexed":14,"partial":0,"requested":14},"status":"usage_error"}

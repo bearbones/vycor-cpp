@@ -451,6 +451,10 @@ struct Diagnostic {
   // in rank order (check/Report.h). Not a fingerprint input: it moves
   // whenever the code around the finding does.
   unsigned rank = 0;
+  // Report at Note severity whatever the check's default (a
+  // hot-path-effects finding on a path the profile says never ran). Set
+  // only by post-analysis passes in the parent; never journaled.
+  bool note = false;
 };
 
 // Project-wide database of all function overloads and deduction guides.

@@ -307,13 +307,14 @@ Severity checkSeverity(const std::string &check) {
       {"noexcept-candidate", Severity::Note},
       {"noexcept-candidate-move", Severity::Note},
       {"noexcept-candidate-virtual", Severity::Note},
+      {"hot-path-effects", Severity::Warning},
   };
   auto it = table.find(check);
   return it == table.end() ? Severity::Warning : it->second;
 }
 
 Severity diagnosticSeverity(const Diagnostic &diag) {
-  if (diag.kind == Diagnostic::ADL_SameScore ||
+  if (diag.note || diag.kind == Diagnostic::ADL_SameScore ||
       diag.kind == Diagnostic::DeadCode_Optimistic ||
       diag.kind == Diagnostic::Internal_DeclaredInHeader ||
       diag.kind == Diagnostic::Internal_TestOnly ||

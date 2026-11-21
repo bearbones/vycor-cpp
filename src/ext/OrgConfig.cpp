@@ -19,6 +19,7 @@
 
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Regex.h"
 
 namespace vycor {
 
@@ -63,7 +64,8 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
   static const char *knownKeys[] = {"lockTypes", "channelTypes",
                                     "featureFlags", "collapsePaths",
                                     "disabledChecks",
-                                    "staticInitHazards", "effects"};
+                                    "staticInitHazards", "effects",
+                                    "hotPaths"};
   for (const auto &kv : *root) {
     bool known = false;
     for (const char *k : knownKeys)
@@ -71,7 +73,8 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
     if (!known) {
       error = "unknown key '" + kv.first.str() +
               "' (expected one of: lockTypes, channelTypes, featureFlags, "
-              "collapsePaths, disabledChecks, staticInitHazards, effects)";
+              "collapsePaths, disabledChecks, staticInitHazards, effects, "
+              "hotPaths)";
       return false;
     }
   }
@@ -94,7 +97,7 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
       auto kind = effectKindFromName(kv.first.str());
       if (!kind) {
         error = "unknown effect '" + kv.first.str() +
-                "' (expected one of: allocation, lock, io)";
+                "' (expected one of: allocation, lock, io, throw)";
         return false;
       }
       if (!parseStringArray(*obj, kv.first.str(),
@@ -102,6 +105,38 @@ bool parseOrgConfigJson(llvm::StringRef buffer, OrgConfig &out,
         error = "'effects': " + error;
         return false;
       }
+    }
+  }
+
+  if (const llvm::json::Value *hot = root->get("hotPaths")) {
+    const llvm::json::Object *obj = hot->getAsObject();
+    if (!obj) {
+      error = "'hotPaths' must be an object";
+      return false;
+    }
+    for (const auto &kv : *obj) {
+      const std::string key = kv.first.str();
+      if (key != "roots" && key != "rootPatterns" && key != "allow" &&
+          key != "minCount") {
+        error = "'hotPaths': unknown key '" + key +
+                "' (expected one of: roots, rootPatterns, allow, minCount)";
+        return false;
+      }
+    }
+    HotPathConfig &hp = out.hotPaths;
+    if (!parseStringArray(*obj, "roots", hp.roots, error) ||
+        !parseStringArray(*obj, "rootPatterns", hp.rootPatterns, error) ||
+        !parseStringArray(*obj, "allow", hp.allow, error)) {
+      error = "'hotPaths': " + error;
+      return false;
+    }
+    if (const llvm::json::Value *minCount = obj->get("minCount")) {
+      auto n = minCount->getAsInteger();
+      if (!n || *n < 0) {
+        error = "'hotPaths': 'minCount' must be a nonnegative integer";
+        return false;
+      }
+      hp.minCount = static_cast<uint64_t>(*n);
     }
   }
 
@@ -192,6 +227,15 @@ bool applyOrgConfig(const OrgConfig &cfg, std::string &error) {
   registry.addChannelTypes(cfg.channelTypes);
   for (EffectKind kind : kEffectKinds)
     registry.addEffectFunctions(kind, cfg.effects[static_cast<size_t>(kind)]);
+  for (const std::string &pattern : cfg.hotPaths.rootPatterns) {
+    llvm::Regex regex(pattern);
+    std::string why;
+    if (!regex.isValid(why)) {
+      error = "hotPaths root pattern is not a valid regex: " + pattern;
+      return false;
+    }
+  }
+  registry.addHotPathConfig(cfg.hotPaths);
   for (const auto &flag : cfg.featureFlags) {
     if (!registry.addFeatureFlagPattern(flag.pattern, flag.nameGroup)) {
       error = "featureFlags pattern is not a valid regex: " + flag.pattern;

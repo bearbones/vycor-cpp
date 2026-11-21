@@ -17,6 +17,7 @@
 
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/Effects.h"
+#include "vycor/callgraph/HotPath.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -45,7 +46,12 @@ struct FeatureFlagPattern {
 //     "staticInitHazards": ["myorg::JniEnv::attach"],
 //     "effects": {"allocation": ["myorg::Arena::alloc"],
 //                 "lock": ["myorg::SpinLock::acquire"],
-//                 "io": ["myorg::log::write"]},
+//                 "io": ["myorg::log::write"],
+//                 "throw": ["myorg::raise"]},
+//     "hotPaths": {"roots": ["myorg::Solver::step"],
+//                  "rootPatterns": ["::kernel_"],
+//                  "allow": ["myorg::Pool::acquire"],
+//                  "minCount": 100000},
 //     "collapsePaths": ["ThirdParty/Math"],
 //     "disabledChecks": ["some-ext-check"]
 //   }
@@ -54,13 +60,17 @@ struct FeatureFlagPattern {
 // (never replace) the corresponding CLI flags; featureFlags become guard
 // classifiers (see Extensions.h); disabledChecks suppresses compiled
 // ext/ checks by name; effects adds functions to the effect table
-// (vycor/callgraph/Effects.h) the metrics read.
+// (vycor/callgraph/Effects.h) the metrics read; hotPaths gives the
+// hot-path-effects check and the query_path_effects tool their roots and
+// accepted functions (docs/checks/hot-path-effects.md).
 struct OrgConfig {
   std::vector<std::string> lockTypes;
   // Extra loader-hostile functions for static-init-hazards.
   std::vector<std::string> staticInitHazards;
   // Extra effect-table functions, indexed by EffectKind.
   std::array<std::vector<std::string>, kEffectKindCount> effects;
+  // Hot roots and accepted functions for hot-path-effects.
+  HotPathConfig hotPaths;
   std::vector<ChannelTypeSpec> channelTypes;
   std::vector<FeatureFlagPattern> featureFlags;
   std::vector<std::string> collapsePaths;
@@ -78,10 +88,11 @@ bool loadOrgConfigFile(const std::string &path, OrgConfig &out,
                        std::string &error);
 
 // Install the config's hook-shaped parts (lockTypes, channelTypes,
-// featureFlags, staticInitHazards, effects) into ExtensionRegistry::instance(). collapsePaths and
+// featureFlags, staticInitHazards, effects, hotPaths) into
+// ExtensionRegistry::instance(). collapsePaths and
 // disabledChecks are not registry concerns — the CLI layer consumes
 // those directly. Returns false and fills `error` when a featureFlags
-// pattern is not a valid regex.
+// pattern or a hotPaths root pattern is not a valid regex.
 bool applyOrgConfig(const OrgConfig &cfg, std::string &error);
 
 } // namespace vycor

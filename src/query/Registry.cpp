@@ -208,6 +208,7 @@ static const std::map<std::string, std::string> kRecordsKeys = {
     {"explain_dependency", "seeds"},
     {"metrics", "records"},
     {"get_references", "references"},
+    {"query_path_effects", "findings"},
 };
 
 std::vector<std::string> sectionNames(unsigned needs) {
@@ -234,6 +235,7 @@ std::vector<ToolEntry> getRegisteredTools() {
   registerDependencyTools(tools);
   registerMetricsTools(tools);
   registerReferenceTools(tools);
+  registerEffectTools(tools);
   for (auto &tool : tools) {
     auto it = kRecordsKeys.find(tool.name);
     if (it != kRecordsKeys.end())

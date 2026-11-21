@@ -567,6 +567,19 @@ public:
     return true;
   }
 
+  // The site of the edge CallGraphEdgeVisitor::VisitCXXThrowExpr records,
+  // under the same conditions: a path that ends at the throw has the try
+  // scopes around the expression.
+  bool VisitCXXThrowExpr(clang::CXXThrowExpr *expr) {
+    Ident caller = getCurrentFunction();
+    if (caller.display.empty() || !isInUserCode(expr->getThrowLoc()))
+      return true;
+    index_.addCallSiteContext(
+        buildContext(caller, throwCalleeIdent(expr->getSubExpr() == nullptr),
+                     expr->getThrowLoc()));
+    return true;
+  }
+
 private:
   void recordAllocationSite(const clang::FunctionDecl *fn,
                             clang::SourceLocation loc) {

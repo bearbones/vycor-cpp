@@ -541,6 +541,34 @@ Ident CallGraphEdgeVisitor::identForCallee(const clang::FunctionDecl *decl) {
   return id;
 }
 
+// A throw expression raises through the runtime: `throw x` allocates the
+// exception object and calls `__cxa_throw`, `throw;` calls
+// `__cxa_rethrow`. The call is as certain as a written one, so the edge is
+// a Proven DirectCall at the `throw` keyword; the node is compiler-declared
+// (`<unknown>`, line 0) like the implicit `operator new`. Recorded for a
+// throw in a template definition too, whatever its operand's type.
+bool CallGraphEdgeVisitor::VisitCXXThrowExpr(clang::CXXThrowExpr *expr) {
+  Ident caller = getCurrentFunction();
+  if (caller.display.empty())
+    return true;
+  if (!isInUserCode(expr->getThrowLoc()))
+    return true;
+  const bool rethrow = expr->getSubExpr() == nullptr;
+  Ident callee = throwCalleeIdent(rethrow);
+  if (!throwNodes_[rethrow]) {
+    throwNodes_[rethrow] = true;
+    CallGraphNode node;
+    node.usr = callee.usr;
+    node.qualifiedName = callee.display;
+    node.file = "<unknown>";
+    graph_.addNode(std::move(node), tuPath_);
+  }
+  graph_.addEdge({caller.usr, callee.usr, EdgeKind::DirectCall,
+                  Confidence::Proven, formatLocation(expr->getThrowLoc()), 0},
+                 tuPath_);
+  return true;
+}
+
 bool CallGraphEdgeVisitor::isInUserCode(clang::SourceLocation loc) const {
   if (loc.isInvalid())
     return false;

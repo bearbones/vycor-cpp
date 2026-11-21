@@ -24,7 +24,7 @@
 #include <vector>
 
 // The effect table: which functions are taken to allocate, acquire a lock,
-// or perform I/O. A pure name table, with no index or AST dependency, so
+// perform I/O, or throw. A pure name table, with no index or AST dependency, so
 // every analysis that asks "does this reach include an allocation?" (the
 // static-init-cost metric, the hot-path checks) classifies the same way.
 //
@@ -42,13 +42,26 @@
 
 namespace vycor {
 
-enum class EffectKind : uint8_t { Allocation, Lock, Io };
-inline constexpr unsigned kEffectKindCount = 3;
+// Throw is the exception being raised, not the possibility of one: the
+// call graph records each throw expression as a call of the runtime's
+// throw entry point (kThrowFunction), and the table lists that entry
+// point and the library functions that always throw.
+enum class EffectKind : uint8_t { Allocation, Lock, Io, Throw };
+inline constexpr unsigned kEffectKindCount = 4;
 inline constexpr std::array<EffectKind, kEffectKindCount> kEffectKinds = {
-    EffectKind::Allocation, EffectKind::Lock, EffectKind::Io};
+    EffectKind::Allocation, EffectKind::Lock, EffectKind::Io,
+    EffectKind::Throw};
+/// Mask with every kind set.
+inline constexpr uint8_t kAllEffects = (1u << kEffectKindCount) - 1;
 
-/// "allocation", "lock", "io": the spelling used in payloads, the org
-/// config and the docs.
+/// The functions a throw expression is recorded as calling
+/// (CallGraphBuilder): `throw x` and a bare `throw;`. The Itanium ABI's
+/// names, used on every target so an index reads the same everywhere.
+inline constexpr const char kThrowFunction[] = "__cxa_throw";
+inline constexpr const char kRethrowFunction[] = "__cxa_rethrow";
+
+/// "allocation", "lock", "io", "throw": the spelling used in payloads,
+/// the org config and the docs.
 llvm::StringRef effectKindName(EffectKind kind);
 std::optional<EffectKind> effectKindFromName(llvm::StringRef name);
 

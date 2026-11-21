@@ -36,6 +36,16 @@ struct Ident {
   std::string display;
 };
 
+// The function a throw expression is recorded as calling: the runtime
+// entry point the compiler emits a call to (`__cxa_throw`, or
+// `__cxa_rethrow` for a bare `throw;`). No declaration of it is in the
+// TU, so the identity is spelled here: the USR a declaration of that C
+// function would have.
+inline Ident throwCalleeIdent(bool rethrow) {
+  return rethrow ? Ident{"c:@F@__cxa_rethrow", "__cxa_rethrow"}
+                 : Ident{"c:@F@__cxa_throw", "__cxa_throw"};
+}
+
 // Per-visitor (per-TU) memo for (usr, display) generation. USR generation
 // allocates and the visitors resolve the same decls repeatedly, so the pair
 // is computed once per Decl* per visitor instance. Uses std::unordered_map

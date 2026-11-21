@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ChannelIndex.h"
 #include "vycor/callgraph/ConditionalGuard.h"
 #include "vycor/callgraph/Effects.h"
+#include "vycor/callgraph/HotPath.h"
 #include "vycor/metrics/Metric.h"
 
 #include <functional>
@@ -136,6 +137,12 @@ public:
   void addEffectFunctions(EffectKind kind,
                           std::vector<std::string> qualifiedNames);
 
+  // Hot roots, root patterns and accepted functions for hot-path-effects
+  // (docs/checks/hot-path-effects.md), merged into what is registered
+  // (lists unioned, the larger minCount kept). Also settable
+  // declaratively via the org config's "hotPaths" key.
+  void addHotPathConfig(const HotPathConfig &config);
+
   // Register (or extend) a named check group usable in --checks
   // specifications, e.g. addCheckGroup("myorg-strict", {"no-legacy-alloc",
   // "ipc-struct-parity"}). The built-in groups ("all", "noisy",
@@ -185,6 +192,9 @@ public:
   // entries plus addEffectFunctions' additions.
   const EffectTable &effectTable() const { return effects_; }
 
+  // Registered hot-path roots and accepted functions.
+  const HotPathConfig &hotPathConfig() const { return hotPaths_; }
+
   // First classifier that recognizes the guard, or nullopt.
   std::optional<GuardAnnotation> classify(const ConditionalGuard &g) const;
 
@@ -204,6 +214,7 @@ private:
   std::unordered_map<std::string, std::vector<std::string>> checkGroups_;
   std::vector<std::unique_ptr<Metric>> metrics_;
   EffectTable effects_;
+  HotPathConfig hotPaths_;
 };
 
 // Shorthand for ExtensionRegistry::instance().classify(g), used at the
