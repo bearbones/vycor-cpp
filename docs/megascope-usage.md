@@ -406,6 +406,31 @@ is hidden.
 
 ---
 
+## Auditing link dependencies
+
+`audit-dependencies` and `explain-dependency` join the index with a
+target map (which target compiles which source, and what each target
+says it links) and report, per declared dependency, how many of the
+provider's symbols the consumer references and how much of the provider
+that drags in:
+
+```bash
+scripts/cmake-target-map.py --build-dir build --output targets.json
+vycor-cpp megascope audit-dependencies --index proj.vycs \
+    --target-map targets.json --finding thin-dependency --sort gain
+vycor-cpp megascope explain-dependency --index proj.vycs \
+    --target-map targets.json --consumer app --provider bigdep
+```
+
+Bake the index for this **without** `--collapse-paths`: collapsed edges
+hide what a dependency needs internally. The evidence is call edges
+only, so every payload says what it cannot see (`completeness`) and no
+finding is a proof; `docs/dependency-audit.md` has the target-map
+schema, the attribution rules, and how to check a result against the
+built objects.
+
+---
+
 ## Known gotchas
 
 **Function names are exact-match only.** Partial names, namespaces

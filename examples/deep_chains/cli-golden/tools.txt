@@ -1,5 +1,7 @@
 # megascope tools -> exit 0
   analyze-dead-code              Run dead code analysis via call graph reachability.
+  audit-dependencies             Audit the build's link dependencies against the index: for every (consumer, provider) target pair, how many provider symbols the consumer's objects reference, how much of the provider those symbols drag along (their closure), and what the consumer would stop linking if the closure were split out.
+  explain-dependency             Explain one link dependency edge: every provider symbol the consumer's objects reference, each with the call site that needs it (and, when the reference sits in an inline body, the call in the consumer's own sources that reaches it), plus the closure those symbols need inside the provider and the other targets that closure references.
   explain-ordering               Compare two channel call sites for the evidence needed to explain an ordering assumption between them: whether they're the same channel, each site's enclosing guard conditions (e.g. only reachable when some flag is true), and which ThreadEntry/AsyncTask/PackagedTask/Invoke boundaries reach each site's enclosing function.
   find-call-chain                Find call chains from a source function (or entry points) to a target function.
   get-callees                    List the functions called by a given function, one record per call site (or per callee with distinct), paged by limit/offset.

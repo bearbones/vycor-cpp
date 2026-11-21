@@ -121,6 +121,10 @@ struct ToolContext {
   /// what a handler called directly, as the unit tests do, sees, and it
   /// fails closed: no universal verdict, no channel facts.
   IndexFacts facts;
+  /// The loaded index's meta: per-TU outcomes and opened-file tables, read
+  /// by the dependency audit (docs/dependency-audit.md). Null in a context
+  /// built directly; the audit then treats no target as covered.
+  const SnapshotMeta *meta = nullptr;
 };
 
 /// Signature for a tool handler function.

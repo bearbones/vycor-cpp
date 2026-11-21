@@ -108,6 +108,7 @@ add_executable(vycor_tests
   test_tooling_runtime.cpp
   test_utf8_strings.cpp
   test_best_practices_regressions.cpp
+  test_dependency_audit.cpp
   ${VYCOR_EXT_SOURCES}
   ${VYCOR_EXT_TEST_SOURCES}
   ${VYCOR_SANITIZER_SOURCES}

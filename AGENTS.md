@@ -225,7 +225,7 @@ directly.
 
 | File | Purpose |
 |---|---|
-| `Tools.h` | `ToolContext` (indexes, entry points, cache, header summary, and `facts` — the `IndexFacts` every payload cites), `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract (`docs/result-contract.md`): success = payload object; error = `{"error": msg, "status": kind}` built with `usageError` / `notFoundError` / `unavailableError`; ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`); `runTool` runs a handler and `completeResult` stamps `status` (`statusOf`) and `indexScope` onto the payload — what every adapter calls |
+| `Tools.h` | `ToolContext` (indexes, entry points, cache, header summary, `facts` — the `IndexFacts` every payload cites — and `meta`, the loaded index's `SnapshotMeta`, which the dependency audit reads for per-TU outcomes and opened files), `ToolEntry` (name, description, JSON Schema, handler, `recordsKey` — the payload's list member, which drives the CLI's ndjson/tsv output and empty-result exit code — and `needs`, the index sections the handler reads), `QueryCache`, `getRegisteredTools()`, and the result contract (`docs/result-contract.md`): success = payload object; error = `{"error": msg, "status": kind}` built with `usageError` / `notFoundError` / `unavailableError`; ambiguity = `{"ambiguous": true, candidates...}` (`isAmbiguousResult`); `runTool` runs a handler and `completeResult` stamps `status` (`statusOf`) and `indexScope` onto the payload — what every adapter calls |
 | `Identity.h/.cpp` | F8 identity resolution: `resolveIdentity` (name/usr/site/filter → USR; an identity that names no node and no edge endpoint is `not_found` with `didYouMean`), the disambiguation payload, `attachUsr` (`resolvedAs: "name"` for a node-less endpoint), the `name`/`function` alias, `rankFunctionMatches` (the `search_functions` ranking) and `suggestFunctions` |
 | `Paging.h` | The shared paging contract of the list tools: `parsePage` (`limit` ≥ 1 with a per-tool default cap, `offset`), `attachPage` (`total`, `offset`, `limit`, `returned`, `truncated`, `nextOffset`), `addPagingProps` for the schemas (`docs/result-contract.md`, "Paging") |
 | `Serialize.h/.cpp` | Enum spellings (`EdgeKind`, `Confidence`, `ExecutionContext`, `ChannelOperation`) and JSON serializers for edges, guards, channel sites — part of the output contract |
@@ -235,6 +235,7 @@ directly.
 | `DeadCodeTools.cpp` | dead-code analysis (cached liveness) |
 | `ChannelTools.cpp` | channel listing/query, channels-for-function, explain-ordering |
 | `ImpactTools.cpp` | `impact_of_change`: seeds by name, usr, or unified diff, reverse walk over the `impact/` module; also the serializers the `diff` verb shares |
+| `DependencyTools.cpp` | `audit_dependencies`, `explain_dependency`: load the `--target-map` file, build `LinkFacts` from the call edges, run the `deps/` kernel, page and serialize (`docs/dependency-audit.md`) |
 | `Registry.cpp` / `Registry.h` | Composes the per-family `register*Tools` lists into `getRegisteredTools()` (tools/list order); result-contract helpers |
 | `Schema.h` | JSON Schema property builders shared by the registrations |
 | `Limits.h/.cpp` | `readLimit`/`readLimitAs`: every user-supplied search limit is clamped to a documented maximum (`kMaxSearchDepth`, ...) before it is narrowed; `docs/path-analysis.md` "Limits" |
@@ -251,6 +252,26 @@ directly.
 | `PatchMapping.h/.cpp` | `parseUnifiedDiff` (after-side hunk ranges, deletions as the two lines they sit between) and `mapRangesToFunctions` (call-site or declaration hit exactly, else the nearest anchors' extents, else the file) |
 
 Contract and worked examples: `docs/change-impact.md`.
+
+### `deps` — Dependency Audit
+
+**Headers:** `include/vycor/deps/`
+**Sources:** `src/deps/`
+
+| File | Purpose |
+|---|---|
+| `TargetMap.h/.cpp` | The build-system-neutral target map (`schema` 1: link targets, their sources and headers, declared `deps`, `depsForm` `direct` or `closure`), parsed and validated once at load; an external query-time input, never part of the snapshot |
+| `DependencyAudit.h/.cpp` | Two layers. `LinkFacts` — flat arrays: one class (`Defined`, `Presumed`, `Inline`, `Unattributed`) and one interned owner-target set per symbol, references in CSR form — produced by `linkFactsFromCallEdges(graph, map, meta)`. `auditDependencies(facts, map)` — the kernel: the declared-reach bit matrix, per-edge seeds, closure and needs, what each direct edge alone pulls in, the findings. It reads `LinkFacts` only, so a different producer (reference facts) replaces the edge source without touching it |
+
+Attribution rules, the closure's treatment of inline bodies, the
+payload members, and every known way an answer is wrong:
+`docs/dependency-audit.md`. Each payload carries `completeness` (which
+kinds of reference the evidence cannot see) and each finding
+`"universal": false`; `unused-link-dependency` is withheld unless both
+targets' sources are fully indexed. Adapters that write the target map
+are scripts (`scripts/cmake-target-map.py`, CMake File API);
+`scripts/dep-audit-nm-compare.py` measures the audit against the
+undefined symbols of a built tree.
 
 ### `cli` — megascope Verbs (adapter)
 
@@ -373,7 +394,7 @@ appending. `scripts/write-integrity-check.py` (ctest
 `write_integrity`) and `tests/test_write_integrity.cpp` reproduce each
 failure mode.
 
-**24 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
+**26 tools** (CLI verbs; `batch` and `call` take the same names): `search_functions`, `lookup_function`, `get_callees`,
 `get_callers`, `find_call_chain`, `query_exception_safety`,
 `query_call_site_context`, `query_raii_scopes_at_callsite`,
 `query_throw_propagation`, `query_all_path_contexts`,
@@ -382,7 +403,7 @@ failure mode.
 `get_class_hierarchy`, `list_entry_points`, `graph_summary`,
 `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`,
 `query_channel`, `query_channels_for_function`, `explain_ordering`,
-`impact_of_change`.
+`impact_of_change`, `audit_dependencies`, `explain_dependency`.
 
 Identical edges registered by multiple TUs (header-inlined code) are
 **deduplicated at insert** with per-TU refcounting, so `removeTU` only drops
@@ -534,7 +555,7 @@ boundary edges (non-collapsed caller → collapsed callee) are preserved.
   single binary doesn't need it). Used by `.github/workflows/release.yml`.
 
 `src/CMakeLists.txt`:
-- Builds `vycor_lib` from `check/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, and `ext/*.cpp`.
+- Builds `vycor_lib` from `check/*.cpp`, `morph/*.cpp`, `callgraph/*.cpp`, `query/*.cpp`, `cli/*.cpp`, `impact/*.cpp`, `deps/*.cpp`, and `ext/*.cpp`.
 - Builds `vycor-cpp` executable from `main.cpp` plus a `CONFIGURE_DEPENDS`
   glob of top-level `ext/*.cpp` (organization slot-in — attached to the
   executable, not the archive, so static registrars survive linking).
