@@ -279,8 +279,8 @@ TEST_CASE("A damaged index is refused on load", "[write-integrity]") {
   }
 
   SECTION("the error names the damaged section") {
-    const char *names[] = {"meta", "graph", "control_flow", "channels",
-                           "references"};
+    const char *names[] = {"meta",     "graph",      "control_flow",
+                           "channels", "references", "static_inits"};
     for (size_t i = 0; i < testing::kSnapshotSections; ++i) {
       const size_t at = testing::snapshotTableEntryAt(i);
       const uint8_t kind = static_cast<uint8_t>(original[at]);

@@ -414,6 +414,10 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
                                     const BakeWorkerConfig *expected,
                                     unsigned batchSizeOverride) {
   BakedIndexes out;
+  // Like an in-process bake: collected, with no roots until a shard adds
+  // some (append ANDs, so a shard without the facts clears it); merged
+  // once after the last shard.
+  out.staticInits.collected = true;
   unsigned poisonedCount = 0;
   bool firstShard = true;
   dispatchIsolated(
@@ -432,12 +436,14 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
           out.cfIndex = std::move(snap->cfIndex);
           out.channels = std::move(snap->channels);
           out.references = std::move(snap->references);
+          out.staticInits = std::move(snap->staticInits);
           firstShard = false;
         } else {
           out.graph.absorb(snap->graph);
           out.cfIndex.absorb(snap->cfIndex);
           out.channels.absorb(snap->channels);
           out.references.absorb(snap->references);
+          out.staticInits.append(std::move(snap->staticInits));
         }
         // The worker records its batch's dependencies and per-TU
         // outcomes in the shard meta.
@@ -467,6 +473,7 @@ BakedIndexes bakeIsolatedWithRunner(const WorkerRunner &runner,
           stats->addTuStat({tu, 0, 0.0, -1});
       },
       batchSizeOverride);
+  out.staticInits.canonicalize();
 
   if (poisonedCount > 0)
     llvm::errs() << "megascope: " << poisonedCount

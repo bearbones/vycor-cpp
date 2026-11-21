@@ -176,9 +176,10 @@ a value is large.
 
 A metric reduces facts the megascope bake already collected; it does not
 parse. Each metric's page names the facts it reads and whether a saved
-index carries them. `static-init-cost` reads facts that today exist only
-in an in-memory bake, so it is run with `--source`, `--source-list` or
-`--source-re` rather than against a saved index.
+index carries them. `static-init-cost` reads the static-initialization
+roots, which the index saves in its `static_inits` section; a saved index
+and an in-memory bake (`--source`, `--source-list`, `--source-re`) answer
+alike.
 
 A request that cannot be answered whatever the index holds (an unknown
 metric, a malformed roll-up) is answered before any index is loaded or

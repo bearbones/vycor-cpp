@@ -1349,7 +1349,8 @@ int runMergeVerb(llvm::ArrayRef<std::string> args, llvm::StringRef indexFlag,
 
   std::string saveError;
   if (!SnapshotIO::save(o.output, merged->graph, merged->cfIndex, merged->meta,
-                        merged->channels, merged->references, &saveError)) {
+                        merged->channels, merged->references, &saveError,
+                        /*durable=*/true, merged->staticInits)) {
     err << "megascope merge: cannot save merged index to " << o.output << ": "
         << saveError << "\n";
     return kExitIndex;
@@ -1999,8 +2000,10 @@ int runMegascopeQueryVerb(llvm::ArrayRef<std::string> args,
                                              : IndexFreshness::Unchecked);
   ctx.meta = &snap->meta;
 
-  // Facts only an in-memory bake collects (the metrics read them); a
-  // loaded index leaves them unset, which a reader answers `unavailable`.
+  // Static-initialization roots (the metrics read them): an in-memory
+  // bake's, or the loaded index's static_inits section when the tool
+  // asked for it. Unset when neither holds them, which a reader answers
+  // `unavailable`.
   ctx.staticInits = snap->staticInits.collected ? &snap->staticInits : nullptr;
 
   if (verb == "batch")

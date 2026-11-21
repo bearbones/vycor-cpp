@@ -1932,7 +1932,7 @@ int main(int argc, const char **argv) {
       if (!vycor::SnapshotIO::save(MegascopeWorkerOut, baked.graph,
                                    baked.cfIndex, meta, baked.channels,
                                    baked.references, &saveError,
-                                   /*durable=*/false)) {
+                                   /*durable=*/false, baked.staticInits)) {
         llvm::errs() << "megascope: worker: cannot write shard to "
                      << MegascopeWorkerOut << ": " << saveError << "\n";
         return 1;
@@ -1944,6 +1944,7 @@ int main(int argc, const char **argv) {
     vycor::ControlFlowIndex cfIndex;
     vycor::ChannelIndex channels;
     vycor::ReferenceIndex references;
+    vycor::StaticInitFacts staticInits;
     bool needFullBuild = true;
     // Set when a bake parsed nothing it was asked to: its result must not
     // replace the index (SnapshotIO::unpublishableBake).
@@ -2156,6 +2157,7 @@ int main(int argc, const char **argv) {
               cfIndex = std::move(full->cfIndex);
               channels = std::move(full->channels);
               references = std::move(full->references);
+              staticInits = std::move(full->staticInits);
               deps = vycor::SnapshotIO::dependenciesOf(snap->meta);
               outcomes = vycor::SnapshotIO::outcomesOf(snap->meta);
               auto refreshStart = StatsClock::now();
@@ -2171,6 +2173,7 @@ int main(int argc, const char **argv) {
               cfIndex.removeTUs(toRemove);
               channels.removeTUs(toRemove);
               references.removeTUs(toRemove);
+              staticInits.removeTUs(toRemove);
               for (const auto &path : toDrop) {
                 deps.erase(path);
                 outcomes.erase(path);
@@ -2207,6 +2210,7 @@ int main(int argc, const char **argv) {
                 cfIndex.absorb(fresh.cfIndex);
                 channels.absorb(fresh.channels);
                 references.absorb(fresh.references);
+                staticInits.absorb(std::move(fresh.staticInits));
                 for (auto &kv : fresh.deps)
                   deps[kv.first] = std::move(kv.second);
                 for (auto &kv : fresh.outcomes)
@@ -2252,6 +2256,7 @@ int main(int argc, const char **argv) {
       cfIndex = std::move(baked.cfIndex);
       channels = std::move(baked.channels);
       references = std::move(baked.references);
+      staticInits = std::move(baked.staticInits);
       deps = std::move(baked.deps);
       outcomes = std::move(baked.outcomes);
       llvm::errs() << "megascope: indexes built ("
@@ -2327,9 +2332,9 @@ int main(int argc, const char **argv) {
             savedOk = vycor::MegascopeBridge::saveSnapshot(
                 indexPath, graph, cfIndex, meta, channels, &saveError);
           } else {
-            savedOk = vycor::SnapshotIO::save(indexPath, graph, cfIndex, meta,
-                                              channels, references,
-                                              &saveError);
+            savedOk = vycor::SnapshotIO::save(
+                indexPath, graph, cfIndex, meta, channels, references,
+                &saveError, /*durable=*/true, staticInits);
           }
           if (savedOk) {
             snapSaveMs = msSince(snapSaveStart);

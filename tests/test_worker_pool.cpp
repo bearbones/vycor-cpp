@@ -207,7 +207,31 @@ bool writeShard(const std::string &shardPath,
   }
   SnapshotIO::recordDependencies(meta, deps);
   SnapshotIO::recordOutcomes(meta, outcomes);
-  return SnapshotIO::save(shardPath, g, cf, meta, channels);
+  // Static-initialization roots: one per TU, and one in the shared header
+  // that every TU runs.
+  StaticInitFacts staticInits;
+  staticInits.collected = true;
+  for (const auto &tu : batch) {
+    StaticInitRoot own;
+    own.name = "init@" + tu;
+    own.usr = "c:@init@" + tu;
+    own.file = tu;
+    own.line = 4;
+    own.tus = {tu};
+    own.callees = {{"c:@F@" + tu, "fn@" + tu, {}}};
+    StaticInitRoot shared;
+    shared.name = "commonInit";
+    shared.usr = "c:@commonInit";
+    shared.file = "/tu/common.h";
+    shared.line = 2;
+    shared.tus = {tu};
+    shared.callees = {{"c:@F@common", "common", {}}};
+    staticInits.roots.push_back(std::move(own));
+    staticInits.roots.push_back(std::move(shared));
+  }
+  staticInits.canonicalize();
+  return SnapshotIO::save(shardPath, g, cf, meta, channels, ReferenceIndex(),
+                          nullptr, /*durable=*/false, staticInits);
 }
 
 void writeMarkers(const std::string &stderrPath,
@@ -600,6 +624,20 @@ TEST_CASE("dispatcher absorbs clean batches", "[worker_pool][dispatcher]") {
   CHECK(out.channels.size() == files.size());
   for (const auto &tu : files)
     CHECK(out.channels.producersOf("chan@" + tu).size() == 1);
+  // So do the static-initialization roots: each TU's own, and the
+  // header's once, run by every TU.
+  CHECK(out.staticInits.collected);
+  REQUIRE(out.staticInits.roots.size() == files.size() + 1);
+  for (const auto &root : out.staticInits.roots) {
+    INFO(root.name);
+    if (root.name == "commonInit") {
+      CHECK(root.tus == files);
+      REQUIRE(root.callees.size() == 1);
+      CHECK(root.callees[0].tus.empty());
+    } else {
+      CHECK(root.tus == std::vector<std::string>{root.file});
+    }
+  }
   // Dependency lists ride the shard meta.
   REQUIRE(out.deps.size() == files.size());
   for (const auto &tu : files) {

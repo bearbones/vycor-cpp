@@ -158,7 +158,7 @@ std::string bakeAndSave(const clang::tooling::CompilationDatabase &db,
   std::string error;
   if (!SnapshotIO::save(path, baked.graph, baked.cfIndex, meta,
                         baked.channels, baked.references, &error,
-                        /*durable=*/false)) {
+                        /*durable=*/false, baked.staticInits)) {
     std::fprintf(stderr, "fuzz_seeds: %s\n", error.c_str());
     std::exit(1);
   }

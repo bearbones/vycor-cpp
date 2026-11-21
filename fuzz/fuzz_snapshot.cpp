@@ -56,6 +56,10 @@ void exerciseMutable(const std::string &path) {
   cf.absorb(snap->cfIndex);
   channels.absorb(snap->channels);
   references.absorb(snap->references);
+  StaticInitFacts staticInits;
+  staticInits.collected = true;
+  StaticInitFacts shard = snap->staticInits; // removeTUs below needs it
+  staticInits.absorb(std::move(shard));
   // A warm refresh: drop the recorded TUs, then save what is left.
   std::vector<std::string> tus;
   for (const auto &f : snap->meta.files)
@@ -64,11 +68,12 @@ void exerciseMutable(const std::string &path) {
   snap->cfIndex.removeTUs(tus);
   snap->channels.removeTUs(tus);
   snap->references.removeTUs(tus);
+  snap->staticInits.removeTUs(tus);
   (void)SnapshotIO::dirtyTUs(snap->meta, snap->meta.files);
   (void)coverageOf(snap->meta);
   const std::string saved = fuzz::scratchPath("resaved.vycs");
   if (SnapshotIO::save(saved, graph, cf, snap->meta, channels, references,
-                       nullptr, /*durable=*/false))
+                       nullptr, /*durable=*/false, staticInits))
     (void)SnapshotIO::load(saved, nullptr, LoadMode::ReadOnly);
 }
 

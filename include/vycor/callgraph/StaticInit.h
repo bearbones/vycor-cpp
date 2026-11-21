@@ -33,9 +33,11 @@ class ASTContext;
 // through the graph (the static-init-cost metric, docs/metrics/).
 //
 // The megascope bake collects them in its one parse of each TU
-// (BakedIndexes::staticInits). They are held in memory only: the saved
-// index does not carry them, so they exist for an in-memory bake and not
-// for a loaded index.
+// (BakedIndexes::staticInits) and the saved index carries them in its
+// `static_inits` section (snapshot format v20, Snapshot.h), so a loaded
+// index answers like the bake that wrote it. Worker shards carry their
+// TUs' roots (absorb), and a warm refresh drops the roots of the TUs it
+// re-parses or drops (removeTUs) before absorbing the fresh ones.
 
 namespace vycor {
 
@@ -52,6 +54,12 @@ struct StaticInitCallee {
   /// Graph identity (the call graph's node key) and display name.
   std::string usr;
   std::string display;
+  /// The TUs whose parse of the initializer calls it, sorted, when that
+  /// is not all of the root's TUs; empty when every TU of the root does
+  /// (the common case). A header's initializer can call different
+  /// functions under different TUs (a macro, an overload declared by an
+  /// earlier include), and removeTUs must drop only what a TU added.
+  std::vector<std::string> tus;
 };
 
 struct StaticInitRoot {
@@ -79,9 +87,28 @@ struct StaticInitFacts {
 
   /// Merge the records of one initializer seen in several TUs and put
   /// everything in canonical order: roots by (file, line, name, usr), TU
-  /// lists and callees sorted and unique. Idempotent. The order in which
-  /// TUs were collected does not survive this.
+  /// lists and callees sorted and unique, each callee's TU list empty
+  /// when every TU of its root calls it and the strict subset otherwise.
+  /// Idempotent. The order in which TUs were collected does not survive
+  /// this.
   void canonicalize();
+
+  /// Append another set of facts (a worker shard, a refreshed TU set) and
+  /// canonicalize. The result is collected only when both were: facts
+  /// missing for some TUs are not facts about the program.
+  void absorb(StaticInitFacts &&other);
+
+  /// absorb without the canonicalize, for a loop over many shards: the
+  /// facts are not canonical until canonicalize() runs after the last
+  /// append, so the loop pays one sort instead of one per shard.
+  void append(StaticInitFacts &&other);
+
+  /// Drop the given TUs (raw paths, as the snapshot meta keeps them; the
+  /// facts hold index text) from every root and callee, and the roots and
+  /// callees left with none. Keeps the canonical form, so absorbing a
+  /// fresh bake of the same TUs afterwards equals a clean bake. Returns
+  /// how many roots were dropped.
+  size_t removeTUs(const std::vector<std::string> &tuPaths);
 };
 
 /// Append the static-initialization roots of a parsed TU to `out`

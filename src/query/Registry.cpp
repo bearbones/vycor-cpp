@@ -158,7 +158,8 @@ llvm::json::Value runTool(const ToolEntry &tool, const llvm::json::Object &args,
 // is named; the other stays in the ndjson _summary line.
 // Sections beyond the graph a tool reads (ToolEntry::needs). Exception
 // and lock tools walk call-site contexts; channel tools read the channel
-// index; the dependency audit reads the references; everything else,
+// index; the dependency audit reads the references; metrics reads the
+// static-initialization roots besides; everything else,
 // graph_summary included (it reports the header
 // counts), touches only the graph.
 static const std::map<std::string, unsigned> kExtraNeeds = {
@@ -179,8 +180,9 @@ static const std::map<std::string, unsigned> kExtraNeeds = {
     {"audit_dependencies", kSectionReferences},
     {"explain_dependency", kSectionReferences},
     // Which sections a metrics run reads depends on the metrics selected,
-    // and an organization metric may read any of them.
-    {"metrics", kSectionControlFlow | kSectionChannels},
+    // and an organization metric may read any of them; static-init-cost
+    // reads the static-initialization roots.
+    {"metrics", kSectionControlFlow | kSectionChannels | kSectionStaticInits},
 };
 
 // Tools that never touch the graph: the section named here is all they
@@ -226,6 +228,8 @@ std::vector<std::string> sectionNames(unsigned needs) {
     out.push_back("channels");
   if (needs & kSectionReferences)
     out.push_back("references");
+  if (needs & kSectionStaticInits)
+    out.push_back("static_inits");
   return out;
 }
 
