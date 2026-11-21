@@ -199,8 +199,13 @@ are preserved. This reduces noise from utility/math headers while keeping entry 
 `makeClangTool` calls `compat/ToolingRuntime` once before frontend work. Its
 instrumented initialization barrier materializes LLVM statistics state without
 enabling statistics, so prebuilt LLVM lazy initialization is ordered across
-parsing threads (including the isolated-worker test seam). Subsequent parses
-remain concurrent; no sanitizer reports are suppressed.
+parsing threads (including the isolated-worker test seam). In a
+ThreadSanitizer build it also parses a few declarations that make Sema build
+its function-local name sets (`SemaAttr.cpp`: the standard-library owners,
+pointers, containers and nullable classes): a prebuilt libclang reads those
+through a guard fast path the sanitizer cannot see, and reports their
+construction on one parsing thread racing with a lookup on another.
+Subsequent parses remain concurrent; no sanitizer reports are suppressed.
 
 **Crash and hang containment**: `megascope index` bakes in subprocess workers
 by default whenever `--threads` is not 1 and `--pch-dir` is unset
