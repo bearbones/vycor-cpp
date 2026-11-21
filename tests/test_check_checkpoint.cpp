@@ -609,7 +609,7 @@ TEST_CASE("A diagnostic kind outside the enum is refused and not loaded",
     const size_t loc = bytes.find("ZZloc.cpp");
     REQUIRE(loc != std::string::npos);
     REQUIRE(u32At(bytes, loc - 12) == 1); // the diagnostic count
-    putU32At(bytes, loc - 8, 32);
+    putU32At(bytes, loc - 8, static_cast<uint32_t>(Diagnostic::Custom) + 1);
     putU32At(bytes, payload + len,
              checkRecordChecksum(bytes.data() + payload, len));
     std::ofstream(shard.path, std::ios::binary | std::ios::trunc) << bytes;
@@ -635,7 +635,7 @@ TEST_CASE("A diagnostic kind outside the enum is refused and not loaded",
     const uint32_t len = u32At(bytes, 17);
     const size_t loc = bytes.find("ZZloc.cpp");
     REQUIRE(loc != std::string::npos);
-    putU32At(bytes, loc - 8, 32);
+    putU32At(bytes, loc - 8, static_cast<uint32_t>(Diagnostic::Custom) + 1);
     putU32At(bytes, payload + len,
              checkRecordChecksum(bytes.data() + payload, len));
     std::ofstream(ckpt.path, std::ios::binary | std::ios::trunc) << bytes;

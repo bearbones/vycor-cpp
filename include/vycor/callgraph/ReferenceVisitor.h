@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/ReferenceIndex.h"
 #include "vycor/callgraph/UsrIdent.h"
 #include "vycor/compat/ClangVersion.h"
@@ -25,7 +26,9 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -64,13 +67,30 @@ namespace vycor {
 //
 // Instantiation bodies are read from a worklist after the main traversal,
 // never nested inside it, so attribution needs no stack of modes.
+//
+// Lock facts. While it reads a body the visitor keeps the set of locks
+// held, lexically: a guard local (callgraph/LockFacts.h) holds its mutexes
+// from its declaration to the end of its block, unique_lock::unlock() and
+// lock() toggle it, a mutex's own lock()/unlock() (and the pthread calls)
+// add and drop it, and the body of a std::call_once lambda or of a
+// function-local static's initializer holds a "once" lock. A function or
+// lambda body starts with no lock held (a lambda runs later, wherever it is
+// called). Every variable access and call is recorded with the lock sets
+// it was made under (ReferenceRecord::locks), and whether it was made
+// inside a loop (kRefInLoop). The lock set is cached and recomputed only
+// when the held set changes, so an occurrence still costs one hash bump.
+// An instantiation's body is read under its own locks; a transparent
+// function's references take the lock sets of the use they are spliced
+// into.
 // ============================================================================
 class ReferenceVisitor : public clang::RecursiveASTVisitor<ReferenceVisitor> {
   using Base = clang::RecursiveASTVisitor<ReferenceVisitor>;
 
 public:
+  // `lockCfg` adds lock guard types (--lock-type); null: the built-ins.
   ReferenceVisitor(ReferenceIndex &index, clang::SourceManager &sm,
-                   const std::string &tuPath);
+                   const std::string &tuPath,
+                   const LockTypeConfig *lockCfg = nullptr);
 
   // Traverse the TU and register its facts with the index under tuPath.
   void run(clang::ASTContext &ctx);
@@ -83,6 +103,16 @@ public:
   bool TraverseCXXTypeidExpr(clang::CXXTypeidExpr *expr);
   bool TraverseRequiresExpr(clang::RequiresExpr *expr);
   bool TraverseConceptDecl(clang::ConceptDecl *decl);
+  bool TraverseCompoundStmt(clang::CompoundStmt *stmt);
+  bool TraverseForStmt(clang::ForStmt *stmt);
+  bool TraverseWhileStmt(clang::WhileStmt *stmt);
+  bool TraverseDoStmt(clang::DoStmt *stmt);
+  bool TraverseCXXForRangeStmt(clang::CXXForRangeStmt *stmt);
+  bool TraverseIfStmt(clang::IfStmt *stmt);
+  bool TraverseSwitchStmt(clang::SwitchStmt *stmt);
+  bool TraverseBreakStmt(clang::BreakStmt *stmt);
+  bool TraverseContinueStmt(clang::ContinueStmt *stmt);
+  bool TraverseGotoStmt(clang::GotoStmt *stmt);
 
   bool VisitDeclRefExpr(clang::DeclRefExpr *expr);
   bool VisitMemberExpr(clang::MemberExpr *expr);
@@ -152,11 +182,56 @@ private:
     uint32_t slot;
     FrameKind kind;
     bool dependent; // templated: a return type may not be known yet
+    bool inLoop = false; // Lambda: written inside a loop body
   };
 
   struct RefAcc {
     uint32_t count = 0;
     clang::SourceLocation site; // first occurrence in traversal order
+    clang::SourceLocation unlockedSite; // first occurrence under no lock
+    uint32_t unlockedSeq = 0;
+    bool unlocked = false; // some occurrence was made under no lock
+    bool locked = false;   // some occurrence was made under a lock
+    uint8_t flags = 0;     // RefFlag bits
+  };
+
+  // ---- lock state -----------------------------------------------------------
+  // One lock held at the current point of a body: a guard's mutex (guard
+  // set) or a mutex locked by hand (guard null). An inactive entry is a
+  // guard that does not own its mutex right now (defer_lock, unlock()).
+  // An unknown lock a meet made (`met`: a different lock on each path)
+  // lasts while `scope`, the guard the paths' locks belonged to, is in
+  // scope (null: they were taken by hand), and an unlock of a mutex not
+  // held drops it.
+  struct HeldLock {
+    uint32_t lock; // index in lockIdents_
+    const clang::VarDecl *guard;
+    bool active;
+    bool met;
+    const clang::VarDecl *scope;
+  };
+  using HeldLocks = llvm::SmallVector<HeldLock, 4>;
+  struct LockState {
+    HeldLocks held;
+    unsigned loopDepth = 0;
+  };
+  // An enclosing loop or switch: the lock states at the breaks out of it
+  // (and, for a loop, at the continues), met as they are reached.
+  struct FlowFrame {
+    bool isSwitch = false;
+    bool anyBreak = false;
+    bool anyContinue = false;
+    HeldLocks breaks;
+    HeldLocks continues;
+  };
+  // The lock states at the forward gotos to a label not reached yet, met.
+  struct GotoState {
+    bool any = false;
+    HeldLocks held;
+  };
+  struct LockedOcc {
+    uint32_t seq;               // occurrence order within the TU
+    clang::SourceLocation site; // first occurrence under this lock set
   };
 
   // What the current traversal attributes to. AsWritten: the main pass.
@@ -182,6 +257,9 @@ private:
     kMarkWrite = 2,
     kMarkCallee = 4,
     kMarkAddress = 8,
+    // With kMarkWrite: a non-const member call that a const overload could
+    // have served, returning by value (the write is not kRefMutates).
+    kMarkWeakWrite = 16,
   };
 
   // ---- traversal ----------------------------------------------------------
@@ -196,6 +274,7 @@ private:
   void noteExplicitMembers(const clang::CXXRecordDecl *cls);
 
   void mark(const clang::Expr *expr, uint8_t bits);
+  static uint8_t objectMarks(const clang::CXXMethodDecl *method);
   [[nodiscard]] uint8_t marksOf(const clang::Expr *expr) const;
   void markArgument(const clang::FunctionDecl *callee, unsigned param,
                     const clang::Expr *arg);
@@ -210,9 +289,44 @@ private:
   void noteFunctionUse(const clang::FunctionDecl *fn, const clang::Expr *expr,
                        clang::NonOdrUseReason nour, clang::SourceLocation loc);
   void noteTypeinfoUse(clang::QualType type, clang::SourceLocation loc);
-  void addRef(uint32_t target, RefRole role, clang::SourceLocation site);
+  void addRef(uint32_t target, RefRole role, clang::SourceLocation site,
+              uint8_t flags = 0);
   void addRefFrom(uint32_t referrer, uint32_t target, RefRole role,
-                  clang::SourceLocation site);
+                  clang::SourceLocation site, uint32_t lockset, uint8_t flags);
+
+  // ---- locks --------------------------------------------------------------
+  void noteGuard(const clang::VarDecl *var);
+  void noteLockCall(const clang::CallExpr *expr);
+  [[nodiscard]] uint32_t mutexIdentity(const clang::Expr *expr);
+  [[nodiscard]] uint32_t lockIdentity(const clang::NamedDecl *decl,
+                                      llvm::StringRef prefix);
+  [[nodiscard]] uint32_t unknownLock();
+  [[nodiscard]] uint32_t onceLock(const clang::NamedDecl *decl);
+  void acquire(uint32_t lock);
+  void release(uint32_t lock);
+  // Replace the held locks, invalidating the cached set only on a change.
+  void assignHeld(const HeldLocks &held);
+  // Must-hold meet of `b` into `a`; a different lock on each side leaves
+  // an unknown lock held.
+  void meetLocks(HeldLocks &a, const HeldLocks &b);
+  void meetLocksInto(bool &any, HeldLocks &into, const HeldLocks &state);
+  // Start the labels heading `stmt` from the states of the gotos to them
+  // (falls: the statement above can reach this one).
+  void enterLabels(const clang::Stmt *stmt, bool falls);
+  // A loop's lock state after it, from the states before it and at the end
+  // of its body (bodyFalls: the body can reach its end).
+  void finishLoop(const HeldLocks &outer, bool zeroTrips, bool condTrue,
+                  bool bodyFalls);
+  [[nodiscard]] uint32_t currentLockset();
+  // The held locks without once locks: what a lambda created here holds
+  // when it is called later.
+  [[nodiscard]] uint32_t currentLocksetWithoutOnce();
+  [[nodiscard]] uint32_t internLockset(llvm::SmallVectorImpl<uint32_t> &locks);
+  void enterBody(LockState &saved);
+  void leaveBody(LockState &saved);
+  [[nodiscard]] std::string
+  lockText(const RefAcc &acc,
+           llvm::ArrayRef<std::pair<uint32_t, LockedOcc>> locked);
 
   // ---- implicit code --------------------------------------------------------
   // The slot a reference to `fn` records: its symbol (scheduling the body of
@@ -270,7 +384,9 @@ private:
   [[nodiscard]] bool filePath(clang::FileID fid,
                               llvm::SmallVectorImpl<char> &path) const;
   void lower();
-  void spliceTransparent(std::vector<std::pair<uint64_t, RefAcc>> &refs);
+  void spliceTransparent(std::vector<std::pair<uint64_t, RefAcc>> &refs,
+                         std::vector<std::pair<uint64_t, uint64_t>> &lockVia);
+  static void mergeLockFacts(RefAcc &acc, const RefAcc &other);
   [[nodiscard]] Id lowerEntity(const Entity &entity,
                                std::vector<ReferenceIndex::SymbolRecord> &out);
 
@@ -306,6 +422,26 @@ private:
   // The instantiation being read, and the maximum over those read so far.
   llvm::DenseMap<uint64_t, RefAcc> instAcc_;
   llvm::DenseMap<uint64_t, RefAcc> instRefs_;
+  const LockTypeConfig *lockCfg_;
+  LockState lockState_;
+  std::vector<FlowFrame> flow_; // innermost last
+  llvm::DenseMap<const clang::LabelDecl *, GotoState> gotoStates_;
+  uint32_t heldSet_ = 0;       // index in locksets_ of the active held locks
+  bool heldSetValid_ = true;
+  uint32_t seq_ = 0;
+  std::vector<Ident> lockIdents_;           // usr = identity, display
+  llvm::StringMap<uint32_t> lockIdentOf_;   // identity -> index
+  uint32_t unknownLock_ = UINT32_MAX;
+  // Lock sets: sorted lockIdents_ indices; set 0 is the empty set.
+  std::vector<std::vector<uint32_t>> locksets_{{}};
+  std::map<std::vector<uint32_t>, uint32_t> locksetOf_;
+  // Lambdas handed to std::call_once -> the once lock their body holds.
+  llvm::DenseMap<const clang::LambdaExpr *, uint32_t> onceLambdas_;
+  // Functions named as the callable of std::call_once -> the once lock
+  // their address is taken under (the call graph's edge to them reads it).
+  llvm::DenseMap<const clang::Expr *, uint32_t> onceCallables_;
+  // (refs_ key, lock set) -> first occurrence, for occurrences under a lock.
+  llvm::DenseMap<std::pair<uint64_t, uint32_t>, LockedOcc> lockedOcc_;
 };
 
 } // namespace vycor

@@ -120,7 +120,7 @@ Token-identical copies at different sites are deliberately not flagged
 are suppressed. This is the ODR class ordinary builds cannot see: linkers
 error on duplicate strong symbols but silently keep one arbitrary copy of
 mismatched weak/COMDAT definitions. OdrEntries ride checkpoint payloads
-and worker shards (since journal/shard format v2; v16 is current).
+and worker shards (since journal/shard format v2; v17 is current).
 
 `--isolate-workers [--workers N]` runs the per-TU parses in subprocess
 workers (megascope's model): the parent spawns `check --index-worker` /
@@ -155,6 +155,25 @@ the graph with `dead-code` / `static-init-hazards`. See
 graph with roots from `--hot-root`, `hotPaths` in the org config, or
 `--hot-profile` + `--hot-min-count`; latent findings set
 `Diagnostic::note` (Note severity). See `docs/checks/hot-path-effects.md`.
+
+`unsynchronized-shared-global` (`check/UnsynchronizedSharedGlobal.h/.cpp`,
+off, groups `noisy` and `compute-heavy`) reads the same graph and
+reference facts: each `std::thread`/`std::jthread`/`std::async`/
+`std::packaged_task` thread entry is a context (plus the main thread
+from `main` and `--entry-point`), a BFS per context over (function, lock
+set) states with parent pointers and per-function / per-context caps
+joins the lock facts of each call on the path with those at the access,
+and a variable (not const, atomic, thread_local, a sync primitive, or
+used as a lock) written in one context and accessed in a concurrent one
+with disjoint lock sets is a finding. `SharedGlobal_Race` (warning)
+needs exhaustive searches and complete coverage; `_Unproven`,
+`_Plausible` (plausible edge or packaged task) and `_InitThenPublish`
+(one side on the main thread) are notes (journal/shard v17 renumbers
+`Custom` for them). The lock facts come from `ReferenceVisitor`
+(`callgraph/LockFacts.h` classifies mutex, guard and sync-primitive
+types) and ride the reference records (format v17). See
+`docs/checks/unsynchronized-shared-global.md` and
+`tests/test_shared_global.cpp`.
 
 `callback-under-lock` is an opt-in TU-local AST check in
 `check/CallbackUnderLock.cpp`: lexical standard mutex guard ownership plus
@@ -226,7 +245,7 @@ function with two or more projections on one triple: `IsaLeak_Divergent`
 what it can inline is (the copies then differ only in optimizing builds that
 keep it out of line). Facts live in
 `IsaLeakFacts` (own lock, interned profile, TU and function ids); they ride
-worker shards (v15) in that interned form (`IsaLeakPayload`: tables plus
+worker shards (since v15) in that interned form (`IsaLeakPayload`: tables plus
 flat id triples) but not the phase-2 handoff. Enabling it turns the
 `--checkpoint` journal off. Reference: `docs/checks/isa-leak.md`; tests in
 `tests/test_check_isa_leak.cpp`.
@@ -259,7 +278,8 @@ The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dry
 | `PathSearch.h/.cpp` | The shared bounded reverse path search (`findCallerPaths`): exact hops (USRs, call site, kind, confidence, execution context), canonical order, stop reasons, `complete`/`exhaustive`; used by `find_call_chain`, the oracle, and the lock tools. Contract: `docs/path-analysis.md` |
 | `ControlFlowOracle.h/.cpp` | Query engine over the path search: exception verdicts (universal only when the search was exhaustive), per-path propagation outcome, nearest catches, call site context |
 | `ReferenceIndex.h/.cpp` | Symbol reference facts (`docs/symbol-references.md`): one record per (referrer, target, role) with an occurrence count and one witness site, and per symbol its kind, linkage class, attributes, declarations, and defining TUs; content-deduplicated with per-TU contributor lists (`removeTUs`, `absorb`), canonical encoding as the snapshot's references section |
-| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity. After the code as written it drains a worklist of the instantiation bodies the TU uses (attributed to the pattern, adding only keys the pattern lacks, at the largest single-instantiation count) and of transparent functions (implicit special members, system-template instantiations, generic-lambda call operators), whose references are spliced into their users at lowering (Tarjan SCC summaries); implicit constructor/destructor calls, `operator new`/`delete`, and a vtable's implicit virtual destructor are recorded on the way |
+| `ReferenceVisitor.h/.cpp` | Phase 4 AST visitor of the single-parse bake: counts references by role (`call`, `address_of`, `read`, `write`, `vtable_use`, `typeinfo_use`) in a per-TU hash map keyed by entity slots, and lowers names, USRs, and linkage facts once per entity. After the code as written it drains a worklist of the instantiation bodies the TU uses (attributed to the pattern, adding only keys the pattern lacks, at the largest single-instantiation count) and of transparent functions (implicit special members, system-template instantiations, generic-lambda call operators), whose references are spliced into their users at lowering (Tarjan SCC summaries); implicit constructor/destructor calls, `operator new`/`delete`, and a vtable's implicit virtual destructor are recorded on the way; tracks the locks held (scoped guards, lock/unlock calls, call_once and static-local once guards) and records the lock sets per reference (`docs/symbol-references.md` "Lock facts") |
+| `LockFacts.h/.cpp` | Type classification the lock facts share: mutex types, guard types, synchronization primitives, `std::defer_lock`-style tags |
 | `WorkerPool.h/.cpp` | Subprocess worker isolation shared by the megascope bake and check: `dispatchIsolated` (batching, WORKER-TU poison markers, crash/bisect), `runWorkerProcess` (spawn, `WorkerLimits` timeout that restarts at every marker and treats expiry as a crash with a `timeout` outcome, memory limit), and `bakeIsolated` |
 | `CrashGuard.h/.cpp` | In-process crash guard: `llvm::CrashRecoveryContext` with handlers on a per-thread `sigaltstack`; parses write TU-local indexes absorbed only after a clean return, so a crash leaves no partial facts and no shared lock held |
 | `Interrupt.h/.cpp` | SIGINT/SIGTERM: a watcher thread kills tracked workers, removes registered scratch paths and `RemoveFileOnSignal` files, and re-raises; workers die with their parent (`PR_SET_PDEATHSIG`) |
@@ -447,7 +467,8 @@ catch handler, v12 a control-flow section laid out for reading in
 place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
 v15 the references section and its two header counts, v16 each
-reference record's largest contributing TU:
+reference record's largest contributing TU, v17 lock facts and a flag
+byte on each reference record:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels / references), so a
@@ -993,6 +1014,6 @@ only, not a namespace boundary.
   required at runtime, not just at build time.
 
 `abi-layout-divergence` compares physical record layouts by canonical USR and
-target ABI. Its worker/journal payload is version 15. Enabling it bypasses legacy
+target ABI. Its worker/journal payload is version 17. Enabling it bypasses legacy
 checkpoint reuse because headers and compile flags affect layout. See
 `docs/checks/abi-layout-divergence.md`.

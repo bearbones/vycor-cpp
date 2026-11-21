@@ -505,6 +505,15 @@ struct Diagnostic {
                                   // built with different code generation
     IsaLeak_Inlined,              // the same, sensitive to the difference
                                   // only through bodies it can inline
+    // unsynchronized-shared-global (check/UnsynchronizedSharedGlobal.h)
+    SharedGlobal_Race,            // written and accessed from two threads,
+                                  // no common lock, search exhaustive
+    SharedGlobal_Unproven,        // the same, from facts or a search that
+                                  // do not cover the whole program
+    SharedGlobal_Plausible,       // the same, through a plausible edge or
+                                  // a std::packaged_task
+    SharedGlobal_InitThenPublish, // one side on the main thread: ordering
+                                  // before the thread start not proven
     Custom,                       // named built-in or org check (see
                                   // checkName). Stays last: records carry
                                   // the raw value and reject anything past it

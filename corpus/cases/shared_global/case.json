@@ -1,0 +1,67 @@
+{
+ "schema": 1,
+ "title": "Globals shared between threads (check unsynchronized-shared-global): a true race, a correctly locked global, an atomic, a thread_local, a const, a call_once initialization, and a main-thread write before the threads start; the same answer from a saved index",
+ "sources": [
+  "state.cpp",
+  "main.cpp"
+ ],
+ "queries": [
+  {
+   "id": "unsynchronized-shared-global",
+   "argv": [
+    "check",
+    "--checks=-all,unsynchronized-shared-global",
+    "--threads",
+    "1"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "state\\.cpp:3: \\[unsynchronized-shared-global\\] 'raced' is written in bump \\(.*state\\.cpp:11:17\\) holding no lock, and read in reader \\(.*main\\.cpp:16:14\\) holding no lock; they run in a std::thread started in main \\(.*main\\.cpp:22:15\\) and in a std::thread started in main \\(.*main\\.cpp:23:15\\), with no lock in common\\. Paths: writer -> bump; reader\\.$",
+      "state\\.cpp:7: \\[unsynchronized-shared-global\\] 'config' is written in main .* One side runs on the main thread: whether its access happens before the thread starts \\(initialize, then publish\\) is not proven\\.$"
+     ],
+     "absent": [
+      "'guarded'",
+      "'guardMutex'",
+      "'hits'",
+      "'scratch'",
+      "'kLimit'",
+      "'initialized'",
+      "'onceFlag'",
+      "Not proven"
+     ]
+    }
+   }
+  },
+  {
+   "id": "from-the-saved-index",
+   "argv": [
+    "check",
+    "--checks=-all,unsynchronized-shared-global",
+    "--index",
+    "{index}",
+    "--threads",
+    "1",
+    "--verbose"
+   ],
+   "expect": {
+    "exit": 1,
+    "lines": {
+     "present": [
+      "'raced' is written in bump",
+      "'config' is written in main"
+     ],
+     "absent": [
+      "'guarded'",
+      "'hits'",
+      "Not proven"
+     ],
+     "stderr_present": [
+      "^check: graph-backed checks read the index "
+     ]
+    }
+   }
+  }
+ ]
+}

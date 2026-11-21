@@ -17,6 +17,7 @@
 #include "vycor/check/CheckSet.h"
 #include "vycor/check/Checkpoint.h"
 #include "vycor/check/CouldBeInternal.h"
+#include "vycor/check/UnsynchronizedSharedGlobal.h"
 #include "vycor/check/DeadCodeAnalyzer.h"
 #include "vycor/check/HotPathEffects.h"
 #include "vycor/check/Indexer.h"
@@ -192,7 +193,8 @@ static llvm::cl::list<std::string>
 static llvm::cl::opt<std::string>
     CheckIndexPath("index",
         llvm::cl::desc("megascope index the graph-backed checks (dead-code, "
-                       "static-init-hazards, could-be-internal) read when it "
+                       "static-init-hazards, could-be-internal, "
+                       "unsynchronized-shared-global) read when it "
                        "is fresh for the selected sources (default: "
                        "<build-path>/.vycor/megascope.vycs); otherwise they "
                        "bake the sources in memory"),
@@ -1284,6 +1286,9 @@ int main(int argc, const char **argv) {
     const bool wantInitHazards =
         enabledChecks.count("static-init-hazards") > 0;
     const bool wantInternal = enabledChecks.count("could-be-internal") > 0;
+    const bool wantShared =
+        enabledChecks.count("unsynchronized-shared-global") > 0;
+    const bool wantRefs = wantInternal || wantShared;
     bool hasInitHazardRoots = false;
     if (wantInitHazards) {
       mergedIndex.forEachStaticInit([&](const vycor::StaticInitEntry &e) {
@@ -1292,8 +1297,17 @@ int main(int argc, const char **argv) {
       });
     }
     const bool wantGraph =
-        wantDeadCode || hasInitHazardRoots || wantHotPaths;
-    if (wantGraph || wantInternal) {
+        wantDeadCode || hasInitHazardRoots || wantHotPaths || wantShared;
+    if (wantGraph || wantRefs) {
+      // The lock types the bake treats as guards (org config included);
+      // an index baked with others does not answer the shared-global check.
+      vycor::LockTypeConfig lockCfg;
+      {
+        vycor::ChannelTypeConfig unusedChannels;
+        std::vector<std::string> unusedCollapse;
+        vycor::mergeExtensionConfig(orgCfg, lockCfg, unusedChannels,
+                                    unusedCollapse);
+      }
       vycor::CallGraph graph;
       vycor::ReferenceIndex references;
       vycor::TuOutcomes factOutcomes;
@@ -1305,7 +1319,7 @@ int main(int argc, const char **argv) {
                      ? std::string()
                      : vycor::defaultIndexPath(CheckBuildPath));
       const unsigned needs = (wantGraph ? vycor::kSectionGraph : 0u) |
-                             (wantInternal ? vycor::kSectionReferences : 0u);
+                             (wantRefs ? vycor::kSectionReferences : 0u);
       if (!snapPath.empty()) {
         if (auto snap = vycor::SnapshotIO::load(
                 snapPath, nullptr, vycor::LoadMode::ReadOnly, needs)) {
@@ -1319,7 +1333,18 @@ int main(int argc, const char **argv) {
             llvm::errs() << "check: not reading the index " << snapPath
                          << ": it was baked with --collapse-paths, which "
                             "hot-path-effects cannot use\n";
-          if ((!(wantDeadCode || wantInternal) ||
+          // The shared-global check needs the lock types it was baked with.
+          const bool sameLocks =
+              !wantShared ||
+              (snap->meta.lockAllowlist == lockCfg.userAllowlist &&
+               snap->meta.lockBuiltins == lockCfg.useBuiltins);
+          if (!sameLocks && CheckVerbose)
+            llvm::errs() << "check: not reading the index " << snapPath
+                         << ": it was baked with other lock types than "
+                            "unsynchronized-shared-global uses (org config "
+                            "lock types only)\n";
+          if (sameLocks &&
+              (!(wantDeadCode || wantRefs) ||
                snap->meta.files.size() == files.size()) &&
               !collapsedForHot) {
             // A TU dirty only because its unchanged inputs parsed with
@@ -1360,8 +1385,9 @@ int main(int argc, const char **argv) {
       if (!loadedFromSnap) {
         const unsigned cgThreads =
             CheckIsolateWorkers ? opts.workerCount : opts.threadCount;
-        if (wantInternal) {
-          auto baked = vycor::bakeIndexes(*compDb, files, {}, cgThreads);
+        if (wantRefs) {
+          auto baked = vycor::bakeIndexes(*compDb, files, {}, cgThreads,
+                                          nullptr, "", lockCfg);
           graph = std::move(baked.graph);
           references = std::move(baked.references);
           factOutcomes = std::move(baked.outcomes);
@@ -1388,9 +1414,10 @@ int main(int argc, const char **argv) {
       if (hasInitHazardRoots)
         vycor::analyzeStaticInitHazards(mergedIndex, graph, diagnostics);
 
-      if (wantInternal) {
-        // The program is every C/C++ entry of the compilation database; a
-        // claim that no other TU references a symbol needs all of them.
+      // The program is every C/C++ entry of the compilation database; a
+      // claim about the whole program needs all of them parsed cleanly.
+      std::string coverageGap;
+      if (wantRefs) {
         size_t programTus = 0, coveredTus = 0;
         auto everything =
             vycor::selectSources(*compDb, vycor::SourceSelection{}, std::cin);
@@ -1403,13 +1430,16 @@ int main(int argc, const char **argv) {
         } else {
           llvm::consumeError(everything.takeError());
         }
+        coverageGap =
+            vycor::describeCoverageGap(programTus, coveredTus, factOutcomes);
+      }
+      if (wantInternal) {
         vycor::CouldBeInternalOptions internalOpts;
         internalOpts.entryPoints.assign(CheckEntryPoints.begin(),
                                         CheckEntryPoints.end());
         internalOpts.testPathPattern = CheckTestPathRe;
         internalOpts.projectRoot = projectRoot;
-        internalOpts.coverageGap =
-            vycor::describeCoverageGap(programTus, coveredTus, factOutcomes);
+        internalOpts.coverageGap = coverageGap;
         std::string error;
         auto internalDiags =
             vycor::findCouldBeInternal(references, internalOpts, error);
@@ -1469,6 +1499,43 @@ int main(int argc, const char **argv) {
         vycor::appendHotPathDiagnostics(
             graph, hotReport,
             hotProfile ? CheckHotProfile.c_str() : nullptr, diagnostics);
+      }
+
+      if (wantShared) {
+        vycor::SharedGlobalOptions sharedOpts;
+        sharedOpts.entryPoints.assign(CheckEntryPoints.begin(),
+                                      CheckEntryPoints.end());
+        sharedOpts.coverageGap = coverageGap;
+        vycor::SharedGlobalStats sharedStats;
+        for (auto &diag : vycor::findUnsynchronizedSharedGlobals(
+                 graph, references, sharedOpts, &sharedStats))
+          diagnostics.push_back(std::move(diag));
+        if (CheckVerbose)
+          llvm::errs() << "check: unsynchronized-shared-global: "
+                       << sharedStats.threadContexts << " thread context(s) ("
+                       << sharedStats.selfConcurrent
+                       << " can overlap themselves), main thread "
+                       << (sharedStats.mainContext ? "found" : "not found")
+                       << (sharedStats.mainDefinitions > 1
+                               ? " (" +
+                                     std::to_string(
+                                         sharedStats.mainDefinitions) +
+                                     " programs define main: they are "
+                                     "treated as one)"
+                               : std::string())
+                       << ", " << sharedStats.candidates
+                       << " candidate variable(s), "
+                       << sharedStats.statesSearched << " state(s) searched"
+                       << (sharedStats.boundedContexts
+                               ? ", " + std::to_string(
+                                            sharedStats.boundedContexts) +
+                                     " context(s) hit a bound"
+                               : std::string())
+                       << "\n";
+        if (CheckVerbose)
+          for (const std::string &name : sharedStats.boundedNames)
+            llvm::errs() << "check: unsynchronized-shared-global: bounded: "
+                         << name << "\n";
       }
     }
 

@@ -7,6 +7,7 @@ add_library(vycor_lib
   check/IsaLeak.cpp
   check/CallbackUnderLock.cpp
   check/CouldBeInternal.cpp
+  check/UnsynchronizedSharedGlobal.cpp
   check/Checkpoint.cpp
   check/CheckSet.cpp
   check/DeadCodeAnalyzer.cpp
@@ -33,6 +34,7 @@ add_library(vycor_lib
   callgraph/Effects.cpp
   callgraph/HotPath.cpp
   callgraph/InputFingerprint.cpp
+  callgraph/LockFacts.cpp
   callgraph/MegascopeBridge.cpp
   callgraph/PathSearch.cpp
   callgraph/ReferenceIndex.cpp

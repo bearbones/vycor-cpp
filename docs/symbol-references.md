@@ -146,7 +146,7 @@ not:
 |---|---|
 | `kind` | `function`, `variable`, `class` (and `file` for a file-scope referrer) |
 | `linkage` | `external` (one strong definition), `template_instantiation`, `vague` (inline, defined in class, a class without a key function, a static local of an inline function), `internal` (`static`, anonymous namespace, function-local), `none` (a file scope) |
-| `attributes` | any of `extern_c`, `visibility` (explicitly exported: a visibility other than hidden written on the declaration, its class or namespace, or by a pragma; not the command line's default), `dllexport`, `dllimport`, `used` (also `retain`, `constructor`, `destructor`), `weak` (also `alias`, `ifunc`), `member`, `static_local`, `thread_local`, `const`, `atomic`, `dynamic_class`, `main`, `explicit_instantiation`, `virtual`, `lambda`, `explicit_specialization` (an explicit specialization of a function, variable, or class template; a symbol of its own, separate from the primary template) — in this order |
+| `attributes` | any of `extern_c`, `visibility` (explicitly exported: a visibility other than hidden written on the declaration, its class or namespace, or by a pragma; not the command line's default), `dllexport`, `dllimport`, `used` (also `retain`, `constructor`, `destructor`), `weak` (also `alias`, `ifunc`), `member`, `static_local`, `thread_local`, `const`, `atomic`, `dynamic_class`, `main`, `explicit_instantiation`, `virtual`, `lambda`, `explicit_specialization` (an explicit specialization of a function, variable, or class template; a symbol of its own, separate from the primary template), `sync_primitive` (a variable of a mutex, condition variable, once flag, semaphore, latch, barrier or stop source type, or an array of one), `in_loop` (a lambda written inside a loop body) — in this order |
 | `declarations` | every declaration some indexed TU saw: `file` (absolute, `.` and `..` removed, so one file has one name however it was included), `line`, `definition`, `inHeader` (not in that TU's main file), and the TUs that saw it (`tuCount`, `firstTu`) |
 | `definingTu`, `definingTuCount` | the TUs holding a definition. A strong external symbol has one; an inline function has one per TU that recorded it, and `definingTu` is the smallest path |
 | `vtableHomeTu` | for a dynamic class, the TU that defines its key function and therefore emits the vtable and typeinfo strongly |
@@ -160,6 +160,75 @@ Of the standard library and other system-header code only strong
 external symbols are kept (`malloc`, `std::exception`'s typeinfo): those
 are link dependencies. Inline and template code from system headers is
 not recorded as a target.
+
+### Lock facts
+
+Each reference record also carries the locks held where its occurrences
+are written, for analyses that ask whether two accesses share a lock
+([unsynchronized-shared-global](checks/unsynchronized-shared-global.md)),
+and a flag byte: `in_loop` when an occurrence is inside a `for`,
+`while`, `do` (not a `do ... while (0)`) or range-`for` statement of the
+referrer, and, on a `write`,
+`mutates` when some occurrence changes the object for certain. A
+`write` without `mutates` only calls non-const member functions that
+have a const overload taking the same parameters and return by value or
+by const reference or pointer, not a write proxy (a class assignable
+from another type, such as `std::vector<bool>::reference`); a non-const
+`std::map`'s `find`, `begin` and `end` are such calls:
+the call does not change the object, though it may later be changed
+through what it returns. The lock facts are a
+text, one line per distinct lock set in order of first occurrence:
+
+```
+<line>:<col>[\t<identity>\t<display>]...
+```
+
+`line:col` is the first occurrence under that set; each lock follows as
+its identity and display name, sorted by identity. A line with no lock
+is an occurrence under no lock beside others under some; a record none
+of whose occurrences holds a lock has no text at all. The identity is
+the USR of the mutex variable or data member, `?` for a mutex the bake
+cannot name (through a pointer, a reference, a call, an array element, a
+variable or member of pointer or reference type, or a lock type
+constructed from an argument that is not read as a mutex or handed over
+from elsewhere),
+and `once:` + USR for the once guard around a `std::call_once` callable
+(the flag) or a function-local static's initializer (the variable).
+
+What holds a lock: a scoped guard (the bake's lock types:
+`std::lock_guard`, `std::scoped_lock`, `std::unique_lock`,
+`std::shared_lock`, the configured allowlist, a `scoped_lockable`
+class, or a class outside namespace `std` with a non-trivial destructor
+constructed from a mutex or a pointer to one) from its declaration to
+the end of its block, with `std::defer_lock` and the guard's `lock` /
+`unlock` calls followed (`release` hands the mutex over still locked);
+a mutex's own `lock` / `unlock` family, the capability attribute
+functions, `std::lock` (on mutexes or deferred guards), and the pthread
+lock calls, in statement order. Each branch of an `if` or `switch`
+starts from the state before it, and after a branch, switch or loop a
+lock is held when every way out that falls through holds it (a branch
+ending in a jump does not count; a different lock on each way out
+leaves an unknown lock held, until the outermost of those guards
+ends or an unlock of a mutex that is not held); a label a forward `goto` reaches starts
+from the states at those gotos; a block drops its own guards. A
+`std::call_once` callable written in the call as a lambda, or named as a
+function, runs under the flag's once guard. A lambda starts with no lock
+held; when it is created under one, the record of the enclosing
+function's `call` of the lambda carries that set, and each call of a
+local holding the lambda (named as an argument of a call: `l()`,
+`std::invoke(l)`, `std::sort(b, e, l)`) is a `call` record under the
+locks held there; a copy into another variable, a capture or a return
+is not. Lock state never crosses a function
+boundary: the joins along call paths are the consumer's.
+
+An instantiation's body (read after the code as written, see "Code the
+compiler writes") starts with no lock held; a reference only
+instantiations hold carries the lock sets and flags of all of them, and
+one the template as written holds keeps its own. A reference of a
+transparent function takes, once spliced into a user, the lock sets and
+`in_loop` flag of that user's reference to the transparent function, and
+its own `mutates` flag; spliced into a reference the user's code holds
+itself, it adds those facts and keeps that reference's count and site.
 
 ## Tools
 
@@ -257,7 +326,9 @@ from shards (`tests/test_determinism.cpp`,
 ## Storage
 
 The facts are the fifth section of the index (`references`, format
-v15; v16 adds each record's largest contributing TU), with its own checksum, decoded only by a load that asks for it.
+v15; v16 adds each record's largest contributing TU; v17 adds the lock
+facts and the flag byte to each reference record), with its own
+checksum, decoded only by a load that asks for it.
 The header's summary carries the symbol and reference counts, which
 `megascope info` and the `index` summary line report as `symbols` and
 `references`.
@@ -291,7 +362,9 @@ checks every list against its records. An index loaded read-only
 cannot be saved.
 
 Other shard formats: a `.shard.json` shard carries the facts as two
-arrays, `symbols` and `references`, beside the call-graph members. A
+arrays, `symbols` and `references`, beside the call-graph members; a
+reference has `locks` (the lock text), `in_loop: true` and
+`mutates: true` only when they are set. A
 `.mgsc` snapshot does not carry them (its schema has no slot); the
 reference tools answer `unavailable` over one.
 
@@ -329,6 +402,22 @@ The section holds about 56,700 symbols and 291,000 references. A one-shot
 `lookup-symbol` or `get-references` over that index takes about 60 ms and
 66 MB (process start, header and checksum, the references section
 alone); graph queries cost what they did.
+
+The lock facts (format v17) were measured the same way against the
+revision before them, interleaved (without, with, with, without), on a
+host shared with other builds (load 4 to 10):
+
+| | Without lock facts | With them | Change |
+|---|---|---|---|
+| Cold bake, wall | 6:30.2, 6:05.4 | 6:12.8, 6:32.8 | +1.3% (noise) |
+| Cold bake, CPU (user) | 1411 s, 1328 s | 1336 s, 1382 s | −0.8% (noise) |
+| Peak RSS of the largest process | 2.72 GB | 2.73 GB | +0.1% |
+| Index size | 573.51 MB | 574.05 MB | +0.09% (0.54 MB) |
+
+The run-to-run spread (25 s wall, 83 s CPU between two runs of one
+binary) is larger than any difference between the binaries. Lock state
+is a small vector of held locks per function body; a reference records
+a lock set only when one is held, and lock sets are interned per TU.
 
 The visitor is a fourth traversal of the AST the bake already holds; an
 occurrence is one hash-map increment keyed by (referrer, target, role),
@@ -385,7 +474,8 @@ from it in the same TU ("Code the compiler writes").
 - **Default arguments** are attributed where they are written (an
   instantiation's, to the template), not to each call that uses them.
 - **Conservative roles.** A non-const member call or non-const
-  `operator[]` on a global is a `write` whether or not it mutates;
+  `operator[]` on a global is a `write` whether or not it mutates (the
+  `mutates` flag of the [lock facts](#lock-facts) narrows it);
   binding to a non-const reference is `address_of`.
 - **Declarations** are recorded as seen by the TUs that define or
   reference the symbol; a TU that merely includes a declaration does

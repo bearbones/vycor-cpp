@@ -19,6 +19,7 @@
 #include "vycor/callgraph/ControlFlowIndex.h"
 #include "vycor/callgraph/CallGraph.h"
 #include "vycor/callgraph/CrashGuard.h"
+#include "vycor/callgraph/LockFacts.h"
 #include "vycor/callgraph/ReferenceVisitor.h"
 #include "vycor/callgraph/RetainUntilExit.h"
 #include "vycor/callgraph/StaticInit.h"
@@ -185,8 +186,8 @@ static const std::unordered_set<std::string> &builtinLockTypes() {
 // the type is trivially destructed or not a class. Returns Lock when the
 // type is a recognized lock; SmartPtr for std::unique_ptr/shared_ptr;
 // Other for any remaining non-trivial-destructor class.
-static std::optional<RaiiKind> classifyRaiiType(clang::QualType qt,
-                                                const LockTypeConfig &cfg) {
+std::optional<RaiiKind> classifyRaiiType(clang::QualType qt,
+                                         const LockTypeConfig &cfg) {
   if (qt.isNull())
     return std::nullopt;
   auto canonical = qt.getCanonicalType();
@@ -1204,7 +1205,7 @@ public:
       : indexerVisitor_(graph, sm, tuPath),
         edgeVisitor_(graph, sm, tuPath),
         cfVisitor_(index, graph, sm, tuPath), sm_(sm), tuPath_(tuPath),
-        references_(references), depSink_(depSink) {
+        references_(references), lockCfg_(lockCfg), depSink_(depSink) {
     edgeVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setCollapseFilter(collapse);
     cfVisitor_.setLockConfig(lockCfg);
@@ -1220,7 +1221,7 @@ public:
     cfVisitor_.TraverseDecl(ctx.getTranslationUnitDecl());
     // Fourth traversal of the same AST: symbol reference facts.
     if (references_)
-      ReferenceVisitor(*references_, sm_, tuPath_).run(ctx);
+      ReferenceVisitor(*references_, sm_, tuPath_, lockCfg_).run(ctx);
     if (depSink_ && depSink_->deps) {
       auto opened = openedFiles(sm_, tuPath_);
       std::lock_guard<std::mutex> lock(depSink_->mutex);
@@ -1241,6 +1242,7 @@ private:
   clang::SourceManager &sm_;
   std::string tuPath_;
   ReferenceIndex *references_; // null: reference facts are not recorded
+  const LockTypeConfig *lockCfg_; // null: the built-in lock types only
   DependencySink *depSink_;
 };
 
