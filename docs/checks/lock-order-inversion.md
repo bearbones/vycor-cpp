@@ -215,13 +215,17 @@ Where the facts cannot tell, the check stays silent or reports a note.
 - **Class-level identity.** A member mutex is one lock for every object
   of the class: `Registry::mu -> Logger::mu` and `Logger::mu ->
   Registry::mu` on two different pairs of objects are reported as a
-  cycle though no object is locked in both orders.
+  cycle though no object is locked in both orders. Telling objects
+  apart by the receiver is #159.
 - **Lock state does not cross a function boundary.** A callee that
   unlocks a lock its caller holds (`lk.unlock()` on a `std::unique_lock`
   passed by reference, which is an unnamed lock anyway) is still read as
   holding it, and a lock a function returns still held is not seen by
-  its caller. A condition variable's wait, which releases and
-  reacquires its lock, is no acquisition.
+  its caller. A lock every caller of a function already holds is not
+  seen there either: a recursive mutex re-acquired under a second lock,
+  on paths that all hold the first, still makes an edge back to it
+  (#160). A condition variable's wait, which releases and reacquires
+  its lock, is no acquisition.
 - **Template instantiations** (#106). A call made inside a template
   instantiation has no call graph edge, so an acquisition reached only
   through one is not in its caller's closure. Acquisitions written in a
@@ -238,7 +242,7 @@ Where the facts cannot tell, the check stays silent or reports a note.
 - **Once guards and static initialization.** A `std::call_once` or a
   function-local static's initializer that waits on a lock held by
   another thread waiting on the same once guard deadlocks too; once
-  guards are not part of the graph.
+  guards are not part of the graph (#161).
 - **Conditions are not read.** `if (a) lock x then y; if (!a) lock y
   then x` is reported, though the two orders never run together under
   one condition.
