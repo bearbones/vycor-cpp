@@ -323,7 +323,7 @@ public:
   }
 
   // ---- persistence ------------------------------------------------------
-  // The snapshot's references section (Snapshot.h, format v15). The bytes
+  // The snapshot's references section (Snapshot.h, format v16). The bytes
   // are canonical: strings, records and contributor lists are written in
   // sorted order, so two indexes holding the same facts encode alike
   // whatever order their TUs were baked or absorbed in.

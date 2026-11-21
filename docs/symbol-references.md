@@ -257,7 +257,7 @@ from shards (`tests/test_determinism.cpp`,
 ## Storage
 
 The facts are the fifth section of the index (`references`, format
-v15), with its own checksum, decoded only by a load that asks for it.
+v15; v16 adds each record's largest contributing TU), with its own checksum, decoded only by a load that asks for it.
 The header's summary carries the symbol and reference counts, which
 `megascope info` and the `index` summary line report as `symbols` and
 `references`.

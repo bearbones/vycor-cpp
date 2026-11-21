@@ -446,7 +446,8 @@ per-TU input fingerprints and parse outcomes, v11 a `rethrows` flag per
 catch handler, v12 a control-flow section laid out for reading in
 place, v13 a checksum per section and for the header, v14 index text
 (`callgraph/Utf8.h`) for every graph, control-flow and channel string,
-v15 the references section and its two header counts:
+v15 the references section and its two header counts, v16 each
+reference record's largest contributing TU:
 header with
 `IndexSummary` counts and a `{kind, offset, length, checksum}` table
 for meta / graph / control flow / channels / references), so a

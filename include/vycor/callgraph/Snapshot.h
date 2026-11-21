@@ -242,7 +242,10 @@ public:
   ///     summary gains the symbol and reference counts. Only a load that
   ///     asks for kSectionReferences decodes it. The other sections are
   ///     unchanged from v14.
-  static constexpr uint32_t kFormatVersion = 15;
+  /// v16: each reference record also carries its largest contributing
+  ///     TU by path, after the smallest (ReferenceIndex.h). The other
+  ///     sections are unchanged from v15.
+  static constexpr uint32_t kFormatVersion = 16;
   /// Bytes before the first section: magic(4) + version(4) + summary(48) +
   /// table count(4) + 5 entries of kind(1) + offset(8) + length(8) +
   /// checksum(8), then the header checksum(8).
