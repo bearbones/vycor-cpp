@@ -35,8 +35,8 @@ struct JsonFindSpec {
 
 struct JsonReplaceSpec {
   std::string target;
-  std::string scope;     // "node" or "macro-expansion", defaults to "node"
-  std::string withTempl; // template string
+  std::string scope = "node"; // "node" or "macro-expansion", defaults to "node"
+  std::string withTempl;      // template string
   std::vector<std::string> macroNames; // for macro-expansion: only match these
   bool argOnly = true; // for macro-expansion: require matched node to be a
                        // macro argument (not a body token). Set false when

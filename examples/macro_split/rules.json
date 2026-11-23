@@ -1,0 +1,36 @@
+{
+  "passes": [
+    {
+      "name": "split compound assertions",
+      "context": "isExpansionInMainFile()",
+      "rules": [
+        {
+          "find": {
+            "matcher": "binaryOperator(hasOperatorName(\"&&\"), unless(hasEitherOperand(ignoringImpCasts(binaryOperator(hasOperatorName(\"&&\")))))).bind(\"condition\")"
+          },
+          "replace": {
+            "target": "condition",
+            "scope": "macro-expansion",
+            "macro-names": [
+              "ASSERT"
+            ],
+            "with": "do { ASSERT({{condition | flatten(\"&&\") | join(\"); ASSERT(\")}}); } while (0)"
+          }
+        },
+        {
+          "find": {
+            "matcher": "binaryOperator(hasOperatorName(\"&&\"), hasEitherOperand(ignoringImpCasts(binaryOperator(hasOperatorName(\"&&\"))))).bind(\"condition\")"
+          },
+          "replace": {
+            "target": "condition",
+            "scope": "macro-expansion",
+            "macro-names": [
+              "ASSERT"
+            ],
+            "with": "ASSERT_ALL({{condition | flatten(\"&&\") | join(\", \")}})"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -384,18 +384,19 @@ changed-file list misses findings whose evidence is in unchanged TUs.
 
 ### morph — Apply Transformations
 
-```bash
-./build/vycor-cpp morph \
-  --rules-json rules.json \
-  --build-path /path/to/compile_commands_dir \
-  --source file1.cpp file2.cpp \
-  --dry-run
+Write a C++ rewrite as JSON and run it with the existing binary. For example,
+the bundled rule splits compound `ASSERT` calls while leaving an `&&` nested
+inside an `||` alone. Preview it from the repository root.
+
+```sh
+build/src/vycor-cpp morph --rules-json examples/macro_split/rules.json \
+  --source examples/macro_split/input.cpp --dry-run -- -std=c++17
 ```
 
-Rules are JSON objects containing a Clang dynamic AST matcher expression,
-a bind ID for the root node, and an action; passes run in sequence, each
-building on the previous. `--dry-run` collects replacements without
-writing them to disk.
+One reported edit changes `ASSERT(a > 0 && b > 0 && c > 0)` to
+`ASSERT_ALL(a > 0, b > 0, c > 0)`. The [morph guide](docs/morph.md)
+walks through applying and checking the example, writing a first rule,
+and extending the implementation.
 
 ### megascope — Cross-TU Call Graph Index and Query Tools
 
@@ -764,15 +765,15 @@ is absent.
 
 ### Boolean Macro Split (`examples/macro_split/`)
 
-`input.cpp` uses a boolean macro for a compound flag. `expected.cpp` shows the
-target form after splitting into separate named parameters. The `morph`
-transform for this pattern is a planned TDD target.
+The directory contains a runnable JSON rules file and the exact expected
+output. The transform integration test checks both preview and apply against it.
+See the [morph walkthrough](docs/morph.md#try-the-macro-example).
 
 ### Builder to Struct (`examples/builder_to_struct/`)
 
-`input.cpp` uses a builder pattern with chained setters. `expected.cpp` shows
-the equivalent aggregate initialization. Demonstrates a significant reduction
-in boilerplate (1130 → 482 bytes) achievable via AST rewriting.
+This illustrative before/after pair turns setter calls into field assignments
+and moves the lambda-based apply operation onto the struct. A contributor
+implementing this migration would need to supply the transformation rules.
 
 ---
 

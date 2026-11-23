@@ -13,15 +13,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Example: expected output after macro boolean-split transform.
+// Example: macro invocations with boolean operators to be split/converted.
+//
+// The transforms demonstrated here convert ASSERT(a && b) style calls into
+// either multiple ASSERT() calls or ASSERT_ALL(a, b, ...) depending on the
+// number of operands.
 
 #define ASSERT(cond) do { if (!(cond)) __builtin_abort(); } while (0)
-#define ASSERT_ALL(...) /* placeholder: checks each argument individually */
+// The sample operands are independent integer comparisons. Function arguments
+// are evaluated eagerly, so this rule assumes every operand is safe to evaluate.
+template <class... Conditions>
+bool all_true(Conditions... values) { return (values && ...); }
+#define ASSERT_ALL(...) ASSERT(all_true(__VA_ARGS__))
 
 void test_two_operands(int a, int b) {
   // Two operands: split into individual ASSERTs.
-  ASSERT(a > 0);
-  ASSERT(b > 0);
+  do { ASSERT(a > 0); ASSERT(b > 0); } while (0);
 }
 
 void test_three_operands(int a, int b, int c) {
@@ -37,6 +44,9 @@ void test_four_operands(int a, int b, int c, int d) {
 void test_no_change(int a, int b) {
   // OR operator: leave alone.
   ASSERT(a > 0 || b > 0);
+
+  // A nested conjunction inside an OR must keep its surrounding condition.
+  ASSERT(a == 0 || (a > 0 && b > 0));
 
   // Single condition: leave alone.
   ASSERT(a > 0);

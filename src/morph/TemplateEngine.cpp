@@ -19,8 +19,8 @@
 #include "clang/AST/Expr.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace vycor {
 
@@ -28,96 +28,109 @@ namespace vycor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Get the source text for a SourceRange, resolving through all macro
-/// expansion levels to the original file location.
-/// getSpellingLoc only unwraps one level; getExpansionLoc collapses to the
-/// macro call start. Walking getImmediateSpellingLoc until isFileID is the
-/// only reliable way to reach the original source text for deeply nested
-/// macro argument chains.
-static std::string getSourceText(clang::SourceRange range,
-                                 const clang::SourceManager &SM,
-                                 const clang::LangOptions &LangOpts) {
-  clang::SourceLocation begin = range.getBegin();
-  while (begin.isMacroID())
-    begin = SM.getImmediateSpellingLoc(begin);
-  clang::SourceLocation end = range.getEnd();
-  while (end.isMacroID())
-    end = SM.getImmediateSpellingLoc(end);
-  auto charRange = clang::CharSourceRange::getTokenRange(begin, end);
-  auto text = clang::Lexer::getSourceText(charRange, SM, LangOpts);
-  return text.str();
+/// Read a contiguous spelling at the use site. Resolving the two endpoints
+/// independently can splice a macro definition into an unrelated expression.
+static llvm::Expected<llvm::StringRef>
+getSourceText(clang::SourceRange range, const clang::SourceManager &SM,
+              const clang::LangOptions &LangOpts) {
+  bool invalid = false;
+  auto text = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(range), SM, LangOpts, &invalid);
+  if (invalid)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "bound node has no contiguous source text");
+  return text;
 }
 
-/// Recursively flatten a binary operator chain into its leaf operand texts.
-/// Stops at non-matching operators, non-BinaryOperator nodes, and ParenExprs.
-static std::vector<std::string>
+/// Visit the leaves from left to right. Parentheses and other operators are
+/// leaves in their own right. Append each spelling once, even for long chains.
+static llvm::Expected<std::string>
 flattenBinOp(const clang::Expr *expr, llvm::StringRef op,
-             const clang::SourceManager &SM,
+             llvm::StringRef separator, const clang::SourceManager &SM,
              const clang::LangOptions &LangOpts) {
-  expr = expr->IgnoreImplicit();
-  if (const auto *binOp = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
-    if (binOp->getOpcodeStr() == op) {
-      auto left = flattenBinOp(binOp->getLHS(), op, SM, LangOpts);
-      auto right = flattenBinOp(binOp->getRHS(), op, SM, LangOpts);
-      left.insert(left.end(), right.begin(), right.end());
-      return left;
+  llvm::SmallVector<const clang::Expr *, 16> pending{expr};
+  std::string output;
+  while (!pending.empty()) {
+    const auto *current = pending.pop_back_val()->IgnoreImplicit();
+    if (const auto *bin = llvm::dyn_cast<clang::BinaryOperator>(current)) {
+      if (bin->getOpcodeStr() == op) {
+        pending.push_back(bin->getRHS());
+        pending.push_back(bin->getLHS());
+        continue;
+      }
     }
+    auto text = getSourceText(current->getSourceRange(), SM, LangOpts);
+    if (!text)
+      return text.takeError();
+    output += *text;
+    if (!pending.empty())
+      output += separator;
   }
-  return {getSourceText(expr->getSourceRange(), SM, LangOpts)};
+  return output;
 }
 
 // ---------------------------------------------------------------------------
 // Template Parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a single pipe operation like "flatten("&&")" or "join(", ")" or "name".
+/// Parse a single pipe operation like "flatten("&&")" or "join(", ")" or
+/// "name".
 static llvm::Expected<PipeOp> parsePipeOp(llvm::StringRef raw) {
   raw = raw.trim();
   if (raw.empty())
-    return llvm::createStringError(llvm::inconvertibleErrorCode(), "empty pipe operation");
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "empty pipe operation");
 
-  auto parenPos = raw.find('(');
-  if (parenPos == llvm::StringRef::npos) {
-    // No-arg pipe: "text", "name"
-    return PipeOp{raw.str(), ""};
+  auto paren = raw.find('(');
+  auto name = raw.take_front(paren).trim();
+  if (name != "name" && name != "text" && name != "flatten" && name != "join")
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "unknown pipe operation: " + name);
+  llvm::StringRef arg;
+  if (paren != llvm::StringRef::npos) {
+    if (raw.back() != ')')
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "expected closing parenthesis in pipe: " +
+                                         name);
+    arg = raw.drop_front(paren + 1).drop_back().trim();
+    if (arg.starts_with("\"") && arg.size() >= 2 && arg.ends_with("\""))
+      arg = arg.drop_front().drop_back();
+    else if (arg.contains('"') || arg.contains(')') || arg.contains('('))
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "malformed pipe argument: " + name);
   }
-
-  std::string name = raw.substr(0, parenPos).trim().str();
-  llvm::StringRef rest = raw.substr(parenPos + 1);
-
-  // Expect: "arg") — find closing paren
-  // The arg is typically quoted: ("&&") or (", ")
-  auto closePos = rest.rfind(')');
-  if (closePos == llvm::StringRef::npos)
-    return llvm::createStringError(llvm::inconvertibleErrorCode(), "unclosed parenthesis in pipe: " + name);
-
-  llvm::StringRef argRaw = rest.substr(0, closePos).trim();
-
-  // Strip surrounding quotes if present
-  std::string arg;
-  if (argRaw.size() >= 2 && argRaw.front() == '"' && argRaw.back() == '"')
-    arg = argRaw.substr(1, argRaw.size() - 2).str();
-  else
-    arg = argRaw.str();
-
-  return PipeOp{std::move(name), std::move(arg)};
+  if ((name == "text" || name == "name") && !arg.empty())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "unexpected argument for pipe: " + name);
+  if (name == "flatten" && arg.empty())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "flatten requires an operator");
+  return PipeOp{name.str(), arg.str()};
 }
 
-/// Split a template expression body on '|' respecting quoted strings.
-static std::vector<llvm::StringRef> splitPipes(llvm::StringRef body) {
-  std::vector<llvm::StringRef> parts;
-  bool inQuotes = false;
+/// Read bindings and pipes up to the closing braces. Quoted separators may
+/// themselves contain a pipe or closing braces.
+static llvm::Expected<llvm::SmallVector<llvm::StringRef, 3>>
+takeExpression(llvm::StringRef &remaining) {
+  llvm::SmallVector<llvm::StringRef, 3> parts;
+  bool quoted = false;
   size_t start = 0;
-  for (size_t i = 0; i < body.size(); ++i) {
-    if (body[i] == '"')
-      inQuotes = !inQuotes;
-    if (body[i] == '|' && !inQuotes) {
-      parts.push_back(body.substr(start, i - start));
+  for (size_t i = 0; i < remaining.size(); ++i) {
+    if (remaining[i] == '"')
+      quoted = !quoted;
+    if (quoted)
+      continue;
+    if (remaining[i] == '|') {
+      parts.push_back(remaining.slice(start, i));
       start = i + 1;
+    } else if (remaining.substr(i).starts_with("}}")) {
+      parts.push_back(remaining.slice(start, i));
+      remaining = remaining.drop_front(i + 2);
+      return parts;
     }
   }
-  parts.push_back(body.substr(start));
-  return parts;
+  return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                 "unclosed {{ in template");
 }
 
 llvm::Expected<ParsedTemplate> parseTemplate(llvm::StringRef templateStr) {
@@ -136,28 +149,28 @@ llvm::Expected<ParsedTemplate> parseTemplate(llvm::StringRef templateStr) {
     result.literals.push_back(remaining.substr(0, openPos).str());
     remaining = remaining.substr(openPos + 2);
 
-    // Find closing }}
-    auto closePos = remaining.find("}}");
-    if (closePos == llvm::StringRef::npos)
-      return llvm::createStringError(llvm::inconvertibleErrorCode(), "unclosed {{ in template");
-
-    llvm::StringRef exprBody = remaining.substr(0, closePos);
-    remaining = remaining.substr(closePos + 2);
-
-    // Parse expression: nodeId | pipe1 | pipe2 ...
-    auto parts = splitPipes(exprBody);
-    if (parts.empty())
-      return llvm::createStringError(llvm::inconvertibleErrorCode(), "empty expression in template");
-
+    auto parts = takeExpression(remaining);
+    if (!parts)
+      return parts.takeError();
     TemplateExpr expr;
-    expr.nodeId = parts[0].trim().str();
+    expr.nodeId = parts->front().trim().str();
     if (expr.nodeId.empty())
-      return llvm::createStringError(llvm::inconvertibleErrorCode(), "empty node ID in template expression");
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "empty node ID in template expression");
 
-    for (size_t i = 1; i < parts.size(); ++i) {
-      auto pipeOrErr = parsePipeOp(parts[i]);
+    for (size_t i = 1; i < parts->size(); ++i) {
+      auto pipeOrErr = parsePipeOp((*parts)[i]);
       if (!pipeOrErr)
         return pipeOrErr.takeError();
+      if (pipeOrErr->name == "join") {
+        if (i != 2 || expr.pipes.front().name != "flatten")
+          return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                         "join must follow flatten");
+      } else if (i != 1) {
+        return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                       pipeOrErr->name +
+                                           " must be the first pipe");
+      }
       expr.pipes.push_back(std::move(*pipeOrErr));
     }
 
@@ -181,73 +194,38 @@ evaluateExpr(const TemplateExpr &texpr,
   const auto &SM = *result.SourceManager;
   const auto &LangOpts = result.Context->getLangOpts();
 
-  // Look up bound node
-  auto map = result.Nodes.getMap();
-  auto it = map.find(texpr.nodeId);
-  if (it == map.end())
-    return llvm::createStringError(llvm::inconvertibleErrorCode(), "bound node not found: " + texpr.nodeId);
-
+  const auto &nodes = result.Nodes.getMap();
+  auto it = nodes.find(texpr.nodeId);
+  if (it == nodes.end())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "bound node not found: " + texpr.nodeId);
   const auto &node = it->second;
-
-  // No pipes → default to source text
-  if (texpr.pipes.empty())
-    return getSourceText(node.getSourceRange(), SM, LangOpts);
-
-  // Process pipe chain
-  std::string textVal;
-  std::vector<std::string> listVal;
-  bool isList = false;
-  bool initialized = false;
-
-  for (const auto &pipe : texpr.pipes) {
-    if (pipe.name == "text") {
-      if (initialized)
-        return llvm::createStringError(llvm::inconvertibleErrorCode(), "'text' must be first in pipe chain");
-      textVal = getSourceText(node.getSourceRange(), SM, LangOpts);
-      initialized = true;
-      isList = false;
-    } else if (pipe.name == "name") {
-      if (initialized)
-        return llvm::createStringError(llvm::inconvertibleErrorCode(), "'name' must be first in pipe chain");
-      const auto *nd = node.get<clang::NamedDecl>();
-      if (!nd)
-        return llvm::createStringError(
-            llvm::inconvertibleErrorCode(),
-            "node '" + texpr.nodeId + "' is not a NamedDecl for 'name' pipe");
-      textVal = nd->getQualifiedNameAsString();
-      initialized = true;
-      isList = false;
-    } else if (pipe.name == "flatten") {
-      if (initialized)
-        return llvm::createStringError(llvm::inconvertibleErrorCode(), "'flatten' must be first in pipe chain");
-      const auto *astExpr = node.get<clang::Expr>();
-      if (!astExpr)
-        return llvm::createStringError(
-            llvm::inconvertibleErrorCode(),
-            "node '" + texpr.nodeId + "' is not an Expr for 'flatten' pipe");
-      listVal = flattenBinOp(astExpr, pipe.arg, SM, LangOpts);
-      initialized = true;
-      isList = true;
-    } else if (pipe.name == "join") {
-      if (!initialized || !isList)
-        return llvm::createStringError(
-            llvm::inconvertibleErrorCode(),
-            "'join' requires a preceding list-producing pipe");
-      textVal = llvm::join(listVal.begin(), listVal.end(), pipe.arg);
-      isList = false;
-    } else {
-      return llvm::createStringError(llvm::inconvertibleErrorCode(), "unknown pipe operation: " + pipe.name);
-    }
+  if (texpr.pipes.empty() || texpr.pipes.front().name == "text") {
+    auto text = getSourceText(node.getSourceRange(), SM, LangOpts);
+    if (!text)
+      return text.takeError();
+    return text->str();
   }
-
-  if (isList)
-    return llvm::join(listVal.begin(), listVal.end(), "");
-  return textVal;
+  if (texpr.pipes.front().name == "name") {
+    if (const auto *decl = node.get<clang::NamedDecl>())
+      return decl->getQualifiedNameAsString();
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "name requires a NamedDecl: " +
+                                       texpr.nodeId);
+  }
+  if (const auto *expr = node.get<clang::Expr>()) {
+    llvm::StringRef separator;
+    if (texpr.pipes.size() == 2)
+      separator = texpr.pipes[1].arg;
+    return flattenBinOp(expr, texpr.pipes.front().arg, separator, SM, LangOpts);
+  }
+  return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                 "flatten requires an Expr: " + texpr.nodeId);
 }
 
-llvm::Expected<std::string> evaluateTemplate(
-    const ParsedTemplate &tmpl,
-    const clang::ast_matchers::MatchFinder::MatchResult &result) {
+llvm::Expected<std::string>
+evaluateTemplate(const ParsedTemplate &tmpl,
+                 const clang::ast_matchers::MatchFinder::MatchResult &result) {
   std::string output;
   output += tmpl.literals[0];
 
@@ -266,21 +244,79 @@ llvm::Expected<std::string> evaluateTemplate(
 // Callback Generation
 // ---------------------------------------------------------------------------
 
+// Follow forwarding wrappers to the invocation the user wrote. A node wholly
+// spelled inside that invocation must cover its entire argument, otherwise an
+// inner match could discard the surrounding expression. Body tokens have no
+// such argument spelling (for example, an operator supplied by the macro).
+static std::optional<clang::CharSourceRange>
+macroInvocation(clang::SourceRange node, const clang::SourceManager &SM,
+                const clang::LangOptions &lang,
+                llvm::ArrayRef<std::string> names, bool argOnly) {
+  auto loc = node.getBegin();
+  if (!loc.isMacroID() || (argOnly && !SM.isMacroArgExpansion(loc)))
+    return std::nullopt;
+  auto call =
+      clang::Lexer::makeFileCharRange(SM.getExpansionRange(loc), SM, lang);
+  if (call.isInvalid())
+    return std::nullopt;
+  if (!names.empty()) {
+    clang::Token token;
+    if (clang::Lexer::getRawToken(call.getBegin(), token, SM, lang) ||
+        !token.is(clang::tok::raw_identifier) ||
+        !llvm::is_contained(names, token.getRawIdentifier()))
+      return std::nullopt;
+  }
+
+  // Follow arguments back to their spelling, but project a nested macro's
+  // body tokens onto that invocation. In ASSERT(a || READY && b), READY's
+  // definition can be in any file. The relevant token is READY in the call.
+  auto argumentToken = [&](clang::SourceLocation token, bool atEnd) {
+    while (token.isMacroID()) {
+      if (SM.isMacroArgExpansion(token))
+        token = SM.getImmediateSpellingLoc(token);
+      else {
+        auto expansion = SM.getImmediateExpansionRange(token);
+        token = atEnd ? expansion.getEnd() : expansion.getBegin();
+      }
+    }
+    return token;
+  };
+  auto begin = argumentToken(loc, false);
+  auto end = argumentToken(node.getEnd(), true);
+  if (!argOnly &&
+      (begin == call.getBegin() ||
+       clang::Lexer::getLocForEndOfToken(end, 0, SM, lang) == call.getEnd()))
+    return call; // The macro body supplied a boundary of the target.
+
+  auto open = clang::Lexer::findNextToken(call.getBegin(), SM, lang);
+  if (!open || !open->is(clang::tok::l_paren))
+    return std::nullopt;
+  auto first = clang::Lexer::findNextToken(open->getLocation(), SM, lang);
+  auto close = clang::Lexer::findNextToken(end, SM, lang);
+  if (!first || first->getLocation() != begin || !close ||
+      !close->is(clang::tok::r_paren) ||
+      clang::Lexer::getLocForEndOfToken(close->getLocation(), 0, SM, lang) !=
+          call.getEnd())
+    return std::nullopt;
+  return call;
+}
+
 ReplacementCallback makeTemplateCallback(ParsedTemplate tmpl,
-                                         std::string target,
-                                         std::string scope,
+                                         std::string target, std::string scope,
                                          std::vector<std::string> macroNames,
                                          bool argOnly) {
   return [tmpl = std::move(tmpl), target = std::move(target),
           scope = std::move(scope), macroNames = std::move(macroNames),
-          argOnly](
-             const clang::ast_matchers::MatchFinder::MatchResult &result)
+          argOnly](const clang::ast_matchers::MatchFinder::MatchResult &result)
              -> std::vector<clang::tooling::Replacement> {
     // Find target node (before template eval to allow early-out filters)
-    auto map = result.Nodes.getMap();
+    const auto &map = result.Nodes.getMap();
+    auto &diags = result.Context->getDiagnostics();
     auto it = map.find(target);
     if (it == map.end()) {
-      llvm::errs() << "Target node '" << target << "' not found in match\n";
+      diags.Report(diags.getCustomDiagID(clang::DiagnosticsEngine::Error,
+                                         "morph: target '%0' was not bound"))
+          << target;
       return {};
     }
 
@@ -291,96 +327,33 @@ ReplacementCallback makeTemplateCallback(ParsedTemplate tmpl,
     // Determine replacement range
     clang::CharSourceRange range;
     if (scope == "macro-expansion") {
-      // Filter 1: When arg-only is set (default), only match nodes from
-      // the macro ARGUMENT (user's code), not body tokens. When arg-only
-      // is false, also match structural patterns introduced by the macro
-      // (e.g. the || in RBX_CHECK_OR's body).
-      if (!targetLoc.isMacroID())
+      auto call = macroInvocation(it->second.getSourceRange(), SM, LangOpts,
+                                  macroNames, argOnly);
+      if (!call)
         return {};
-      if (argOnly && !SM.isMacroArgExpansion(targetLoc))
-        return {};
-
-      range = SM.getExpansionRange(targetLoc);
-      auto callText = clang::Lexer::getSourceText(range, SM, LangOpts);
-
-      // Filter 2: Check macro name at the expansion site.
-      // isExpandedFromMacro() doesn't work for arg-chaining wrappers
-      // (e.g. RBX_CHECK → CHECK → INTERNAL_CATCH_TEST) because the
-      // token is a macro arg at every level and the name check only
-      // fires for body expansions. Instead, read the macro name
-      // directly from the call-site text.
-      if (!macroNames.empty()) {
-        auto parenPos = callText.find('(');
-        llvm::StringRef name = (parenPos != llvm::StringRef::npos)
-                                   ? callText.substr(0, parenPos).rtrim()
-                                   : callText;
-        if (!llvm::is_contained(macroNames, name))
-          return {};
-      }
-
-      // Filter 3: Only match nodes that are the TOP-LEVEL expression of
-      // the macro argument. Compare the target node's source text against
-      // the macro argument text (between the outermost parens of the call).
-      // If they differ, the node is nested inside a larger expression
-      // (e.g. the && inside RBX_CHECK(a || b && c)) and should be skipped.
-      //
-      // This check is only meaningful when the matched node's tokens all
-      // come from the user's source (same FileID). When the node mixes
-      // body tokens (spelled in a macro definition) with arg tokens
-      // (spelled in the source), the macro itself defines the operator
-      // structure, and the top-level-arg check doesn't apply.
-      {
-        auto openParen = callText.find('(');
-        auto closeParen = callText.rfind(')');
-        if (openParen != llvm::StringRef::npos &&
-            closeParen != llvm::StringRef::npos && closeParen > openParen) {
-          clang::SourceRange nodeRange = it->second.getSourceRange();
-          clang::SourceLocation filBegin = nodeRange.getBegin();
-          while (filBegin.isMacroID())
-            filBegin = SM.getImmediateSpellingLoc(filBegin);
-          clang::SourceLocation filEnd = nodeRange.getEnd();
-          while (filEnd.isMacroID())
-            filEnd = SM.getImmediateSpellingLoc(filEnd);
-
-          // Only compare when the node's resolved file locations fall
-          // within the macro call's range (i.e., the tokens are from the
-          // user's argument text). If they resolve to the macro definition
-          // or a different location, the matched node uses body tokens and
-          // the text comparison doesn't apply.
-          clang::SourceLocation callStart = range.getBegin();
-          if (SM.getFileID(filBegin) == SM.getFileID(callStart) &&
-              SM.getFileID(filEnd) == SM.getFileID(callStart)) {
-            unsigned callOff = SM.getFileOffset(callStart);
-            unsigned nBeginOff = SM.getFileOffset(filBegin);
-            unsigned nEndOff = SM.getFileOffset(filEnd);
-            if (nBeginOff >= callOff && nEndOff >= callOff) {
-              auto argText =
-                  callText.substr(openParen + 1, closeParen - openParen - 1)
-                      .trim();
-              auto nodeCharRange =
-                  clang::CharSourceRange::getTokenRange(filBegin, filEnd);
-              auto nodeText =
-                  clang::Lexer::getSourceText(nodeCharRange, SM, LangOpts);
-              if (argText != nodeText.trim())
-                return {};
-            }
-          }
-        }
-      }
+      range = *call;
     } else {
       // "node" scope (default)
-      range = clang::CharSourceRange::getTokenRange(
-          it->second.getSourceRange());
+      range =
+          clang::CharSourceRange::getTokenRange(it->second.getSourceRange());
     }
 
     // Evaluate template (after filters to avoid unnecessary work)
     auto textOrErr = evaluateTemplate(tmpl, result);
     if (!textOrErr) {
-      llvm::errs() << "Template evaluation error: "
-                   << llvm::toString(textOrErr.takeError()) << "\n";
+      diags.Report(targetLoc, diags.getCustomDiagID(
+                                  clang::DiagnosticsEngine::Error, "morph: %0"))
+          << llvm::toString(textOrErr.takeError());
       return {};
     }
 
+    range = clang::Lexer::makeFileCharRange(range, SM, LangOpts);
+    if (range.isInvalid()) {
+      diags.Report(targetLoc, diags.getCustomDiagID(
+                                  clang::DiagnosticsEngine::Error,
+                                  "morph: target has no editable file range"));
+      return {};
+    }
     clang::tooling::Replacement rep(SM, range, *textOrErr, LangOpts);
     return {std::move(rep)};
   };

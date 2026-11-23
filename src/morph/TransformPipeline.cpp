@@ -18,7 +18,6 @@
 
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Core/Replacement.h"
-#include "clang/Tooling/Refactoring.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -68,6 +67,24 @@ private:
   std::vector<std::unique_ptr<clang::tooling::CompilationDatabase>> dbs_;
 };
 
+// Replacements are ordered by original byte offset. Advance through each
+// line once even when a file has many matches.
+void printPreview(llvm::StringRef file, llvm::StringRef original,
+                  const clang::tooling::Replacements &edits) {
+  size_t line = 1, lineStart = 0;
+  size_t newline = original.find('\n');
+  for (const auto &edit : edits) {
+    while (newline < edit.getOffset()) {
+      ++line;
+      lineStart = newline + 1;
+      newline = original.find('\n', lineStart);
+    }
+    llvm::outs() << file << ":" << line << ":"
+                 << edit.getOffset() - lineStart + 1 << ": replace with '"
+                 << edit.getReplacementText() << "'\n";
+  }
+}
+
 } // namespace
 
 void TransformPipeline::addPass(std::vector<TransformRule> rules) {
@@ -79,6 +96,7 @@ int TransformPipeline::execute(const std::vector<std::string> &buildPaths,
                                bool dryRun,
                                const std::vector<std::string> &fixedCompileArgs,
                                bool hasFixedCompileArgs) {
+  allReplacements_.clear();
   if (buildPaths.empty() && !hasFixedCompileArgs && fixedCompileArgs.empty()) {
     llvm::errs() << "Error: at least one build path or '-- <compile-flags>' is "
                     "required\n";
@@ -89,8 +107,8 @@ int TransformPipeline::execute(const std::vector<std::string> &buildPaths,
     std::string dbLoadError;
     auto db = loadCompilationDatabase(path, {}, dbLoadError);
     if (!db) {
-      llvm::errs() << "Error loading compilation database from " << path
-                   << ": " << dbLoadError << "\n";
+      llvm::errs() << "Error loading compilation database from " << path << ": "
+                   << dbLoadError << "\n";
       return 1;
     }
     compDb.add(std::move(db));
@@ -106,87 +124,83 @@ int TransformPipeline::execute(const std::vector<std::string> &buildPaths,
     compDb.add(std::move(db));
   }
 
-  for (auto &passRules : passes_) {
+  std::map<std::string, std::string> original, staged;
+  decltype(allReplacements_) combined;
+  for (size_t pass = 0; pass < passes_.size(); ++pass) {
     MatcherEngine engine;
-    for (auto &rule : passRules) {
+    for (const auto &rule : passes_[pass]) {
       std::string error;
       if (!engine.addRule(rule, error)) {
-        llvm::errs() << "Error adding rule: " << error << "\n";
+        llvm::errs() << "morph: pass " << pass + 1 << ": " << error << "\n";
         return 1;
       }
     }
 
-    if (int ret = engine.run(compDb, sourceFiles))
+    if (int ret = engine.run(compDb, sourceFiles, staged))
       return ret;
 
-    // Merge replacements from this pass into the overall set.
-    for (auto &[file, repls] : engine.getReplacements()) {
-      for (auto &r : repls) {
-        if (auto err = allReplacements_[file].add(r)) {
-          llvm::errs() << "Replacement merge conflict: "
-                       << llvm::toString(std::move(err)) << "\n";
+    for (const auto &[file, edits] : engine.getReplacements()) {
+      auto it = staged.find(file);
+      if (it == staged.end()) {
+        auto buf = llvm::MemoryBuffer::getFile(file);
+        if (!buf) {
+          llvm::errs() << "Error reading " << file << ": "
+                       << buf.getError().message() << "\n";
+          return 1;
         }
+        original.emplace(file, (*buf)->getBuffer().str());
       }
+      const auto &contents =
+          it == staged.end() ? original.at(file) : it->second;
+      auto rewritten = clang::tooling::applyAllReplacements(contents, edits);
+      if (!rewritten) {
+        llvm::errs() << "Error applying replacements to " << file << ": "
+                     << llvm::toString(rewritten.takeError()) << "\n";
+        return 1;
+      }
+      staged[file] = std::move(*rewritten);
+      // This pass's offsets refer to staged text. Compose them back into
+      // original-file coordinates for the preview and the library caller.
+      auto [prior, first] = combined.try_emplace(file, edits);
+      if (!first)
+        prior->second = prior->second.merge(edits);
     }
-
-    // TODO: apply replacements to files between passes when !dryRun
-    // For now, replacements are just collected.
   }
 
-  if (dryRun) {
-    // Print diagnostic-style output with line:col (not raw byte offsets)
-    for (auto &[file, repls] : allReplacements_) {
-      // Load the file to compute line numbers from offsets
-      auto buf = llvm::MemoryBuffer::getFile(file);
-      llvm::StringRef content;
-      if (buf)
-        content = buf.get()->getBuffer();
-
-      for (auto &r : repls) {
-        llvm::outs() << file << ":";
-        if (!content.empty() && r.getOffset() <= content.size()) {
-          llvm::StringRef before = content.substr(0, r.getOffset());
-          unsigned line = before.count('\n') + 1;
-          auto lastNl = before.rfind('\n');
-          unsigned col = (lastNl == llvm::StringRef::npos)
-                             ? r.getOffset() + 1
-                             : r.getOffset() - lastNl;
-          llvm::outs() << line << ":" << col;
-        } else {
-          llvm::outs() << r.getOffset() << ":" << r.getLength();
-        }
-        llvm::outs() << ": replace with '" << r.getReplacementText() << "'\n";
-      }
-    }
-  } else {
-    // Apply replacements to disk
-    for (auto &[file, repls] : allReplacements_) {
-      auto buf = llvm::MemoryBuffer::getFile(file);
-      if (!buf) {
-        llvm::errs() << "Error reading " << file << ": "
-                     << buf.getError().message() << "\n";
-        return 1;
-      }
-      auto result =
-          clang::tooling::applyAllReplacements(buf.get()->getBuffer(), repls);
-      if (!result) {
-        llvm::errs() << "Error applying replacements to " << file << ": "
-                     << llvm::toString(result.takeError()) << "\n";
-        return 1;
-      }
-      std::error_code EC;
-      llvm::raw_fd_ostream out(file, EC);
-      if (EC) {
-        llvm::errs() << "Error writing " << file << ": " << EC.message()
+  // Check every touched file before publishing any result. Filesystem writes
+  // are per file, so a later I/O failure can still leave earlier files edited.
+  if (!dryRun) {
+    for (const auto &[file, contents] : original) {
+      auto current = llvm::MemoryBuffer::getFile(file);
+      if (!current || (*current)->getBuffer() != contents) {
+        llvm::errs() << "morph: input changed or became unreadable: " << file
                      << "\n";
         return 1;
       }
-      out << *result;
     }
+  }
+  for (const auto &[file, edits] : combined) {
+    if (dryRun) {
+      printPreview(file, original.at(file), edits);
+      continue;
+    }
+    std::error_code ec;
+    llvm::raw_fd_ostream out(file, ec);
+    if (!ec) {
+      out << staged.at(file);
+      out.close();
+      ec = out.error();
+      out.clear_error();
+    }
+    if (ec) {
+      llvm::errs() << "Error writing " << file << ": " << ec.message() << "\n";
+      return 1;
+    }
+  }
+  allReplacements_ = std::move(combined);
+  if (!dryRun)
     llvm::outs() << "Applied replacements to " << allReplacements_.size()
                  << " file(s).\n";
-  }
-
   return 0;
 }
 

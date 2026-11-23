@@ -23,7 +23,7 @@ namespace vycor {
 
 // Orchestrates multiple passes of transform rules over a set of source files.
 // Each pass runs a MatcherEngine with its own set of rules, collects
-// replacements, and (optionally) applies them before the next pass.
+// replacements, and stages new contents for the next pass.
 class TransformPipeline {
 public:
   // Add a pass consisting of one or more transform rules.
@@ -39,7 +39,8 @@ public:
               const std::vector<std::string> &fixedCompileArgs = {},
               bool hasFixedCompileArgs = false);
 
-  // Retrieve all accumulated replacements across all passes, keyed by file.
+  // Edits from the last successful execution in original-file coordinates,
+  // keyed by absolute path. Empty after a failed execution.
   const std::map<std::string, clang::tooling::Replacements> &
   getReplacements() const;
 

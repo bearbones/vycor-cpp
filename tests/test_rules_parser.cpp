@@ -100,12 +100,12 @@ TEST_CASE("parseTemplate pipe chains", "[template][parse]") {
   }
 
   SECTION("pipe arg containing pipe character in quotes") {
-    auto result = parseTemplate("{{id | join(\" | \")}}");
+    auto result = parseTemplate(R"({{id | flatten("||") | join(" | ")}})");
     REQUIRE(result);
     REQUIRE(result->exprs.size() == 1);
-    REQUIRE(result->exprs[0].pipes.size() == 1);
-    CHECK(result->exprs[0].pipes[0].name == "join");
-    CHECK(result->exprs[0].pipes[0].arg == " | ");
+    REQUIRE(result->exprs[0].pipes.size() == 2);
+    CHECK(result->exprs[0].pipes[1].name == "join");
+    CHECK(result->exprs[0].pipes[1].arg == " | ");
   }
 }
 
@@ -125,6 +125,19 @@ TEST_CASE("parseTemplate full RBX_CHECK pattern", "[template][parse]") {
 }
 
 TEST_CASE("parseTemplate errors", "[template][parse]") {
+  SECTION("unknown and out-of-order pipes are rejected without running a matcher") {
+    for (auto text : {"{{x | unknown}}", "{{x | join}}", "{{x | text | name}}",
+                      "{{x | flatten}}", "{{x | flatten(\"&&\") garbage}}"}) {
+      auto result = parseTemplate(text);
+      CHECK_FALSE(result);
+      llvm::consumeError(result.takeError());
+    }
+  }
+  SECTION("a quoted join separator can contain closing braces") {
+    auto result = parseTemplate(R"({{x | flatten("||") | join("}} | ")}})");
+    REQUIRE(result);
+    CHECK(result->exprs.front().pipes.back().arg == "}} | ");
+  }
   SECTION("unclosed braces") {
     auto result = parseTemplate("{{unclosed");
     CHECK_FALSE(result);
@@ -198,6 +211,16 @@ TEST_CASE("fromJSON JsonRulesFile", "[rules][json]") {
     CHECK(rules.passes[0].rules[0].replace.scope == "macro-expansion");
   }
 
+  SECTION("a misspelled macro filter is an error at the field path") {
+    auto json = llvm::json::parse(R"({
+      "target": "root", "with": "x", "scope": "macro-expansion", "macro-name": ["ASSERT"]
+    })");
+    REQUIRE(json);
+    JsonReplaceSpec replace;
+    llvm::json::Path::Root root("replace");
+    REQUIRE_FALSE(fromJSON(*json, replace, root));
+    CHECK(llvm::toString(root.getError()).find("macro-name") != std::string::npos);
+  }
   SECTION("missing required fields") {
     auto json = llvm::json::parse(R"JSON({
       "passes": [{
@@ -236,10 +259,11 @@ TEST_CASE("buildPipeline context combination", "[rules][pipeline]") {
   REQUIRE(pipeline->size() == 1);
   REQUIRE((*pipeline)[0].size() == 1);
 
-  // The matcher expression should be wrapped in allOf with context
-  CHECK((*pipeline)[0][0].matcherExpression ==
-        "allOf(binaryOperator(hasOperatorName(\"&&\")).bind(\"root\"), "
-        "isExpansionInMainFile())");
+  const auto &built = (*pipeline)[0][0];
+  CHECK(built.context == pass.context);
+  MatcherEngine engine;
+  std::string error;
+  CHECK(engine.addRule(built, error));
 }
 
 TEST_CASE("buildPipeline no context", "[rules][pipeline]") {
