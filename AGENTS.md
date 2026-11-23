@@ -281,10 +281,12 @@ flat id triples) but not the phase-2 handoff. Enabling it turns the
 
 | File | Purpose |
 |---|---|
-| `MatcherEngine.h/.cpp` | Parses Clang dynamic matcher expression strings; registers callbacks with `MatchFinder`; runs `ClangTool` and accumulates `Replacement` objects |
-| `TransformPipeline.h/.cpp` | Orchestrates multiple passes of `MatcherEngine`; merges replacements across passes; optionally writes to disk |
+| `RulesParser.h/.cpp` | Reads JSON passes, matchers, replacement scopes, and templates |
+| `TemplateEngine.h/.cpp` | Evaluates bound-node text and selects editable node or macro invocation ranges |
+| `MatcherEngine.h/.cpp` | Registers dynamic Clang matchers and groups compatible replacements by file |
+| `TransformPipeline.h/.cpp` | Stages each pass, reparses the edited source, and previews or writes the composed changes |
 
-The main entry point is `vycor::TransformPipeline::execute(buildPath, files, dryRun)`.
+The CLI and embedding contracts are in the [morph guide](docs/morph.md).
 
 ### `callgraph` — Call Graph and Control Flow Analysis
 
@@ -704,7 +706,7 @@ equivalents and exits 2):
 ```
 vycor-cpp check     --build-path <dir> (--source <file>... | --source-list <file|->) [--list-checks] [--checks <spec>] [--checks-config <file>] [--threads <n>] [--checkpoint <file>] [--isolate-workers [--workers <n>] [--worker-timeout <s>] [--worker-memory-limit <MiB>]] [--org-config <file>]
                      [--format text|json|sarif] [--output <file>] [--fail-on note|warning|error|none] [--allow-parse-failures] [--baseline <file>] [--write-baseline <file>] [--patch-file <file|-> | --git-base <rev> [--git-head <rev>]] [--project-root <dir>] [-v]
-vycor-cpp morph     --rules-json <file> --build-path <dir> --source <files...> [--dry-run]
+vycor-cpp morph     --rules-json <file> [--build-path <dir>] --source <file> [--source <file> ...] [--dry-run] [-- <compile-flags>]
 vycor-cpp megascope index   --build-path <dir> [--source <file>...] [--source-list <file|->] [--source-re <regex>] [--skip-paths <pattern>...] [--index <file>] [--force | --retry-failed] [--no-wait] [--collapse-paths <pattern>...] [--org-config <file>] [--threads <n>] [--isolate-workers[=false]] [--worker-timeout <s>] [--worker-memory-limit <MiB>]
 vycor-cpp megascope <tool>  [--index <file> | --build-path <dir>] [tool flags from its schema...] [--format json|ndjson|tsv] [--pretty]
 vycor-cpp megascope <tool>  --build-path <dir> --source <file>... | --source-list <file|-> | --source-re <regex> [--skip-paths ...] [--collapse-paths ...] [--threads <n>] [--org-config <file>] [tool flags...]   # ephemeral: bake in memory, no index
@@ -942,24 +944,12 @@ correctly (the CMake build sets it automatically via a compile definition).
 
 ## Adding a New Transform to morph
 
-1. Create a `TransformRule` struct with:
-   - `matcherExpression`: a Clang dynamic matcher string
-     (e.g. `"functionDecl(hasName(\"foo\"))"`)
-   - `bindId`: the bind ID for the root node (e.g. `"fn"`)
-   - `callback`: a `ReplacementCallback` lambda that receives the
-     `MatchFinder::MatchResult` and returns `vector<Replacement>`
-
-2. Add the rule to a pipeline pass:
-   ```cpp
-   TransformPipeline pipeline;
-   pipeline.addPass({ rule1, rule2 });
-   pipeline.execute(buildPath, sourceFiles, dryRun);
-   ```
-
-3. Test using the example files in `examples/` as TDD targets.
-
-The JSON rules format for the `morph` CLI subcommand is not yet implemented
-(see TODOs below). For now, rules are added programmatically.
+Start with a JSON rule and a before/after fixture. The CLI reads `passes[].rules[]`
+and resolves inline `.bind("id")` names in replacement templates.
+Use a C++ `TransformRule` callback for edits that need more than the JSON
+template language can express. Run the focused tests with
+`build/tests/vycor_tests '[transforms],[rules],[template],[parse],[addRule]'`.
+See the [example and extension points](docs/morph.md).
 
 ---
 
@@ -998,9 +988,8 @@ XxxConsumer::HandleTranslationUnit → drives XxxVisitor
 
 ### MatchFinder Callbacks
 
-`MatcherEngine` uses Clang's `MatchFinder` with a nested `CallbackAdapter`
-class that bridges between `MatchFinder::MatchCallback` and the user-supplied
-`ReplacementCallback` function objects.
+Public transform callbacks return source replacements. `MatcherEngine` uses a `CallbackAdapter`
+to register them with Clang's `MatchFinder` and detect conflicting edits to the same file.
 
 ---
 
@@ -1057,9 +1046,8 @@ only, not a namespace boundary.
   `CMAKE_PREFIX_PATH=/usr/lib/llvm-NN`.
 - **Catch2 v3.10+** (tests only) — resolved in three tiers: pre-existing
   imported target -> `find_package` -> `extern/Catch2` submodule.
-  Network is not required at configure time. See README.md "Hermetic
-  and internal-package-manager builds" for organizations using
-  internal mirrors or alternate package managers.
+  For internal mirrors or alternate package managers, see the
+  [hermetic build instructions](docs/building.md#hermetic-and-internal-package-manager-builds).
 - No other runtime dependencies.
 - **macOS install path**: the self-hosted Homebrew tap
   `bearbones/homebrew-vycor-cpp` (`brew tap bearbones/vycor-cpp && brew

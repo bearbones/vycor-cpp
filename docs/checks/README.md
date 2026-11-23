@@ -1,4 +1,4 @@
-# check checks
+# Named checks
 
 Every check analysis is a **named check** with its own documentation page,
 selectable through a clang-tidy-style specification. Most compare information
@@ -6,8 +6,9 @@ selectable through a clang-tidy-style specification. Most compare information
 also inspect source-ordered behavior within each TU; their documentation states
 which helper definitions and runtime contracts they can model.
 
-Run `vycor-cpp check --list-checks` for the live table (organization
-checks included).
+Run `vycor-cpp check --list-checks` for the live table, including organization
+checks. For a first run, worker options, and CI examples, see the
+[check usage guide](../check-usage.md).
 
 ## Selecting checks
 
