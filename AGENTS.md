@@ -1046,9 +1046,8 @@ only, not a namespace boundary.
   `CMAKE_PREFIX_PATH=/usr/lib/llvm-NN`.
 - **Catch2 v3.10+** (tests only) — resolved in three tiers: pre-existing
   imported target -> `find_package` -> `extern/Catch2` submodule.
-  Network is not required at configure time. See README.md "Hermetic
-  and internal-package-manager builds" for organizations using
-  internal mirrors or alternate package managers.
+  For internal mirrors or alternate package managers, see the
+  [hermetic build instructions](docs/building.md#hermetic-and-internal-package-manager-builds).
 - No other runtime dependencies.
 - **macOS install path**: the self-hosted Homebrew tap
   `bearbones/homebrew-vycor-cpp` (`brew tap bearbones/vycor-cpp && brew

@@ -19,7 +19,7 @@ cmake --build build --target vycor-cpp
 
 The sample is a self-contained C++17 translation unit. Copy it to a temporary
 directory so you can compare the result with the checked-in expected output.
-[Toolchain and build options](../README.md#building)
+[Toolchain and build options](building.md#build-from-source)
 
 ```sh
 work=$(mktemp -d)
@@ -178,6 +178,10 @@ survive unchanged. For macro rules, include a nested expression and a
 different macro with a similar expansion. The integration tests exercise the
 published JSON and compare transformed bytes with the expected file.
 [Pipeline tests](../tests/test_transforms.cpp) · [Rule and template tests](../tests/test_rules_parser.cpp)
+
+The [builder-to-struct fixture](../examples/builder_to_struct) sketches a
+larger migration from setter calls to field assignments. It contains a
+before/after pair for contributors developing rules for that pattern.
 
 ### Why use Clang's matcher and replacement APIs directly?
 

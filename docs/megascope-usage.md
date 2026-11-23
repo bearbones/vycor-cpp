@@ -1,36 +1,42 @@
-# megascope — Usage Guide
+# Using megascope
 
-This guide covers practical usage of `megascope` based on real analysis runs
-against game-engine codebases. It focuses on workflow, gotchas, and effective
-query patterns rather than repeating what's in AGENTS.md.
+`vycor-cpp megascope` indexes a C++ project's call graph, symbol references,
+and the control flow around call sites. Build the index once to answer questions
+such as who calls a function, which paths can reach it, and which locks or
+exception handlers are in scope along the way.
 
-For the output contract and exit codes see `docs/result-contract.md`.
-
----
+- [Build and query an index](#quick-start)
+- [Select translation units](#file-selection) or [query files in memory](#query-selected-files-in-memory)
+- [Find a tool](#query-tools) or [use a shell recipe](#shell-recipes)
+- [Merge Bazel or Buck2 shards and index during compilation](#build-system-integration)
 
 ## Quick start
 
-### 1. Build the tool
+### 1. Get the CLI
 
-```bash
-export PATH="/path/to/llvm/bin:$PATH"
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=$(which clang++)
-cmake --build build --target vycor-cpp
-```
+The commands below use `vycor-cpp` on your PATH. For a local CMake build,
+the executable is `build/src/vycor-cpp`. [Install and build instructions](building.md)
 
 ### 2. Generate a compilation database
 
-Point `--build-path` at a directory containing `compile_commands.json`.
-For game-engine targets this is `build.ninja/<target>/optimized/`.
-The **build must be complete** — generated headers (OpenAPI stubs, Protobuf
-outputs, reflection registration files) must exist on disk or ClangTool will
-crash while parsing TUs that include them.
+For a CMake project, enable `CMAKE_EXPORT_COMPILE_COMMANDS` with the Ninja
+generator. Build the targets you want to index so that generated headers
+exist when Clang parses the sources.
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build
+```
+
+For a runnable example from this repository, use the bundled call-chain
+fixture. It includes a script to generate its compilation database and a
+query that traces a call from `main` to `stage5_sink`.
+[Call-chain walkthrough](../examples/deep_chains/README.md#how-to-analyze)
 
 ### 3. Build the index
 
 ```bash
-./build/src/vycor-cpp megascope index \
+vycor-cpp megascope index \
   --build-path /path/to/build \
   --source /path/to/file1.cpp \
   --source /path/to/file2.cpp \
@@ -54,7 +60,9 @@ megascope: index saved to /path/to/build/.vycor/megascope.vycs
 {"call_sites":1098163,"edges":412051,"files":68,"index":"/path/to/build/.vycor/megascope.vycs","mode":"cold","nodes":59893,...}
 ```
 
-Re-running `index` is a warm start: it loads the file, compares per-file
+The initial bake parses each TU once to collect declarations, call edges, and
+control-flow context. Cross-TU joins such as virtual dispatch happen at query
+time. Re-running `index` is a warm start: it loads the file, compares per-file
 mtime+size stamps of every TU **and of every header each TU's parse
 opened**, re-parses only the dirty TUs (in parallel, through the same
 bake as a cold build; drops TUs removed from the selection), and skips
@@ -82,10 +90,24 @@ Every TU's parse outcome is recorded (`megascope info` reports
 failed is never cached as healthy. Failed TUs are re-parsed alongside
 any refresh that rewrites the index, or on `--retry-failed`; a refresh
 that would otherwise touch nothing leaves them as recorded and stays
-meta-only. See `docs/index-provenance.md`.
+meta-only. [Index provenance and refresh rules](index-provenance.md)
+
+#### Indexing options
+
+| Option | When to use it |
+|---|---|
+| `--index <file>` | Choose a snapshot path for later refreshes. `--snapshot` is the older spelling. |
+| `--no-wait` | Fail immediately if another writer holds `<index>.lock`. |
+| `--threads N`, `--pch-dir <dir>` | Set parse parallelism or choose a cache directory for precompiled headers. |
+| `--isolate-workers`, `--workers N` | Parse in subprocesses. Isolation is the default when `--threads` differs from 1 and `--pch-dir` is unset. Use `--isolate-workers=false` for an in-process bake. |
+| `--worker-timeout <seconds>`, `--worker-memory-limit <MiB>` | Bound each worker. The timeout defaults to 600 seconds without starting a new TU. A timed-out TU is recorded as `timeout`. Zero disables the timeout. |
+| `--stats-json <file>` | Write per-phase and per-TU timings, parse outcomes, graph sizes, and peak memory use after saving the index. |
+| `-v` | Show progress on stderr. Verbose queries also report the index load time by section. |
 
 ### 4. Query it
 
+Query verbs find the index using `--index`, then `$VYCOR_INDEX`, then
+`<build-path>/.vycor/megascope.vycs` or `./.vycor/megascope.vycs`.
 Every tool is a verb. Its flags come from the tool's input schema (the
 names `batch` takes as JSON keys, hyphens or underscores), so
 `megascope <tool> --help` is the reference:
@@ -111,7 +133,7 @@ messages unless `-v`.
 Every payload carries `status` (`ok`, `ambiguous`, `usage_error`,
 `not_found`, `unavailable`) and `indexScope` (which bake the index came
 from, whether it was checked against the sources, and how many of the
-requested TUs it holds cleanly) — see `docs/result-contract.md`. Exit
+requested TUs it holds cleanly) — see [result contract](result-contract.md). Exit
 codes derive from `status` and are the contract to branch on:
 
 | Code | Meaning |
@@ -153,8 +175,71 @@ vycor-cpp megascope get-references --name ns::counter --roles write   # who writ
 vycor-cpp megascope get-references --name main --direction from      # what main references
 ```
 
-`docs/symbol-references.md` has the payloads, what is and is not
-recorded, and the cost.
+The reference describes the payloads, coverage, and indexing cost.
+[Symbol references](symbol-references.md)
+
+## Query tools
+
+Run `vycor-cpp megascope tools` for the live list. Use
+`vycor-cpp megascope <tool> --help` for a tool's arguments. The CLI uses hyphens in verb names.
+Batch requests use the identifiers below.
+
+| Question | Tool identifiers |
+|---|---|
+| Which function, symbol, or class is this? | `search_functions`, `lookup_function`, `lookup_symbol`, `get_class_hierarchy` |
+| What calls or references it? | `get_callers`, `get_callees`, `find_call_chain`, `get_references`, `list_entry_points`, `graph_summary`, `analyze_dead_code` |
+| What happens on a path or at a call site? | `query_call_site_context`, `query_all_path_contexts`, `query_raii_scopes_at_callsite`, `query_locks_held`, `query_same_lock`, `query_path_effects` |
+| Where can an exception propagate? | `query_exception_safety`, `query_throw_propagation`, `query_nearest_catches` |
+| Which callbacks, threads, and channels interact? | `list_callback_sites`, `list_concurrency_entry_points`, `list_channels`, `query_channel`, `query_channels_for_function`, `explain_ordering` |
+| What does a change or link dependency affect? | `impact_of_change`, `audit_dependencies`, `explain_dependency` |
+| What can I measure? | `metrics` |
+
+Use `megascope diff --before A --after B` to compare two saved indexes.
+The reference guides explain how to interpret each kind of evidence.
+[Change impact](change-impact.md) · [Link dependencies](dependency-audit.md) · [Metrics](metrics/README.md)
+
+## Shell recipes
+
+Run these from the index's build directory or set `VYCOR_INDEX` to its path.
+`megascope dump` streams call-site contexts and channel sites as NDJSON.
+Use `dump --format json` for one JSON document.
+
+```bash
+# Unique callers of a function, walking one level up
+vycor-cpp megascope get-callers --name Foo::bar --format ndjson | \
+  jq -r 'select(.callerName) | .callerName' | sort -u
+
+# Print each returned path from main as a sequence of function names
+vycor-cpp megascope find-call-chain --from main --to Foo::bar --format ndjson | \
+  jq -r 'select(type=="array") | [.[0].fromName] + map(.toName) | join(" -> ")'
+
+# Unprotected call sites of the whole index (no enclosing try/catch)
+vycor-cpp megascope dump | \
+  jq -c 'select(.kind=="call_site" and .enclosingTryCatches==[]) | {callerName, calleeName, callSite}'
+
+# Dead functions under one directory, as a file:line list
+vycor-cpp megascope analyze-dead-code --format ndjson | \
+  jq -r 'select(.file? and (.file|test("/src/net/"))) | "\(.file):\(.line) \(.name)"'
+
+# Exit codes drive scripts: 1 is "answered, empty", 4 is "ambiguous name"
+vycor-cpp megascope get-callers --name bar --format ndjson; case $? in
+  4) echo "pick a --usr from the candidates above";; esac
+```
+
+## Query selected files in memory
+
+Give a query `--source`, `--source-list`, or `--source-re` to build its input in
+memory. Supply the project's compilation database with `--build-path`, or pass
+compiler flags after `--`. Only the selected TUs contribute evidence, including
+callers. This mode also supports `--skip-paths`, `--collapse-paths`, `--threads`,
+and `--org-config`. It replaces the former `prism` subcommand.
+
+```sh
+vycor-cpp megascope query-nearest-catches --build-path build \
+  --source SecurityModule.cpp --function onClientChallengeResponse
+vycor-cpp megascope dump --build-path build --source SecurityModule.cpp | \
+  jq -c 'select(.kind=="call_site" and .enclosingTryCatches==[])'
+```
 
 ---
 
@@ -352,7 +437,7 @@ primary signal of interest. Each path is one exact chain of call sites
 under a try, one not — are two paths with two outcomes. When the search
 stopped early (`stopReasons` non-empty, `exhaustive: false`) the verdict
 is `observed_caught` / `observed_uncaught`: a statement about the paths
-examined, not about all of them. See `docs/path-analysis.md`.
+examined, not about all of them. See [path analysis](path-analysis.md).
 
 ### Step 4 — Check call site context for specific callers
 
@@ -440,7 +525,7 @@ vycor-cpp megascope explain-dependency --index proj.vycs \
 The evidence is the index's symbol reference facts (an index baked
 before them falls back to call edges; bake that one without
 `--collapse-paths`). Every payload says what it cannot see
-(`completeness`) and no finding is a proof; `docs/dependency-audit.md` has the target-map
+(`completeness`) and no finding is a proof; [the dependency audit reference](dependency-audit.md) has the target-map
 schema, the attribution rules, and how to check a result against the
 built objects.
 
@@ -467,6 +552,78 @@ Roots and accepted functions also come from the org config's `hotPaths`
 key. The same analysis runs as the `hot-path-effects` check. Reference,
 including the profile join and what a count does and does not prove:
 [checks/hot-path-effects.md](checks/hot-path-effects.md).
+
+## Build system integration
+
+### Merge translation units and build targets
+
+Build adapters can capture the compiler flags for each translation unit
+directly from a Bazel or Buck2 action. Generate a shard for each TU, merge a
+target's shards, then merge the targets into a project index.
+
+```sh
+# Index one TU with its compiler flags. Repeat for the other TUs in the target.
+mkdir -p out/tu
+vycor-cpp megascope index --threads 1 --no-wait \
+  --index out/tu/a.cpp.vycs --source src/a.cpp -- -std=c++17 -Iinclude
+
+# Combine the TU shards for a library or binary.
+vycor-cpp megascope merge --no-wait --output out/libcore.vycs \
+  out/tu/a.cpp.vycs out/tu/b.cpp.vycs
+
+# Merge target shards, one path per line in target_shards.list.
+vycor-cpp megascope merge --no-wait --output out/megascope.global.vycs \
+  --input-list out/target_shards.list --entry-point main
+```
+
+`megascope merge` validates build configuration and environment compatibility
+across shards (overridable with `--allow-mismatch`) and deduplicates
+overlapping TUs idempotently so diamond dependencies in the target graph never
+double-count edges or call-site contexts.
+
+Both integrations include a runnable multi-target project.
+
+- **Buck2** supports Starlark rules and BXL scripts. [Buck2 guide](../buck2/README.md) · [Example project](../examples/buck2_megascope/)
+- **Bazel** supports rules and aspects with Bzlmod or `WORKSPACE`. [Bazel guide](../bazel/README.md) · [Example project](../examples/bazel_megascope/)
+
+### Index during compilation with the Clang plugin
+
+Load `libvycor_megascope_plugin.so` into the normal `clang++ -c` invocation
+to emit a per-TU shard alongside the object file. The plugin walks the AST
+after the main compiler action, reusing its parsed headers and templates.
+For example, compile with the same Clang major as the plugin.
+
+```bash
+# Emits foo.vycs next to foo.o by default (or pass --output=foo.vycs / foo.mgsc / foo.shard.json)
+clang++ -c foo.cpp -o foo.o \
+  -fplugin=/path/to/lib/libvycor_megascope_plugin.so \
+  -fplugin-arg-vycor-megascope---output=foo.vycs \
+  -fplugin-arg-vycor-megascope---entry-point=main \
+  -fplugin-arg-vycor-megascope---no-wait
+```
+
+Plugin flags (`--output=<path>`, `--entry-point=<fn>`, `--collapse-paths=<p>`,
+`--org-config=<file>`, `--lock-types=<t>`, `--channel-types-json=<file>`,
+`--no-wait`) can be passed via `-fplugin-arg-vycor-megascope-<flag>` or
+`-Xclang -plugin-arg-vycor-megascope -Xclang <flag>`.
+
+### Share an index with the Rust core and Python tools
+
+The native snapshot format is `.vycs`. To exchange data with the Rust
+megascope engine, choose an output format with `index --index` or the Clang
+plugin's `--output`. [Rust megascope](https://github.com/bearbones/megascope) · [C++ bridge](../include/vycor/callgraph/MegascopeBridge.h)
+
+- **Export JSON shards.** A path ending in `.shard.json` or `.shards.json`
+  exports functions, call edges, exception handlers, RAII and lock scopes,
+  conditional guards, class hierarchies, and channels for `megascope ingest`.
+- **Use binary snapshots.** Linking the optional `libmegascope` lets the CLI
+  build, merge, compare, and query `.mgsc` snapshots. [Build options](building.md#dependencies)
+- **Combine C++ and Python.** With `libmegascope` linked,
+  `vycor-cpp megascope merge --output combined.mgsc cpp.vycs python.pyrx`
+  merges a C++ index and a Python snapshot from pyRx. It also accepts C++
+  `.mgsc` and JSON shards. [pyRx](https://github.com/bearbones/pyRx)
+
+---
 
 ## Known gotchas
 
@@ -538,7 +695,7 @@ that throws, and the effect tools see throws as they see allocations.
 `list_callback_sites`, `list_concurrency_entry_points`, and the other
 list tools return at most their default `limit` (200 for callers and
 callees) and say `truncated: true` with a `nextOffset` when there is
-more; pass `offset` to continue (`docs/result-contract.md`, "Paging").
+more; pass `offset` to continue ([paging contract](result-contract.md#paging)).
 
 **Graph scope is limited to the selected TUs.** If `get_callers` returns
 fewer callers than expected, the missing callers are in TUs you didn't
@@ -550,19 +707,14 @@ include. The graph is not a lie — it's scoped.
 `OnReceive_deprecated`. These are not dead code — they're active code
 paths for older protocol versions. Exception safety audits must include them.
 
-**Build completeness matters.** TUs that include missing generated headers
-(OpenAPI stubs, Protobuf outputs, reflection registration) will crash
-ClangTool during parsing. Under the default worker isolation such a TU is
-recorded `poisoned` (or `timeout` if it hangs past `--worker-timeout`);
-with `--threads 1` the in-process crash guard skips it and reports
-`N TU(s) crashed and were skipped` to stderr. A `megascope dump
---source-re ...` pass over a sample confirms your crash count before a
-long `megascope index` run.
+**Build generated headers first.** A missing header can leave a translation
+unit only partially indexed. Check `megascope info --files` for per-file parse
+status. After generating the missing inputs, run `megascope index --retry-failed`
+to retry incomplete parses. [Coverage and refresh rules](index-provenance.md)
 
-**Index build takes time proportional to file count.** Expect roughly
-4–6 seconds per 10 source files at 8 threads on ARM64. For 68 Replicator
-files, build takes ~30 seconds. Nothing is ready until "server started"
-appears on stderr.
+**Measuring index time.** Pass `--stats-json timings.json` to a bake to see
+which translation units took the longest to parse. The index command prints a
+JSON summary when it finishes.
 
 ---
 
@@ -581,7 +733,7 @@ Per-path `outcome` (`query_throw_propagation`): `caught` (with
 `caughtAt` / `caughtBy`, and `rethrownAt` for handlers that rethrew on
 the way), `uncaught` (escapes the entry point), `terminates` (noexcept
 or thread boundary, `stopAt` says where), `unknown` (`note` says why).
-`docs/path-analysis.md` has the propagation order and the limits of the
+[path analysis](path-analysis.md) has the propagation order and the limits of the
 model.
 
 For security-sensitive functions called on data-plane paths (packet
