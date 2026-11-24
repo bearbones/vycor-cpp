@@ -73,6 +73,67 @@ overloads, add a parameter type constraint to select the intended overload.
 Use `clang-query` with the project's compilation database to try a matcher
 and inspect the bindings. [Clang AST matcher reference](https://clang.llvm.org/docs/LibASTMatchersReference.html)
 
+## Migrating field assignments to a builder API
+
+The motivating use case was to turn field-by-field initialization into one
+builder expression containing just the setters for the fields assigned at
+that site. Today's JSON rules handle one part of that migration directly.
+When the receiver already offers equivalent setters, a rule per field can
+rewrite whichever assignments occur, in place and in source order.
+
+For example, save this translation unit as `config.cpp`.
+
+```cpp
+struct Options {
+  int port = 0;
+  bool verbose = false;
+  Options& setPort(int);
+};
+void observe(const Options&);
+
+void configure(Options& cfg, int base) {
+  cfg.port = base + 1;
+  observe(cfg);
+}
+```
+
+Save this rule as `setters.json` and run
+`vycor-cpp morph --rules-json setters.json --source config.cpp --dry-run -- -std=c++17`.
+
+```json
+{
+  "passes": [{
+    "context": "isExpansionInMainFile()",
+    "rules": [{
+      "find": {
+        "matcher": "binaryOperator(hasOperatorName(\"=\"), hasParent(compoundStmt()), hasLHS(memberExpr(unless(isArrow()), member(fieldDecl(hasName(\"::Options::port\"))), hasObjectExpression(declRefExpr().bind(\"object\")))), hasRHS(expr().bind(\"value\"))).bind(\"assign\")"
+      },
+      "replace": { "target": "assign", "with": "{{object}}.setPort({{value}})" }
+    }]
+  }]
+}
+```
+
+The preview shows `cfg.setPort(base + 1)` at the assignment. Its semicolon
+stays in place, and `observe(cfg)` sees the write at the same point. The
+matcher selects a standalone built-in assignment to the declared
+`Options::port` field on a named object. To cover `verbose` when the API
+also has `setVerbose(bool)`, add a second rule with that field and setter.
+An omitted field produces no setter call.
+
+**Combining statements into one chain takes additional logic.** A matcher
+on a compound statement can bind several known children, and a template can
+use all of them when replacing that whole block. Each JSON match has one
+target range. Bindings from separate matches do not accumulate, and a template
+that references an absent binding fails with `bound node not found`. For a
+variable-length run of assignments within a larger block, a compiled C++
+callback can walk the block's statements and emit a replacement for the run.
+[Callback API](../include/vycor/morph/MatcherEngine.h)
+
+The older example illustrates the reverse migration, from setter calls to
+struct assignments. It contains a hand-written before/after pair.
+[Builder-to-struct fixture](../examples/builder_to_struct)
+
 ## Run on a project
 
 ```sh
@@ -178,10 +239,6 @@ survive unchanged. For macro rules, include a nested expression and a
 different macro with a similar expansion. The integration tests exercise the
 published JSON and compare transformed bytes with the expected file.
 [Pipeline tests](../tests/test_transforms.cpp) · [Rule and template tests](../tests/test_rules_parser.cpp)
-
-The [builder-to-struct fixture](../examples/builder_to_struct) sketches a
-larger migration from setter calls to field assignments. It contains a
-before/after pair for contributors developing rules for that pattern.
 
 ### Why use Clang's matcher and replacement APIs directly?
 
