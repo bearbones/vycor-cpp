@@ -284,6 +284,7 @@ flat id triples) but not the phase-2 handoff. Enabling it turns the
 | `RulesParser.h/.cpp` | Reads JSON passes, matchers, replacement scopes, and templates |
 | `TemplateEngine.h/.cpp` | Evaluates bound-node text and selects editable node or macro invocation ranges |
 | `MatcherEngine.h/.cpp` | Registers dynamic Clang matchers and groups compatible replacements by file |
+| `StatementSubset.cpp` | Matches an anchor and consecutive sibling statements and renders ordered case fragments, including guarded field-to-builder migrations |
 | `TransformPipeline.h/.cpp` | Stages each pass, reparses the edited source, and previews or writes the composed changes |
 
 The CLI and embedding contracts are in the [morph guide](docs/morph.md).

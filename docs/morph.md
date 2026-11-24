@@ -73,6 +73,121 @@ overloads, add a parameter type constraint to select the intended overload.
 Use `clang-query` with the project's compilation database to try a matcher
 and inspect the bindings. [Clang AST matcher reference](https://clang.llvm.org/docs/LibASTMatchersReference.html)
 
+## Migrating field assignments to a builder API
+
+A `statement-subset` rule can turn field-by-field initialization into one
+builder expression. Write one case per field. At each declaration, morph
+emits just the cases it matches, in the order the assignments appear.
+
+```cpp
+Options cfg{};
+cfg.verbose = true;
+cfg.port = base + 1;
+```
+
+With the example rule, those three statements become one declaration.
+
+```cpp
+Options cfg = OptionsBuilder{}.verbose(true).port(base + 1).build();
+```
+
+At a site that sets only `timeout`, the same rule produces
+`Options cfg = OptionsBuilder{}.timeout(10).build();`. A declaration with
+zero matching writes stays as written. The example builder uses the same
+field defaults as the struct. For a real migration, check that the setters,
+construction, and `build()` preserve the behavior of the original code.
+
+Run the example from the repository root.
+
+```sh
+work=$(mktemp -d)
+cp examples/struct_to_builder/input.cpp "$work/config.cpp"
+rules=examples/struct_to_builder/rules.json
+build/src/vycor-cpp morph --rules-json "$rules" --source "$work/config.cpp" --dry-run -- -std=c++17
+build/src/vycor-cpp morph --rules-json "$rules" --source "$work/config.cpp" -- -std=c++17
+diff -u examples/struct_to_builder/expected.cpp "$work/config.cpp"
+c++ -std=c++17 "$work/config.cpp" -o "$work/config" && "$work/config"
+```
+
+[Complete JSON rule](../examples/struct_to_builder/rules.json) · [Input](../examples/struct_to_builder/input.cpp) · [Expected output](../examples/struct_to_builder/expected.cpp)
+
+### Writing a statement-subset rule
+
+Put `statement-subset` in a pass's `rules` array. The rule accepts the following fields.
+
+| Field | Meaning |
+|---|---|
+| `anchor` | AST matcher for the first direct child of a compound statement. The pass's `context` applies to the enclosing compound statement. |
+| `cases` | Nonempty array of objects with a statement `matcher` and an `emit` template. Morph tries cases in listed order for each subsequent sibling. The first matching case supplies that statement's bindings to its template. |
+| `prefix`, `suffix` | Templates evaluated with the anchor's bindings. Output is the prefix, all emitted fragments in source order, and the suffix. Include the required punctuation and final semicolon. |
+| `fresh-local` | Optional anchor binding naming the single declared variable. Preserves the declaration through the variable name and replaces its initialization and matched writes. The example prefix starts with ` = `. |
+
+Morph consumes consecutive expression or declaration statements within one
+block. Repeated cases emit repeatedly. The first unmatched statement ends the
+run. An anchor needs at least one follower, and each participating matcher must
+give one unambiguous binding set. Comments or preprocessing directives in the
+consumed spelling or between statements end the run. A later anchor can start
+another run. With `fresh-local` omitted, the replacement includes the entire
+anchor, so design the matchers to express the required operand relationships.
+
+For a C++17 or later builder migration, bind an automatic local record declared
+alone with default initialization or empty braces. The guard accepts consecutive
+direct member assignments on that same variable. An intervening call such as
+`observe(cfg)`, a write to another object, or a right-hand side that reads
+`cfg` ends the run. A safe prefix can still become a chain. The guard also skips
+writes requiring expression cleanups, such as a temporary with a nontrivial
+destructor, and implicit template instantiations cannot trigger a rewrite of
+the shared template source.
+
+### Rewriting each assignment in place
+
+When the existing receiver already provides equivalent setters, an ordinary
+single-node rule can change each assignment in place.
+
+For example, save this translation unit as `config.cpp`.
+
+```cpp
+struct Options {
+  int port = 0;
+  bool verbose = false;
+  Options& setPort(int);
+};
+void observe(const Options&);
+
+void configure(Options& cfg, int base) {
+  cfg.port = base + 1;
+  observe(cfg);
+}
+```
+
+Save this rule as `setters.json` and run
+`vycor-cpp morph --rules-json setters.json --source config.cpp --dry-run -- -std=c++17`.
+
+```json
+{
+  "passes": [{
+    "context": "isExpansionInMainFile()",
+    "rules": [{
+      "find": {
+        "matcher": "binaryOperator(hasOperatorName(\"=\"), hasParent(compoundStmt()), hasLHS(memberExpr(unless(isArrow()), member(fieldDecl(hasName(\"::Options::port\"))), hasObjectExpression(declRefExpr().bind(\"object\")))), hasRHS(expr().bind(\"value\"))).bind(\"assign\")"
+      },
+      "replace": { "target": "assign", "with": "{{object}}.setPort({{value}})" }
+    }]
+  }]
+}
+```
+
+The preview shows `cfg.setPort(base + 1)` at the assignment. Its semicolon
+stays in place, and `observe(cfg)` sees the write at the same point. The
+matcher selects a standalone built-in assignment to the declared
+`Options::port` field on a named object. To cover `verbose` when the API
+also has `setVerbose(bool)`, add a second rule with that field and setter.
+An omitted field produces no setter call.
+
+The older example illustrates the reverse migration, from setter calls to
+struct assignments. It contains a hand-written before/after pair.
+[Builder-to-struct fixture](../examples/builder_to_struct)
+
 ## Run on a project
 
 ```sh
@@ -150,8 +265,8 @@ that the generated code compiles and preserves the behavior you need.
 
 The CLI calls `parseRulesFile`, `buildPipeline`, and
 `TransformPipeline::execute`. To add a JSON field, update the schema structs
-and deserialization in `RulesParser`. Add a text operation or range-selection
-policy in `TemplateEngine`. `MatcherEngine` registers dynamic matchers,
+and deserialization in `RulesParser`. Add single-node text operations in `TemplateEngine` and sibling matching or
+range policies in `StatementSubset`. `MatcherEngine` registers dynamic matchers,
 collects compatible edits, and supplies staged source to Clang on later
 passes. `TransformPipeline` composes the edits in original-file coordinates.
 [Public headers](../include/vycor/morph) · [Implementations](../src/morph)
@@ -161,8 +276,8 @@ string, an optional root `bindId`, and a callback taking a
 `MatchFinder::MatchResult`. Return a vector of `clang::tooling::Replacement`
 objects. Call `pipeline.addPass({rule})`, then
 `pipeline.execute(buildPaths, sourceFiles, /*dryRun=*/true)`.
-After success, `getReplacements()` holds that run's combined edits. The JSON
-interface exposes one target per match. A C++ callback can emit several.
+After success, `getReplacements()` holds that run's combined edits. Single-node JSON rules target one binding. Statement-subset rules replace a
+run of siblings. A C++ callback can emit several edits from one match.
 
 To run the tests from the minimal build above, enable Catch2 and reconfigure.
 
@@ -178,10 +293,6 @@ survive unchanged. For macro rules, include a nested expression and a
 different macro with a similar expansion. The integration tests exercise the
 published JSON and compare transformed bytes with the expected file.
 [Pipeline tests](../tests/test_transforms.cpp) · [Rule and template tests](../tests/test_rules_parser.cpp)
-
-The [builder-to-struct fixture](../examples/builder_to_struct) sketches a
-larger migration from setter calls to field assignments. It contains a
-before/after pair for contributors developing rules for that pattern.
 
 ### Why use Clang's matcher and replacement APIs directly?
 

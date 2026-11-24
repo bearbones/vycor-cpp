@@ -1,0 +1,31 @@
+{
+  "passes": [
+    {
+      "context": "isExpansionInMainFile()",
+      "rules": [
+        {
+          "statement-subset": {
+            "anchor": "declStmt(hasSingleDecl(varDecl(hasType(cxxRecordDecl(hasName(\"::Options\")))).bind(\"cfg\")))",
+            "fresh-local": "cfg",
+            "prefix": " = OptionsBuilder{}",
+            "cases": [
+              {
+                "matcher": "binaryOperator(hasLHS(memberExpr(member(fieldDecl(hasName(\"port\"))))), hasRHS(expr().bind(\"value\")))",
+                "emit": ".port({{value}})"
+              },
+              {
+                "matcher": "binaryOperator(hasLHS(memberExpr(member(fieldDecl(hasName(\"timeout\"))))), hasRHS(expr().bind(\"value\")))",
+                "emit": ".timeout({{value}})"
+              },
+              {
+                "matcher": "binaryOperator(hasLHS(memberExpr(member(fieldDecl(hasName(\"verbose\"))))), hasRHS(expr().bind(\"value\")))",
+                "emit": ".verbose({{value}})"
+              }
+            ],
+            "suffix": ".build();"
+          }
+        }
+      ]
+    }
+  ]
+}

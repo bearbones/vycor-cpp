@@ -52,10 +52,11 @@ vycor::TransformRule literalRule(unsigned value, llvm::StringRef replacement) {
 
 } // namespace
 
-TEST_CASE("morph previews and applies the published macro example",
+TEST_CASE("morph previews and applies the published examples",
           "[transforms]") {
-  const auto example =
-      std::string(PROJECT_SOURCE_DIR) + "/examples/macro_split/";
+  std::string example = std::string(PROJECT_SOURCE_DIR) + "/examples/";
+  SECTION("macro arguments") { example += "macro_split/"; }
+  SECTION("statement subsets") { example += "struct_to_builder/"; }
   const auto original = readFile(example + "input.cpp");
   const auto expected = readFile(example + "expected.cpp");
   SourceFile source(original);
@@ -202,4 +203,110 @@ TEST_CASE("a nested macro cannot hide the rest of an assertion argument",
   REQUIRE(pipeline.execute({}, {source.path.str().str()}, false,
                            {"-std=c++17"}) == 0);
   CHECK(readFile(source.path) == prefix + "both(READY(a), b); }\n");
+}
+
+TEST_CASE("morph renders ordered statement subsets and leaves barriers in place",
+          "[transforms][subset]") {
+  vycor::JsonStatementSubset subset;
+  subset.anchor = R"(callExpr(callee(functionDecl(hasName("start"))),hasArgument(0,expr().bind("arg"))))";
+  subset.prefix = "send({{arg}}";
+  subset.suffix = ");";
+  subset.cases = {
+      {R"(callExpr(callee(functionDecl(hasName("add"))),hasArgument(0,expr().bind("v"))))", ", {{v}}"},
+      {R"(callExpr(callee(functionDecl(hasName("flag")))))", ", 42"}};
+  vycor::JsonRule rule;
+  rule.subset = subset;
+  vycor::JsonPass pass;
+  pass.rules.push_back(rule);
+  vycor::JsonRulesFile spec;
+  spec.passes.push_back(pass);
+  auto passes = vycor::buildPipeline(spec);
+  REQUIRE(passes);
+  vycor::TransformPipeline pipeline;
+  pipeline.addPass(std::move(passes->front()));
+  const std::string prelude = "void start(int); void add(int); void flag(); "
+                              "void send(int,...); void stop();\n";
+  const std::string src =
+      prelude +
+      "void f() { start(1); flag(); add(2+3); flag(); stop(); add(4);\n"
+      "  { start(2); add(6); } start(3); }\n";
+  SourceFile file(src);
+  REQUIRE(pipeline.execute({}, {file.path.str().str()}, false,
+                           {"-std=c++17"}) == 0);
+  CHECK(readFile(file.path) ==
+        prelude + "void f() { send(1, 42, 2+3, 42); stop(); add(4);\n"
+                  "  { send(2, 6); } start(3); }\n");
+}
+
+TEST_CASE("morph validates statement-subset rules", "[rules][subset]") {
+  vycor::JsonRule rule;
+  auto &subset = rule.subset.emplace();
+  subset.anchor = "declStmt()";
+  subset.cases.push_back({"binaryOperator()", "x"});
+  SECTION("invalid anchor") { subset.anchor = "varDecl()"; }
+  SECTION("invalid case") { subset.cases.front().matcher = "notAMatcher()"; }
+  SECTION("empty cases") { subset.cases.clear(); }
+  SECTION("bad fragment") { subset.cases.front().emit = "{{bad"; }
+  vycor::JsonPass pass;
+  pass.rules.push_back(rule);
+  vycor::JsonRulesFile spec;
+  spec.passes.push_back(pass);
+  auto result = vycor::buildPipeline(spec);
+  CHECK_FALSE(result);
+  llvm::consumeError(result.takeError());
+}
+
+TEST_CASE(
+    "fresh-local subsets preserve statement and initialization boundaries",
+    "[transforms][subset]") {
+  const auto example =
+      std::string(PROJECT_SOURCE_DIR) + "/examples/struct_to_builder/";
+  auto rules = vycor::parseRulesFile(example + "rules.json");
+  REQUIRE(rules);
+  auto passes = vycor::buildPipeline(*rules);
+  REQUIRE(passes);
+  vycor::TransformPipeline pipeline;
+  pipeline.addPass(std::move(passes->front()));
+  const std::string prelude = R"cpp(
+struct Options { int port = 80; int timeout = 30; bool verbose = false; };
+struct Other { int port; };
+struct OptionsBuilder { OptionsBuilder& port(int); Options build() const; };
+struct Guard { operator int(); ~Guard(); };
+Guard guard();
+void observe(const Options&);
+#define VALUE 1
+#define SET =
+)cpp";
+  const std::string untouched = R"cpp(
+void barriers(Options &other) {
+  { Options cfg{}; other.port = 1; cfg.port = 2; }
+  { Options cfg{}; cfg.port = cfg.timeout; }
+  { Options cfg{}; cfg.port = guard(); }
+  { Options cfg{}; cfg.port = VALUE; }
+  { Options cfg{}; cfg.port SET 1; }
+  { Options cfg{}; /* keep this */ cfg.port = 3; }
+  { Options cfg{}; cfg.port /* selects endpoint */ = 3; }
+  { Options cfg{}; observe(cfg); cfg.port = 3; }
+  { Options cfg{}; if (other.port) cfg.port = 3; }
+  { Options cfg{};
+#if 1
+    cfg.port = 3;
+#endif
+  }
+  { Options a{}, cfg{}; cfg.port = 1; }
+  { static Options cfg{}; cfg.port = 1; }
+  { Options cfg = other; cfg.port = 1; }
+}
+template<class T> T make() { T cfg{}; cfg.port = 5; return cfg; }
+void instantiate() { (void)make<Options>(); (void)make<Other>(); }
+)cpp";
+  const std::string tail = "observe(cfg); cfg.port = cfg.timeout; }\n";
+  SourceFile file(prelude + untouched +
+                  "void prefix() { Options cfg{}; cfg.port = 3; " + tail);
+  REQUIRE(pipeline.execute({}, {file.path.str().str()}, false,
+                           {"-std=c++17"}) == 0);
+  CHECK(readFile(file.path) ==
+        prelude + untouched +
+            "void prefix() { Options cfg = OptionsBuilder{}.port(3).build(); " +
+            tail);
 }

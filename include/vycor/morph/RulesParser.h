@@ -20,6 +20,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,9 +44,23 @@ struct JsonReplaceSpec {
                        // matching structural patterns introduced by the macro.
 };
 
+struct JsonSubsetCase {
+  std::string matcher;
+  std::string emit;
+};
+
+struct JsonStatementSubset {
+  std::string anchor;
+  std::string freshLocal;
+  std::vector<JsonSubsetCase> cases;
+  std::string prefix;
+  std::string suffix;
+};
+
 struct JsonRule {
   JsonFindSpec find;
   JsonReplaceSpec replace;
+  std::optional<JsonStatementSubset> subset = {};
 };
 
 struct JsonPass {

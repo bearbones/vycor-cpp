@@ -21,6 +21,7 @@ add_library(vycor_lib
   morph/MatcherEngine.cpp
   morph/TemplateEngine.cpp
   morph/RulesParser.cpp
+  morph/StatementSubset.cpp
   morph/TransformPipeline.cpp
   compat/PchCache.cpp
   compat/ToolingRuntime.cpp
