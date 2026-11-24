@@ -9,7 +9,7 @@ you describe in JSON, or trace a call across library boundaries.
 | Command | What can I do with it? | Guide |
 |---|---|---|
 | `check` | Find defects that span files, such as conflicting definitions, inconsistent declarations, and lock-order inversions. Use findings to gate a pull request. | [Run checks and use them in CI](docs/check-usage.md) |
-| `morph` | Describe a migration with AST matchers and replacement templates. Preview the edits, then apply a sequence of rules to source files or macro invocations. | [Write and run a rewrite rule](docs/morph.md) |
+| `morph` | Preview and apply AST-based rewrites, from macro edits to turning a subset of field assignments into a builder chain. | [Write and run a rewrite rule](docs/morph.md) |
 | `megascope` | Index a project's call graph and control flow. Find callers, trace exception paths, or query the same index repeatedly from a script. | [Build and query an index](docs/megascope-usage.md) |
 | `metrics` | Measure work reachable before `main` and group the results by translation unit, directory, or link target. | [Run and interpret metrics](docs/metrics/README.md) |
 

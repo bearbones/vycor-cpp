@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "vycor/morph/RulesParser.h"
+#include "StatementSubset.h"
 #include "vycor/morph/TemplateEngine.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -70,9 +71,42 @@ bool fromJSON(const llvm::json::Value &value, JsonReplaceSpec &out,
   return true;
 }
 
+static bool fromJSON(const llvm::json::Value &value, JsonSubsetCase &out,
+                     llvm::json::Path path) {
+  llvm::json::ObjectMapper o(value, path);
+  return o && knownFields(value, path, {"matcher", "emit"}) &&
+         o.map("matcher", out.matcher) && o.map("emit", out.emit);
+}
+
+static bool fromJSON(const llvm::json::Value &value, JsonStatementSubset &out,
+                     llvm::json::Path path) {
+  llvm::json::ObjectMapper o(value, path);
+  if (!o ||
+      !knownFields(value, path,
+                   {"anchor", "fresh-local", "cases", "prefix", "suffix"}) ||
+      !o.map("anchor", out.anchor) || !o.map("cases", out.cases) ||
+      !o.map("prefix", out.prefix) || !o.map("suffix", out.suffix) ||
+      !o.mapOptional("fresh-local", out.freshLocal))
+    return false;
+  if (value.getAsObject()->get("fresh-local") && out.freshLocal.empty()) {
+    path.field("fresh-local").report("expected a nonempty binding ID");
+    return false;
+  }
+  return true;
+}
+
 bool fromJSON(const llvm::json::Value &value, JsonRule &out,
               llvm::json::Path path) {
   llvm::json::ObjectMapper o(value, path);
+  out = JsonRule{};
+  if (auto *object = value.getAsObject()) {
+    if (auto *subset = object->get("statement-subset")) {
+      if (!knownFields(value, path, {"statement-subset"}))
+        return false;
+      return fromJSON(*subset, out.subset.emplace(),
+                      path.field("statement-subset"));
+    }
+  }
   return o && knownFields(value, path, {"find", "replace"}) &&
          o.map("find", out.find) && o.map("replace", out.replace);
 }
@@ -133,6 +167,13 @@ buildPipeline(const JsonRulesFile &rulesFile) {
     std::vector<TransformRule> passRules;
 
     for (const auto &jsonRule : jsonPass.rules) {
+      if (jsonRule.subset) {
+        auto rule = buildStatementSubset(*jsonRule.subset, jsonPass.context);
+        if (!rule)
+          return rule.takeError();
+        passRules.push_back(std::move(*rule));
+        continue;
+      }
       if (jsonRule.replace.target.empty())
         return llvm::createStringError(
             llvm::inconvertibleErrorCode(),
